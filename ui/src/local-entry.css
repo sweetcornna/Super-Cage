@@ -118,7 +118,8 @@
 }
 
 /* Devices. */
-.settings-subpage .local-entry-devices ul {
+.settings-subpage .local-entry-devices ul,
+.settings-subpage .local-entry-kept ul {
   margin: 16px 0 0;
   padding: 0;
   border-top: 1px solid var(--line);
@@ -233,4 +234,25 @@
 }
 .settings-subpage .local-entry .local-entry-unfiltered {
   margin: 4px 0 0;
+}
+
+/* A revocation that did not reach another running environment. */
+.local-entry-notice {
+  margin: 0 0 20px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--amber) 34%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.local-entry-include-warning {
+  display: block;
+  margin: 10px 0;
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.6;
 }

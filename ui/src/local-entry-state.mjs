@@ -88,14 +88,51 @@ export function includeDialog(preview) {
     alias: preview?.alias || "",
     aliasText: preview?.alias ? "之后用 ssh " + preview.alias + " 连接。这一行引入的配置：" : "",
     block: preview?.block || "",
+    warning: preview?.warning || "",
     after: "这一行只引用 Super Cage 自己的文件，原文件会先备份。关闭所有环境的本机终端时会移除它。",
     actions: { cancel: "取消", secondary: "不写入，只用 cage ssh", confirm: "写入并开启" },
   };
 }
 
-// What the page says about bytes that are not filtered (design 5.7).
-export const unfilteredNote =
-  "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。";
+// What the page says about filtering (design 5.7), exactly as the server
+// does it: sessions with a terminal are filtered once the filter exists
+// (pty_sessions "filtered") and refused until then.
+export function unfilteredNote(ptySessions) {
+  const terminal = ptySessions === "filtered"
+    ? "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。"
+    : "带终端的会话（ssh、ssh -t）会被拒绝：这一版还没有终端输出过滤。";
+  return terminal + "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。";
+}
+
+// What the page says when a revocation did not reach a running environment
+// in time: its open connections go on until it next hears of the key.
+export function unreachedNote(names = []) {
+  if (!names.length) return "";
+  return "另一个环境暂时没有响应，已撤销的钥匙会在它下次连接时被拒绝（" + names.join("、") + "）";
+}
+
+// The kept ssh terminals with 结束 (they have their own limit).
+export function keptRows(view) {
+  const kept = view?.kept || [];
+  return {
+    title: "保留的终端",
+    help: `来自本机终端、连接断开后仍保留的终端，最多 ${view?.kept_limit || 4} 个。没人查看也没有程序运行 30 分钟后会自动结束。`,
+    rows: kept.map((terminal) => ({
+      id: terminal.id,
+      title: terminal.title,
+      detail: "来自 " + (terminal.device || "本机终端") + (terminal.ended ? " · 已结束" : ""),
+    })),
+  };
+}
+
+export function endKeptConfirm(row) {
+  return {
+    title: `结束「${row.title}」？`,
+    body: "终端里还在运行的程序会一起结束。",
+    confirm: "结束终端",
+    danger: true,
+  };
+}
 
 // "最近使用 3 分钟前".
 export function relativeTime(iso, now = Date.now()) {

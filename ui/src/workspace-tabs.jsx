@@ -420,7 +420,7 @@ export function WorkspaceTabs({
                 {/* A phone or external row names its owner instead; the account is in the label and tooltip. */}
                 {tab.claudeLabel && !ownerChip && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
                 {tab.origin?.kind === "ssh" && !tab.claudeLabel && !ownerChip &&
-                  <small className="claude-tab-profile" title={tab.origin.kept ? "来自本机终端，已保留" : "来自本机终端，连接断开时结束"}>来自 {tab.origin.device}</small>}
+                  <small className="claude-tab-profile" title={tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束"}>来自 {tab.origin.device}{tab.origin.kept ? " · 已保留" : ""}</small>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
                 {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
                 {!horizontal && !vertical && (opening

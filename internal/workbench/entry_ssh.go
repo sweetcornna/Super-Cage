@@ -74,6 +74,8 @@ type entryService struct {
 	paths   *entryPaths
 	runPath string
 	install func(context.Context) error
+	// kept is the idle check of kept ssh terminals.
+	kept entryKeptCheck
 }
 
 // entryTitlePush and entryResetSequence are cage attach's TitlePush and
@@ -251,6 +253,11 @@ func (s *Server) entryCheck(device string) (entryDevice, *entryRefusal) {
 	record := st.device(device)
 	if record == nil {
 		return entryDevice{}, errEntryUnknown
+	}
+	if paths, err := s.entryPaths(); err == nil {
+		if _, err := entryLoadRevoked(paths); err != nil {
+			return entryDevice{}, errEntryRevocationsUnreadable
+		}
 	}
 	if record.Revoked != nil || s.entryComputerKeyRevoked(device) {
 		return entryDevice{}, errEntryRevoked
@@ -592,6 +599,13 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 				conn.refuse("subsystem:" + command)
 				_ = request.Reply(false, nil)
 				continue
+			case request.Type == "subsystem" && pty != nil:
+				// N3 of the second review: sftp's bytes go unfiltered, so not
+				// to a terminal (ssh -t -s). sftp, scp and rsync never ask
+				// for a pty.
+				conn.refuse("subsystem-pty")
+				_ = request.Reply(false, nil)
+				continue
 			case request.Type == "exec" && entryHerdrLine(command):
 				conn.refuse("herdr")
 				_ = request.Reply(true, nil)
@@ -786,8 +800,12 @@ func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, comma
 		return nil, err
 	}
 	script := terminalScript(s.cliWorkspace(workspace), "shell", "")
+	pid := ""
 	if command != "" {
 		script = entryCommandScript(s.cliWorkspace(workspace), command)
+	} else {
+		pid = randomToken()[:16]
+		script = entryPIDScript(pid) + script
 	}
 	cols, rows := uint16(100), uint16(30)
 	if validTerminalSize(uint16(min(pty.Cols, 1<<16-1)), uint16(min(pty.Rows, 1<<16-1))) {
@@ -807,7 +825,7 @@ func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, comma
 		}
 	}
 	session.mu.Lock()
-	session.origin, session.originDevice, session.originID = "ssh", name, conn.device
+	session.origin, session.originDevice, session.originID, session.originPID = "ssh", name, conn.device, pid
 	session.mu.Unlock()
 	return session, nil
 }
@@ -1075,15 +1093,17 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	}
 	close(outputDone)
 	locked := !ended && conn.epoch.Err() != nil
+	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
+	// already: then it ends, and says so.
+	full := locked && s.entryKeep(session) != nil
 	session.mu.Lock()
-	if locked {
-		session.kept = true
-	}
 	kept := session.kept
 	session.mu.Unlock()
 	tail := append(filter.Abort(nil), entryResetSequence...)
 	switch cause := context.Cause(conn.ctx); {
 	case ended:
+	case full:
+		tail = append(tail, "\r\nSuper Cage 已锁定："+errEntryKeptFull().Error()+"，这个终端随连接结束。\r\n"...)
 	case locked:
 		tail = append(tail, "\r\n"+entryLockedNotice+"\r\n"...)
 	case conn.ctx.Err() != nil:

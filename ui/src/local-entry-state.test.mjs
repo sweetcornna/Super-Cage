@@ -6,12 +6,15 @@ import {
   entryStateLine,
   includeDialog,
   includeRow,
+  keptRows,
+  endKeptConfirm,
   loadError,
   relativeTime,
   revokeConfirm,
   shortFingerprint,
   sortedDevices,
   unfilteredNote,
+  unreachedNote,
   validDeviceName,
 } from "./local-entry-state.mjs";
 
@@ -82,11 +85,37 @@ test("include row and dialog", () => {
   const shown = includeDialog({ line: "Include ~/.ssh/super-cage/config", alias: "cage-lab1", block: "Host cage-lab1\n  User cage\n" });
   assert.equal(shown.aliasText, "之后用 ssh cage-lab1 连接。这一行引入的配置：");
   assert.equal(shown.block, "Host cage-lab1\n  User cage\n");
-  // A read-only file or a taken host name is said as it is.
-  const readOnly = includeRow({ ...on, include: { error: "~/.ssh/config 是只读文件，Super Cage 不会修改它" } });
-  assert.match(readOnly.text, /^~\/\.ssh\/config 是只读文件，Super Cage 不会修改它。你仍可以用 cage ssh default 连接。$/);
-  // The page names what is not filtered.
-  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤"]) assert.ok(unfilteredNote.includes(word), word);
+  // A file Super Cage must not change, or a taken host name, is said as it
+  // is, with the line to add by hand.
+  const readOnly = includeRow({ ...on, include: { error: "~/.ssh/config 不可写（只读、带不可更改标记或在只读的文件系统上），Super Cage 不会修改它：要直接用 ssh 连接，请自己在它的第一行加入 Include ~/.ssh/super-cage/config" } });
+  assert.match(readOnly.text, /^~\/\.ssh\/config 不可写.*Super Cage 不会修改它：.*Include ~\/\.ssh\/super-cage\/config。你仍可以用 cage ssh default 连接。$/);
+  // A BOM is warned about before anything is written.
+  assert.equal(includeDialog({ warning: "~/.ssh/config 以 BOM（字节顺序标记）开头" }).warning, "~/.ssh/config 以 BOM（字节顺序标记）开头");
+  assert.equal(includeDialog({}).warning, "");
+});
+
+test("the page says exactly what is filtered", () => {
+  for (const pty of ["filtered", "refused", undefined]) {
+    const note = unfilteredNote(pty);
+    for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s"]) assert.ok(note.includes(word), word);
+    assert.equal(note.includes("经过和窗口里一样的过滤"), pty === "filtered", String(pty));
+    assert.equal(note.includes("会被拒绝"), pty !== "filtered", String(pty));
+  }
+});
+
+test("a revocation that did not reach another environment says so", () => {
+  assert.equal(unreachedNote([]), "");
+  assert.equal(unreachedNote(undefined), "");
+  assert.equal(unreachedNote(["研究机"]), "另一个环境暂时没有响应，已撤销的钥匙会在它下次连接时被拒绝（研究机）");
+});
+
+test("kept terminals are listed with their limit and 结束", () => {
+  assert.deepEqual(keptRows(on).rows, []);
+  const kept = keptRows({ ...on, kept_limit: 4, kept: [{ id: "a", title: "终端 3", device: "MacBook Pro" }, { id: "b", title: "终端 4", device: "MacBook Pro", ended: true }] });
+  assert.match(kept.help, /最多 4 个/);
+  assert.deepEqual(kept.rows.map((row) => row.detail), ["来自 MacBook Pro", "来自 MacBook Pro · 已结束"]);
+  assert.equal(endKeptConfirm(kept.rows[0]).title, "结束「终端 3」？");
+  assert.equal(endKeptConfirm(kept.rows[0]).danger, true);
 });
 
 test("relative times", () => {

@@ -328,7 +328,7 @@ func TestEntryOffAndRevokeNeverWaitForAHungInstall(t *testing.T) {
 
 // entrySecondEnvironment is a local VM's controller on the same computer as
 // a: its profile is <default>/vms/<id> and it shares a's entry paths.
-func entrySecondEnvironment(t *testing.T, a *entryFixture) *entryFixture {
+func entrySecondEnvironment(t *testing.T, a *entryFixture, wrap ...func(http.Handler) http.Handler) *entryFixture {
 	t.Helper()
 	id := "0123456789abcdef"
 	dir := filepath.Join(a.s.profile, cage.LocalVMDir, id)
@@ -356,6 +356,9 @@ func entrySecondEnvironment(t *testing.T, a *entryFixture) *entryFixture {
 	port := server.Listener.Addr().(*net.TCPAddr).Port
 	s.origin = "http://localhost:" + strconv.Itoa(port)
 	server.Config.Handler = s.handler()
+	for _, w := range wrap {
+		server.Config.Handler = w(server.Config.Handler)
+	}
 	server.Start()
 	t.Cleanup(server.Close)
 	holdControllerLock(t, dir)
@@ -747,7 +750,7 @@ func TestEntryGeneratedBlockAgainstHostileOwnerConfigs(t *testing.T) {
 			want := map[string]string{
 				"controlmaster": "false", "controlpersist": "no", "pubkeyauthentication": "true",
 				"preferredauthentications": "publickey", "passwordauthentication": "no", "kbdinteractiveauthentication": "no",
-				"proxyusefdpass": "no", "sessiontype": "default", "stdinnull": "no", "forkafterauthentication": "no",
+				"proxyusefdpass":       "no",
 				"globalknownhostsfile": "/dev/null", "canonicalizehostname": "false", "addkeystoagent": "false",
 				"forwardagent": "no", "clearallforwardings": "yes", "permitlocalcommand": "no", "requesttty": "auto",
 				"stricthostkeychecking": "true", "tunnel": "false", "user": "cage",
@@ -758,8 +761,11 @@ func TestEntryGeneratedBlockAgainstHostileOwnerConfigs(t *testing.T) {
 				}
 			}
 			// LocalCommand stays the owner's, but PermitLocalCommand no keeps
-			// it from running.
-			for _, unset := range []string{"controlpath", "knownhostscommand", "proxyjump", "remotecommand"} {
+			// it from running. The pins newer than OpenSSH 7.6 (SessionType,
+			// StdinNull, ForkAfterAuthentication, KnownHostsCommand) are
+			// cage ssh's only (N2 of the second review); its -F file keeps
+			// the owner's configuration out.
+			for _, unset := range []string{"controlpath", "proxyjump", "remotecommand"} {
 				if values[unset] != "" {
 					t.Errorf("owner_config: %s = %q", unset, values[unset])
 				}
@@ -783,28 +789,6 @@ func TestEntryGeneratedBlockAgainstHostileOwnerConfigs(t *testing.T) {
 				t.Fatalf("owner_config3: %v / %v", other, cageHost)
 			}
 		})
-	}
-}
-
-// F7: an option the local ssh does not know is left out of the block
-// instead of hidden behind IgnoreUnknown.
-func TestEntryBlockWritesOnlyOptionsTheLocalSSHKnows(t *testing.T) {
-	paths := entryTestPaths(t)
-	previous := entrySSHKnows
-	entrySSHKnows = func(names []string) map[string]bool {
-		known := map[string]bool{}
-		for _, name := range names {
-			known[name] = name != "ObscureKeystrokeTiming"
-		}
-		return known
-	}
-	t.Cleanup(func() { entrySSHKnows = previous })
-	if _, err := entryWriteClient(paths, defaultLocalVMID, "lab1", entryTestHostKey(t)); err != nil {
-		t.Fatal(err)
-	}
-	block, _ := os.ReadFile(paths.hostFile(defaultLocalVMID))
-	if strings.Contains(string(block), "IgnoreUnknown") || strings.Contains(string(block), "ObscureKeystrokeTiming") || !strings.Contains(string(block), "SessionType default") {
-		t.Fatalf("block:\n%s", block)
 	}
 }
 

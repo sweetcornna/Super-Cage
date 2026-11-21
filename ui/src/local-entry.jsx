@@ -4,9 +4,11 @@ import { api, writeClipboard } from "./api";
 import { EmptyState } from "./drawings";
 import {
   commandRows,
+  endKeptConfirm,
   entryStateLine,
   includeDialog,
   includeRow,
+  keptRows,
   loadError,
   offConfirm,
   relativeTime,
@@ -14,6 +16,7 @@ import {
   shortFingerprint,
   sortedDevices,
   unfilteredNote,
+  unreachedNote,
   validDeviceName,
 } from "./local-entry-state.mjs";
 import "./local-entry.css";
@@ -28,6 +31,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const [failure, setFailure] = useState(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState("");
   const copiedTimer = useRef();
   const load = useCallback(async () => {
@@ -57,6 +61,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const run = async (name, action) => {
     setBusy(name);
     setError("");
+    setNotice("");
     try {
       const next = await action();
       if (next) setView(next);
@@ -89,6 +94,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
               <pre className="local-entry-include-block">{dialog.block}</pre>
             </>
           )}
+          {dialog.warning && <strong className="local-entry-include-warning">{dialog.warning}</strong>}
           {dialog.after}
         </>
       ),
@@ -127,7 +133,18 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   };
   const revoke = async (device) => {
     if (!(await onConfirm(revokeConfirm(device)))) return;
-    await run("revoke:" + device.id, () => api("/entry/devices/" + encodeURIComponent(device.id) + "/revoke", {}));
+    await run("revoke:" + device.id, async () => {
+      const next = await api("/entry/devices/" + encodeURIComponent(device.id) + "/revoke", {});
+      setNotice(unreachedNote(next?.unreached));
+      return next;
+    });
+  };
+  const endKept = async (row) => {
+    if (!(await onConfirm(endKeptConfirm(row)))) return;
+    await run("end:" + row.id, async () => {
+      await api("/terminals/" + encodeURIComponent(row.id), undefined, "DELETE");
+      return api("/entry");
+    });
   };
   const rename = (device, name) =>
     run("rename:" + device.id, () => api("/entry/devices/" + encodeURIComponent(device.id) + "/rename", { name }));
@@ -202,6 +219,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const rows = commandRows(view);
   const include = includeRow(view);
   const devices = sortedDevices(view.devices);
+  const kept = keptRows(view);
   return (
     <div className="local-entry">
       {intro}
@@ -215,6 +233,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         )}
       </p>
       {error && <p className="local-entry-error" role="alert">{error}</p>}
+      {notice && <p className="local-entry-notice" role="status">{notice}</p>}
       <ul className="local-entry-commands" aria-label="连接命令">
         {rows.map((row) => (
           <li key={row.id}>
@@ -235,7 +254,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         ))}
       </ul>
       <span className="sr-only" aria-live="polite">{copied ? "已复制" : ""}</span>
-      <p className="field-help local-entry-unfiltered">{unfilteredNote}</p>
+      <p className="field-help local-entry-unfiltered">{unfilteredNote(view.pty_sessions)}</p>
       {include && (
         <p className="local-entry-include" data-state={include.state}>
           {include.text}
@@ -255,6 +274,25 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
           ))}
         </ul>
       </section>
+      {kept.rows.length > 0 && (
+        <section className="settings-group local-entry-kept" aria-label={kept.title}>
+          <h3>{kept.title}</h3>
+          <p className="field-help">{kept.help}</p>
+          <ul>
+            {kept.rows.map((row) => (
+              <li key={row.id} className="local-entry-device">
+                <div className="local-entry-device-main">
+                  <div className="local-entry-device-title"><strong title={row.title}>{row.title}</strong></div>
+                  <span className="local-entry-device-meta"><span>{row.detail}</span></span>
+                </div>
+                <button type="button" className="quiet-button local-entry-revoke" disabled={Boolean(busy)} onClick={() => endKept(row)}>
+                  结束
+                </button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
       <div className="local-entry-footer">
         <button type="button" disabled={Boolean(busy)} onClick={turnOff}>
           {busy === "off" && <LoaderCircle size={16} className="spin" aria-hidden="true" />}

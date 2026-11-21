@@ -53,8 +53,10 @@ type terminalSession struct {
 	// origin is "ssh" for a terminal the local SSH entry opened, with the
 	// device's name and id; kept is the owner's "保留", which keeps it past
 	// the connection (a lock sets it too). sshViewers counts the ssh
-	// clients showing it.
+	// clients showing it. originPID names the guest file with the shell's
+	// process id of an interactive ssh terminal (entryKeptBusy).
 	origin, originDevice, originID string
+	originPID                      string
 	kept                           bool
 	sshViewers                     int
 }

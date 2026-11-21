@@ -15,6 +15,7 @@ const fixture = await createWorkbench({ beforeNavigate: async (page, state) => {
   state.status.ready = true;
   state.terminals.push({ id: "ssh-1", title: "终端 1", kind: "shell", workspace: state.settings.workspace, origin: { kind: "ssh", device: "林间的 MacBook Pro", kept: false } });
   state.terminals.push({ id: "web-1", title: "终端 2", kind: "shell", workspace: state.settings.workspace });
+  state.terminals.push({ id: "ssh-2", title: "终端 3", kind: "shell", workspace: state.settings.workspace, origin: { kind: "ssh", device: "林间的 MacBook Pro", kept: true } });
   await page.route("**/api/terminals/*/keep", (route) => {
     const id = new URL(route.request().url()).pathname.split("/")[3];
     keeps.push(id);
@@ -29,6 +30,8 @@ try {
   const row = page.locator('[data-tab-id="terminal:ssh-1"]');
   await row.getByText("来自 林间的 MacBook Pro", { exact: true }).waitFor();
   assert.equal(await page.locator('[data-tab-id="terminal:web-1"]').getByText(/^来自 /).count(), 0, "a web terminal has no origin caption");
+  // A kept one says so.
+  await page.locator('[data-tab-id="terminal:ssh-2"]').getByText("来自 林间的 MacBook Pro · 已保留", { exact: true }).waitFor();
   await page.screenshot({ path: fileURLToPath(new URL("wiring-sidebar.png", output)) });
   // A sidebar row's right click focuses its actions; 保留终端 is one of them.
   await row.hover();

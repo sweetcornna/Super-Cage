@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -99,11 +100,30 @@ type entryStatusView struct {
 	Herdr    bool               `json:"herdr"`
 	Settings entryLocalSettings `json:"settings"`
 	Error    string             `json:"error,omitempty"`
+	// Unreached names the environments a revocation could not reach.
+	Unreached []string `json:"unreached,omitempty"`
+	// PTYSessions is what happens to a session with a terminal: "filtered"
+	// once the escape filter exists, "refused" until then.
+	PTYSessions string `json:"pty_sessions"`
+	// Kept are the kept ssh terminals of this environment, at most
+	// KeptLimit, each with 结束 on the page.
+	Kept      []entryKeptView `json:"kept"`
+	KeptLimit int             `json:"kept_limit"`
+}
+
+// entryUnreachedNote is what the page and cage entry revoke say when a
+// running environment did not answer a revocation in time.
+func entryUnreachedNote(names []string) string {
+	return "另一个环境暂时没有响应，已撤销的钥匙会在它下次连接时被拒绝（" + strings.Join(names, "、") + "）"
 }
 
 // entryView reads everything the page shows and writes nothing.
 func (s *Server) entryView() entryStatusView {
-	view := entryStatusView{Supported: s.macosGuest == nil && s.windowsGuest == nil, Environment: entryEnvironmentID(s.profile), Name: entryEnvironmentName(s.profile), Devices: []entryDeviceView{}}
+	view := entryStatusView{Supported: s.macosGuest == nil && s.windowsGuest == nil, Environment: entryEnvironmentID(s.profile), Name: entryEnvironmentName(s.profile), Devices: []entryDeviceView{}, PTYSessions: "refused"}
+	if entryNewOutputFilter != nil {
+		view.PTYSessions = "filtered"
+	}
+	view.Kept, view.KeptLimit = s.entryKeptViews(), entryKeptLimit
 	paths, err := s.entryPaths()
 	if err != nil {
 		view.Error = err.Error()
@@ -198,6 +218,9 @@ func (s *Server) entryOn(w http.ResponseWriter, r *http.Request) {
 	err = func() error {
 		s.entry.mu.Lock()
 		defer s.entry.mu.Unlock()
+		if _, err := entryLoadRevoked(paths); err != nil {
+			return err
+		}
 		st, err := entryLoadState(s.profile)
 		if err != nil {
 			st = entryState{Version: entryStateVersion}
@@ -361,41 +384,51 @@ func (s *Server) entryRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "没有这台设备", http.StatusNotFound)
 		return
 	}
+	// The device is refused here even when revoked.json cannot be read
+	// (every key is refused then).
+	var keyErr error
 	if record.PublicKey != "" {
-		err = entryRevokeKey(paths, record.PublicKey)
+		keyErr = entryRevokeKey(paths, record.PublicKey)
 	}
-	if record.Revoked == nil && err == nil {
+	if record.Revoked == nil {
 		now := time.Now().UTC()
 		record.Revoked = &now
 		err = entrySaveState(s.profile, st)
 	}
 	s.entry.mu.Unlock()
 	s.entry.registry.cutDevice(id, errEntryRevoked)
-	if err != nil {
+	var unreached []string
+	if !input.Propagated {
+		unreached = s.entryRevokeElsewhere(paths, id)
+	}
+	if err = errors.Join(keyErr, err); err != nil {
 		requestError(w, err)
 		return
 	}
-	if !input.Propagated {
-		// The answer does not wait for the other controllers.
-		go s.entryRevokeElsewhere(paths, id)
-	}
-	jsonReply(w, s.entryView())
+	view := s.entryView()
+	view.Unreached = unreached
+	jsonReply(w, view)
 }
 
 // entryPropagateWait bounds how long a revocation waits for the other
-// environments' controllers; one that does not answer in time, or does not
-// run, refuses the key from revoked.json at its next dial.
+// environments' controllers.
 const entryPropagateWait = 2 * time.Second
 
 // entryRevokeElsewhere passes a revocation on to the controllers of the
-// other environments on this computer whose entry is on.
-func (s *Server) entryRevokeElsewhere(paths entryPaths, device string) {
+// other environments on this computer whose entry is on, so they cut the
+// device's open connections (N4 of the second review). It returns the
+// names of the running ones that did not answer in time: their open
+// connections go on, and the page says so. One that does not run has no
+// connection and refuses the key from revoked.json at its next dial.
+func (s *Server) entryRevokeElsewhere(paths entryPaths, device string) []string {
 	here := entryEnvironmentID(s.profile)
 	defaultConfig := filepath.Join(paths.ComputerDir, "config.json")
 	matches, _ := filepath.Glob(filepath.Join(paths.hostsDir(), "*.conf"))
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), entryPropagateWait)
 	defer cancel()
 	var calls sync.WaitGroup
+	var mu sync.Mutex
+	var unreached []string
 	for _, match := range matches {
 		environment := strings.TrimSuffix(filepath.Base(match), ".conf")
 		configPath, err := entryProfileConfig(defaultConfig, environment)
@@ -407,12 +440,18 @@ func (s *Server) entryRevokeElsewhere(paths entryPaths, device string) {
 			defer calls.Done()
 			err := entryCall(ctx, configPath, "POST", "/api/entry/devices/"+url.PathEscape(device)+"/revoke", map[string]bool{"propagated": true}, nil)
 			var refusal *entryRefusal
-			if err != nil && !(errors.As(err, &refusal) && refusal.Code == errEntryOff.Code) {
-				diagnostics.Log("info", "entry", "revocation not passed on to environment "+entryShortID(environment)+": "+entryClientError(err))
+			if err == nil || errors.As(err, &refusal) && refusal.Code == errEntryOff.Code || controllerLockFree(filepath.Dir(configPath)) {
+				return
 			}
+			diagnostics.Log("info", "entry", "revocation not passed on to environment "+entryShortID(environment)+": "+entryClientError(err))
+			mu.Lock()
+			unreached = append(unreached, entryEnvironmentName(filepath.Dir(configPath)))
+			mu.Unlock()
 		}()
 	}
 	calls.Wait()
+	slices.Sort(unreached)
+	return unreached
 }
 
 func validEntryDeviceName(name string) bool {
@@ -452,25 +491,4 @@ func (s *Server) entryRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonReply(w, s.entryView())
-}
-
-// keepTerminal is "保留" on a terminal an ssh session opened: it stays when
-// the connection ends, as an ordinary terminal.
-func (s *Server) keepTerminal(w http.ResponseWriter, r *http.Request) {
-	session := s.terminals.get(r.PathValue("id"))
-	if session == nil {
-		http.NotFound(w, r)
-		return
-	}
-	session.mu.Lock()
-	ssh := session.origin == "ssh"
-	if ssh {
-		session.kept = true
-	}
-	session.mu.Unlock()
-	if !ssh {
-		http.Error(w, "只有来自本机终端的终端需要保留", http.StatusConflict)
-		return
-	}
-	jsonReply(w, session.summary())
 }

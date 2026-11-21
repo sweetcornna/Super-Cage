@@ -125,31 +125,28 @@ func TestEntryClientFilesModesAndBlock(t *testing.T) {
 	}
 	got := sshG(t, paths.clientFile(), "cage-default")
 	for name, want := range map[string]string{
-		"hostname":               "cage-default.invalid",
-		"user":                   "cage",
-		"proxycommand":           "'/Applications/Super Cage.app/cage' entry proxy default",
-		"hostkeyalias":           "cage-default",
-		"userknownhostsfile":     paths.knownHosts(defaultLocalVMID),
-		"stricthostkeychecking":  "true",
-		"updatehostkeys":         "false",
-		"identityfile":           strings.ReplaceAll(paths.deviceKey(), "%", "%%"), // ssh expands it when it connects
-		"identitiesonly":         "yes",
-		"identityagent":          "none",
-		"forwardagent":           "no",
-		"forwardx11":             "no",
-		"forwardx11trusted":      "no",
-		"clearallforwardings":    "yes",
-		"tunnel":                 "false",
-		"permitlocalcommand":     "no",
-		"requesttty":             "auto",
-		"obscurekeystroketiming": "no",
-		"serveraliveinterval":    "15",
-		"serveralivecountmax":    "4",
-		"loglevel":               "ERROR",
+		"hostname":              "cage-default.invalid",
+		"user":                  "cage",
+		"proxycommand":          "'/Applications/Super Cage.app/cage' entry proxy default",
+		"hostkeyalias":          "cage-default",
+		"userknownhostsfile":    paths.knownHosts(defaultLocalVMID),
+		"stricthostkeychecking": "true",
+		"updatehostkeys":        "false",
+		"identityfile":          strings.ReplaceAll(paths.deviceKey(), "%", "%%"), // ssh expands it when it connects
+		"identitiesonly":        "yes",
+		"identityagent":         "none",
+		"forwardagent":          "no",
+		"forwardx11":            "no",
+		"forwardx11trusted":     "no",
+		"clearallforwardings":   "yes",
+		"tunnel":                "false",
+		"permitlocalcommand":    "no",
+		"requesttty":            "auto",
+		"verifyhostkeydns":      "false",
+		"serveraliveinterval":   "15",
+		"serveralivecountmax":   "4",
+		"loglevel":              "ERROR",
 	} {
-		if name == "obscurekeystroketiming" && got[name] == "" {
-			continue // an ssh older than 9.5 ignores it (IgnoreUnknown)
-		}
 		if got[name] != want {
 			t.Fatalf("ssh -G %s = %q, want %q", name, got[name], want)
 		}
@@ -190,7 +187,7 @@ func TestEntryHostAliases(t *testing.T) {
 	if got, _ := entryHostAlias(paths, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Work"); got != "cage-work-bbbbbb" {
 		t.Fatal(got)
 	}
-	if command, err := entrySSHCommand(paths, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []string{"-t", "ls"}); err != nil || strings.Join(command, " ") != "ssh -F "+paths.clientFile()+" cage-work -t ls" {
+	if command, err := entrySSHCommand(paths, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []string{"-t", "ls"}); err != nil || strings.Join(command, " ") != "ssh -F "+paths.cageSSHFile()+" cage-work -t ls" {
 		t.Fatal(command, err)
 	}
 	if _, err := entrySSHCommand(paths, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", nil); err == nil {

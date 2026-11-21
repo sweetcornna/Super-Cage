@@ -2,7 +2,6 @@ package workbench
 
 import (
 	"bytes"
-	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -11,12 +10,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"maps"
 	"os"
-	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -480,13 +479,19 @@ func entryHostAlias(paths entryPaths, environment, name string) (string, error) 
 		suffix = suffix[:6]
 	}
 	taken := entryAliasesInUse(paths, environment)
-	owner := entryOwnerPatterns(paths)
-	candidates := []string{"cage-" + base, "cage-" + base + "-" + suffix, "super-cage-" + base, "super-cage-" + base + "-" + suffix}
+	owner := entryReadOwner(paths)
+	candidates := []string{"cage-" + base, "cage-" + base + "-" + suffix, "super-cage-" + base}
+	if owner.unknown {
+		// N1 of the second review: names the owner's configuration may use
+		// cannot be read, so only the form with the environment's id.
+		candidates = nil
+	}
+	candidates = append(candidates, "super-cage-"+base+"-"+environment)
 	for n := 2; n <= 9; n++ {
-		candidates = append(candidates, fmt.Sprintf("super-cage-%s-%s-%d", base, suffix, n))
+		candidates = append(candidates, fmt.Sprintf("super-cage-%s-%s-%d", base, environment, n))
 	}
 	for _, alias := range candidates {
-		if !slices.Contains(taken, alias) && !entryClaimed(owner, alias) {
+		if !slices.Contains(taken, alias) && !entryClaimed(owner.rules, alias) {
 			return alias, nil
 		}
 	}
@@ -496,59 +501,178 @@ func entryHostAlias(paths entryPaths, environment, name string) (string, error) 
 // entryChooseAlias keeps the environment's alias unless the owner's own
 // configuration has come to use it since, and picks a new one then.
 func entryChooseAlias(paths entryPaths, environment, name string) (string, error) {
-	if alias := entryReadAlias(paths.hostFile(environment)); alias != "" && !entryClaimed(entryOwnerPatterns(paths), alias) {
+	if alias := entryReadAlias(paths.hostFile(environment)); alias != "" && entryAliasSafe(entryReadOwner(paths), alias, environment) {
 		return alias, nil
 	}
 	return entryHostAlias(paths, environment, name)
 }
 
-// entryOwnerPatterns reads the host patterns of the owner's own ssh client
+// entryAliasSafe: the owner's configuration does not use alias, or, when
+// what it uses cannot be read, alias has the form with the environment's
+// id ("super-cage-<name>-<id>", "-<n>" after it).
+func entryAliasSafe(owner entryOwnerConfig, alias, environment string) bool {
+	if entryClaimed(owner.rules, alias) {
+		return false
+	}
+	if !owner.unknown {
+		return true
+	}
+	trimmed := alias
+	if n := len(trimmed); n > 2 && trimmed[n-2] == '-' && trimmed[n-1] >= '2' && trimmed[n-1] <= '9' {
+		trimmed = trimmed[:n-2]
+	}
+	return strings.HasPrefix(alias, "super-cage-") && strings.HasSuffix(trimmed, "-"+environment)
+}
+
+// entryOwnerConfig is what Super Cage reads of the owner's own ssh client
 // configuration: every Host line and every "Match host" or "Match
 // originalhost" list in ~/.ssh/config, the system-wide file and the files
-// they include, leaving out Super Cage's own files. It never writes and runs
-// nothing.
-func entryOwnerPatterns(paths entryPaths) [][]string {
+// they include, leaving out Super Cage's own files. unknown: an Include
+// names files Super Cage cannot tell with certainty (see
+// entryIncludePattern), or a file it cannot read safely; the owner's names
+// are then unknown.
+type entryOwnerConfig struct {
+	rules   [][]string
+	unknown bool
+}
+
+// entryReadOwner reads the owner's configuration. It never writes, runs
+// nothing and opens only regular files.
+func entryReadOwner(paths entryPaths) entryOwnerConfig {
 	home := filepath.Dir(paths.SSHDir)
-	var rules [][]string
+	var owner entryOwnerConfig
 	seen := map[string]bool{}
-	var read func(path, base string, depth int)
-	read = func(path, base string, depth int) {
-		if depth > 16 || seen[path] || entryWithin(paths.clientDir(), path) {
+	var read func(path string, user bool, depth int)
+	read = func(path string, user bool, depth int) {
+		if seen[path] || entryWithin(paths.clientDir(), path) {
+			return
+		}
+		if depth > 16 {
+			owner.unknown = true
 			return
 		}
 		seen[path] = true
+		info, err := os.Stat(path)
+		if errors.Is(err, os.ErrNotExist) || err == nil && info.IsDir() {
+			return
+		}
+		// A FIFO or a device would block or never end; ssh would read it.
+		if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
+			owner.unknown = true
+			return
+		}
 		data, err := os.ReadFile(path)
-		if err != nil || len(data) > 1<<20 {
+		if err != nil {
+			owner.unknown = true
 			return
 		}
 		for _, line := range strings.Split(string(data), "\n") {
 			keyword, args := entryConfigLine(line)
 			switch strings.ToLower(keyword) {
 			case "host":
-				rules = append(rules, args)
+				owner.rules = append(owner.rules, args)
 			case "match":
-				rules = append(rules, entryMatchHosts(args)...)
+				owner.rules = append(owner.rules, entryMatchHosts(args)...)
 			case "include":
-				for _, pattern := range args {
-					if strings.HasPrefix(pattern, "~/") {
-						pattern = filepath.Join(home, pattern[2:])
+				base := paths.SSHDir
+				if !user {
+					base = filepath.Dir(paths.SystemConfig)
+				}
+				for _, arg := range args {
+					pattern, ok := entryIncludePattern(arg, home, base, user)
+					if !ok {
+						owner.unknown = true
+						continue
 					}
-					if !filepath.IsAbs(pattern) {
-						pattern = filepath.Join(base, pattern)
+					matches, err := filepath.Glob(pattern)
+					if err != nil {
+						owner.unknown = true
 					}
-					matches, _ := filepath.Glob(pattern)
 					for _, match := range matches {
-						read(match, base, depth+1)
+						read(match, user, depth+1)
 					}
 				}
 			}
 		}
 	}
-	read(paths.userConfig(), paths.SSHDir, 0)
+	read(paths.userConfig(), true, 0)
 	if paths.SystemConfig != "" {
-		read(paths.SystemConfig, filepath.Dir(paths.SystemConfig), 0)
+		read(paths.SystemConfig, false, 0)
 	}
-	return rules
+	return owner
+}
+
+// entryIncludePattern is the glob pattern ssh makes of an Include argument
+// (ssh_config(5), Include, TOKENS and ENVIRONMENT VARIABLES; OpenSSH 9.9
+// added the expansion, older releases take the argument as it is): ${VAR}
+// and the tokens that do not depend on the host being connected to, then
+// a relative path in ~/.ssh (/etc/ssh for the system file), then ~ and
+// ~/ as the user's home. ok is false for anything that cannot be expanded
+// with certainty: %C, %h, %j, %k, %n, %p and %r name the destination,
+// %L and %l the local host name, which can change with the network; an
+// undefined variable; another user's home; %i and %u on Windows; ~ in the
+// system file, which ssh refuses.
+func entryIncludePattern(arg, home, base string, user bool) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(arg); i++ {
+		switch c := arg[i]; {
+		case c == '$' && i+1 < len(arg) && arg[i+1] == '{':
+			end := strings.IndexByte(arg[i+2:], '}')
+			if end < 0 {
+				return "", false
+			}
+			value, ok := os.LookupEnv(arg[i+2 : i+2+end])
+			if !ok {
+				return "", false
+			}
+			b.WriteString(value)
+			i += 2 + end
+		case c == '%':
+			if i+1 == len(arg) {
+				return "", false
+			}
+			i++
+			switch arg[i] {
+			case '%':
+				b.WriteByte('%')
+			case 'd':
+				b.WriteString(home)
+			case 'i':
+				if runtime.GOOS == "windows" {
+					return "", false
+				}
+				b.WriteString(strconv.Itoa(os.Getuid()))
+			case 'u':
+				current, err := osuser.Current()
+				if runtime.GOOS == "windows" || err != nil {
+					return "", false
+				}
+				b.WriteString(current.Username)
+			default:
+				return "", false
+			}
+		default:
+			b.WriteByte(c)
+		}
+	}
+	pattern := b.String()
+	if !strings.HasPrefix(pattern, "~") && !filepath.IsAbs(pattern) {
+		pattern = filepath.Join(base, pattern)
+	}
+	if strings.HasPrefix(pattern, "~") {
+		if !user {
+			return "", false
+		}
+		switch {
+		case pattern == "~":
+			pattern = home
+		case strings.HasPrefix(pattern, "~/"):
+			pattern = filepath.Join(home, pattern[2:])
+		default:
+			return "", false
+		}
+	}
+	return pattern, true
 }
 
 func entryWithin(dir, path string) bool {
@@ -741,16 +865,8 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 		// "Connection closed by UNKNOWN port 65535" after it only confuses.
 		// ssh -v still raises the level, since the command line wins.
 		{"LogLevel", "ERROR"},
-	}
-	// Options newer OpenSSH releases added are written only when every ssh
-	// client on this computer accepts them (F7): IgnoreUnknown would hide
-	// them instead, but the first IgnoreUnknown ssh reads wins, so it would
-	// also replace the owner's own.
-	known := entrySSHKnows(slices.Collect(maps.Keys(entryNewerOptions)))
-	for _, option := range entryNewerOptionOrder {
-		if known[option] {
-			options = append(options, [2]string{option, entryNewerOptions[option]})
-		}
+		// The proxy reaches the controller, not a host DNS could vouch for.
+		{"VerifyHostKeyDNS", "no"},
 	}
 	for _, option := range options {
 		fmt.Fprintf(&b, "  %s %s\n", option[0], option[1])
@@ -758,8 +874,40 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 	return b.String()
 }
 
-// entryNewerOptions are the pins that older OpenSSH clients (Windows 10's
-// 8.1 among them) do not know, with the release that added them.
+// entryBaselineOptions are the only options a file the owner's ssh reads
+// carries (N2 of the second review): an option that ssh does not know makes
+// every ssh the owner runs fail, and Super Cage cannot see every ssh on
+// the computer (Git for Windows', MacPorts', Nix's, a GUI-started
+// controller's PATH). The baseline is OpenSSH 7.6 (2017, Ubuntu 18.04's;
+// Windows 10 ships 7.7 and 8.1): every name is in the keyword table of
+// readconf.c at V_7_6_P1, and each value it is written with is one 7.6
+// accepts (ControlPath and RemoteCommand none clear the option in 7.6,
+// IdentityAgent none is read by ssh.c). The value is the release whose
+// notes add the option, or "≤7.6" for one older than the notes say.
+var entryBaselineOptions = map[string]string{
+	"HostName": "≤7.6", "User": "≤7.6", "ProxyCommand": "≤7.6", "HostKeyAlias": "2.5",
+	"UserKnownHostsFile": "≤7.6", "StrictHostKeyChecking": "≤7.6", "UpdateHostKeys": "6.8",
+	"IdentityFile": "≤7.6", "IdentitiesOnly": "3.9", "IdentityAgent": "7.3",
+	"ForwardAgent": "≤7.6", "ForwardX11": "≤7.6", "ForwardX11Trusted": "3.8",
+	"ClearAllForwardings": "3.0", "Tunnel": "≤7.6", "PermitLocalCommand": "≤7.6",
+	"RemoteCommand": "7.6", "RequestTTY": "5.9", "ControlMaster": "3.9", "ControlPath": "3.9",
+	"ControlPersist": "5.6", "PubkeyAuthentication": "2.5", "PreferredAuthentications": "2.5",
+	"PasswordAuthentication": "≤7.6", "KbdInteractiveAuthentication": "≤7.6",
+	"ProxyUseFdpass": "6.5", "GlobalKnownHostsFile": "≤7.6", "CanonicalizeHostname": "≤7.6",
+	"AddKeysToAgent": "7.2", "ServerAliveInterval": "3.8", "ServerAliveCountMax": "≤7.6",
+	"LogLevel": "≤7.6", "VerifyHostKeyDNS": "≤7.6",
+}
+
+// entryNewerOptions are the pins OpenSSH 7.6 does not know, with the
+// release that added them. Only cage ssh applies them, through its own -F
+// file (entryCageSSHConfig), which ssh reads instead of ~/.ssh/config and
+// the system file, so its IgnoreUnknown replaces nobody's. A file the
+// owner's ssh reads never carries them: IgnoreUnknown would hide them from
+// an older ssh, but the first IgnoreUnknown ssh reads wins, and Super
+// Cage's Include comes first, so it would silently replace one the owner
+// adds later (nothing of Super Cage runs when the owner edits the file),
+// and an option of theirs that their ssh does not know would then break
+// every ssh again.
 var entryNewerOptions = map[string]string{
 	"KnownHostsCommand":       "none",    // 8.5
 	"SessionType":             "default", // 8.7
@@ -770,78 +918,23 @@ var entryNewerOptions = map[string]string{
 
 var entryNewerOptionOrder = []string{"KnownHostsCommand", "SessionType", "StdinNull", "ForkAfterAuthentication", "ObscureKeystrokeTiming"}
 
-// entrySSHClients are the OpenSSH clients the owner may run on this
-// computer: the system one, the first ssh on PATH and Homebrew's.
-func entrySSHClients() []string {
-	candidates := []string{sshExecutable()}
-	if path, err := exec.LookPath("ssh"); err == nil {
-		candidates = append(candidates, path)
-	}
-	if runtime.GOOS == "darwin" {
-		candidates = append(candidates, "/opt/homebrew/bin/ssh", "/usr/local/bin/ssh")
-	}
-	var clients []string
-	for _, candidate := range candidates {
-		resolved, err := filepath.EvalSymlinks(candidate)
-		if err != nil {
-			continue
-		}
-		if info, err := os.Stat(resolved); err == nil && info.Mode().IsRegular() && !slices.Contains(clients, resolved) {
-			clients = append(clients, resolved)
-		}
-	}
-	return clients
-}
+// cageSSHFile is the configuration cage ssh gives ssh with -F.
+func (p entryPaths) cageSSHFile() string { return filepath.Join(p.clientDir(), "cage-ssh.conf") }
 
-// entrySSHKnows reports which of the options every local ssh client
-// accepts, asking each with "ssh -G -F <null> -o Option=value": ssh only
-// prints its configuration, reads no file and connects nowhere. With no
-// client found, none counts as known.
-var entrySSHKnows = func(names []string) map[string]bool {
-	clients := entrySSHClients()
-	known := map[string]bool{}
-	for _, name := range names {
-		known[name] = len(clients) > 0
+// entryCageSSHConfig is cage ssh's own configuration: the environments'
+// blocks and the newer pins, hidden from an ssh that does not know them.
+// The command line (-o) could not carry them: ssh refuses -N after
+// -o SessionType.
+func entryCageSSHConfig(paths entryPaths) string {
+	var b strings.Builder
+	b.WriteString("# Super Cage 本机终端（cage ssh）— generated, do not edit.\n")
+	fmt.Fprintf(&b, "IgnoreUnknown %s\n", strings.Join(entryNewerOptionOrder, ","))
+	fmt.Fprintf(&b, "Include %s\n", entryQuote(filepath.Join(paths.hostsDir(), "*.conf")))
+	b.WriteString("Host *\n")
+	for _, option := range entryNewerOptionOrder {
+		fmt.Fprintf(&b, "  %s %s\n", option, entryNewerOptions[option])
 	}
-	for _, client := range clients {
-		accepted := entryProbeSSH(client, names)
-		for _, name := range names {
-			known[name] = known[name] && accepted[name]
-		}
-	}
-	return known
-}
-
-func entryProbeSSH(client string, names []string) map[string]bool {
-	accepted := map[string]bool{}
-	left := slices.Clone(names)
-	for range len(names) + 1 {
-		args := []string{"-G", "-F", os.DevNull}
-		for _, name := range left {
-			args = append(args, "-o", name+"="+entryNewerOptions[name])
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		output, err := exec.CommandContext(ctx, client, append(args, "probe.invalid")...).CombinedOutput()
-		cancel()
-		if err == nil {
-			for _, name := range left {
-				accepted[name] = true
-			}
-			return accepted
-		}
-		// "command-line: line 0: Bad configuration option: sessiontype"
-		bad := -1
-		for i, name := range left {
-			if bytes.Contains(bytes.ToLower(output), []byte("bad configuration option: "+strings.ToLower(name))) {
-				bad = i
-			}
-		}
-		if bad < 0 {
-			return accepted
-		}
-		left = slices.Delete(left, bad, bad+1)
-	}
-	return accepted
+	return b.String()
 }
 
 // entryWriteClient writes this environment's Host block and pinned host key,
@@ -868,6 +961,9 @@ func entryWriteClient(paths entryPaths, environment, name string, hostKey ssh.Pu
 	}
 	include := "# Super Cage 本机终端 — generated, do not edit.\nInclude " + entryQuote(filepath.Join(paths.hostsDir(), "*.conf")) + "\n"
 	if err := entryWriteFile(paths.clientFile(), []byte(include), 0o600); err != nil {
+		return "", err
+	}
+	if err := entryWriteFile(paths.cageSSHFile(), []byte(entryCageSSHConfig(paths)), 0o600); err != nil {
 		return "", err
 	}
 	alias, err := entryChooseAlias(paths, environment, name)
@@ -916,7 +1012,7 @@ func entryRemoveClient(paths entryPaths, environment string) error {
 	if err := entryIncludeRemove(paths); err != nil {
 		return err
 	}
-	for _, path := range []string{paths.clientFile(), paths.hostsDir(), paths.clientDir()} {
+	for _, path := range []string{paths.clientFile(), paths.cageSSHFile(), paths.hostsDir(), paths.clientDir()} {
 		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) && !isDirNotEmpty(err) {
 			return err
 		}
@@ -997,17 +1093,28 @@ type entryRevoked struct {
 	Keys    []string `json:"keys"`
 }
 
-func entryLoadRevoked(paths entryPaths) entryRevoked {
-	var revoked entryRevoked
-	data, err := os.ReadFile(filepath.Join(paths.DeviceDir, entryRevokedFile))
-	if err != nil || json.Unmarshal(data, &revoked) != nil {
-		return entryRevoked{Version: 1}
+// entryLoadRevoked reads revoked.json. One that exists but cannot be read
+// (or names a version this release does not know) is an error: the caller
+// refuses every key until it can be read, and never writes it again from
+// an empty list (N4 of the second review).
+func entryLoadRevoked(paths entryPaths) (entryRevoked, error) {
+	path := filepath.Join(paths.DeviceDir, entryRevokedFile)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return entryRevoked{Version: 1}, nil
 	}
-	return revoked
+	var revoked entryRevoked
+	if err != nil || json.Unmarshal(data, &revoked) != nil || revoked.Version != 1 {
+		return entryRevoked{}, errEntryRevocationsUnreadable
+	}
+	return revoked, nil
 }
 
+// entryKeyRevoked is true for a revoked key, and for every key while
+// revoked.json cannot be read.
 func entryKeyRevoked(paths entryPaths, key ssh.PublicKey) bool {
-	return slices.Contains(entryLoadRevoked(paths).Keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	revoked, err := entryLoadRevoked(paths)
+	return err != nil || slices.Contains(revoked.Keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
 }
 
 // entryRevokeKey adds a device key, in authorized_keys form, to the list.
@@ -1016,12 +1123,15 @@ func entryRevokeKey(paths entryPaths, authorized string) error {
 	if err != nil {
 		return err
 	}
-	if entryKeyRevoked(paths, key) {
+	revoked, err := entryLoadRevoked(paths)
+	if err != nil {
+		return err
+	}
+	line := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key)))
+	if slices.Contains(revoked.Keys, line) {
 		return nil
 	}
-	revoked := entryLoadRevoked(paths)
-	revoked.Version = 1
-	revoked.Keys = append(revoked.Keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	revoked.Keys = append(revoked.Keys, line)
 	if err := host.EnsurePrivateDir(paths.DeviceDir); err != nil {
 		return err
 	}
@@ -1050,7 +1160,13 @@ type entryInclude struct {
 	// the confirmation with the line that includes it.
 	Alias string `json:"alias,omitempty"`
 	Block string `json:"block,omitempty"`
+	// Warning is something the owner should know before confirming.
+	Warning string `json:"warning,omitempty"`
 }
+
+// entryCurrentUID is the user that may own ~/.ssh/config; a variable for
+// tests.
+var entryCurrentUID = os.Getuid
 
 // entryUserConfigTarget is ~/.ssh/config, or the file it links to, so a
 // dotfiles link keeps pointing at the owner's file.
@@ -1114,16 +1230,28 @@ func entryIncludePreview(paths entryPaths) entryInclude {
 		return view
 	}
 	view.Present = entryHasInclude(content, entryIncludeLines(paths))
-	if info, err := os.Stat(target); err == nil && info.Mode().Perm()&0o200 == 0 && !view.Present {
-		view.Error = errEntryConfigReadOnly.Error()
-		return view
-	}
-	owner := entryOwnerPatterns(paths)
-	for _, alias := range entryAliasesInUse(paths, "") {
-		if entryClaimed(owner, alias) {
-			view.Error = fmt.Sprintf("~/.ssh/config 里已经有主机 %s：在 Super Cage 里关闭再开启本机终端，换一个名字后再加入", alias)
+	if info, err := os.Stat(target); err == nil && !view.Present {
+		if refusal := entryFileRefusal(target, info); refusal != nil {
+			view.Error = fmt.Sprintf("%s：要直接用 ssh 连接，请自己在它的第一行加入 %s", refusal.Error(), view.Line)
 			return view
 		}
+	}
+	if bytes.HasPrefix(content, []byte(entryBOM)) {
+		view.Warning = "~/.ssh/config 以 BOM（字节顺序标记）开头，多数 OpenSSH 会把带 BOM 的第一行读成未知选项而报错；Super Cage 的这一行会写在 BOM 之后。建议先把文件另存为不带 BOM 的 UTF-8。"
+	}
+	owner := entryReadOwner(paths)
+	blocks, _ := filepath.Glob(filepath.Join(paths.hostsDir(), "*.conf"))
+	for _, block := range blocks {
+		alias := entryReadAlias(block)
+		if alias == "" || entryAliasSafe(owner, alias, strings.TrimSuffix(filepath.Base(block), ".conf")) {
+			continue
+		}
+		if entryClaimed(owner.rules, alias) {
+			view.Error = fmt.Sprintf("~/.ssh/config 里已经有主机 %s：在 Super Cage 里关闭再开启本机终端，换一个名字后再加入", alias)
+		} else {
+			view.Error = fmt.Sprintf("~/.ssh/config 引入的文件有 Super Cage 无法确定的路径，可能已经用了主机名 %s：在 Super Cage 里关闭再开启本机终端，换成带环境标识的名字后再加入", alias)
+		}
+		return view
 	}
 	if !view.Present {
 		view.Token = entryIncludeToken(content, view.Line)
@@ -1131,10 +1259,14 @@ func entryIncludePreview(paths entryPaths) entryInclude {
 	return view
 }
 
-// errEntryConfigReadOnly: a read-only ~/.ssh/config (or the file it links
-// to, a Nix or dotfiles store, say) is never replaced, though its directory
-// would allow it.
-var errEntryConfigReadOnly = errors.New("~/.ssh/config 是只读文件，Super Cage 不会修改它")
+// errEntryConfigReadOnly and errEntryConfigNotOwned: a ~/.ssh/config (or
+// the file it links to, a Nix or dotfiles store, say) that this user cannot
+// write or does not own is never replaced, though its directory would allow
+// it (entryFileRefusal).
+var (
+	errEntryConfigReadOnly = errors.New("~/.ssh/config 不可写（只读、带不可更改标记或在只读的文件系统上），Super Cage 不会修改它")
+	errEntryConfigNotOwned = errors.New("~/.ssh/config 属于另一个用户，Super Cage 不会修改它")
+)
 
 // entryBOM is the UTF-8 byte order mark some editors write; it stays the
 // first thing in the file.
@@ -1209,8 +1341,8 @@ func entryIncludeRemove(paths entryPaths) error {
 	if err != nil {
 		return err
 	}
-	if info.Mode().Perm()&0o200 == 0 {
-		return fmt.Errorf("%w：请自己删掉其中的 %s", errEntryConfigReadOnly, paths.includeLine())
+	if refusal := entryFileRefusal(target, info); refusal != nil {
+		return fmt.Errorf("%w：请自己删掉其中的 %s", refusal, paths.includeLine())
 	}
 	var kept []byte
 	if bytes.HasPrefix(content, []byte(entryBOM)) {

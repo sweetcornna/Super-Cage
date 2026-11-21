@@ -61,7 +61,7 @@ func entryCall(ctx context.Context, configPath, method, path string, input, outp
 	return nil
 }
 
-const entryUsage = `用法：
+const entryUsageCommands = `用法：
   cage entry on [环境]             在这台电脑上开启这个环境的本机终端
   cage entry off [环境]            关闭，并立即断开所有本机连接
   cage entry status [环境] [--json]
@@ -72,17 +72,26 @@ const entryUsage = `用法：
   cage entry proxy <环境>           ssh 的 ProxyCommand，不用手动运行
   cage ssh <环境> [ssh 参数…]       不改 ~/.ssh/config 也能连接
 环境：default（默认环境）或本机虚拟机的标识。
-带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。
-不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：
-环境里的程序可以借这些输出向你的终端发送控制字符。
 `
+
+// entryUsage is the help; it says exactly which sessions are filtered (N3 of
+// the second review).
+func entryUsage() string {
+	terminal := "带终端的会话（ssh、ssh -t）会被拒绝：这一版还没有终端输出过滤。\n"
+	if entryNewOutputFilter != nil {
+		terminal = "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。\n"
+	}
+	return entryUsageCommands + terminal +
+		"不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：\n" +
+		"环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。\n"
+}
 
 // EntryMain runs cage entry …; defaultConfig is the default profile's
 // configuration path.
 func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stderr io.Writer) int {
 	ctx := context.Background()
 	if len(args) == 0 {
-		fmt.Fprint(stderr, entryUsage)
+		fmt.Fprint(stderr, entryUsage())
 		return 2
 	}
 	if args[0] == "proxy" {
@@ -105,11 +114,11 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 	positional := map[string]int{"on": 0, "off": 0, "status": 0, "devices": 0, "include": 0, "revoke": 1, "rename": 2}
 	need, known := positional[args[0]]
 	if !known {
-		fmt.Fprint(stderr, entryUsage)
+		fmt.Fprint(stderr, entryUsage())
 		return 2
 	}
 	if len(rest) < need || len(rest) > need+1 {
-		fmt.Fprint(stderr, entryUsage)
+		fmt.Fprint(stderr, entryUsage())
 		return 2
 	}
 	if len(rest) == need+1 {
@@ -144,6 +153,9 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 		encoder.SetIndent("", "  ")
 		_ = encoder.Encode(view)
 		return 0
+	}
+	if len(view.Unreached) > 0 {
+		fmt.Fprintln(stderr, "Super Cage："+entryUnreachedNote(view.Unreached))
 	}
 	if args[0] == "devices" {
 		entryPrintDevices(stdout, view)
@@ -211,7 +223,7 @@ func entryIncludeCommand(ctx context.Context, configPath, environment string, st
 		return 1
 	}
 	if preview.Error != "" {
-		fmt.Fprintln(stderr, "Super Cage："+preview.Error)
+		fmt.Fprintln(stderr, "Super Cage："+preview.Error+"。不改它也能用：cage ssh "+environment)
 		return 1
 	}
 	if preview.Present {
@@ -250,6 +262,9 @@ func entryIncludePrompt(preview entryInclude) string {
 		}
 		b.WriteString("\n")
 	}
+	if preview.Warning != "" {
+		b.WriteString("注意：" + preview.Warning + "\n\n")
+	}
 	b.WriteString("写入吗？[y/N] ")
 	return b.String()
 }
@@ -275,5 +290,9 @@ func entrySSHCommand(paths entryPaths, environment string, args []string) ([]str
 	if alias == "" {
 		return nil, errEntryOff
 	}
-	return append([]string{"ssh", "-F", paths.clientFile(), alias}, args...), nil
+	config := paths.cageSSHFile()
+	if _, err := os.Stat(config); err != nil {
+		config = paths.clientFile() // written by a release before it
+	}
+	return append([]string{"ssh", "-F", config, alias}, args...), nil
 }

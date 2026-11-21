@@ -19,17 +19,20 @@ type entryRefusal struct {
 func (e *entryRefusal) Error() string { return e.Message }
 
 var (
-	errEntryLocalOnly   = &entryRefusal{http.StatusForbidden, "local_only", "本机终端只能在这台电脑上开启和连接"}
-	errEntryOff         = &entryRefusal{http.StatusConflict, "off", "本机终端未在这个环境里开启"}
-	errEntryUnknown     = &entryRefusal{http.StatusForbidden, "device_unknown", "这台电脑还没有加入这个环境的本机终端：在 Super Cage 里重新开启"}
-	errEntryRevoked     = &entryRefusal{http.StatusForbidden, "device_revoked", "这台电脑的钥匙已撤销：在 Super Cage 里重新开启本机终端即可生成新钥匙"}
-	errEntryLocked      = &entryRefusal{http.StatusLocked, "locked", "Super Cage 已锁定，请在应用中解锁"}
-	errEntryUnsupported = &entryRefusal{http.StatusConflict, "unsupported", "这个环境暂不支持本机终端"}
-	errEntryStopped     = &entryRefusal{http.StatusConflict, "stopped", "环境已停止：先在 Super Cage 里启动环境"}
-	errEntryStarting    = &entryRefusal{http.StatusConflict, "starting", "环境正在启动或停止：稍后再连接"}
-	errEntryPaused      = &entryRefusal{http.StatusConflict, "paused", "网络已暂停：本机终端会在恢复网络后重新可用"}
-	errEntryClosing     = &entryRefusal{http.StatusServiceUnavailable, "closing", "Super Cage 正在退出"}
-	errEntryWindowOnly  = &entryRefusal{http.StatusForbidden, "window_only", "本机终端只能在 Super Cage 窗口或 cage entry 里管理"}
+	errEntryLocalOnly = &entryRefusal{http.StatusForbidden, "local_only", "本机终端只能在这台电脑上开启和连接"}
+	errEntryOff       = &entryRefusal{http.StatusConflict, "off", "本机终端未在这个环境里开启"}
+	errEntryUnknown   = &entryRefusal{http.StatusForbidden, "device_unknown", "这台电脑还没有加入这个环境的本机终端：在 Super Cage 里重新开启"}
+	errEntryRevoked   = &entryRefusal{http.StatusForbidden, "device_revoked", "这台电脑的钥匙已撤销：在 Super Cage 里重新开启本机终端即可生成新钥匙"}
+	// errEntryRevocationsUnreadable: revoked.json exists but cannot be
+	// read, so every key is refused (N4 of the second review).
+	errEntryRevocationsUnreadable = &entryRefusal{http.StatusForbidden, "revocations_unreadable", "这台电脑的撤销记录（Super Cage 的 entry/revoked.json）无法读取：在修好或删除它之前，本机终端拒绝所有钥匙"}
+	errEntryLocked                = &entryRefusal{http.StatusLocked, "locked", "Super Cage 已锁定，请在应用中解锁"}
+	errEntryUnsupported           = &entryRefusal{http.StatusConflict, "unsupported", "这个环境暂不支持本机终端"}
+	errEntryStopped               = &entryRefusal{http.StatusConflict, "stopped", "环境已停止：先在 Super Cage 里启动环境"}
+	errEntryStarting              = &entryRefusal{http.StatusConflict, "starting", "环境正在启动或停止：稍后再连接"}
+	errEntryPaused                = &entryRefusal{http.StatusConflict, "paused", "网络已暂停：本机终端会在恢复网络后重新可用"}
+	errEntryClosing               = &entryRefusal{http.StatusServiceUnavailable, "closing", "Super Cage 正在退出"}
+	errEntryWindowOnly            = &entryRefusal{http.StatusForbidden, "window_only", "本机终端只能在 Super Cage 窗口或 cage entry 里管理"}
 )
 
 // entryConn is one live connection of the entry: one WebSocket carrying one
