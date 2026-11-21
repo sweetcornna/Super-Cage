@@ -457,6 +457,11 @@ export async function startMockServer({
       });
       if (url.pathname === "/api/account") return json(res, 200, { exists: true, unlocked: true, username: "fixture" });
       if (url.pathname === "/api/environment/initialization") return json(res, 200, { required: false });
+      // Event streams (diagnostics, browser events): a valid stream that asks for no early reconnect.
+      if (req.method === "GET" && url.pathname.startsWith("/api/") && url.pathname.endsWith("/events")) {
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
+        return res.end("retry: 600000\n\n");
+      }
       const desktopReply = desktopApi?.(req.method, url.pathname);
       if (desktopReply) return json(res, 200, desktopReply);
       if (url.pathname === "/api/status") return json(res, 200, { job: { running: false }, ready: false, projects: [] });

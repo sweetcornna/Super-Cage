@@ -416,8 +416,7 @@ async function tabletScreens(device, variant, sheet) {
   const opts = { insets: device.insets, touch: true };
   try {
     const post = await signIn(context, page);
-    const { origin } = await enterWorkspace(page, post);
-    await page.goto(origin + "/");
+    await enterWorkspace(page, post);
     await page.locator(".workbench-shell").waitFor();
     await sleep(800);
     // Upright tablets (to 1100 px) get the sidebar as a drawer over the panes (ui/src/sidebar-drawer.mjs).
