@@ -126,7 +126,15 @@ type staticHandler struct {
 	// phone, when set, picks the document at "/": true serves the phone UI
 	// (mobile.html) there instead of the desktop workbench (index.html).
 	phone func(*http.Request) bool
+	// offered reports whether this server can serve the phone UI at "/" at all;
+	// its desktop document then carries phoneEntryMeta.
+	offered        func() bool
+	offeredDesktop *staticAsset
 }
+
+// phoneEntryMeta marks the desktop document of a server that can also serve the
+// phone UI at "/" (read by ui/src/entry-layout.mjs).
+const phoneEntryMeta = `<meta name="cage-phone-entry" content="available">`
 
 func newStaticHandler(files fs.FS) http.Handler {
 	return &staticHandler{files: files, assets: map[string]*staticAsset{}}
@@ -135,8 +143,28 @@ func newStaticHandler(files fs.FS) http.Handler {
 // newEntryStaticHandler serves files like newStaticHandler and answers "/" with
 // the document phone chooses (see internal/webentry). Both documents live at the
 // same URL, so deep links, reloads and Back are the same in either layout.
-func newEntryStaticHandler(files fs.FS, phone func(*http.Request) bool) http.Handler {
-	return &staticHandler{files: files, assets: map[string]*staticAsset{}, phone: phone}
+func newEntryStaticHandler(files fs.FS, phone func(*http.Request) bool, offered func() bool) http.Handler {
+	return &staticHandler{files: files, assets: map[string]*staticAsset{}, phone: phone, offered: offered}
+}
+
+// offeredDesktopAsset is index.html with phoneEntryMeta after <head>: its own
+// bytes, validator and (in-memory) compression, never index.html's companions.
+func (h *staticHandler) offeredDesktopAsset(plain *staticAsset) *staticAsset {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.offeredDesktop != nil {
+		return h.offeredDesktop
+	}
+	data := bytes.Replace(plain.identity.data, []byte("<head>"), []byte("<head>"+phoneEntryMeta), 1)
+	if bytes.Equal(data, plain.identity.data) {
+		return plain
+	}
+	h.offeredDesktop = &staticAsset{
+		name: "index.html (phone entry)", contentType: plain.contentType, cacheControl: plain.cacheControl,
+		identity: newStaticRepresentation(data),
+		varies:   staticCompressible[".html"] && len(data) >= staticMinCompressBytes,
+	}
+	return h.offeredDesktop
 }
 
 // companion reports whether name is a build-time compressed copy of another
@@ -342,6 +370,9 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if asset == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if root && name == "index.html" && h.offered != nil && h.offered() {
+		asset = h.offeredDesktopAsset(asset)
 	}
 	representation, encoding := h.represent(asset, r)
 	header := w.Header()

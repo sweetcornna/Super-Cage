@@ -23,10 +23,21 @@ function writeCookie(value, maxAge) {
 
 // A phone-sized touch device: no hover, a coarse pointer, and a window narrower than a tablet or
 // shorter than one (a phone on its side). A desktop browser resized narrow has a fine pointer and
-// is never moved; a phone asking for the desktop site has a 980 px wide window and is left alone.
+// is never moved. A phone asking for the desktop site lays the page out about 980 px wide, wider than
+// its screen, in either orientation (on its side it is also under 500 px tall): it is left alone.
 export function phoneSized() {
-  return matchMedia("(pointer: coarse)").matches && !matchMedia("(hover: hover)").matches &&
-    (innerWidth < 740 || innerHeight < 500);
+  if (!matchMedia("(pointer: coarse)").matches || matchMedia("(hover: hover)").matches) return false;
+  if (innerWidth >= 980 || innerWidth > Math.max(screen.width, screen.height) + 1) return false;
+  return innerWidth < 740 || innerHeight < 500;
+}
+
+// Whether this page may offer the phone UI at all: the server marks the desktop document when it can serve
+// the phone document at "/" (internal/workbench; the desktop app's own server, macOS and Windows guests
+// and older workspaces do not), and this is a browser, not a native desktop window (its shell injects
+// the bridge before any page script).
+export function phoneEntryOffered() {
+  if (window.cageNativeBridge || window.webkit?.messageHandlers?.cage) return false;
+  return document.querySelector('meta[name="cage-phone-entry"][content="available"]') !== null;
 }
 
 // The visible switch: remembered on this device for this origin, then the server serves the choice.
@@ -40,7 +51,7 @@ export function chooseLayout(value) {
 // server that is not ready for it (no session yet, a locked account) cannot make it loop. Returns true
 // when the page is leaving.
 export function guardDesktopEntry() {
-  if (layoutChoice() || !phoneSized()) return false;
+  if (!phoneEntryOffered() || layoutChoice() || !phoneSized()) return false;
   try {
     if (sessionStorage.getItem(GUARD)) return false;
     sessionStorage.setItem(GUARD, "1");
@@ -53,7 +64,7 @@ export function guardDesktopEntry() {
 // Desktop page on a phone-sized touch device (a phone that chose the desktop, or a server that was not
 // ready for the phone UI): a small switch back. Hidden by CSS everywhere else.
 export function mountPhoneSwitch() {
-  if (!matchMedia("(pointer: coarse)").matches) return;
+  if (!phoneEntryOffered() || !matchMedia("(pointer: coarse)").matches) return;
   const button = document.createElement("button");
   button.type = "button";
   button.className = "layout-switch";

@@ -17,10 +17,15 @@ import { IconHints } from "./icon-hints.jsx";
 // A phone-sized touch device without a layout choice goes to the phone UI instead of loading the
 // workbench (after a launch ticket in the hash has been redeemed, so the server can serve it).
 const leaving = !location.hash && guardDesktopEntry();
+// In the portal's frame the desktop page asks for the portal's bar back once it knows it stays.
 if (location.hash)
-  window.addEventListener("cage-session-ready", () => guardDesktopEntry(), {
-    once: true,
-  });
+  window.addEventListener(
+    "cage-session-ready",
+    () => {
+      if (!guardDesktopEntry()) announceDesktopInFrame();
+    },
+    { once: true },
+  );
 const Workbench = lazy(() =>
   leaving ? new Promise(() => {}) : import("./main.jsx"),
 );
@@ -49,7 +54,7 @@ createRoot(document.getElementById("root")).render(
 );
 
 mountPhoneSwitch();
-if (!leaving) announceDesktopInFrame();
+if (!leaving && !location.hash) announceDesktopInFrame();
 
 window.addEventListener("hashchange", () => {
   if (location.hash) location.reload();

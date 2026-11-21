@@ -24,9 +24,25 @@ const layoutCookie = (value, maxAge) => {
 function settlePhoneEntry() {
   try { sessionStorage.removeItem("cage-entry-guard"); } catch { /* storage may be unavailable */ }
   const auto = document.cookie.split(";").some((part) => part.trim() === "cage-layout=phone-auto");
+  const desktopSite = innerWidth >= 980 || innerWidth > Math.max(screen.width, screen.height) + 1;
   const phoneSized = matchMedia("(pointer: coarse)").matches && !matchMedia("(hover: hover)").matches &&
-    (innerWidth < 740 || innerHeight < 500);
+    !desktopSite && (innerWidth < 740 || innerHeight < 500);
   if (auto && !phoneSized) layoutCookie("", 0);
+}
+// A native desktop window (its shell injects the bridge before any page script) never runs the phone UI.
+// Its web view shares cookies across every localhost port, so a choice made on another port could ask
+// for it; this window takes the desktop workbench for its session instead, before drawing (once per tab,
+// so a server that ignored the cookie could not make it loop).
+const nativeDesktopWindow = webPhone && Boolean(window.cageNativeBridge || window.webkit?.messageHandlers?.cage);
+if (nativeDesktopWindow) {
+  try {
+    if (!sessionStorage.getItem("cage-native-desktop")) {
+      sessionStorage.setItem("cage-native-desktop", "1");
+      document.documentElement.style.visibility = "hidden";
+      layoutCookie("desktop");
+      location.reload();
+    }
+  } catch { /* storage may be unavailable: stay, without the browser parts */ }
 }
 // 电脑版: remembered on this device for this origin; the server then serves the desktop workbench.
 export function chooseDesktop() {
@@ -40,7 +56,7 @@ let portalOrigin = "";
 let tenant = false;
 const tenantListeners = new Set();
 
-if (webPhone) {
+if (webPhone && !nativeDesktopWindow) {
   document.documentElement.classList.add("web-phone");
   if (portalFrame) document.documentElement.classList.add("portal-frame");
   settlePhoneEntry();
@@ -93,10 +109,8 @@ async function readContext() {
     const context = response.ok ? await response.json() : null;
     if (!context?.tenant_workspace) return;
     tenant = true;
-    if (portalFrame && /^https?:\/\/[^/]+$/.test(context.portal_origin || "")) {
-      portalOrigin = context.portal_origin;
-      toPortal({ type: "cage:phone-ui" });
-    }
+    // The portal decides on its own whether its bar steps back for this workspace.
+    if (portalFrame && /^https?:\/\/[^/]+$/.test(context.portal_origin || "")) portalOrigin = context.portal_origin;
     for (const listener of tenantListeners) listener(true);
   } catch { /* the phone UI works without it */ }
 }
@@ -108,14 +122,14 @@ export function toPortal(message) {
   return true;
 }
 
-// "返回门户": the portal goes back past this workspace's own history entries (screens and overlays pushed
-// since it loaded; each records its depth) to the VM list, leaving nothing behind to press Back through.
+// "返回门户": the portal goes back to the VM list past this workspace's history entries, which it counts
+// itself, leaving nothing behind to press Back through.
 export function backToPortal() {
-  toPortal({ type: "cage:portal-home", depth: depth() });
+  toPortal({ type: "cage:portal-home" });
 }
-const depth = () => (Number.isInteger(history.state?.cageDepth) ? history.state.cageDepth : 0);
 
-// Opens an http(s) link outside the app: the portal's sandbox has no pop-ups, so the portal opens it.
+// Opens an http(s) link outside the app: the portal's sandbox has no pop-ups, so the portal offers it to
+// the person with the address shown.
 export function openExternal(url) {
   if (portalFrame && toPortal({ type: "cage:open-link", url })) return;
   window.open(url, "_blank", "noopener");
@@ -157,7 +171,6 @@ export function useDocked() {
 export function writeRoute(route, push) {
   const overlay = history.state?.cageOverlay;
   const next = { ...history.state, cageCLI: route, cageOverlay: undefined };
-  if (webPhone && push && !overlay) next.cageDepth = depth() + 1;
   history[push && !overlay ? "pushState" : "replaceState"](next, "");
   if (webPhone) {
     try { sessionStorage.setItem(ROUTE, JSON.stringify(route)); } catch { /* storage may be unavailable */ }
@@ -175,7 +188,7 @@ export function useBackDismiss(open, close) {
     if (!open || !webPhone || !closeRef.current) return undefined;
     const id = load + ":" + ++overlays;
     openOverlays.add(id);
-    history.pushState({ ...history.state, cageOverlay: id, cageDepth: depth() + 1 }, "");
+    history.pushState({ ...history.state, cageOverlay: id }, "");
     const pop = () => { if (history.state?.cageOverlay !== id) closeRef.current?.(); };
     window.addEventListener("popstate", pop);
     return () => {

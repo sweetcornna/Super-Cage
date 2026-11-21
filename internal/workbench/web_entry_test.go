@@ -2,12 +2,15 @@ package workbench
 
 import (
 	"bytes"
+	"compress/gzip"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/webentry"
 )
 
@@ -29,6 +32,12 @@ func entryDocuments(t *testing.T) (desktop, phone []byte) {
 	return desktop, phone
 }
 
+// offeredDocument is the desktop document as a server that can also serve the
+// phone UI answers "/" with: marked so its page may hand a phone over.
+func offeredDocument(desktop []byte) []byte {
+	return bytes.Replace(desktop, []byte("<head>"), []byte("<head>"+phoneEntryMeta), 1)
+}
+
 func rootRequest(s *Server, agent, cookie, hint string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest("GET", s.origin+"/", nil)
 	r.Header.Set("User-Agent", agent)
@@ -48,6 +57,7 @@ func rootRequest(s *Server, agent, cookie, hint string) *httptest.ResponseRecord
 // downloading the desktop workbench, unless it chose the desktop layout.
 func TestRootDocumentFollowsTheDevice(t *testing.T) {
 	desktop, phone := entryDocuments(t)
+	desktop = offeredDocument(desktop)
 	s := testServer(t)
 	for _, test := range []struct {
 		name, agent, cookie, hint string
@@ -107,6 +117,7 @@ func TestRootDocumentFollowsTheDevice(t *testing.T) {
 // internal/tenant/entry_test.go for the gateway's half of this contract).
 func TestRootDocumentForTheTenantGateway(t *testing.T) {
 	desktop, phone := entryDocuments(t)
+	desktop = offeredDocument(desktop)
 	s := testServer(t)
 	for hint, want := range map[string][]byte{webentry.Phone: phone, webentry.Desktop: desktop} {
 		r := httptest.NewRequest("GET", s.origin+"/", nil)
@@ -126,6 +137,7 @@ func TestRootDocumentForTheTenantGateway(t *testing.T) {
 // redeems a launch ticket, signs in and unlocks.
 func TestRootDocumentWaitsForAReadyBrowser(t *testing.T) {
 	desktop, phone := entryDocuments(t)
+	desktop = offeredDocument(desktop)
 	s := testServer(t)
 	anonymous := func() []byte {
 		r := httptest.NewRequest("GET", s.origin+"/", nil)
@@ -154,16 +166,69 @@ func TestRootDocumentWaitsForAReadyBrowser(t *testing.T) {
 	}
 }
 
-// Servers that cannot answer the phone routes for a browser keep the desktop.
+// Servers that cannot answer the phone routes for a browser keep the desktop,
+// and its document does not offer the phone UI: no hand-over, no 手机版 switch
+// (in the desktop app's window, on macOS or Windows guests, on a client).
 func TestRootDocumentStaysDesktopWithoutPhoneRoutes(t *testing.T) {
 	desktop, _ := entryDocuments(t)
-	for _, mode := range []string{"desktop entry", "client only"} {
+	for _, mode := range []string{"desktop entry", "client only", "macOS guest", "Windows guest"} {
 		s := testServer(t)
 		s.desktopEntry = mode == "desktop entry"
 		s.clientOnly = mode == "client only"
-		if w := rootRequest(s, entryIPhone, "cage-layout=phone", "phone"); !bytes.Equal(w.Body.Bytes(), desktop) {
-			t.Fatalf("%s served the phone UI", mode)
+		if mode == "macOS guest" {
+			s.macosGuest = &guestos.MacOSProfile{Instance: "test", User: "test"}
 		}
+		if mode == "Windows guest" {
+			s.windowsGuest = &guestos.WindowsProfile{}
+		}
+		for _, agent := range []string{entryIPhone, entryMac} {
+			w := rootRequest(s, agent, "cage-layout=phone", "phone")
+			if !bytes.Equal(w.Body.Bytes(), desktop) {
+				t.Fatalf("%s: served the phone UI or a marked desktop document", mode)
+			}
+			if bytes.Contains(w.Body.Bytes(), []byte("cage-phone-entry")) {
+				t.Fatalf("%s offers the phone UI", mode)
+			}
+		}
+	}
+}
+
+// The mark is on the desktop document of a server that can serve the phone UI,
+// in every coding, with a validator of its own.
+func TestRootDocumentOffersThePhoneEntry(t *testing.T) {
+	plain, _ := entryDocuments(t)
+	s := testServer(t)
+	offeredTag := ""
+	for _, coding := range []string{"", "gzip", "br"} {
+		r := httptest.NewRequest("GET", s.origin+"/", nil)
+		r.Header.Set("User-Agent", entryMac)
+		if coding != "" {
+			r.Header.Set("Accept-Encoding", coding)
+		}
+		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+		w := httptest.NewRecorder()
+		s.handler().ServeHTTP(w, r)
+		body := w.Body.Bytes()
+		if w.Header().Get("Content-Encoding") == "gzip" {
+			zr, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if body, err = io.ReadAll(zr); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if w.Code != 200 || !bytes.Equal(body, offeredDocument(plain)) || bytes.Count(body, []byte(phoneEntryMeta)) != 1 {
+			t.Fatalf("coding %q (%q): the desktop document at / must carry the mark once", coding, w.Header().Get("Content-Encoding"))
+		}
+		if coding == "" {
+			offeredTag = w.Header().Get("ETag")
+		}
+	}
+	unmarked := testServer(t)
+	unmarked.desktopEntry = true
+	if plainTag := rootRequest(unmarked, entryMac, "", "").Header().Get("ETag"); offeredTag == "" || offeredTag == plainTag {
+		t.Fatalf("the marked document needs its own validator: %q, %q", offeredTag, plainTag)
 	}
 }
 

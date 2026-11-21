@@ -16,7 +16,7 @@ import (
 // Behind the tenant gateway the browser's cookies and user agent never reach
 // this server; the gateway applies the same rule and sends only its result.
 func (s *Server) phoneEntry(r *http.Request) bool {
-	if s.desktopEntry || s.clientOnly || s.windowsGuest != nil || s.macosGuest != nil {
+	if !s.phoneEntryAvailable() {
 		return false
 	}
 	choice, ok := webentry.FromHint(r.Header)
@@ -24,6 +24,14 @@ func (s *Server) phoneEntry(r *http.Request) bool {
 		choice = webentry.Choose(r.Header)
 	}
 	return choice == webentry.Phone && s.phoneReady(r)
+}
+
+// phoneEntryAvailable reports whether this server can ever answer "/" with the
+// phone UI. Its desktop document says so (staticHandler), and only then does the
+// page hand a phone-sized touch device over or offer the 手机版 switch: never in
+// the desktop app's own window, on a macOS or Windows guest, or on a client.
+func (s *Server) phoneEntryAvailable() bool {
+	return !s.desktopEntry && !s.clientOnly && s.windowsGuest == nil && s.macosGuest == nil
 }
 
 // phoneReady reports whether the phone UI can work for this browser as it is.
