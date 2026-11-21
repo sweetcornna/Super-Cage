@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode/utf8"
 )
 
@@ -81,14 +82,15 @@ type Filter struct {
 	n        int // held bytes
 	hold     [HoldLimit]byte
 
-	focus   bool           // the guest asked for focus reports (mode 1004)
+	focus   atomic.Bool    // the guest asked for focus reports (mode 1004)
 	resets  int            // full and soft resets passed to the application
 	dropped map[string]int // what was dropped, by kind
 }
 
 // GuestFocus reports whether the guest turned on focus reporting. The filter
 // never passes mode 1004: the viewer owns the host terminal's focus reports.
-func (f *Filter) GuestFocus() bool { return f.focus }
+// Unlike the rest of the filter, it may be called from another goroutine.
+func (f *Filter) GuestFocus() bool { return f.focus.Load() }
 
 // Resets counts the full (RIS) and soft (DECSTR) resets that passed; a reset
 // also turns off what the viewer itself set in the application.
@@ -373,6 +375,7 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 	}
 	if f.n == 2 && b == 'c' {
 		f.resets++
+		f.focus.Store(false)
 	}
 	return f.emitHold(dst)
 }

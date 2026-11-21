@@ -163,7 +163,7 @@ func (f *Filter) privateModes(params []byte, final byte) bool {
 	if !focus {
 		return true
 	}
-	f.focus = final == 'h'
+	f.focus.Store(final == 'h')
 	// Rebuild "ESC [ ? modes final" without 1004.
 	kept := make([]byte, 0, len(params))
 	for _, field := range splitParams(params) {

@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/controlclient"
@@ -248,6 +249,13 @@ type attacher struct {
 	restore   func() // the local terminal's mode before the attach
 	leaveOnce sync.Once
 
+	// Whether the owner is at this window, for clipboard writes: focus
+	// reports when the application sends them, else recent input.
+	focusState atomic.Int32 // focusUnknown, focusIn or focusOut
+	lastInput  atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
+	inPaste    bool         // input is inside a bracketed paste
+	resets     int          // the filter's Resets, to turn focus reports on again
+
 	filter  *termfilter.Filter
 	in      []byte // one read of output; output is never held whole
 	buf     []byte
@@ -256,6 +264,10 @@ type attacher struct {
 	ended   bool
 	started bool // the first stream was accepted
 }
+
+// ClipboardWindow is how long after the owner's last key or mouse input a
+// clipboard write passes, in an application that never reports focus.
+var ClipboardWindow = 3 * time.Second
 
 // updateNeeded is the answer to a workload from before the viewer rules.
 const updateNeeded = "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"
@@ -307,7 +319,7 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 		return Exit{1, "无法确认正在运行的 Super Cage 的版本。"}
 	}
 	a.settings, _ = localterm.LoadSettings(filepath.Dir(cfg.ConfigPath))
-	a.filter = termfilter.New(termfilter.Options{ClipboardWrite: a.settings.ClipboardWrite})
+	a.filter = termfilter.New(termfilter.Options{ClipboardWrite: a.settings.ClipboardWrite, ClipboardNow: a.ownerHere})
 	a.viewer = attachViewerID()
 	if exit, ok := a.connectController(ctx); !ok {
 		return exit
@@ -329,7 +341,7 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 		}
 	}
 	defer a.guard()
-	if _, err := tty.Out.Write([]byte(TitlePush)); err != nil {
+	if _, err := tty.Out.Write([]byte(TitlePush + focusOn)); err != nil {
 		a.leave()
 		ws.Close()
 		return Exit{}
@@ -340,6 +352,79 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 		options.FilterReport(a.filter.Report())
 	}
 	return exit
+}
+
+// focusOn turns on focus reports in the local application. They are the
+// viewer's: the program gets them only if it asked for them too.
+const focusOn = "\x1b[?1004h"
+
+const (
+	focusUnknown int32 = iota
+	focusIn
+	focusOut
+)
+
+// ownerHere says whether a clipboard write may pass now: while the window
+// has focus, or, in an application that has not reported focus, within
+// ClipboardWindow of the owner's last key or mouse input. A write that
+// arrives otherwise is dropped, not kept for later.
+func (a *attacher) ownerHere() bool {
+	switch a.focusState.Load() {
+	case focusIn:
+		return true
+	case focusOut:
+		return false
+	}
+	last := a.lastInput.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < ClipboardWindow
+}
+
+// noteInput reads what the local application sent before it goes on: keys,
+// pastes and mouse reports mark the owner as here; focus reports set the
+// focus and are kept from the program unless it asked for them. Answers to
+// queries are neither.
+func (a *attacher) noteInput(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	owner := false
+	for i := 0; i < len(data); {
+		if a.inPaste {
+			end := bytes.Index(data[i:], []byte(attachPasteEnd))
+			owner = true
+			if end < 0 {
+				out = append(out, data[i:]...)
+				break
+			}
+			end += len(attachPasteEnd)
+			out = append(out, data[i:i+end]...)
+			i += end
+			a.inPaste = false
+			continue
+		}
+		n, kind, _ := termfilter.NextInput(data[i:])
+		unit := data[i : i+n]
+		i += n
+		switch kind {
+		case termfilter.InputFocusIn, termfilter.InputFocusOut:
+			state := focusIn
+			if kind == termfilter.InputFocusOut {
+				state = focusOut
+			}
+			a.focusState.Store(state)
+			if !a.filter.GuestFocus() {
+				continue
+			}
+		case termfilter.InputKey:
+			owner = true
+			a.inPaste = string(unit) == attachPasteStart
+		case termfilter.InputMouse:
+			owner = true
+		}
+		out = append(out, unit...)
+	}
+	if owner {
+		a.lastInput.Store(time.Now().UnixNano())
+	}
+	return out
 }
 
 // leave returns the local terminal to how it was, once: the reset, then the
@@ -671,6 +756,9 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 			case <-a.tty.Resized:
 				a.sendSize()
 			case data := <-inputs:
+				if data = a.noteInput(data); len(data) == 0 {
+					continue
+				}
 				if a.cfg.Observe {
 					if bytes.ContainsAny(data, "\x03\x04") {
 						detached = true
@@ -775,7 +863,7 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 				// The bytes that follow do not continue what this window
 				// shows: start from a clean screen, after ending what the
 				// last bytes left open.
-				if _, err := a.tty.Out.Write(append(a.filter.Abort(nil), "\x1bc"...)); err != nil {
+				if _, err := a.tty.Out.Write(append(a.filter.Abort(nil), "\x1bc"+focusOn...)); err != nil {
 					return err
 				}
 			}
@@ -797,6 +885,11 @@ func (a *attacher) writeOutput(data []byte) error {
 		}
 		a.filter.SetReplay(a.replay > 0)
 		a.buf = a.filter.Append(a.buf[:0], data[:n])
+		if resets := a.filter.Resets(); resets != a.resets {
+			// A full or soft reset turned focus reports off as well.
+			a.resets = resets
+			a.buf = append(a.buf, focusOn...)
+		}
 		if a.replay > 0 {
 			a.replay -= n
 		}

@@ -79,6 +79,11 @@ func TestAttachChild(t *testing.T) {
 		case strings.Contains(chunk, "?effects"):
 			// A query, a clipboard write, a notification and a bell.
 			fmt.Print("\x1b[c\x1b]52;c;aGk=\x07\x1b]9;done\x07\x07effects-shown\r\n")
+		case strings.Contains(chunk, "?late-clip"):
+			// A query at once, then a clipboard write a second later.
+			fmt.Print("\x1b[cquery-shown\r\n")
+			time.Sleep(time.Second)
+			fmt.Print("\x1b]52;c;bGF0ZQ==\x07late-shown\r\n")
 		case strings.Contains(chunk, "?clip-open"):
 			// A clipboard write the program never finishes.
 			fmt.Print("clip-open-shown\r\n\x1b]52;c;" + strings.Repeat("QUFB", 64))
@@ -435,10 +440,14 @@ func TestAttachFilterStats(t *testing.T) {
 	a.waitFor("ready", 1)
 	a.typeText("?dropped")
 	out := a.waitFor("dropped-shown", 1)
-	for _, seq := range []string{"\x1b[>c", "\x1b[?2048h", "\x1b[?1004h"} {
+	for _, seq := range []string{"\x1b[>c", "\x1b[?2048h"} {
 		if strings.Contains(out, seq) {
 			t.Fatalf("passed %q: %q", seq, out)
 		}
+	}
+	// Only the viewer's own focus request, before the program's output.
+	if strings.Count(out, "\x1b[?1004h") != 1 || strings.Index(out, "\x1b[?1004h") > strings.Index(out, "ready") {
+		t.Fatalf("the program's focus request passed: %q", out)
 	}
 	a.cancel()
 	a.exit(5 * time.Second)
@@ -1152,6 +1161,59 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 		t.Fatalf("%+v", result)
 	}
 	b.leftReset()
+}
+
+// Clipboard writes pass only while the owner is at this window: attach
+// turns on focus reports itself and keeps them from the program, which did
+// not ask for them.
+func TestAttachClipboardFollowsFocus(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	if !strings.Contains(a.output(), "\x1b[?1004h") {
+		t.Fatalf("focus reports not turned on: %q", a.output())
+	}
+	a.typeText("\x1b[O") // the window loses focus
+	a.typeText("?effects")
+	out := a.waitFor("effects-shown", 1)
+	if strings.Contains(out, "\x1b]52") {
+		t.Fatalf("clipboard written while away: %q", out)
+	}
+	a.typeText("\x1b[I") // and gets it back
+	a.typeText("?effects")
+	out = a.waitFor("effects-shown", 2)
+	if strings.Count(out, "\x1b]52;c;aGk=\x07") != 1 {
+		t.Fatalf("clipboard not written at the window: %q", out)
+	}
+	if strings.Contains(out, "\\x1b[I") || strings.Contains(out, "\\x1b[O") {
+		t.Fatalf("focus reports reached the program: %q", out)
+	}
+}
+
+// Where the application never reports focus, a clipboard write passes only
+// within ClipboardWindow of the owner's last key or mouse input; an answer
+// to a query the program sent is not input.
+func TestAttachClipboardWithoutFocusReports(t *testing.T) {
+	window := attach.ClipboardWindow
+	attach.ClipboardWindow = 300 * time.Millisecond
+	t.Cleanup(func() { attach.ClipboardWindow = window })
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	a.typeText("?effects")
+	if out := a.waitFor("effects-shown", 1); !strings.Contains(out, "\x1b]52;c;aGk=\x07") {
+		t.Fatalf("clipboard not written right after typing: %q", out)
+	}
+	a.typeText("?late-clip")
+	a.waitFor("query-shown", 1)
+	time.Sleep(500 * time.Millisecond)
+	a.typeText("\x1b[?62;22c") // the application answers the query
+	out := a.waitFor("late-shown", 1)
+	if strings.Contains(out, "bGF0ZQ==") {
+		t.Fatalf("clipboard written long after the last key: %q", out)
+	}
 }
 
 // A window left inside a clipboard write when the attach ends gets it
