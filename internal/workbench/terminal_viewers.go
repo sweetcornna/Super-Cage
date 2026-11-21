@@ -279,21 +279,22 @@ func (t *terminalSession) resize(cols, rows uint16) {
 
 func (t *terminalSession) applyResizes() {
 	r := &t.resizer
-	for {
-		r.mu.Lock()
-		if !r.pending {
-			r.busy = false
-			r.mu.Unlock()
-			return
-		}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for r.pending {
 		cols, rows, waiters := r.cols, r.rows, r.waiters
 		r.pending, r.waiters = false, nil
 		r.mu.Unlock()
 		_ = t.file.Resize(cols, rows)
+		r.mu.Lock()
+		// Idle again before the waiters go on, so a request made as soon
+		// as one returns waits for its own size.
+		r.busy = r.pending
 		for _, done := range waiters {
 			close(done)
 		}
 	}
+	r.busy = false
 }
 
 // peerResize records a viewer's size and applies it when that viewer decides
@@ -307,7 +308,8 @@ func (t *terminalSession) peerResize(p *terminalPeer, cols, rows uint16) error {
 	if p.phone {
 		p.seen = time.Now()
 	}
-	decides := !p.observe && (p.legacy || z.owner == p.key || !z.typist || !z.liveLocked(z.owner, time.Now()))
+	legacy := p.legacy // a phone's request can change it
+	decides := !p.observe && (legacy || z.owner == p.key || !z.typist || !z.liveLocked(z.owner, time.Now()))
 	if decides && z.owner != p.key {
 		z.owner, z.typist = p.key, false
 	}
@@ -315,7 +317,7 @@ func (t *terminalSession) peerResize(p *terminalPeer, cols, rows uint16) error {
 	if !decides {
 		return nil
 	}
-	if p.legacy {
+	if legacy {
 		// As before: every resize from such a viewer reaches the PTY.
 		t.mu.Lock()
 		z.cols, z.rows = cols, rows
@@ -332,11 +334,12 @@ func (t *terminalSession) peerResize(p *terminalPeer, cols, rows uint16) error {
 // without identity keeps its behaviour from before these rules: its input
 // passes whole and its typing never resizes.
 func (t *terminalSession) peerInput(p *terminalPeer, data string) (string, error) {
-	if p.observe {
-		return "", nil
-	}
 	now := time.Now()
 	t.mu.Lock()
+	if p.observe {
+		t.mu.Unlock()
+		return "", nil
+	}
 	typing, rest := t.sizing.splitReplies(p, data, now)
 	t.mu.Unlock()
 	t.sizeMu.Lock()
@@ -348,10 +351,10 @@ func (t *terminalSession) peerInput(p *terminalPeer, data string) (string, error
 	}
 	if typing {
 		p.active = now
-		claim := z.owner != p.key
+		claim := z.owner != p.key && !p.legacy
 		z.owner, z.typist = p.key, true
 		t.mu.Unlock()
-		if claim && !p.legacy {
+		if claim {
 			if err := t.applySizeOf(p); err != nil {
 				return "", err
 			}
@@ -457,7 +460,12 @@ func (z *terminalSizing) splitReplies(p *terminalPeer, data string, now time.Tim
 			dropped = true
 			continue
 		case kind == termfilter.InputReply && p.asked[reply] > 0:
-			p.asked[reply]--
+			// At the bound the count stays: a burst of queries past it
+			// (a program starting, a long replay) has every answer taken
+			// as one until the queries are terminalQueryLive old.
+			if p.asked[reply] < terminalAskedLimit {
+				p.asked[reply]--
+			}
 			dropped = true
 			continue
 		}

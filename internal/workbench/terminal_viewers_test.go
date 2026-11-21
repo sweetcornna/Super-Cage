@@ -639,3 +639,25 @@ func TestTerminalAnswersToReplayedQueries(t *testing.T) {
 		t.Fatalf("an answer to a replayed query passed or took the size: %q %v", got, file.sizes)
 	}
 }
+
+// A burst of queries past the count kept per kind (a TUI starting up, or a
+// history replay) still has every answer taken as an answer.
+func TestTerminalAnswersPastTheQueryCount(t *testing.T) {
+	session, file := newRecordingSession(t)
+	owner := session.openPeer("owner-identity-1", false)
+	other := session.openPeer("other-identity-1", false)
+	_ = session.peerResize(other, 100, 30)
+	_ = session.peerResize(owner, 120, 40)
+	_, _ = session.peerInput(owner, "x")
+	for range 3 * terminalAskedLimit {
+		output(session, "\x1b[c")
+	}
+	for i := range 3 * terminalAskedLimit {
+		if data, _ := session.peerInput(other, "\x1b[?62;22c"); data != "" {
+			t.Fatalf("answer %d passed from a non-owner", i+1)
+		}
+	}
+	if file.lastSize() != [2]uint16{120, 40} {
+		t.Fatal("an answer took the size", file.sizes)
+	}
+}
