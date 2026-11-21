@@ -72,6 +72,9 @@ var (
 	monitorBrowserSettings = func(s *Server, ctx context.Context, cfg cage.Config) (browserObservation, error) {
 		return s.browserObservation(ctx, cfg, false)
 	}
+	monitorMacOSBrowserRecheck = func(s *Server, ctx context.Context, cfg cage.Config) error {
+		return s.recheckMacOSBrowserSettings(ctx, cfg)
+	}
 )
 
 // Timing of the monitor's guest reads within a lease. A read keeps the
@@ -89,7 +92,7 @@ var (
 )
 
 // errMonitorNoTime is an unconfirmed read: too little lease was left to start it.
-var errMonitorNoTime = errors.New("monitoring lease too short for another guest read")
+var errMonitorNoTime = noAnswer(errors.New("monitoring lease too short for another guest read"))
 
 type networkObservation struct {
 	Status int    `json:"status"`
@@ -400,15 +403,16 @@ func (s *Server) guestObservation(ctx context.Context, input map[string]any) (gu
 	var observation guestObservation
 	data, err := json.Marshal(input)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	command := "python3 -c " + shellescape.Quote(guestSafetyProbe) + " " + shellescape.Quote(base64.StdEncoding.EncodeToString(data))
 	output, err := s.guestControl(ctx, "exec bash -lc "+shellescape.Quote(command), "safety-probe")
 	if err != nil {
-		return observation, fmt.Errorf("客机检测未返回完整结果: %w", err)
+		return observation, noAnswer(fmt.Errorf("客机检测未返回完整结果: %w", err))
 	}
 	if err = json.Unmarshal(output, &observation); err != nil {
-		return observation, errors.New("客机检测返回格式无效")
+		// A probe killed while writing leaves part of its reply.
+		return observation, noAnswer(errors.New("客机检测返回格式无效"))
 	}
 	return observation, nil
 }
@@ -424,7 +428,8 @@ func (s *Server) browserObservation(ctx context.Context, cfg cage.Config, networ
 	body, _ := json.Marshal(map[string]any{"network": network, "timezone": cfg.Timezone})
 	data, err := s.guestAPI(ctx, token, "POST", "/audit", body)
 	if err != nil || json.Unmarshal(data, &observation) != nil {
-		return observation, errors.New("浏览器检测未返回完整结果，请更新或重启环境")
+		// The audit reports the values it reads; it fails only without them.
+		return observation, noAnswer(errors.New("浏览器检测未返回完整结果，请更新或重启环境"))
 	}
 	return observation, nil
 }
@@ -1307,9 +1312,13 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		timing.stage("guest_settings")
 		// An answer is a confirmation either way; only no answer is retried.
 		// Values the probe leaves out (UTC offsets) come from files and zone
-		// data, not from a slow guest, so they count as a wrong answer.
-		if e != nil {
+		// data, not from a slow guest, so they count as a wrong answer. A
+		// read that answered wrongly (guest_reads.go) closes at once and is
+		// rechecked automatically, as every failed read was before.
+		if e != nil && unanswered(e) {
 			unconfirmed = "guest_settings"
+		} else if e != nil {
+			issue, recoverable = diagnostics.Redact(e.Error()), true
 		} else if !s.guestSettingsOK(guest, cfg) {
 			issue = "系统时区或语言与已应用配置不一致，外网已暂停；请重新应用设置并重新检测"
 			if s.windowsGuest == nil && s.macosGuest == nil {
@@ -1320,8 +1329,17 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		}
 	}
 	if issue == "" && unconfirmed == "" && s.macosGuest != nil {
+		e := errMonitorNoTime
+		if readCtx, cancelRead := readContext(); readCtx != nil {
+			e = monitorMacOSBrowserRecheck(s, readCtx, cfg)
+			cancelRead()
+		}
 		timing.stage("browser_settings_inputs")
-		if !s.recheckMacOSBrowserSettings(ctx, cfg) {
+		switch {
+		case e == nil:
+		case unanswered(e):
+			unconfirmed = "browser_settings"
+		default:
 			issue = "未能确认 Chrome 仍在使用检测过的进程和资料设置，请打开 Chrome 后重新检测"
 			recoverable = false
 		}
@@ -1332,8 +1350,10 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 			cancelRead()
 		}
 		timing.stage("browser_settings")
-		if e != nil {
+		if e != nil && unanswered(e) {
 			unconfirmed = "browser_settings"
+		} else if e != nil {
+			issue, recoverable = "浏览器配置检查未通过："+diagnostics.Redact(e.Error()), true
 		} else if mismatch := s.browserSettingsIssue(browser, cfg); mismatch != "" {
 			issue = "浏览器配置检查未通过：" + mismatch
 		}

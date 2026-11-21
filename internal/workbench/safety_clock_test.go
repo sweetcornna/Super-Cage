@@ -155,7 +155,7 @@ func TestMonitorWithWallClockSteppedBackFollowsTheLease(t *testing.T) {
 		deadline, _ := ctx.Deadline()
 		deadlines = append(deadlines, deadline)
 		<-ctx.Done()
-		return guestObservation{}, ctx.Err()
+		return guestObservation{}, noAnswer(ctx.Err())
 	}, func(context.Context) (browserObservation, error) {
 		return browserObservation{}, errors.New("unexpected")
 	})
@@ -194,7 +194,7 @@ func TestMonitorRetryTimesFollowTheMonotonicLease(t *testing.T) {
 	s.publishGate(gate.Status())
 	fakeMonitorReads(t, func(ctx context.Context) (guestObservation, error) {
 		<-ctx.Done()
-		return guestObservation{}, ctx.Err()
+		return guestObservation{}, noAnswer(ctx.Err())
 	}, func(context.Context) (browserObservation, error) {
 		return browserObservation{}, errors.New("unexpected")
 	})
