@@ -34,6 +34,9 @@ ACCOUNT_REFUSED = 78
 # A desktop terminal's launch refused to start Codex; the message is on stderr.
 LAUNCH_REFUSED = 75
 PROBE_TIMEOUT = 15
+# Purge runs inside the host's 15 s cap on a helper call: its probe and the
+# CLI's delete share this budget, and the rollout goes when they cannot.
+PURGE_BUDGET = 12.0
 # Bumped when probe.json gains fields, so a cached older probe is redone.
 PROBE_SCHEMA = 2
 UNPROBED = {"installed": False, "complete": False, "version": "", "resume": False, "no_daemon": False, "resume_no_daemon": False,
@@ -52,6 +55,7 @@ TUI_OPEN = "这段会话正在电脑上的 Codex 终端中打开。请先退出�
 DESKTOP_OPEN = "这段会话正在电脑的 Codex 终端中打开。可在手机的终端页打开该终端继续，或等电脑上退出 Codex 后再发送。"
 DESKTOP_NOTICE = "这段会话正在电脑的 Codex 终端中打开，手机上可以查看和停止本轮。"
 STATE_UNREADABLE = "电脑上这段 Codex 会话的状态无法读取，请在电脑上重新打开这段会话后再试。"
+STATE_UNREADABLE_BUSY = "这段 Codex 会话的状态无法读取，且这段会话可能仍有 Codex 在运行。请先结束电脑上运行它的 Codex，或重启环境后再打开。"
 PHONE_RUNNING = "手机发起的一轮仍在运行，完成后再在终端中继续。"
 OTHER_TERMINAL = "这段会话已在另一个电脑终端中打开。"
 OTHER_PROCESS = "这段会话正在其他 Codex 进程中打开，请先退出该进程后再继续。"
@@ -92,21 +96,38 @@ def load_state(path):
 
 
 @contextlib.contextmanager
-def state_file(connection, strict=False):
+def state_file(connection, strict=False, recover=None):
     """The state of one connection under its lock. strict refuses an unreadable
-    file, which could have recorded a desktop lease, instead of starting afresh."""
+    file, which could have recorded a desktop lease or a phone turn, instead of
+    starting afresh; recover(path), called under the lock, may set such a file
+    aside (and say so) when nothing it can record still runs."""
     folder = ROOT / identifier(connection)
     folder.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (folder / "lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         path = folder / "state.json"
         state, readable = load_state(path)
+        if not readable and recover is not None and recover(path):
+            state, readable = {}, True
         if strict and not readable:
             raise ValueError(STATE_UNREADABLE)
         before = json.dumps(state, sort_keys=True)
         yield state
         if json.dumps(state, sort_keys=True) != before:
             save(path, state)
+
+
+@contextlib.contextmanager
+def admission():
+    """Admitting a phone turn or a desktop TUI, across connections: each checks
+    the other connections' runs and leases and records its own under this
+    lock, so neither is admitted beside the other on one thread while its
+    Codex has not started. Taken before any connection's lock. The process
+    scan stays: an older helper copy does not take it."""
+    ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with (ROOT / "admission.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def codex_home(account):
@@ -153,8 +174,93 @@ def fingerprint(pid):
     return process_start(pid) or ""
 
 
-def alive(run):
-    return isinstance(run, dict) and bool(run.get("start")) and fingerprint(run.get("pid")) == run["start"]
+def run_state(run, connection=None):
+    """"running", "ended" or "unknown" for a phone turn's supervisor of
+    connection: ended when there is no process or it recorded its exit,
+    unknown when the process exists but cannot be told from another one with
+    a reused PID, or when an admitted turn has no PID recorded (the send that
+    launched it was cut off) and its supervisor cannot be ruled out."""
+    if not isinstance(run, dict) or run.get("exit_code") is not None:
+        return "ended"
+    if not run.get("pid"):
+        if not run.get("argv"):
+            return "ended"
+        return "ended" if connection and supervising(connection) is False else "unknown"
+    current = process_start(run.get("pid"))
+    if current is None or current and not run.get("start"):
+        return "unknown"
+    return "running" if current and current == run["start"] else "ended"
+
+
+def alive(run, connection=None):
+    # An unknown state counts as running: nothing writes beside a turn that may run.
+    return run_state(run, connection) != "ended"
+
+
+def phone_turns(thread, states):
+    """Connections whose phone turn runs (or may) on thread."""
+    return [connection for connection, state in states.items() if alive(state.get("run"), connection) and claimed_thread(connection, state) == thread]
+
+
+def boot_time():
+    """When the system booted, in seconds since the epoch, or None."""
+    try:
+        for line in (PROC / "stat").read_text().splitlines():
+            if line.startswith("btime "):
+                return float(line.split()[1])
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def supervising(connection):
+    """Whether a phone turn's supervisor of connection runs; None when the
+    process table cannot be read."""
+    def supervises(words):
+        return any(word == "supervise" and following == connection for word, following in zip(words, words[1:]))
+    try:
+        entries = [entry for entry in PROC.iterdir() if entry.name.isdigit()]
+    except FileNotFoundError:
+        # No /proc (a macOS guest): the command lines from ps.
+        try:
+            listing = subprocess.run(["ps", "-axww", "-o", "command="], capture_output=True, text=True, timeout=2)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if listing.returncode != 0:
+            return None
+        return any(supervises(line.split()) for line in listing.stdout.splitlines())
+    except OSError:
+        return None
+    for entry in entries:
+        try:
+            words = [os.fsdecode(word) for word in (entry / "cmdline").read_bytes().split(b"\0") if word]
+        except OSError:
+            continue
+        if supervises(words):
+            return True
+    return False
+
+
+def unreadable_recovery(connection, thread, home, users):
+    """recover for state_file in a desktop open: an unreadable state is set
+    aside (renamed, never overwritten) when nothing it may record can still
+    run: it was written before this boot, or the open names a thread that no
+    process holds and no phone turn of this connection is supervised.
+    Otherwise the open is refused."""
+    def recover(path):
+        try:
+            written = path.stat().st_mtime
+        except OSError:
+            return False
+        booted = boot_time()
+        if booted is None or written >= booted:
+            held = (find_rollout(home, thread) or compressed_path(home, thread)) if thread else None
+            running = supervising(connection)
+            if not thread or running is not False or held is not None and foreign(held, thread, users, set()):
+                raise ValueError(STATE_UNREADABLE_BUSY)
+        os.replace(path, path.with_name("state.json.unreadable-%d" % int(time.time())))
+        return True
+    return recover
 
 
 def lease_state(lease):
@@ -752,10 +858,10 @@ def view(request):
         meta = head(path) if path else None
         turns, cwd, pending, truncated = transcript(path, thread)
         run = state.get("run") or {}
-        ours = alive(run)
+        ours = alive(run, connection)
         leases = ([lease] if lease else []) + (desktop_leases(thread, account, path, all_states(connection)) if thread else [])
         desktop = bool(leases)
-        groups = ({run["pid"]} if ours else set()) | {item["pgid"] for item in leases if item.get("pgid")}
+        groups = ({run["pid"]} if ours and run.get("pid") else set()) | {item["pgid"] for item in leases if item.get("pgid")}
         held = path or (compressed_path(home, thread) if thread else None)
         tui = foreign(held, thread, users, groups) if held else set()
         tui = {pid for pid in tui if not any(lease_member(item, pid) for item in leases)}
@@ -842,7 +948,7 @@ def discover(request):
                 if bind_lease(connection, current, users) or settle_lease(connection, current, users) or "lease" not in current:
                     states[connection] = json.loads(json.dumps(current))
     leases = {key: state["lease"] for key, state in states.items() if isinstance(state.get("lease"), dict) and leased(state["lease"])}
-    runs = {state["run"]["pid"] for state in states.values() if alive(state.get("run"))}
+    runs = {state["run"]["pid"] for key, state in states.items() if alive(state.get("run"), key) and state["run"].get("pid")}
     claimed = {claimed_thread(key, state) for key, state in states.items()} - {""}
     unbound = [lease for lease in leases.values() if not lease.get("thread")]
     index = read_json(ROOT / "index.json", {}) or {}
@@ -868,7 +974,7 @@ def discover(request):
             connection, state = next(((key, value) for key, value in states.items()
                                       if value.get("thread_id") == thread and value.get("account", "default") == account), ("", {}))
             run = state.get("run") or {}
-            ours = connection and alive(run)
+            ours = connection and alive(run, connection)
             holders = [lease for lease in leases.values() if lease.get("thread") == thread and (lease.get("account") or "default") == account]
             # A desktop TUI that moved to another thread (/new, /resume) writes
             # it as any other process would: only the thread's own lease and
@@ -887,7 +993,7 @@ def discover(request):
     # before its rollout is listed.
     for connection, state in states.items():
         run = state.get("run") or {}
-        ours, desktop = alive(run), connection in leases
+        ours, desktop = alive(run, connection), connection in leases
         if connection in listed or state.get("account", "default") not in accounts or not (ours or desktop):
             continue
         cwd = state.get("cwd", "") or (leases.get(connection) or {}).get("cwd", "")
@@ -927,7 +1033,7 @@ def send(request):
     thread = identifier(request["thread"]) if request.get("thread") else ""
     cwd = Path(request["cwd"])
     folder = ROOT / connection
-    with state_file(connection, strict=True) as state:
+    with admission(), state_file(connection, strict=True) as state:
         settle_lease(connection, state, rollout_users())
         known = state.get("thread_id") or started_thread(folder)
         if known and thread and known != thread:
@@ -942,7 +1048,7 @@ def send(request):
                 raise ValueError("同一发送编号已用于另一条消息")
             return {"ok": True}
         previous = state.get("run") or {}
-        if alive(previous):
+        if alive(previous, connection):
             raise ValueError("这段会话已有消息正在处理，请等待完成后再发送")
         # A desktop terminal's Codex owns the thread while its lease holds.
         lease = state.get("lease")
@@ -955,8 +1061,11 @@ def send(request):
             path = find_rollout(home, thread)
             if path is None:
                 raise ValueError("未找到这段 Codex 会话的历史，请重新读取会话列表")
-            if desktop_leases(thread, account, path, all_states(connection)):
+            others = all_states(connection)
+            if desktop_leases(thread, account, path, others):
                 raise ValueError(DESKTOP_OPEN)
+            if phone_turns(thread, others):
+                raise ValueError("这段会话已有消息正在处理，请等待完成后再发送")
             if foreign(path, thread, rollout_users(), set()):
                 raise ValueError(TUI_OPEN)
         if not cwd.is_absolute() or not cwd.is_dir():
@@ -1041,12 +1150,17 @@ def stop(request):
         raise ValueError("这次运行不是从手机发起的，请在电脑终端停止")
     with state_file(connection) as state:
         run = state.get("run") or {}
+        current = run_state(run, connection)
         if archive:
-            if not alive(run):
+            if current == "ended":
                 return {"ok": True}
             request_id = run.get("request_id") or ""
-        if run.get("request_id") != request_id or not alive(run):
+        if run.get("request_id") != request_id or current == "ended":
             raise ValueError("这次运行已结束或不是从手机发起的，请重新读取会话")
+        if current != "running":
+            # Only a process it can identify is signalled: a reused PID could
+            # belong to anyone.
+            raise ValueError("无法确认本轮在电脑上的进程，请稍后重试")
         state["stopped"] = request_id
     # Signal outside the lock: the supervisor needs it to record the exit.
     for number, wait in ((signal.SIGINT, 5), (signal.SIGTERM, 2), (signal.SIGKILL, 1)):
@@ -1055,22 +1169,30 @@ def stop(request):
         except ProcessLookupError:
             break
         deadline = time.monotonic() + wait
-        while time.monotonic() < deadline and alive(run):
+        while time.monotonic() < deadline and run_state(run, connection) == "running":
             time.sleep(0.05)
-        if not alive(run):
+        if run_state(run, connection) != "running":
             break
     return {"ok": True}
 
 
 def purge(request):
+    deadline = time.monotonic() + PURGE_BUDGET
     account = request.get("account") or "default"
     home = codex_home(account)
     thread = identifier(request["thread"]) if request.get("thread") else ""
     connection = identifier(request["connection"]) if request.get("connection") else ""
+    with admission():
+        return purge_admitted(request, account, home, thread, connection, deadline)
+
+
+def purge_admitted(request, account, home, thread, connection, deadline):
+    """purge under the admission lock: no phone turn or desktop TUI is admitted
+    on the thread while it checks and deletes."""
     state, readable = load_state(ROOT / connection / "state.json") if connection else ({}, True)
     if not readable:
         raise ValueError(STATE_UNREADABLE)
-    if alive(state.get("run")):
+    if alive(state.get("run"), connection or None):
         raise ValueError("Codex 仍在处理这段会话，请先停止本轮再删除")
     if leased(state.get("lease")):
         raise ValueError("这段会话正在电脑的 Codex 终端中打开，请先关闭该终端再删除")
@@ -1080,13 +1202,16 @@ def purge(request):
         meta = head(path)
         if not meta or meta["id"] != thread or not within(meta["cwd"], request["workspace"]):
             raise ValueError("会话历史与已授权项目不一致，请检查电脑上的 Codex 配置")
-        if desktop_leases(thread, account, path, all_states(connection)):
+        others = all_states(connection)
+        if desktop_leases(thread, account, path, others):
             raise ValueError("这段会话正在电脑的 Codex 终端中打开，请先关闭该终端再删除")
+        if phone_turns(thread, others):
+            raise ValueError("Codex 仍在处理这段会话，请先停止本轮再删除")
         if foreign(path, thread, rollout_users(), set()):
             raise ValueError("这段会话正在电脑上的 Codex 终端中打开，请先退出后再删除")
         # Codex's own delete also removes compressed history, metadata and
         # spawned sub-agent threads; the file is removed here if it remains.
-        codex_delete(account, home, thread)
+        codex_delete(account, home, thread, deadline)
         if path.exists():
             path.unlink()
     if connection:
@@ -1116,8 +1241,16 @@ def help_commands(text):
     return names
 
 
-def probe_binary(binary, env):
-    """What this Codex CLI supports, from its own help. Cached per binary."""
+def has_option(text, name):
+    """Whether a --help text lists the option name as a whole token: "--cd" is
+    not "--cdp-port"."""
+    return re.search(r"(?:^|[\s,\[(])" + re.escape(name) + r"(?=$|[\s,=<\[\])])", text, re.M) is not None
+
+
+def probe_binary(binary, env, deadline=None):
+    """What this Codex CLI supports, from its own help. Cached per binary, and
+    only when every help it read answered in time: a timeout is not taken for
+    an option the CLI lacks. deadline (monotonic) bounds the whole probe."""
     target = os.path.realpath(binary)
     info = os.stat(target)
     key = [target, info.st_size, info.st_mtime_ns, PROBE_SCHEMA]
@@ -1126,9 +1259,12 @@ def probe_binary(binary, env):
         return dict(cached["result"])
 
     def output(*args):
+        timeout = PROBE_TIMEOUT if deadline is None else min(PROBE_TIMEOUT, deadline - time.monotonic())
+        if timeout <= 0:
+            return None
         try:
             done = subprocess.run([binary, *args], stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
-                                  timeout=PROBE_TIMEOUT, env=env, cwd=str(Path.home()))
+                                  timeout=timeout, env=env, cwd=str(Path.home()))
         except (OSError, subprocess.SubprocessError):
             return None
         return done.stdout + done.stderr if done.returncode == 0 else ""
@@ -1140,12 +1276,19 @@ def probe_binary(binary, env):
     found = re.search(r"(\d+\.\d+\.\d+[0-9A-Za-z.+-]*)", version or "")
     commands = help_commands(top)
     result = dict(UNPROBED, installed=True, complete=True, version=found.group(1) if found else "", resume="resume" in commands,
-                  no_daemon="--no-daemon" in top, cd="--cd" in top, add_dir="--add-dir" in top)
+                  no_daemon=has_option(top, "--no-daemon"), cd=has_option(top, "--cd"), add_dir=has_option(top, "--add-dir"))
+    answered = True
     if result["resume"]:
-        options = output("resume", "--help") or ""
-        result.update(resume_no_daemon="--no-daemon" in options, resume_cd="--cd" in options, resume_add_dir="--add-dir" in options)
+        options = output("resume", "--help")
+        answered = answered and options is not None
+        options = options or ""
+        result.update(resume_no_daemon=has_option(options, "--no-daemon"), resume_cd=has_option(options, "--cd"), resume_add_dir=has_option(options, "--add-dir"))
     if "delete" in commands:
-        result["delete"] = "--force" in (output("delete", "--help") or "")
+        options = output("delete", "--help")
+        answered = answered and options is not None
+        result["delete"] = has_option(options or "", "--force")
+    if not answered:
+        return dict(result, complete=False)
     ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     save(ROOT / "probe.json", {"key": key, "result": result})
     return result
@@ -1161,18 +1304,22 @@ def probe(request):
     return result
 
 
-def codex_delete(account, home, thread):
-    """Delete a thread through the CLI when it supports deleting by UUID."""
+def codex_delete(account, home, thread, deadline=None):
+    """Delete a thread through the CLI when it supports deleting by UUID, by
+    deadline (monotonic) when one is given."""
     env = cli_environment()
     binary = shutil.which("codex", path=env["PATH"])
-    if not binary or not probe_binary(binary, env).get("delete"):
+    if not binary or not probe_binary(binary, env, deadline).get("delete"):
         return False
     env.pop("CODEX_HOME", None)
     if account != "default" or os.environ.get("CODEX_HOME"):
         env["CODEX_HOME"] = str(home)
+    timeout = 20 if deadline is None else deadline - time.monotonic()
+    if timeout <= 0:
+        return False
     try:
         return subprocess.run([binary, "delete", "--force", thread], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                              timeout=20, env=env, cwd=str(Path.home())).returncode == 0
+                              timeout=timeout, env=env, cwd=str(Path.home())).returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -1226,40 +1373,10 @@ def tui_launch(request):
     start = fingerprint(os.getpid())
     if not start:
         raise ValueError("无法确认终端进程，请关闭此终端后重试")
-    users = rollout_users()
-    with state_file(connection) as state:
-        settle_lease(connection, state, users)
-        if state.get("account", account) != account:
-            raise ValueError("会话账号已变化，请重新读取会话列表")
-        known = state.get("thread_id") or started_thread(ROOT / connection)
-        if known and thread and known != thread:
-            raise ValueError("会话身份已变化，请重新读取会话列表")
-        thread = thread or known
-        if alive(state.get("run")):
-            raise ValueError(PHONE_RUNNING)
-        if leased(state.get("lease")):
-            raise ValueError(OTHER_TERMINAL)
-        others = all_states(connection)
-        if thread:
-            path = find_rollout(home, thread)
-            packed = None if path else compressed_path(home, thread)
-            if path is None and packed is None:
-                raise ValueError("未找到这段 Codex 会话的历史，可能已在电脑上删除。")
-            if desktop_leases(thread, account, path, others):
-                raise ValueError(OTHER_TERMINAL)
-            if foreign(path or packed, thread, users, set()):
-                raise ValueError(OTHER_PROCESS)
-            if not caps.get("complete"):
-                # Resuming on a CLI without resume would start a new thread
-                # with the thread ID as its prompt.
-                raise ValueError("暂时无法确认电脑上的 Codex 版本，请稍后重试。")
-            if not caps.get("resume"):
-                raise ValueError("电脑上的 Codex 版本不支持继续会话，请更新 Codex 后重试。")
-        state.update(account=account, cwd=str(cwd))
-        if thread:
-            state["thread_id"] = thread
-        state["lease"] = {"id": lease_id, "pid": os.getpid(), "start": start, "pgid": os.getpgid(0), "thread": thread,
-                          "account": account, "cwd": str(cwd), "acquired_at": time.time()}
+    with admission():
+        users = rollout_users()
+        with state_file(connection, strict=True, recover=unreadable_recovery(connection, thread, home, users)) as state:
+            thread = admit_tui(connection, state, users, lease_id, account, home, thread, cwd, start, caps)
     args = tui_args(caps, thread, cwd, directories)
     if account == "default":
         argv = [binary, *args]
@@ -1272,6 +1389,46 @@ def tui_launch(request):
         os.execve(argv[0], argv, env)
     except OSError:
         raise ValueError("无法启动 Codex，请检查环境后重试")
+
+
+def admit_tui(connection, state, users, lease_id, account, home, thread, cwd, start, caps):
+    """tui_launch's checks and lease, under the admission and connection locks.
+    Returns the thread the TUI resumes ("" for a new one)."""
+    settle_lease(connection, state, users)
+    if state.get("account", account) != account:
+        raise ValueError("会话账号已变化，请重新读取会话列表")
+    known = state.get("thread_id") or started_thread(ROOT / connection)
+    if known and thread and known != thread:
+        raise ValueError("会话身份已变化，请重新读取会话列表")
+    thread = thread or known
+    if alive(state.get("run"), connection):
+        raise ValueError(PHONE_RUNNING)
+    if leased(state.get("lease")):
+        raise ValueError(OTHER_TERMINAL)
+    others = all_states(connection)
+    if thread:
+        path = find_rollout(home, thread)
+        packed = None if path else compressed_path(home, thread)
+        if path is None and packed is None:
+            raise ValueError("未找到这段 Codex 会话的历史，可能已在电脑上删除。")
+        if phone_turns(thread, others):
+            raise ValueError(PHONE_RUNNING)
+        if desktop_leases(thread, account, path, others):
+            raise ValueError(OTHER_TERMINAL)
+        if foreign(path or packed, thread, users, set()):
+            raise ValueError(OTHER_PROCESS)
+        if not caps.get("complete"):
+            # Resuming on a CLI without resume would start a new thread
+            # with the thread ID as its prompt.
+            raise ValueError("暂时无法确认电脑上的 Codex 版本，请稍后重试。")
+        if not caps.get("resume"):
+            raise ValueError("电脑上的 Codex 版本不支持继续会话，请更新 Codex 后重试。")
+    state.update(account=account, cwd=str(cwd))
+    if thread:
+        state["thread_id"] = thread
+    state["lease"] = {"id": lease_id, "pid": os.getpid(), "start": start, "pgid": os.getpgid(0), "thread": thread,
+                      "account": account, "cwd": str(cwd), "acquired_at": time.time()}
+    return thread
 
 
 def main():
