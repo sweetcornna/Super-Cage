@@ -87,7 +87,7 @@ func (s *Server) remoteManifest(w http.ResponseWriter, r *http.Request) {
 // The returned ticket must travel on that private pipe, never a shared log.
 func ServerEntry(configPath string) (RemoteEntry, error) {
 	var result RemoteEntry
-	c, err := connectController(filepath.Dir(configPath))
+	c, err := connectProvenController(filepath.Dir(configPath))
 	if controllerIdentityError(err) {
 		return result, err
 	}

@@ -93,6 +93,29 @@ func openController(profile string) (*controllerClient, error) {
 	return c, nil
 }
 
+// olderControllerGraceEndsIn is the release that removes the grace for a
+// controller from the release before the identity proof (a control.json
+// without auth): connectController and openController accept its record and
+// talk to it over 127.0.0.1, unproven, so the window can save and stop its
+// environment and complete an update. The proof ships in 0.1.16; from
+// 0.1.17 every caller below uses connectProvenController and openController
+// refuses a record without auth. TestOlderControllerGraceCallers fails once
+// the version reaches it.
+const olderControllerGraceEndsIn = "0.1.17"
+
+// olderControllerGraceCallers are the functions that still use the grace
+// (they call connectController or openController); automation (the agent
+// transport, AgentStartService, ServerEntry, the SSH entry's proxy) uses
+// connectProvenController. TestOlderControllerGraceCallers keeps this list
+// equal to the code.
+var olderControllerGraceCallers = []string{
+	"BrowserFileForConnection", "ClipboardFilesForConnection", "DesktopEntry", "DesktopFileForConnection",
+	"PrepareAppUpdate", "PrepareDesktopUpdate", "ShareNativeCloudProject", "UploadHostFilesForConnection",
+	"desktopGateway.trustedLogin", "desktopLaunch", "desktopLocal.Connect", "desktopLocal.Release",
+	"desktopLocal.ReleaseOwnedIdle", "desktopLocal.ReleaseUnused", "desktopLocal.Status",
+	"desktopLocal.handoffOldLocal", "desktopLocal.releaseFailedLaunch", "exportDiagnostics", "waitControllerReady",
+}
+
 // connectController serves the window and its helpers. Until the next
 // release it also reaches a controller from the release before the identity
 // proof (a record without auth), over 127.0.0.1 and unproven, because saving
