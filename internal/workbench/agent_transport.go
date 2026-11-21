@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -82,6 +83,19 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 	// refused before anything is sent (agent_access.go).
 	if refusal := agentRouteRefusal(method, u.Path); refusal != nil {
 		return result, refusal
+	}
+	// Routes with body rules: read the body once, check it, send those bytes.
+	if rules := agentBodyRulesFor(method, u.Path); len(rules) > 0 {
+		var body []byte
+		if input != nil {
+			if body, err = io.ReadAll(io.LimitReader(input, agentBodyLimit+1)); err != nil {
+				return result, &AgentError{Code: "invalid_input", Message: "The request body could not be read; nothing was sent.", NextAction: "capabilities"}
+			}
+		}
+		if refusal := agentBodyRefusal(rules, body); refusal != nil {
+			return result, refusal
+		}
+		input = bytes.NewReader(body)
 	}
 	// Client-only operations must address the desktop explicitly. Ordinary
 	// business routes on that listener require the selected target's generation.

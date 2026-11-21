@@ -1,9 +1,12 @@
 package workbench
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -78,6 +81,70 @@ var agentWindowRoutes = []agentWindowRoute{
 	{"POST /api/terminals/{id}/keep", "Keeping a terminal open for the SSH entry is decided by the person in the desktop window.", "open_desktop"},
 	// A paired phone reports its own device.
 	{"POST /api/mobile/device", "Only a paired phone reports its own device details.", "mobile.get"},
+	// Opens Screen Sharing on this computer (open vnc://…).
+	{"POST /api/environment/macos-screen-sharing", "Screen Sharing opens on this computer only from the desktop window.", "open_desktop"},
+	// A recovery key resets the account password.
+	{"POST /api/account/recovery-generate", "A recovery key unlocks the account; the person creates and keeps it in the desktop window.", "open_desktop"},
+	{"POST /api/account/recovery-reset", "A recovery key unlocks the account; the person uses it in the desktop window.", "open_desktop"},
+	// Giving a cloud host access to a folder on this computer (the same as
+	// the window-only native shareLocalProject); withdrawing a share with
+	// DELETE stays open.
+	{"POST /api/client/project-shares", "Giving a cloud host access to a folder on this computer is done in the desktop window.", "open_desktop"},
+	// The host browser's profiles and extension files.
+	{"/api/client/browser-extensions", "The host browser's profiles and extension files are read only by the desktop window.", "open_desktop"},
+}
+
+// agentBodyRule refuses a request to an otherwise open route by a value in
+// its JSON body: an action switch whose value returns a secret or acts on this
+// computer. The CLI reads the body (at most agentBodyLimit bytes) and decodes
+// Field the way the handler decodes it (encoding/json into a struct field:
+// case-insensitive, the last matching key wins). A body it cannot decode that
+// way is refused, so nothing it did not read is sent.
+type agentBodyRule struct {
+	Pattern string   `json:"pattern"`
+	Field   string   `json:"field"`
+	Refused []string `json:"refused"`
+	Reason  string   `json:"reason"`
+}
+
+const agentBodyLimit = 1 << 20
+
+const agentGuestPasswordReason = "The macOS guest's stored login password is shown only in the desktop window."
+
+var agentBodyRules = []agentBodyRule{
+	// The three macOS window routes share one handler (macOSLoginWindow),
+	// where show-password returns the guest's stored login password.
+	{"POST /api/macos/login", "action", []string{"show-password"}, agentGuestPasswordReason},
+	{"POST /api/macos/first-setup", "action", []string{"show-password"}, agentGuestPasswordReason},
+	{"POST /api/macos/maintenance", "action", []string{"show-password"}, agentGuestPasswordReason},
+}
+
+// agentBodyRulesFor returns the body rules of method path.
+func agentBodyRulesFor(method, path string) []agentBodyRule {
+	var rules []agentBodyRule
+	for _, rule := range agentBodyRules {
+		if agentPatternMatches(rule.Pattern, method, path) {
+			rules = append(rules, rule)
+		}
+	}
+	return rules
+}
+
+// agentBodyRefusal checks body against rules; an empty body decodes as {}.
+func agentBodyRefusal(rules []agentBodyRule, body []byte) *AgentError {
+	if len(body) > agentBodyLimit {
+		return &AgentError{Code: "invalid_input", Message: "This route's request body is larger than the agent transport reads; nothing was sent.", NextAction: "capabilities"}
+	}
+	for _, rule := range rules {
+		value := reflect.New(reflect.StructOf([]reflect.StructField{{Name: "Value", Type: reflect.TypeFor[string](), Tag: reflect.StructTag(`json:"` + rule.Field + `"`)}}))
+		if len(bytes.TrimSpace(body)) > 0 && json.Unmarshal(body, value.Interface()) != nil {
+			return &AgentError{Code: "invalid_input", Message: "This route's request body must be one JSON object whose " + rule.Field + " is a string; nothing was sent.", NextAction: "capabilities"}
+		}
+		if slices.Contains(rule.Refused, value.Elem().Field(0).String()) {
+			return &AgentError{Code: "native_transport_required", Message: rule.Reason, NextAction: "open_desktop"}
+		}
+	}
+	return nil
 }
 
 // agentRoutes are the state-changing routes an agent may call: the
@@ -90,7 +157,7 @@ var agentRoutes = []string{
 	"POST /api/agent/native", "POST /api/appearance", "POST /api/favorites", "POST /api/diagnostics/events",
 	"DELETE /api/environment/guest-systems", "POST /api/environment/guest-systems/activate", "POST /api/environment/guest-profile/preview",
 	"POST /api/environment/cache/clean", "POST /api/environment/cache/inventory", "POST /api/environment/cache/restore",
-	"POST /api/environment/device-check", "POST /api/environment/initialization", "POST /api/environment/macos-screen-sharing",
+	"POST /api/environment/device-check", "POST /api/environment/initialization",
 	"POST /api/environment/resources", "POST /api/environment/storage", "POST /api/environment/storage/recover",
 	"POST /api/environment/tools", "POST /api/environment/update",
 	"POST /api/terminals", "DELETE /api/terminals/{id}", "POST /api/terminals/{id}/login-link", "POST /api/terminals/{id}/metadata",
@@ -124,17 +191,24 @@ var agentRoutes = []string{
 	// password are window only (above).
 	"POST /api/account/create", "POST /api/account/unlock", "POST /api/account/profile", "POST /api/account/password",
 	"POST /api/account/lock", "POST /api/account/logout", "POST /api/account/suspend",
-	"POST /api/account/recovery-generate", "POST /api/account/recovery-reset",
 	// The desktop chooser, SSH hosts, cloud project shares and tenants.
-	"POST /api/client/about", "POST /api/client/browser-extensions",
+	"POST /api/client/about",
 	"POST /api/client/hosts", "PUT /api/client/hosts/{id}", "DELETE /api/client/hosts/{id}",
 	"POST /api/client/connect", "POST /api/client/disconnect", "POST /api/client/local",
 	"POST /api/client/candidate", "POST /api/client/commit", "POST /api/client/cancel", "POST /api/client/local-stop",
-	"POST /api/client/project-shares", "DELETE /api/client/project-shares/{id}",
+	"DELETE /api/client/project-shares/{id}",
 	"POST /api/client/tenant/login", "POST /api/client/tenant/vms",
 	// Routes of the browser-data branch, classified ahead of its merge:
 	// the guest browser's browsing data.
 	"POST /api/browser/data", "POST /api/browser/data-settings",
+}
+
+// agentRoutesAhead are open routes of branches not merged yet, by branch. The
+// route test fails once one of them is registered here, so the entry is
+// dropped from this list when its branch merges.
+var agentRoutesAhead = map[string]string{
+	"POST /api/browser/data":          "browser-data",
+	"POST /api/browser/data-settings": "browser-data",
 }
 
 // agentRouteFamilies are registered {action} routes whose values differ:
@@ -270,6 +344,11 @@ var agentNativeWindowOnly = map[string]string{
 	"scienceFrame":          "changes the frame the desktop window loads and trusts",
 }
 
+// agentNativeAhead are classified native actions of branches not merged yet,
+// by branch. The shell test fails once a shell answers one of them, so the
+// entry is dropped from this list when its branch merges.
+var agentNativeAhead = map[string]string{"scienceFrame": "claude-science-p2"}
+
 // agentNativeRefusal returns why an agent may not queue request, or "".
 func agentNativeRefusal(request map[string]json.RawMessage) string {
 	var action string
@@ -382,6 +461,7 @@ func AgentAccess() map[string]any {
 	return map[string]any{
 		"rule":               "Agents drive the workbench. Acting on this computer outside the workbench without the person (installing or replacing Super Cage, launching host applications, the host clipboard, what the desktop window trusts, the window's own transports) is window only. GET and HEAD are open unless listed as window only; other methods are open only on the listed routes.",
 		"window_only_routes": agentWindowRoutes,
+		"window_only_bodies": agentBodyRules,
 		"routes":             agentRoutes,
 		"native":             agentNativeAccess,
 		"native_window_only": agentNativeWindowOnly,

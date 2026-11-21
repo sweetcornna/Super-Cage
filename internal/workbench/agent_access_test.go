@@ -1,16 +1,23 @@
 package workbench
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -95,14 +102,30 @@ func TestAgentNativeAccessCoversEveryShellAction(t *testing.T) {
 			}
 		}
 	}
-	for action := range agentNativeAccess {
-		if !seen[action] {
-			t.Errorf("agentNativeAccess lists %s, which no shell answers", action)
+	// Every classified action exists in a shell, except those of branches
+	// not merged yet; once a shell answers one of those, it leaves the list.
+	for _, table := range []map[string]string{agentNativeWindowOnly, func() map[string]string {
+		names := map[string]string{}
+		for action := range agentNativeAccess {
+			names[action] = ""
+		}
+		return names
+	}()} {
+		for action := range table {
+			branch, ahead := agentNativeAhead[action]
+			if ahead && seen[action] {
+				t.Errorf("a shell answers %s now: drop it from agentNativeAhead (branch %s merged)", action, branch)
+			}
+			if !ahead && !seen[action] {
+				t.Errorf("%s is classified but no shell answers it", action)
+			}
 		}
 	}
-	for action := range agentNativeWindowOnly {
-		if !seen[action] && action != "scienceFrame" { // claude-science branch
-			t.Errorf("agentNativeWindowOnly lists %s, which no shell answers", action)
+	for action := range agentNativeAhead {
+		_, open := agentNativeAccess[action]
+		_, window := agentNativeWindowOnly[action]
+		if !open && !window {
+			t.Errorf("agentNativeAhead lists %s without classifying it", action)
 		}
 	}
 }
@@ -257,26 +280,65 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 		}
 	}
 	// Registrations that only some platforms or build tags reach: every
-	// literal "METHOD /path" handed to HandleFunc in this package.
+	// HandleFunc call of this package. A literal pattern is classified here;
+	// one built at run time (mobile_browser.go) must match a route the walk
+	// above registered, or it has to be classified by hand.
+	walked := maps.Clone(registered)
+	fset := token.NewFileSet()
 	sources, _ := filepath.Glob("*.go")
-	literal := regexp.MustCompile(`HandleFunc\("([A-Z]+ /[^"]*)"`)
+	calls := 0
 	for _, name := range sources {
 		if strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		data, err := os.ReadFile(name)
+		source, err := parser.ParseFile(fset, name, nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, match := range literal.FindAllStringSubmatch(string(data), -1) {
-			registered[match[1]] = true
-			if access, _ := agentRouteClass(match[1]); access == "not_open" {
-				t.Errorf("%s (%s) changes state and is neither open to agents nor window only: classify it in agent_access.go", match[1], name)
+		ast.Inspect(source, func(n ast.Node) bool {
+			if fn, ok := n.(*ast.FuncDecl); ok && fn.Name.Name == "HandleFunc" {
+				return false // the recording mux itself
 			}
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 2 {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); !ok || sel.Sel.Name != "HandleFunc" {
+				return true
+			}
+			calls++
+			where := fset.Position(call.Pos()).String()
+			if pattern, ok := astString(call.Args[0]); ok {
+				registered[pattern] = true
+				if access, _ := agentRouteClass(pattern); access == "not_open" {
+					t.Errorf("%s (%s) changes state and is neither open to agents nor window only: classify it in agent_access.go", pattern, where)
+				}
+				return true
+			}
+			shape := regexp.MustCompile("^" + astShape(call.Args[0]) + "$")
+			seen := 0
+			for route := range walked {
+				if shape.MatchString(route) {
+					seen++
+				}
+			}
+			if seen == 0 {
+				t.Errorf("%s builds a route at run time that the route walk never registered: classify it by hand", where)
+			}
+			return true
+		})
+	}
+	if calls < 150 {
+		t.Fatalf("found only %d HandleFunc calls; the scan no longer reads the package", calls)
+	}
+	for route, branch := range agentRoutesAhead {
+		if registered[route] {
+			t.Errorf("%s is registered now: drop it from agentRoutesAhead (branch %s merged)", route, branch)
+		}
+		if !slices.Contains(agentRoutes, route) {
+			t.Errorf("agentRoutesAhead lists %s, which agentRoutes does not open", route)
 		}
 	}
-	// Classified ahead of their branches' merge; drop from here once merged.
-	pending := map[string]bool{"POST /api/browser/data": true, "POST /api/browser/data-settings": true}
 	// No stale entries: an open pattern is registered, or a value of a family,
 	// or a /api/client/ route dispatched outside the mux.
 	for _, open := range agentRoutes {
@@ -285,7 +347,7 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 			family = family || strings.HasPrefix(open, strings.TrimSuffix(f, "{action}"))
 		}
 		_, path, _ := strings.Cut(open, " ")
-		if !registered[open] && !family && !pending[open] && !strings.HasPrefix(path, "/api/client/") {
+		if !registered[open] && !family && agentRoutesAhead[open] == "" && !strings.HasPrefix(path, "/api/client/") {
 			t.Errorf("agentRoutes lists %s, which no listener registers", open)
 		}
 		if access, _ := agentRouteClass(open); access == "window_only" {
@@ -300,35 +362,296 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 }
 
 // What agents used before still works: every named operation and the raw
-// routes the guide documents, except the ones refused on purpose.
+// routes the guide documents, with the bodies they are used with; what is
+// refused on purpose is checked to be refused.
 func TestAgentDocumentedOperationsStayOpen(t *testing.T) {
+	refusal := func(method, path, body string) *AgentError {
+		if refusal := agentRouteRefusal(method, path); refusal != nil {
+			return refusal
+		}
+		return agentBodyRefusal(agentBodyRulesFor(method, path), []byte(body))
+	}
 	var names []string
 	for _, op := range AgentOperations() {
 		names = append(names, op.Name)
-		if refusal := agentRouteRefusal(op.method, op.path); refusal != nil {
-			t.Errorf("%s (%s %s): refused %v", op.Name, op.method, op.path, refusal)
+		if refused := refusal(op.method, op.path, "{}"); refused != nil {
+			t.Errorf("%s (%s %s): refused %v", op.Name, op.method, op.path, refused)
 		}
 	}
-	// Remembering the login changes what the window trusts: refused on
-	// purpose, and no longer offered as a named operation.
-	if agentRouteRefusal("POST", "/api/client/trusted-login") == nil {
-		t.Error("trusted login is open to agents")
-	}
 	sort.Strings(names)
-	for _, route := range [][2]string{
-		{"PUT", "/api/client/hosts/host-1"}, {"DELETE", "/api/client/hosts/host-1"}, {"POST", "/api/client/connect"},
-		{"POST", "/api/cli/sessions/s1/metadata"}, {"POST", "/api/cli/sessions/s1/account"}, {"POST", "/api/cli/sessions/s1/archive"},
-		{"POST", "/api/cli/sessions/s1/restore"}, {"POST", "/api/cli/sessions/s1/purge"}, {"POST", "/api/cli/sessions/s1/open"},
-		{"POST", "/api/macos/first-setup"}, {"POST", "/api/macos/login"}, {"POST", "/api/macos/maintenance"}, {"POST", "/api/macos/project-approval"},
-		{"POST", "/api/browser/extensions/upload"}, {"GET", "/api/diagnostics/export"}, {"GET", "/api/terminals/t1/stream"},
-		{"GET", "/api/agent/native/abc"}, {"POST", "/api/agent/native"}, {"GET", "/api/client/local-terminal"}, {"GET", "/api/app-update"},
-		{"POST", "/api/account/recovery-generate"}, {"POST", "/api/claude-science/start"}, {"HEAD", "/api/status"},
+	for _, route := range [][3]string{
+		{"PUT", "/api/client/hosts/host-1", "{}"}, {"DELETE", "/api/client/hosts/host-1", ""}, {"POST", "/api/client/connect", "{}"},
+		{"POST", "/api/cli/sessions/s1/metadata", "{}"}, {"POST", "/api/cli/sessions/s1/account", "{}"}, {"POST", "/api/cli/sessions/s1/archive", "{}"},
+		{"POST", "/api/cli/sessions/s1/restore", "{}"}, {"POST", "/api/cli/sessions/s1/purge", "{}"}, {"POST", "/api/cli/sessions/s1/open", "{}"},
+		{"POST", "/api/macos/first-setup", `{"action":"permissions"}`}, {"POST", "/api/macos/login", `{"action":"open"}`},
+		{"POST", "/api/macos/login", `{"action":"click","x":1,"y":2}`}, {"POST", "/api/macos/maintenance", `{"action":"fill-password","maintenance":"projects"}`},
+		{"POST", "/api/macos/project-approval", `{"action":"cancel"}`}, {"POST", "/api/browser/extensions/upload", "ZIP"},
+		{"GET", "/api/diagnostics/export", ""}, {"GET", "/api/terminals/t1/stream", ""}, {"GET", "/api/agent/native/abc", ""}, {"POST", "/api/agent/native", "{}"},
+		{"GET", "/api/client/local-terminal", ""}, {"GET", "/api/app-update", ""}, {"POST", "/api/claude-science/start", "{}"}, {"HEAD", "/api/status", ""},
+		{"DELETE", "/api/client/project-shares/share-1", ""}, {"GET", "/api/client/project-shares", ""},
 	} {
-		if refusal := agentRouteRefusal(route[0], route[1]); refusal != nil {
-			t.Errorf("%s %s refused: %v", route[0], route[1], refusal)
+		if refused := refusal(route[0], route[1], route[2]); refused != nil {
+			t.Errorf("%s %s %s refused: %v", route[0], route[1], route[2], refused)
+		}
+	}
+	// Refused on purpose: each returns a secret that unlocks the account or
+	// the guest login, or acts on this computer.
+	for _, route := range [][3]string{
+		{"POST", "/api/client/trusted-login", "{}"}, {"POST", "/api/account/recovery-generate", `{"password":"x"}`}, {"POST", "/api/account/recovery-reset", "{}"},
+		{"POST", "/api/macos/login", `{"action":"show-password"}`}, {"POST", "/api/macos/first-setup", `{"action":"show-password"}`},
+		{"POST", "/api/macos/maintenance", `{"action":"show-password"}`}, {"POST", "/api/environment/macos-screen-sharing", "{}"},
+		{"POST", "/api/client/project-shares", `{"path":"/Users/x"}`}, {"POST", "/api/client/browser-extensions", "{}"}, {"GET", "/api/client/browser-extensions", ""},
+	} {
+		if refused := refusal(route[0], route[1], route[2]); refused == nil || refused.NextAction == "" {
+			t.Errorf("%s %s %s is open to agents", route[0], route[1], route[2])
 		}
 	}
 	if len(names) < 60 {
 		t.Fatal("named operations missing", len(names))
+	}
+}
+
+func astString(e ast.Expr) (string, bool) {
+	lit, ok := e.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	value, err := strconv.Unquote(lit.Value)
+	return value, err == nil
+}
+
+// astShape turns "POST "+route+"/open" into a pattern its routes match.
+func astShape(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return astShape(x.X)
+	case *ast.BinaryExpr:
+		if x.Op == token.ADD {
+			return astShape(x.X) + astShape(x.Y)
+		}
+	}
+	if value, ok := astString(e); ok {
+		return regexp.QuoteMeta(value)
+	}
+	return ".*"
+}
+
+type clientDispatch struct{ method, path string }
+
+// clientDispatchRoutes reads the /api/client/ dispatcher's own conditions:
+// every path (and method, where the condition names one) compared in
+// clientRequest, desktopGateway.handle, tenantClientRequest and
+// clientProjectShareRequest.
+func clientDispatchRoutes(t *testing.T) []clientDispatch {
+	t.Helper()
+	dispatchers := map[string]string{"remote_gateway.go": "clientRequest", "desktop_gateway.go": "handle", "tenant_client.go": "tenantClientRequest", "cloud_client_share.go": "clientProjectShareRequest"}
+	var routes []clientDispatch
+	var condition func(ast.Expr) []clientDispatch
+	method := func(e ast.Expr) string {
+		if value, ok := astString(e); ok {
+			return value
+		}
+		if sel, ok := e.(*ast.SelectorExpr); ok && strings.HasPrefix(sel.Sel.Name, "Method") {
+			return strings.ToUpper(strings.TrimPrefix(sel.Sel.Name, "Method"))
+		}
+		return ""
+	}
+	isIdent := func(e ast.Expr, name string) bool { id, ok := e.(*ast.Ident); return ok && id.Name == name }
+	isMethod := func(e ast.Expr) bool { sel, ok := e.(*ast.SelectorExpr); return ok && sel.Sel.Name == "Method" }
+	condition = func(e ast.Expr) []clientDispatch {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			return condition(x.X)
+		case *ast.BinaryExpr:
+			switch x.Op {
+			case token.LOR:
+				return append(condition(x.X), condition(x.Y)...)
+			case token.LAND:
+				var out []clientDispatch
+				for _, a := range condition(x.X) {
+					for _, b := range condition(x.Y) {
+						out = append(out, clientDispatch{cmp.Or(a.method, b.method), cmp.Or(a.path, b.path)})
+					}
+				}
+				return out
+			case token.EQL:
+				if value, ok := astString(x.Y); ok && isIdent(x.X, "path") {
+					return []clientDispatch{{path: value}}
+				}
+				if isMethod(x.X) {
+					return []clientDispatch{{method: method(x.Y)}}
+				}
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "HasPrefix" && len(x.Args) == 2 && isIdent(x.Args[0], "path") {
+				if value, ok := astString(x.Args[1]); ok {
+					return []clientDispatch{{path: value + "x"}}
+				}
+			}
+		}
+		return []clientDispatch{{}}
+	}
+	fset := token.NewFileSet()
+	for name, function := range dispatchers {
+		source, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, decl := range source.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Name.Name != function {
+				continue
+			}
+			found = true
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.IfStmt:
+					routes = append(routes, condition(x.Cond)...)
+				case *ast.SwitchStmt:
+					for _, clause := range x.Body.List {
+						for _, e := range clause.(*ast.CaseClause).List {
+							if isIdent(x.Tag, "path") {
+								if value, ok := astString(e); ok {
+									routes = append(routes, clientDispatch{path: value})
+								}
+							} else if x.Tag == nil {
+								routes = append(routes, condition(e)...)
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+		if !found {
+			t.Fatalf("dispatcher %s not found in %s", function, name)
+		}
+	}
+	var out []clientDispatch
+	for _, route := range routes {
+		if route.path != "" && !slices.Contains(out, route) {
+			out = append(out, route)
+		}
+	}
+	return out
+}
+
+// Every /api/client/ route the dispatcher answers (outside the mux) is open,
+// window only, or read-only; read from the dispatcher, not listed by hand.
+func TestAgentRegistryClassifiesClientRoutes(t *testing.T) {
+	routes := clientDispatchRoutes(t)
+	var paths []string
+	for _, route := range routes {
+		paths = append(paths, route.path)
+	}
+	for _, want := range []string{"hosts", "hosts/x", "trusted-login", "tenant/login", "project-shares", "candidate", "browser-extensions", "virtual-machines/x"} {
+		if !slices.Contains(paths, want) {
+			t.Fatalf("the dispatcher scan missed %s; it no longer reads the dispatcher: %v", want, paths)
+		}
+	}
+	for _, route := range routes {
+		// A prefix that only hands over to a sub-dispatcher whose paths are
+		// read too (tenant/) is checked through those paths.
+		if prefix, ok := strings.CutSuffix(route.path, "/x"); ok && slices.ContainsFunc(paths, func(p string) bool { return p != route.path && strings.HasPrefix(p, prefix+"/") }) {
+			continue
+		}
+		// A path compared without a method only to hand over to a
+		// sub-dispatcher that names the methods (project-shares/).
+		if route.method == "" && slices.ContainsFunc(routes, func(o clientDispatch) bool { return o.method != "" && o.path == route.path }) {
+			continue
+		}
+		method := cmp.Or(route.method, "POST")
+		if method == "GET" || method == "HEAD" {
+			continue
+		}
+		path := "/api/client/" + route.path
+		if refusal := agentRouteRefusal(method, path); refusal != nil && refusal.Code == "route_not_open" {
+			t.Errorf("%s %s is dispatched for /api/client/ and changes state, but is neither open to agents nor window only", method, path)
+		}
+	}
+}
+
+// show-password is refused however the body spells it, as the handler would
+// decode it; a body the CLI cannot decode that way is not sent at all.
+func TestAgentBodyRulesReadTheBodyAsTheHandlerDoes(t *testing.T) {
+	config := filepath.Join(t.TempDir(), "config.json")
+	send := func(path, body string) *AgentError {
+		_, err := AgentRequest(context.Background(), config, AgentTarget{Scope: "selected", Connection: "c1"}, "POST", path, strings.NewReader(body), "application/json", "")
+		var ae *AgentError
+		if !errors.As(err, &ae) {
+			t.Fatalf("%s %s: %v", path, body, err)
+		}
+		return ae
+	}
+	for _, path := range []string{"/api/macos/login", "/api/macos/first-setup", "/api/macos/maintenance"} {
+		for _, body := range []string{
+			`{"action":"show-password"}`, `{"Action":"show-password"}`, `{"ACTION":"show-password"}`,
+			`{"action":"open","action":"show-password"}`, `{"action":"open","Action":"show-password"}`,
+			` {"action":"show\u002dpassword"} `,
+		} {
+			if ae := send(path, body); ae.Code != "native_transport_required" || ae.NextAction != "open_desktop" {
+				t.Errorf("%s %s: %+v", path, body, ae)
+			}
+		}
+		for _, body := range []string{`{"action":"open"} {"action":"show-password"}`, `[{"action":"show-password"}]`, `{"action":["show-password"]}`, `{"action":7}`, "not json", strings.Repeat(" ", agentBodyLimit+1)} {
+			if ae := send(path, body); ae.Code != "invalid_input" {
+				t.Errorf("%s %.40q was not refused as unreadable: %+v", path, body, ae)
+			}
+		}
+		// An ordinary action passes the gate and goes on to the (absent)
+		// desktop service.
+		if ae := send(path, `{"action":"open","x":1}`); ae.Code == "native_transport_required" || ae.Code == "invalid_input" {
+			t.Errorf("%s open refused: %+v", path, ae)
+		}
+	}
+}
+
+// A real window-only route, end to end: the window's session gets a recovery
+// key from it; the same request through the agent transport is refused before
+// it reaches the handler, and the key in force is unchanged.
+func TestAgentCannotTakeARecoveryKeyFromALiveController(t *testing.T) {
+	s := agentTestController(t)
+	a, err := loadLocalAccount(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(a.lock)
+	s.account = a
+	w := request(s, "POST", "/api/account/create", s.origin, `{"username":"agent_qa","password":"original-test-password","confirm_password":"original-test-password"}`, true)
+	var created struct {
+		RecoveryKey string `json:"recovery_key"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &created) != nil || created.RecoveryKey == "" {
+		t.Fatal("account", w.Code, w.Body.String())
+	}
+	body := `{"password":"original-test-password"}`
+	_, err = AgentRequest(context.Background(), s.configPath, AgentTarget{}, "POST", "/api/account/recovery-generate", strings.NewReader(body), "application/json", "")
+	var ae *AgentError
+	if !errors.As(err, &ae) || ae.Code != "native_transport_required" || ae.NextAction != "open_desktop" {
+		t.Fatalf("agent took a recovery key: %v", err)
+	}
+	// The original key still resets the password: nothing was rotated.
+	a.lock()
+	if _, err := a.resetPassword(created.RecoveryKey, "recovered-test-password"); err != nil {
+		t.Fatal("the agent's refused request changed the recovery key", err)
+	}
+	// The route is live: the window's own session is answered.
+	if err := a.unlock("recovered-test-password"); err != nil {
+		t.Fatal(err)
+	}
+	if w := request(s, "POST", "/api/account/recovery-generate", s.origin, `{"password":"recovered-test-password"}`, true); w.Code != 200 || !strings.Contains(w.Body.String(), "recovery_key") {
+		t.Fatal("the route under test is not live", w.Code, w.Body.String())
+	}
+	// On the same controller show-password never leaves the CLI, while an
+	// ordinary action reaches the controller (which answers it without a
+	// macOS guest).
+	_, err = AgentRequest(context.Background(), s.configPath, AgentTarget{}, "POST", "/api/macos/login", strings.NewReader(`{"action":"show-password"}`), "application/json", "")
+	if !errors.As(err, &ae) || ae.Code != "native_transport_required" {
+		t.Fatalf("show-password reached the controller: %v", err)
+	}
+	_, err = AgentRequest(context.Background(), s.configPath, AgentTarget{}, "POST", "/api/macos/login", strings.NewReader(`{"action":"open"}`), "application/json", "")
+	if !errors.As(err, &ae) || ae.HTTPStatus == 0 {
+		t.Fatalf("an ordinary macOS window action did not reach the controller: %v", err)
 	}
 }
