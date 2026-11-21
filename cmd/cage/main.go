@@ -646,6 +646,9 @@ func run() int {
 		if resourceErr != nil {
 			return fail(resourceErr)
 		}
+		if allocation, err := cage.LoadResourceAllocation(path); err == nil && allocation.LimitsNotice() != "" {
+			fmt.Fprintln(os.Stderr, allocation.LimitsNotice())
+		}
 		args = append([]string{"setup", "--memory", fmt.Sprint(memory), "--cpus", fmt.Sprint(cpus), "--disk", "24", "--preinstall=node,python,chromium,gh,claude,code-server"}, args[1:]...)
 	}
 	if args[0] == "up" || args[0] == "login" {

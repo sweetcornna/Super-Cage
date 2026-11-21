@@ -60,11 +60,19 @@ per-instance state: held demand D and the time it was set.
 4. Grow: L_i < f_i -> to roundUp(f_i) at once, also under host pressure (f is already fair; a guest OOM is
    worse than host reclaim). Reason "guest needs memory" / "fair share of a short host".
 5. Shrink — only memory above the floor F_i = max(f_i, W_i + 256 MiB, g_i), never below the working set:
-   a. capacity needed: N = sum_j max(L_j, f_j) - C > 0. Take N from instances with L > F, inactive first,
-      then active, within a tier proportional to slack (L - F), at most step per instance per round.
+   a. capacity needed: N = sum_j max(L_j, f_j) - C > 0, and some VM grows this round or is short (held below
+      its demand); without either nothing is taken, since a limit above the capacity is not use. Take N from
+      instances with L > F, inactive first, then active, within a tier proportional to slack (L - F), at most
+      step per instance per round.
    b. idle return: an inactive instance with L - max(D, g) >= step returns one step per round toward
       max(D, g). D only decays after the 5-minute hold, so a VM idle for 5 minutes starts to give back;
       an active VM keeps its excess (its page cache is in use) unless (a) or (c).
+      Being active only orders the tiers of (a) and (c) and spares (b); unlike the legacy policy's fair-share
+      exemption it never keeps memory another VM or the host needs. That matters because the gateway counts
+      every proxied chunk, 20 s terminal heartbeats included, as use (review 2, extra item 6): a workspace
+      with an open terminal is active for good, gives nothing through (b), and still yields through (a) and
+      (c) (TestAllocationActiveVMStillYieldsToAGrowingOne, TestAllocationHostPressureTakesIdleFirst...). The
+      heartbeats' other effect, that such a workspace never cools, belongs to idle cooling, not here.
    c. host pressure (Ha < 2R or Hs >= 10): release N_p = max(2R - Ha, step) by tiers:
       T1 inactive above d_i (instantaneous demand), T2 active above d_i (proportional to slack),
       T3 inactive above W_i + 256 MiB, T4 active above W_i + 256 MiB. Never below W + 256 MiB, never
@@ -301,8 +309,20 @@ internal/tenant/replay_test.go (simulator).
 ### 7.1 Level A (allocateMemory, unexported; planMemory kept for CAGE_TENANT_MEMORY_POLICY=legacy)
 - Floor of a shrink is max(base, guarantee, roundUp(W + 512 MiB)) (memoryMinHeadroom = 512 MiB, not 256:
   a shrink into the headroom under pressure must not read as a shortage in the next round).
-- While the host is under pressure only a VM that is short itself grows to its fair share; one that merely
-  lacks headroom waits (otherwise shrink-into-headroom and regrowth oscillate).
+- Pressure (review 2, R2-5, replaces "available < 2R"): guest page cache fills the limits and is resident on
+  the host, so a host whose limits fill its capacity has R - own available: the plan, not a shortage. With
+  the old "available < 2R" a VM host sat in pressure for good once its limits passed total - own - 2R, and a
+  VM grew only when nearly out of memory. Pressure is now: stall >= 10, or available < keep (keep =
+  max(512 MiB, R/4): limits above the capacity being filled), or available < R while the limits leave more
+  unallocated than is available (the host's own use is above its reserve). Below 2R ("reclaim") memory
+  above max(demand, fair) is taken back early, idle VMs first; under pressure also the headroom above
+  max(W + 512 MiB, fair). The 1 GiB step applies below R.
+- Every shrink floor is at least the fair allocation: a VM above its fair share is never taken below it, so
+  nothing a shrink takes is grown back the next round (the reviewer saw 4.75 -> 3.75 GiB with fair 4.0).
+- Growth to the fair allocation is at once within what the host has free above keep, short guests first,
+  max-min fair among the rest (waterFill over the gaps); what it cannot back now (result.backlog) follows
+  as memory taken back from VMs above their fair shares is freed. While the host is in pressure only a VM
+  that is short itself grows; one that merely lacks headroom waits.
 - "Capacity needed" reclaim (above fair share, idle first) runs only when some VM grows or is short.
 - Shortage boost: stall >= 10, pswpin advanced, or available < 256 MiB: d >= L + max(512 MiB, L/4).
   Nested short_bytes is added to d. machine-memory.json must be fresh within +-45 s of the gateway clock
@@ -359,6 +379,11 @@ size. POST accepts "apply": true (save, then restart a running environment).
   fail and the environment will not start under 0.1.15. Before rolling back a desktop install: set the
   allocation to automatic in settings (or delete <profile>/resource-limits.json), then install 0.1.15.
 - The "chosen" key is ignored by 0.1.15.
+- The manual range depends on the machine's role, which follows DISPLAY/WAYLAND_DISPLAY: a value saved by
+  a headless cage serve (dedicated) can be above the desktop app's range on the same machine. A saved value
+  outside the current range is clamped at start, never refused (review 2, R2-9): Limits() clamps,
+  LimitsNotice() says so (the API's notice, the Lima start log, cage setup's stderr), and the file is not
+  rewritten (the other role still reads it). Choosing a value checks the range (Validate()).
 
 ### 7.6 Level C as built (supersedes section 4 where they differ)
 Built (declarative or fail-open), in guest-services.sh, guest-memory.sh, guest.go, resource-governor.py:
@@ -383,6 +408,16 @@ Ubuntu guests: snap Chromium runs in a scope under the browser user's slice in u
 counts user.slice/user-<cage-browser uid>.slice as browser (use, stall, MemoryHigh/MemoryMax), subtracts it
 from the sessions, takes the sessions' stall from user-<cage uid>.slice and sets that slice's MemoryLow
 equal to user.slice's, so no protection is left over for the browser user's slice.
+Accounts (review 2, R2-3): new environments have random account names (internal/guestprofile), so the
+governor takes both from its unit: Environment=CAGE_SESSION_USER=cage and CAGE_BROWSER_USER=cage-browser,
+rewritten by the same rename rules as every other account reference (guestprofile linuxAccountRules has a
+prefix for each; nothing else in any template contains them, TestGovernorAccountRulesMatchOnlyItsUnit).
+A name is resolved when getpwnam knows it (a browser user without a slice, Debian, is resolved). When
+either is missing, malformed, unknown or both are the same uid, the governor does not guess: it limits
+only cage-browser.slice, protects only system.slice, sets user.slice MemoryLow=0, reports no class (the
+host agent falls back to the whole guest's pressure), writes "accounts unresolved <roles>" to the state
+file and says which names in the journal. TestRenderedGovernorFindsTheProfileUsers runs the governor and
+unit rendered by Config.SetupScript/StartScript for no profile and two random ones in a fake guest.
 Not built (moved to the follow-up with the browser-agent endpoint): the chromium.d hook, Delegate= and
 agent/chromium leaves, adoption of sessions into cage-sessions.slice (no single spawn point owned here:
 terminals, claude and codex arrive by several SSH paths), memory.high on the sessions.
@@ -410,6 +445,9 @@ is available. The model is a model: it shows the rules interact as intended, not
 | page cache hog vs quiet neighbour | | guest 2816 vs 2560 MiB: cache buys nothing |
 | machine shrinking under an idle guest | | 10 -> 4.75 GiB, neighbour grows to 8.5 GiB, no machine OOM |
 | 60 s of failed samples | | target never shrinks, resumes |
+| two machines growing, machine page cache filling (R2-5) | | pressure in 102 of 120 rounds before, 3 after (boot at the ceiling) |
+| reviewer's 17 GiB host, 3 plain VMs, cache fills limits | | vm0 grows in the round its demand rises, never short, no pressure |
+| 8 h steady state, plain VMs, middle band and saturated | | no move after settling, no round in pressure |
 | parked machine, +3 GiB over 30 s | | guest has it after 30 s, probes silent 6 s |
 | parked machine, +3 GiB in 1 s | | guest has it after 35 s, probes silent 34 s |
 Machine out of memory: 0 s in every trace.
@@ -467,10 +505,28 @@ first). lima.yaml is rewritten at every start by whichever version starts.
 Guest, persisted: /etc/systemd/system/cage-browser.slice, cage-resource-governor.service (enabled),
 /usr/local/lib/cage-resource-governor.py, changed cage-browser.service, cage-editor.service and
 /usr/local/bin/cage-memory-start. 0.1.15's component update rewrites the three changed files; it does not
-know the slice or the governor, which then keeps protecting system.slice/user.slice and limiting an empty
-cage-browser.slice (harmless). To remove them: sudo systemctl disable --now cage-resource-governor.service
-(its stop resets the limits); sudo rm -f /etc/systemd/system/cage-resource-governor.service
-/etc/systemd/system/cage-browser.slice /usr/local/lib/cage-resource-governor.py; sudo systemctl daemon-reload.
+know the slice or the governor, which keeps running. That is not harmless (review 2, R2-9): without a host
+agent sending limits the governor applies its own plan, so it keeps the browser limited (about 3/4 of the
+guest) on cage-browser.slice and, on Ubuntu guests, on the browser user's slice user.slice/user-<uid>.slice
+where snap Chromium runs, and keeps protecting system.slice, user.slice and the session user's slice.
+Remove it in the guest:
+  1. sudo systemctl disable --now cage-resource-governor.service
+     Its stop (SIGTERM, then ExecStopPost --reset) sets MemoryHigh=infinity, MemoryMax=infinity and
+     MemoryLow=0 on cage-browser.slice, system.slice, user.slice, the unit's two accounts' user slices and
+     every user-<uid>.slice holding a runtime memory setting, deletes those runtime drop-ins
+     (/run/systemd/system.control/<unit>.d/50-MemoryHigh.conf, 50-MemoryMax.conf, 50-MemoryLow.conf) and
+     removes /run/cage-resources.
+  2. sudo rm -f /etc/systemd/system/cage-resource-governor.service /etc/systemd/system/cage-browser.slice
+     /usr/local/lib/cage-resource-governor.py; sudo systemctl daemon-reload
+  3. Check: B=$(systemctl show -P User cage-browser.service); S=$(systemctl show -P User cage-editor.service);
+     systemctl show cage-browser.slice system.slice user.slice user-$(id -u "$B").slice user-$(id -u "$S").slice
+     -p MemoryHigh -p MemoryMax -p MemoryLow (infinity, infinity, 0 everywhere);
+     ls /run/systemd/system.control (no 50-Memory*.conf left by the governor); ls -d /run/cage-resources
+     (absent).
+  A governor installed before this fix (84012c5 up to review 2) resets the slices it finds but leaves the
+  runtime drop-ins, which then say infinity/0 (the defaults) until the next boot; to remove them at once:
+  sudo rm -f /run/systemd/system.control/{cage-browser,system,user}.slice.d/50-Memory{High,Max,Low}.conf
+  /run/systemd/system.control/user-*.slice.d/50-Memory{High,Max,Low}.conf (or reboot the guest).
 Guest, runtime (gone at reboot): /run/cage-resources, /run/systemd/system.control/*.d drop-ins, zram size,
 vm.swappiness.
 

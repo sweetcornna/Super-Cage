@@ -1,12 +1,19 @@
-.environment-cache { border-top: 1px solid var(--border); padding-top: 18px; margin-top: 18px; }
-.cache-items { display: grid; gap: 8px; margin: 14px 0; }
-.environment-cache .cache-item { display: flex; flex-direction: row; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 8px; }
-.cache-item > input { flex: 0 0 auto; width: auto; margin-top: 3px; }
+/* 环境清理: the inventory is a hairline list with one checkbox per cache. */
+.cache-items { margin: 16px 0 8px; border-top: 1px solid var(--line); }
+.settings-page .settings-content .environment-cache .cache-item { display: flex; flex-direction: row; align-items: flex-start; gap: 12px; margin: 0; padding: 12px 0; border-bottom: 1px solid var(--line); font-weight: 400; }
+.cache-item > input { flex: none; margin-top: 3px; }
 .cache-item > span:first-of-type { flex: 1; min-width: 0; }
-.cache-item strong { font-size: 14px; }
-.cache-item small { display: block; opacity: .72; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
-.cache-size { text-align: right; white-space: nowrap; }
-.cache-protected, .cache-result { padding: 12px; border: 1px solid var(--border); border-radius: 8px; margin-top: 12px; }
-.cache-protected p, .cache-result p { margin: 6px 0 0; font-size: 13px; }
-.cache-recovery { margin-top: 16px; }
-@media (max-width: 520px) { .cache-item { flex-wrap: wrap; } .cache-size { width: 100%; text-align: left; padding-left: 24px; } }
+.cache-item strong { display: block; color: var(--ink); font-size: var(--fs-body); font-weight: 500; }
+.cache-item small { display: block; margin-top: 2px; color: var(--muted); font-size: var(--fs-caption); line-height: 1.55; overflow-wrap: anywhere; }
+.cache-item small + small { color: var(--faint); }
+.cache-item:has(input:disabled) strong { color: var(--muted); }
+.cache-size { flex: none; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.cache-size small { color: var(--muted); }
+.cache-protected, .cache-result { margin-top: 16px; padding: 12px 16px; border-radius: var(--r-md); background: var(--soft); color: var(--ink); font-size: var(--fs-secondary); line-height: 1.6; }
+.cache-protected strong, .cache-result strong { color: var(--ink); font-weight: 600; }
+.cache-protected p, .cache-result p { margin: 4px 0 0; color: var(--muted); font-size: var(--fs-caption); }
+.cache-recovery { margin-top: 32px; }
+.settings-page .settings-content .cache-recovery h4 { margin: 0 0 4px; color: var(--ink); font-size: var(--fs-body); font-weight: 600; }
+.cache-recovery .setting-summary-row { align-items: center; }
+.settings-page .settings-content .cache-recovery .setting-summary-row button { min-height: var(--h-compact); padding: 0 12px; font-size: var(--fs-secondary); }
+@media (max-width: 520px) { .cache-item { flex-wrap: wrap; } .cache-size { width: 100%; text-align: left; padding-left: 28px; } }
