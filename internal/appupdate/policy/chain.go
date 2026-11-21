@@ -39,9 +39,12 @@ type Terminal struct {
 
 // Environment is what the update must bring back.
 type Environment struct {
-	Running   bool       `json:"running"`
-	Workspace string     `json:"workspace,omitempty"`
-	Terminals []Terminal `json:"terminals,omitempty"`
+	Running bool `json:"running"`
+	// NetworkPaused keeps a pause the person set: the restored environment
+	// starts with its network still paused.
+	NetworkPaused bool       `json:"network_paused,omitempty"`
+	Workspace     string     `json:"workspace,omitempty"`
+	Terminals     []Terminal `json:"terminals,omitempty"`
 }
 
 // Chain is written by the version being replaced at the moment it decides to

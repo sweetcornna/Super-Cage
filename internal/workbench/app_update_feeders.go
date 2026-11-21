@@ -63,10 +63,12 @@ func (m *terminalManager) updateActivity() (facts []string, tabs []policy.Termin
 	return facts, tabs
 }
 
-func (d *displayViewDemand) viewerCount() int {
+// viewerCount is the number of shown streams and how many ever joined; a
+// viewer that came and went between two looks still changes the second.
+func (d *displayViewDemand) viewerCount() (int, uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return d.viewers
+	return d.viewers, d.joined
 }
 
 // registerAppUpdateFeeders feeds the registry from state the workbench
@@ -108,11 +110,14 @@ func (s *Server) registerAppUpdateFeeders(r *policy.Registry) {
 	})
 	r.Register("viewers", "无法确认画面是否有人在看", func(context.Context) (policy.Reading, error) {
 		var reading policy.Reading
+		displays, displayJoins := s.desktopViews.viewerCount()
+		browsers, browserJoins := s.browserViews.viewerCount()
 		for _, view := range []struct {
 			id, label string
 			count     int
-		}{{"viewer:display", "正在查看环境画面", s.desktopViews.viewerCount()}, {"viewer:browser", "正在查看浏览器画面", s.browserViews.viewerCount()}} {
-			reading.Activity = append(reading.Activity, fmt.Sprintf("%s=%d", view.id, view.count))
+			joined    uint64
+		}{{"viewer:display", "正在查看环境画面", displays, displayJoins}, {"viewer:browser", "正在查看浏览器画面", browsers, browserJoins}} {
+			reading.Activity = append(reading.Activity, fmt.Sprintf("%s=%d/%d", view.id, view.count, view.joined))
 			if view.count > 0 {
 				reading.Blockers = append(reading.Blockers, policy.Blocker{ID: view.id, Kind: policy.KindViewer, Interruptible: true, Label: view.label})
 			}

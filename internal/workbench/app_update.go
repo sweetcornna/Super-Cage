@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,7 +19,6 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/appupdate"
 	"github.com/sylvinus/agent-vm/internal/appupdate/policy"
-	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/version"
@@ -73,8 +74,23 @@ type appUpdateState struct {
 	stop        func() error
 	start       func() error
 	sync        func() error
+	network     func() error
 	unavailable func() string
+
+	unavailableOnce   sync.Once
+	unavailableReason string
 }
+
+// appUpdateStopTimeout bounds the stop an update makes, like the stop button.
+const appUpdateStopTimeout = 3 * time.Minute
+
+// heldOperation stands in for Server.op when the caller already holds it:
+// the update's stop runs as an ordinary stop job inside the decision's
+// operation, so nothing can start between the decision and the stop.
+type heldOperation struct{}
+
+func (heldOperation) Lock()   {}
+func (heldOperation) Unlock() {}
 
 // startRun and syncRun are the chain's environment steps.
 func (s *Server) appUpdateStartRun() func() error {
@@ -89,6 +105,51 @@ func (s *Server) appUpdateSyncRun() func() error {
 		return s.appUpdate.sync
 	}
 	return s.synchronizeEnvironment
+}
+
+// appUpdateNetworkRun is the existing 检查联网条件 action.
+func (s *Server) appUpdateNetworkRun() func() error {
+	if s.appUpdate.network != nil {
+		return s.appUpdate.network
+	}
+	if s.macosGuest != nil {
+		return s.checkMacOSNetwork
+	}
+	return s.runSafetyCheck
+}
+
+// appUpdateStop stops a running environment with the stop button's own
+// steps, as a stop job inside the operation the caller holds.
+func (s *Server) appUpdateStop(running bool) error {
+	if s.appUpdate.stop != nil {
+		return s.appUpdate.stop()
+	}
+	if !running {
+		return nil
+	}
+	if err := s.requireStorageReady(); err != nil {
+		return err
+	}
+	s.stopEnvironmentOwners()
+	s.pauseNetworkForStop()
+	s.mu.Lock()
+	job, err := s.jobs.submit(heldOperation{}, "stop", s.safety.pauseVersion, nil, nil, s.stopEnvironment)
+	s.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), appUpdateStopTimeout)
+	defer cancel()
+	done, err := s.waitJob(ctx, job.ID)
+	switch {
+	case err != nil:
+		return errors.New("停止环境超时")
+	case done.ID != job.ID || done.Canceled:
+		return errors.New("停止环境被中断")
+	case done.Error != "":
+		return errors.New(done.Error)
+	}
+	return nil
 }
 
 func (a *appUpdateState) now() time.Time {
@@ -162,11 +223,18 @@ func (s *Server) silentUnavailable() string {
 	if s.appUpdate.unavailable != nil {
 		return s.appUpdate.unavailable()
 	}
-	executable, err := os.Executable()
-	if err != nil {
-		return "无法确认安装位置，不支持静默更新"
-	}
-	return silentUnavailableReason(runtime.GOOS, version.Version, executable, dirWritable)
+	// Computed once per process: the answer only changes with a new
+	// installation, and on Windows the check creates a file.
+	a := &s.appUpdate
+	a.unavailableOnce.Do(func() {
+		executable, err := os.Executable()
+		if err != nil {
+			a.unavailableReason = "无法确认安装位置，不支持静默更新"
+			return
+		}
+		a.unavailableReason = silentUnavailableReason(runtime.GOOS, version.Version, executable, dirWritable)
+	})
+	return a.unavailableReason
 }
 
 func silentUnavailableReason(goos, current, executable string, writable func(string) bool) string {
@@ -427,12 +495,12 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, tabs := s.terminals.updateActivity()
-	environment := policy.Environment{Running: s.vmRunning(), Workspace: s.workspace(), Terminals: tabs}
-	// Close admission completely, then look once more at the work the
-	// seal does not cover. Anything new since the decision wins.
 	s.mu.Lock()
-	s.closing = true
+	paused := s.networkPaused
 	s.mu.Unlock()
+	environment := policy.Environment{Running: s.vmRunning(), NetworkPaused: paused, Workspace: s.workspace(), Terminals: tabs}
+	// Look once more at the work the seal does not cover (a viewer, a phone,
+	// a transfer already admitted). Anything new since the decision wins.
 	final := s.updateRegistry().Snapshot(ctx, a.now(), false)
 	if trigger == policy.SilentUpdate && (final.Fingerprint != snapshot.Fingerprint || !final.Idle()) {
 		unseal()
@@ -464,11 +532,7 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 		appUpdateRefuse(w, policy.Unreadable, "无法保存升级记录，未停止环境："+err.Error(), nil)
 		return
 	}
-	stop := a.stop
-	if stop == nil {
-		stop = s.stopEnvironment
-	}
-	stopErr := stop()
+	stopErr := s.appUpdateStop(environment.Running)
 	if stopErr == nil {
 		if owners, probeErr := controllerVMOwners(s.profile); probeErr != nil || len(owners) != 0 {
 			stopErr = errors.New("环境仍在运行")
@@ -477,6 +541,14 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	if stopErr == nil {
 		if err = managedproxy.Stop(s.profile); err != nil {
 			stopErr = errors.New("代理尚未停止")
+		}
+	}
+	if stopErr == nil {
+		// Installing is recorded before the shell may install: a record left
+		// at stopping therefore proves that nothing was installed.
+		_ = chain.Advance(policy.StepInstalling, a.now())
+		if err = policy.SaveChain(profile, chain); err != nil {
+			stopErr = errors.New("无法保存升级记录：" + err.Error())
 		}
 	}
 	if stopErr != nil {
@@ -488,20 +560,24 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 		s.op.Unlock()
 		locked = false
 		if environment.Running {
-			go s.restoreEnvironmentAfterUpdate(chain.ID)
+			go s.restoreEnvironmentAfterUpdate(chain.ID, environment)
 		}
-		appUpdateRefuse(w, policy.Code("stop_failed"), reason, nil)
+		appUpdateRefuse(w, policy.StopFailed, reason, nil)
 		return
 	}
-	_ = chain.Advance(policy.StepInstalling, a.now())
-	if err = policy.SaveChain(profile, chain); err != nil {
-		diagnostics.Log("warn", "app-update", "chain record not advanced: "+err.Error())
-	}
+	// Admission closes only now, so that the window could follow the stop.
+	s.mu.Lock()
+	s.closing = true
+	s.mu.Unlock()
 	diagnostics.Log("info", "app-update", "installing "+input.Version+" ("+string(trigger)+")")
+	// The attempt id travels with the installation so that the installer's
+	// result can be matched to this record. A fixed length keeps the reply
+	// complete even if shutdown cancels the request right after it.
+	body, _ := json.Marshal(AppUpdatePrepared{Status: "prepared", Attempt: chain.ID})
+	body = append(body, '\n')
 	w.Header().Set("Content-Type", "application/json")
-	const prepared = "{\"status\":\"prepared\"}\n"
-	w.Header().Set("Content-Length", "21")
-	_, _ = w.Write([]byte(prepared))
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
 	_ = http.NewResponseController(w).Flush()
 	s.op.Unlock()
 	locked = false
@@ -510,12 +586,12 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 
 // restoreEnvironmentAfterUpdate starts the environment again after an update
 // that stopped it and then did not happen.
-func (s *Server) restoreEnvironmentAfterUpdate(id string) {
+func (s *Server) restoreEnvironmentAfterUpdate(id string, environment policy.Environment) {
 	ctx := s.lifetimeContext()
 	if err := s.waitAccountUnlocked(ctx); err != nil {
 		return
 	}
-	if _, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun()); err != nil {
+	if _, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun(), environment.NetworkPaused); err != nil {
 		diagnostics.Log("warn", "app-update", "environment not restored after update "+id+": "+err.Error())
 	}
 }
@@ -540,11 +616,32 @@ func (s *Server) waitAccountUnlocked(ctx context.Context) error {
 	}
 }
 
+// appUpdateSubmit submits a chain step. A start keeps a network pause the
+// person set before the update; otherwise it resumes the network exactly
+// like the start button does.
+func (s *Server) appUpdateSubmit(kind string, run func() error, keepPause bool) (Job, error) {
+	if !keepPause {
+		return s.submitJob(kind, run)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closing {
+		return Job{}, errJobsClosed
+	}
+	if s.appUpdateSealed {
+		return Job{}, errAppUpdateSealed
+	}
+	if s.storageRecoveryError != "" {
+		return Job{}, fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
+	}
+	return s.jobs.submit(&s.op, kind, s.safety.pauseVersion, nil, nil, run)
+}
+
 // appUpdateRunJob submits a job as the chain's own step and waits for it. A
 // job the person started first is waited for, then the step is decided again.
-func (s *Server) appUpdateRunJob(ctx context.Context, kind string, run func() error) (Job, error) {
+func (s *Server) appUpdateRunJob(ctx context.Context, kind string, run func() error, keepPause bool) (Job, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		job, err := s.submitJob(kind, run)
+		job, err := s.appUpdateSubmit(kind, run, keepPause)
 		if errors.Is(err, errJobBusy) {
 			if _, err = s.waitJob(ctx, ""); err != nil {
 				return Job{}, err
@@ -598,16 +695,34 @@ func (s *Server) resumeAppUpdateChain() {
 			_ = policy.SaveChain(profile, c)
 		}
 		return
+	case resumption.RolledBack && c.Step == policy.StepStopping:
+		// The record never reached installing, so nothing was installed:
+		// the previous process ended during its stop.
+		reason := "升级在停止环境时中断，未安装更新"
+		c.Fail(policy.StepStopping, reason, now)
+		_ = policy.SaveChain(profile, c)
+		s.finishAttempt(c.To, false, policy.StepStopping, reason)
+		if c.Environment.Running {
+			s.restoreEnvironmentAfterUpdate(c.ID, c.Environment)
+		}
+		return
 	case resumption.RolledBack:
-		reason := lastInstallerMessage(profile)
-		if reason == "" {
-			reason = "安装没有完成，已恢复原应用"
+		reason, proven := installerFailure(profile, c)
+		if !proven {
+			// The old version runs but nothing says the installer finished:
+			// it may still be running, or the shell stopped before it. Leave
+			// the record and the stopped environment as they are.
+			a.mu.Lock()
+			a.note = "升级没有完成，环境保持停止；可以重新点击升级，或手动启动环境"
+			a.mu.Unlock()
+			diagnostics.Log("warn", "app-update", "update "+c.ID+" unfinished without an installer result")
+			return
 		}
 		c.Fail(policy.StepInstalling, reason, now)
 		_ = policy.SaveChain(profile, c)
 		s.finishAttempt(c.To, false, policy.StepInstalling, reason)
 		if c.Environment.Running {
-			s.restoreEnvironmentAfterUpdate(c.ID)
+			s.restoreEnvironmentAfterUpdate(c.ID, c.Environment)
 		}
 		return
 	case resumption.Continue == "":
@@ -622,19 +737,41 @@ func (s *Server) resumeAppUpdateChain() {
 	s.runAppUpdateChain(c)
 }
 
-func lastInstallerMessage(profile string) string {
-	data, err := os.ReadFile(filepath.Join(policy.Dir(profile), "last-result.json"))
-	if err != nil || len(data) > 16384 {
-		return ""
+// installerFailure is the installer's own report that this attempt failed
+// and the previous application was kept: last-result.json naming the
+// attempt, or, from shells that do not pass the attempt on yet, the target
+// version written after the record reached installing.
+func installerFailure(profile string, c *policy.Chain) (string, bool) {
+	path := filepath.Join(policy.Dir(profile), "last-result.json")
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 16384 {
+		return "", false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
 	}
 	var result struct {
 		Success bool   `json:"success"`
 		Message string `json:"message"`
+		Version string `json:"version"`
+		Attempt string `json:"attempt"`
 	}
 	if json.Unmarshal(data, &result) != nil || result.Success {
-		return ""
+		return "", false
 	}
-	return strings.TrimSpace(result.Message)
+	matches := result.Attempt == c.ID
+	if result.Attempt == "" {
+		matches = result.Version == c.To && !info.ModTime().Before(c.UpdatedAt.Add(-time.Second))
+	}
+	if !matches {
+		return "", false
+	}
+	reason := strings.TrimSpace(result.Message)
+	if reason == "" {
+		reason = "安装没有完成，已恢复原应用"
+	}
+	return reason, true
 }
 
 func (s *Server) finishAttempt(version string, ok bool, step policy.Step, reason string) {
@@ -682,7 +819,7 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 				return
 			}
 			if !s.vmRunning() {
-				job, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun())
+				job, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun(), c.Environment.NetworkPaused)
 				if err != nil || job.Error != "" {
 					reason := job.Error
 					if err != nil {
@@ -711,7 +848,7 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 			required := s.guestUpdateRequired
 			s.mu.Unlock()
 			if required {
-				job, err := s.appUpdateRunJob(ctx, "environment-update", s.appUpdateSyncRun())
+				job, err := s.appUpdateRunJob(ctx, "environment-update", s.appUpdateSyncRun(), c.Environment.NetworkPaused)
 				if err != nil || job.Error != "" {
 					reason := job.Error
 					if err != nil {
@@ -732,15 +869,18 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 				return
 			}
 		case policy.StepNetwork:
-			s.mu.Lock()
-			paused, gate, problem := s.networkPaused, s.safety.Gate, s.safety.Error
-			s.mu.Unlock()
-			if !paused && (gate == nil || gate.Mode != cage.GateOpen) {
-				if problem == "" {
-					problem = "外网尚未放行"
+			// A network the person paused before the update stays paused.
+			// Otherwise run 检查联网条件 once, like the button would.
+			if !c.Environment.NetworkPaused {
+				job, err := s.appUpdateRunJob(ctx, "safety", s.appUpdateNetworkRun(), false)
+				if err != nil || job.Error != "" {
+					reason := job.Error
+					if err != nil {
+						reason = err.Error()
+					}
+					fail(policy.StepNetwork, "已升级到 "+c.To+"，环境已恢复，但联网检查未通过："+reason)
+					return
 				}
-				fail(policy.StepNetwork, "已升级到 "+c.To+"，环境已恢复，但联网检查未通过："+problem)
-				return
 			}
 			if !save(policy.StepDone) {
 				return
@@ -775,7 +915,7 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 	a.mu.Lock()
 	pending, checked, request := a.pending, a.checked, a.request
 	a.mu.Unlock()
-	if pending == nil || now.Sub(checked) >= policy.CheckEvery {
+	if checked.IsZero() || now.Sub(checked) >= policy.CheckEvery {
 		check := a.check
 		if check == nil {
 			check = func(ctx context.Context) (*appupdate.Available, error) {

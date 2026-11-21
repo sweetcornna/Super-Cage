@@ -197,8 +197,8 @@ func TestAppUpdateSilentInstallsOnlyAfterIdleHeld(t *testing.T) {
 		t.Fatalf("attempt not recorded as unfinished before install: %+v", last)
 	}
 	c, err := policy.LoadChain(f.s.updateProfile())
-	if err != nil || c == nil || c.Step != policy.StepInstalling || c.From != "0.1.15" || c.To != "0.1.16" {
-		t.Fatalf("chain %+v %v", c, err)
+	if err != nil || c == nil || c.Step != policy.StepInstalling || c.From != "0.1.15" || c.To != "0.1.16" || reply.Attempt != c.ID {
+		t.Fatalf("chain %+v %v reply %+v", c, err, reply)
 	}
 	if _, err = f.s.submitJob("start", func() error { return nil }); !errors.Is(err, errJobsClosed) {
 		t.Fatalf("new job after prepared: %v", err)
@@ -214,6 +214,12 @@ func TestAppUpdateBlockerAppearingAfterRequestWins(t *testing.T) {
 		{"job started", func(f *updateFixture) { f.s.setJobForTest(Job{ID: "j", Kind: "start", Running: true}) }, policy.Busy},
 		{"phone connected", func(f *updateFixture) { f.s.notePhoneRequest() }, policy.Busy},
 		{"work came and went", func(f *updateFixture) { f.s.noteAppUpdateActivity() }, policy.Changed},
+		{"viewer came and went", func(f *updateFixture) {
+			release, err := f.s.desktopViews.acquire(func(bool) error { return nil })
+			if err == nil {
+				release()
+			}
+		}, policy.Changed},
 		{"guest command", func(f *updateFixture) {
 			f.guest = func(context.Context) (policy.Reading, error) {
 				return policy.Reading{Blockers: []policy.Blocker{{ID: "terminal-command:7", Kind: policy.KindTerminal, Interruptible: true, Label: "终端里还有命令在运行（make）"}}}, nil
@@ -534,27 +540,46 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 	t.Run("environment restarted and components updated", func(t *testing.T) {
 		f := newUpdateFixture(t)
 		version.Version = "0.1.16"
-		var started, synced atomic.Int32
+		var started, synced, checked atomic.Int32
 		f.s.appUpdate.start = func() error {
 			started.Add(1)
 			f.s.mu.Lock()
 			f.s.guestUpdateRequired = true
-			f.s.networkPaused = true
 			f.s.mu.Unlock()
 			return nil
 		}
 		f.s.appUpdate.sync = func() error { synced.Add(1); return nil }
+		f.s.appUpdate.network = func() error { checked.Add(1); return nil }
 		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
-		if c == nil || c.Step != policy.StepDone || started.Load() != 1 || synced.Load() != 1 {
-			t.Fatalf("chain %+v started=%d synced=%d", c, started.Load(), synced.Load())
+		ledger, _ := policy.LoadLedger(f.s.updateProfile())
+		if c == nil || c.Step != policy.StepDone || started.Load() != 1 || synced.Load() != 1 || checked.Load() != 1 || ledger.Last().Result != "ok" {
+			t.Fatalf("chain %+v started=%d synced=%d checked=%d", c, started.Load(), synced.Load(), checked.Load())
 		}
 	})
-	t.Run("network gate stays closed", func(t *testing.T) {
+	t.Run("a network paused before the update stays paused", func(t *testing.T) {
+		f := newUpdateFixture(t)
+		version.Version = "0.1.16"
+		f.s.networkPaused = true
+		var checked atomic.Int32
+		f.s.appUpdate.start = func() error { return nil }
+		f.s.appUpdate.network = func() error { checked.Add(1); return nil }
+		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true, NetworkPaused: true}})
+		f.s.resumeAppUpdateChain()
+		c, _ := policy.LoadChain(f.s.updateProfile())
+		f.s.mu.Lock()
+		paused := f.s.networkPaused
+		f.s.mu.Unlock()
+		if c == nil || c.Step != policy.StepDone || checked.Load() != 0 || !paused {
+			t.Fatalf("chain %+v network checked=%d paused=%t", c, checked.Load(), paused)
+		}
+	})
+	t.Run("network check fails", func(t *testing.T) {
 		f := newUpdateFixture(t)
 		version.Version = "0.1.16"
 		f.s.appUpdate.start = func() error { return nil }
+		f.s.appUpdate.network = func() error { return errors.New("节点不可用") }
 		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepRelaunched, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
@@ -567,10 +592,10 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		f := newUpdateFixture(t)
 		var started atomic.Int32
 		f.s.appUpdate.start = func() error { started.Add(1); return nil }
-		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "签名校验失败，已恢复原应用"}); err != nil {
+		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "签名校验失败，已恢复原应用", "version": "0.1.16"}); err != nil {
 			t.Fatal(err)
 		}
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		ledger, _ := policy.LoadLedger(f.s.updateProfile())
@@ -578,4 +603,48 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 			t.Fatalf("chain %+v attempt %+v started=%d", c, ledger.Last(), started.Load())
 		}
 	})
+	t.Run("old version without an installer result is left alone", func(t *testing.T) {
+		f := newUpdateFixture(t)
+		var started atomic.Int32
+		f.s.appUpdate.start = func() error { started.Add(1); return nil }
+		// A result from an earlier attempt does not count for this one.
+		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "旧结果", "version": "0.1.14"}); err != nil {
+			t.Fatal(err)
+		}
+		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		f.s.resumeAppUpdateChain()
+		c, _ := policy.LoadChain(f.s.updateProfile())
+		ledger, _ := policy.LoadLedger(f.s.updateProfile())
+		if c == nil || c.Step != policy.StepInstalling || started.Load() != 0 || ledger.Last().Result != "" || f.s.appUpdateStatusView().Chain.Note == "" {
+			t.Fatalf("chain %+v attempt %+v started=%d", c, ledger.Last(), started.Load())
+		}
+	})
+	t.Run("interrupted while stopping", func(t *testing.T) {
+		f := newUpdateFixture(t)
+		var started atomic.Int32
+		f.s.appUpdate.start = func() error { started.Add(1); return nil }
+		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepStopping, Environment: policy.Environment{Running: true}})
+		f.s.resumeAppUpdateChain()
+		c, _ := policy.LoadChain(f.s.updateProfile())
+		if c == nil || c.Step != policy.StepFailed || c.FailedStep != policy.StepStopping || started.Load() != 1 {
+			t.Fatalf("chain %+v started=%d", c, started.Load())
+		}
+	})
+}
+
+func TestSilentTickChecksForReleasesEverySixHours(t *testing.T) {
+	f := newUpdateFixture(t)
+	f.setMode(t, policy.Silent)
+	f.s.appUpdate.check = func(context.Context) (*appupdate.Available, error) { f.checks.Add(1); return nil, nil }
+	for range 6 {
+		f.s.appUpdateTick(context.Background())
+		f.advance(time.Hour)
+	}
+	if f.checks.Load() != 1 || f.guests.Load() != 0 {
+		t.Fatalf("six hourly ticks checked=%d read guest=%d", f.checks.Load(), f.guests.Load())
+	}
+	f.s.appUpdateTick(context.Background())
+	if f.checks.Load() != 2 {
+		t.Fatalf("seventh tick checked=%d", f.checks.Load())
+	}
 }

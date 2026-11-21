@@ -22,6 +22,9 @@ const (
 	UserActive        Code = "user_active"
 	UserUnknown       Code = "user_unknown"
 	Unreadable        Code = "unreadable"
+	// StopFailed is the workbench's answer when the decision allowed the
+	// installation but the environment did not stop; nothing was installed.
+	StopFailed Code = "stop_failed"
 )
 
 // Request is what an installer asks for.

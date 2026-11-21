@@ -73,6 +73,7 @@ func (s *Server) audio(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audioClients++
 	s.mu.Unlock()
+	s.noteAppUpdateActivity()
 	defer func() { s.mu.Lock(); s.audioClients--; s.mu.Unlock() }()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

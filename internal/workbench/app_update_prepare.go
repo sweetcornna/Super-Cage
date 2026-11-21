@@ -28,7 +28,10 @@ type AppUpdateOptions struct {
 // AppUpdatePrepared is the answer printed by "cage prepare-update --app-update".
 // Status is "prepared" (stop done, install now) or "blocked".
 type AppUpdatePrepared struct {
-	Status   string           `json:"status"`
+	Status string `json:"status"`
+	// Attempt identifies the update record; the installer writes it back
+	// into last-result.json so a rollback can be matched to it.
+	Attempt  string           `json:"attempt,omitempty"`
 	Code     policy.Code      `json:"code,omitempty"`
 	Message  string           `json:"message,omitempty"`
 	Blockers []policy.Blocker `json:"blockers,omitempty"`
@@ -87,12 +90,15 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 	}
 	switch status {
 	case http.StatusOK:
+		if reply.Status != "prepared" {
+			return AppUpdatePrepared{}, errors.New("后台响应无效，未继续更新。")
+		}
 		if err = c.waitForExit(); err != nil {
 			return AppUpdatePrepared{}, err
 		}
 		gateway, err := connectController(filepath.Dir(desktopConfigPath(fullConfig)))
 		if errors.Is(err, errControllerUnavailable) {
-			return AppUpdatePrepared{Status: "prepared"}, nil
+			return reply, nil
 		}
 		if err != nil {
 			return AppUpdatePrepared{}, err
@@ -101,7 +107,7 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 		if err = gateway.releaseDesktopEntry(); err != nil {
 			return AppUpdatePrepared{}, err
 		}
-		return AppUpdatePrepared{Status: "prepared"}, nil
+		return reply, nil
 	case http.StatusConflict:
 		if reply.Status != "blocked" {
 			reply = appUpdateBlocked(policy.Busy, "本机后台拒绝了这次升级")

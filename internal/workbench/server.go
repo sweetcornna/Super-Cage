@@ -982,15 +982,30 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.stopEnvironmentOwners()
+	jobID := s.jobs.cancelRunning()
+	if jobID != "" {
+		_ = cage.RequestJobStop(s.profile, jobID)
+	}
+	s.pauseNetworkForStop()
+	kind := "stop"
+	if logout {
+		kind = "logout"
+	}
+	s.launchJob(w, kind, s.stopEnvironment, reply)
+}
+
+// stopEnvironmentOwners asks the cage processes that own the environment to stop.
+func (s *Server) stopEnvironmentOwners() {
 	for _, name := range []string{cage.InstanceName(s.profile, s.environmentDir()), "base-building"} {
 		if owner := cage.InstanceJobID(filepath.Join(s.profile, "state"), name); owner != "" {
 			_ = cage.RequestJobStop(s.profile, owner)
 		}
 	}
-	jobID := s.jobs.cancelRunning()
-	if jobID != "" {
-		_ = cage.RequestJobStop(s.profile, jobID)
-	}
+}
+
+// pauseNetworkForStop closes the network before a stop job runs.
+func (s *Server) pauseNetworkForStop() {
 	if s.macosGuest != nil {
 		// Stopping the guest revokes its current grant. A user's saved pause
 		// remains distinct so the next Mac start can honor the same intent.
@@ -998,11 +1013,6 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 	} else if s.windowsGuest == nil {
 		_ = s.pauseNetworkNow("正在停止环境")
 	}
-	kind := "stop"
-	if logout {
-		kind = "logout"
-	}
-	s.launchJob(w, kind, s.stopEnvironment, reply)
 }
 
 func (s *Server) cookieName() string { u, _ := url.Parse(s.origin); return cookieName + "_" + u.Port() }
