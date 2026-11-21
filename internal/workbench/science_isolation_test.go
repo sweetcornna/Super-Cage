@@ -52,6 +52,8 @@ func newScienceFrameHarness(t *testing.T, frameSources string) *scienceFrameHarn
 	port := listener.Addr().(*net.TCPAddr).Port
 	h := &scienceFrameHarness{origin: fmt.Sprintf("http://localhost:%d", port), cookieName: fmt.Sprintf("cage_session_%d", port)}
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// As server.go: no response of the workbench is kept.
+		w.Header().Set("Cache-Control", "no-store")
 		switch r.URL.Path {
 		case "/":
 			http.SetCookie(w, &http.Cookie{Name: h.cookieName, Value: "real", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 86400 * 30})
@@ -138,6 +140,9 @@ func runScienceFrameNeverSeesTheHost(t *testing.T, variant string) {
 		time.Sleep(3 * time.Second)
 	case "top-level navigation":
 		time.Sleep(600 * time.Millisecond)
+		if scienceShellTrace {
+			t.Logf("%s navigate", time.Now().Format("05.000"))
+		}
 		shell.navigateTop(t, harness.origin+"/slow")
 		time.Sleep(3 * time.Second)
 	case "re-ticket":
@@ -150,8 +155,11 @@ func runScienceFrameNeverSeesTheHost(t *testing.T, variant string) {
 	}
 	guest := scienceGuestValues()
 	reports := scienceIdentityReports(t, env.daemon)
-	t.Logf("%d identity reports, %d frames ended by the shell", len(reports), shell.ended())
+	t.Logf("%d identity reports, %d failed calls, %d frames ended by the shell", len(reports), shell.failed.Load(), shell.ended())
 	for _, report := range reports {
+		if scienceShellTrace {
+			t.Logf("report %s %.40q", report.Why, report.Value)
+		}
 		if report.Value != guest {
 			t.Errorf("the guest page saw %q (%s)", report.Value, report.Why)
 		}
@@ -332,7 +340,7 @@ func TestScienceBrowserFrameCannotTouchWorkbenchCookies(t *testing.T) {
 // scienceTestFrameHost is the host the front's frame URLs use.
 func scienceTestFrameHost(env *testScienceFront) string {
 	u, _ := url.Parse(env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()}))
-	env.front.tickets.Clear()
+	env.front.reset("")
 	return u.Hostname()
 }
 
@@ -343,6 +351,7 @@ func TestScienceFrontLeavesNothingInTheBrowser(t *testing.T) {
 	env := newTestScienceFront(t)
 	env.daemon.assets["/assets/app.js"] = "1"
 	env.daemon.rootHeaders = map[string]string{"Cache-Control": "public, max-age=31536000, immutable", "Etag": `"a"`, "Last-Modified": "Mon, 01 Jan 2024 00:00:00 GMT", "Expires": "Thu, 01 Jan 2037 00:00:00 GMT", "Age": "10", "Vary": "Accept"}
+	env.ticket(t)
 	enter := env.do(t, env.client(t), "GET", "/_cage/enter", "", "", nil)
 	if got := enter.Header.Get("Clear-Site-Data"); got != `"cache", "storage"` {
 		t.Errorf("enter page Clear-Site-Data %q", got)
@@ -393,7 +402,7 @@ func TestScienceFrontLeavesNothingInTheBrowser(t *testing.T) {
 	}
 	// A flood of the page's own cookies (Chromium keeps up to 180 of 4 KiB
 	// per host) does not end the session.
-	flood := strings.Repeat("f=" + strings.Repeat("x", 4090) + "; ", 180)
+	flood := strings.Repeat("f="+strings.Repeat("x", 4090)+"; ", 180)
 	if r := env.do(t, client, "GET", "/assets/app.js", "", "", map[string]string{"Cookie": flood}); r.StatusCode != 200 {
 		t.Errorf("flooded request: %d", r.StatusCode)
 	}

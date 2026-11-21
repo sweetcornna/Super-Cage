@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -126,7 +127,7 @@ func shapeCodes(s *Server) map[string]int {
 
 func frameSources(t *testing.T, s *Server) string {
 	t.Helper()
-	w := requestShape{method: "GET", path: "/"}.send(s)
+	w := requestShape{method: "GET", path: "/", headers: map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}}.send(s)
 	policy := w.Header().Get("Content-Security-Policy")
 	for _, directive := range strings.Split(policy, ";") {
 		if fields := strings.Fields(directive); len(fields) > 0 && fields[0] == "frame-src" {
@@ -154,9 +155,6 @@ func TestScienceHostRenderOffChangesNothing(t *testing.T) {
 			for _, s := range []*Server{workload, entry} {
 				if got := frameSources(t, s); got != "'none'" {
 					t.Fatalf("frame-src %q", got)
-				}
-				if s.scienceHardened() {
-					t.Fatal("hardened while off")
 				}
 				// A same-site or cross-site page is treated as before: only
 				// the session cookie decides, and the first cookie of a name
@@ -219,19 +217,29 @@ func TestScienceHostRenderAvailability(t *testing.T) {
 	}
 }
 
-func TestScienceHostRenderOnHardensOnlyCrossSiteRequests(t *testing.T) {
+// windowFetch is the fetch metadata of the workbench document's own script
+// requests (what scienceFromWindow requires).
+var windowFetch = map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors", "Sec-Fetch-Dest": "empty"}
+
+func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	workload := scienceWorkload(t)
 	entry := scienceEntry(t, workload)
 	before := map[*Server]map[string]int{workload: shapeCodes(workload), entry: shapeCodes(entry)}
 
 	// Turning it on needs the window.
-	if w := (requestShape{method: "POST", path: "/api/claude-science/host-render"}).send(workload); w.Code != http.StatusBadRequest && w.Code != http.StatusConflict {
+	if w := (requestShape{method: "POST", path: "/api/claude-science/host-render"}).send(workload); w.Code != http.StatusForbidden {
+		t.Fatalf("not from the window: %d", w.Code)
+	}
+	if w := (requestShape{method: "POST", path: "/api/claude-science/host-render", headers: windowFetch}).send(workload); w.Code != http.StatusBadRequest {
 		t.Fatalf("empty body: %d", w.Code)
 	}
 	on := func(s *Server, enabled bool, trusted bool) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", s.origin+"/api/claude-science/host-render", strings.NewReader(fmt.Sprintf(`{"enabled":%v}`, enabled)))
 		r.Header.Set("Origin", s.origin)
 		r.Header.Set("Content-Type", "application/json")
+		for name, value := range windowFetch {
+			r.Header.Set(name, value)
+		}
 		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
 		if trusted {
 			r.AddCookie(&http.Cookie{Name: s.cookieName() + "-desktop", Value: trustedViewProof(s.token)})
@@ -242,6 +250,15 @@ func TestScienceHostRenderOnHardensOnlyCrossSiteRequests(t *testing.T) {
 	}
 	if w := on(workload, true, false); w.Code != http.StatusConflict || workload.scienceFrontRunning() != nil {
 		t.Fatalf("enabled without the window: %d", w.Code)
+	}
+	// The agent transport's client: the window's proof, no fetch metadata.
+	agent := httptest.NewRequest("POST", workload.origin+"/api/claude-science/host-render", strings.NewReader(`{"enabled":true}`))
+	agent.Header.Set("Origin", workload.origin)
+	agent.Header.Set("Content-Type", "application/json")
+	agent.AddCookie(&http.Cookie{Name: workload.cookieName(), Value: workload.session})
+	agent.AddCookie(&http.Cookie{Name: workload.cookieName() + "-desktop", Value: trustedViewProof(workload.token)})
+	if w := httptest.NewRecorder(); func() int { workload.handler().ServeHTTP(w, agent); return w.Code }() != http.StatusForbidden || workload.scienceFrontRunning() != nil {
+		t.Fatal("the agent transport turned host rendering on")
 	}
 	w := on(workload, true, true)
 	if w.Code != http.StatusOK {
@@ -275,10 +292,10 @@ func TestScienceHostRenderOnHardensOnlyCrossSiteRequests(t *testing.T) {
 		t.Fatalf("front with a foreign Host: %d", response.StatusCode)
 	}
 
-	// The entry's document may frame exactly that front; the workload's own
-	// document still frames nothing.
-	entry.scienceHost.cache.at = time.Time{}
-	if got := frameSources(t, entry); got != front.origin {
+	// The entry's document may frame exactly that front's label origins; the
+	// workload's own document still frames nothing, and no other response
+	// of the entry reads a control file.
+	if got := frameSources(t, entry); got != scienceFrameSource(front.port) {
 		t.Fatalf("entry frame-src %q", got)
 	}
 	if got := frameSources(t, workload); got != "'none'" {
@@ -290,16 +307,17 @@ func TestScienceHostRenderOnHardensOnlyCrossSiteRequests(t *testing.T) {
 			t.Fatalf("callers changed:\nbefore %v\nafter  %v", codes, after)
 		}
 	}
-	// Only a page on another site (or another loopback port) is refused, and
-	// a shadowing cookie no longer locks the real one out.
+	// The front is another site: nothing about the workbench's own requests
+	// changes (no hardening, the first cookie of a name is still the one
+	// read).
 	for _, s := range []*Server{workload, entry} {
 		for _, site := range []string{"same-site", "cross-site"} {
-			if w := (requestShape{method: "GET", path: "/api/settings", headers: map[string]string{"Sec-Fetch-Site": site}}).send(s); w.Code != http.StatusForbidden {
-				t.Fatalf("%s: %d", site, w.Code)
+			if w := (requestShape{method: "GET", path: "/api/settings", headers: map[string]string{"Sec-Fetch-Site": site}}).send(s); w.Code == http.StatusForbidden {
+				t.Fatalf("%s refused while on: %d", site, w.Code)
 			}
 		}
-		if w := (requestShape{method: "GET", path: "/api/settings", cookies: []string{strings.Repeat("f", 64), ""}}).send(s); w.Code == http.StatusUnauthorized {
-			t.Fatal("shadowed cookie still locks out")
+		if w := (requestShape{method: "GET", path: "/api/settings", cookies: []string{strings.Repeat("f", 64), ""}}).send(s); w.Code != http.StatusUnauthorized {
+			t.Fatalf("cookie rule changed while on: %d", w.Code)
 		}
 	}
 	// The settings pages do not know the switch: a save keeps it.
@@ -335,16 +353,12 @@ func TestScienceHostRenderOnHardensOnlyCrossSiteRequests(t *testing.T) {
 	if strings.Contains(string(data), "science") {
 		t.Fatalf("control file kept the front: %s", data)
 	}
-	entry.scienceHost.cache.at = time.Time{}
 	for s, codes := range before {
 		if got := frameSources(t, s); got != "'none'" {
 			t.Fatalf("frame-src after off: %q", got)
 		}
 		if after := shapeCodes(s); fmt.Sprint(after) != fmt.Sprint(codes) {
 			t.Fatalf("callers changed after off: %v %v", codes, after)
-		}
-		if w := (requestShape{method: "GET", path: "/api/settings", headers: map[string]string{"Sec-Fetch-Site": "same-site"}}).send(s); w.Code == http.StatusForbidden {
-			t.Fatal("still hardened after off")
 		}
 	}
 }
@@ -371,10 +385,16 @@ func TestScienceTicketRoute(t *testing.T) {
 		body := `{"timezone":"Asia/Tokyo","expected_timezone":"Asia/Tokyo","language":"ja-JP","languages":["ja-JP"],"platform":"Linux x86_64","device":{"user_agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36","platform":"Linux x86_64","client_hints":{"brands":[{"brand":"Chromium","version":"157"}],"platform":"Linux","mobile":false}}}`
 		return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
 	}))
+	window := true
 	ticket := func(trusted bool, host string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("POST", s.origin+"/api/claude-science/ticket", strings.NewReader(host))
 		r.Header.Set("Origin", s.origin)
 		r.Header.Set("Content-Type", "application/json")
+		if window {
+			for name, value := range windowFetch {
+				r.Header.Set(name, value)
+			}
+		}
 		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
 		if trusted {
 			r.AddCookie(&http.Cookie{Name: s.cookieName() + "-desktop", Value: trustedViewProof(s.token)})
@@ -392,6 +412,11 @@ func TestScienceTicketRoute(t *testing.T) {
 	if w := ticket(false, host); w.Code != http.StatusConflict {
 		t.Fatalf("ticket without the window: %d", w.Code)
 	}
+	window = false
+	if w := ticket(true, host); w.Code != http.StatusForbidden {
+		t.Fatalf("ticket for the agent transport: %d", w.Code)
+	}
+	window = true
 	if w := ticket(true, `{"host":{"timezone":"../x"}}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid host identity: %d", w.Code)
 	}
@@ -403,7 +428,8 @@ func TestScienceTicketRoute(t *testing.T) {
 		URL string `json:"url"`
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &reply)
-	if !strings.HasPrefix(reply.URL, front.origin+"/_cage/enter#") || len(strings.TrimPrefix(reply.URL, front.origin+"/_cage/enter#")) != 64 || audits != 1 {
+	entryURL, _ := url.Parse(reply.URL)
+	if entryURL == nil || entryURL.Path != "/_cage/enter" || entryURL.Fragment != "" || !scienceLabelHost.MatchString(entryURL.Host) || !strings.HasSuffix(entryURL.Host, fmt.Sprintf(".localhost:%d", front.port)) || audits != 1 {
 		t.Fatalf("ticket URL %q, audits %d", reply.URL, audits)
 	}
 	// The shell's copy of the identity is in the control file, not the page.
@@ -508,7 +534,10 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 	t.Run("pane released", func(t *testing.T) {
 		s := start(t)
 		front, _ := liveScienceFront(t, s)
-		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true}).send(s); w.Code != http.StatusNoContent {
+		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true}).send(s); w.Code != http.StatusForbidden {
+			t.Fatalf("release not from the window: %d", w.Code)
+		}
+		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true, headers: windowFetch}).send(s); w.Code != http.StatusNoContent {
 			t.Fatalf("release: %d", w.Code)
 		}
 		if !frontCleared(front) {
@@ -551,7 +580,7 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 			t.Fatal("ended while the pane was recent")
 		}
 		// The pane's poll keeps it; silence past the lease ends it.
-		(requestShape{method: "GET", path: "/api/claude-science/host-render", trusted: true}).send(s)
+		(requestShape{method: "GET", path: "/api/claude-science/host-render", trusted: true, headers: windowFetch}).send(s)
 		mu.Lock()
 		later = later.Add(scienceOrphanAfter - time.Second)
 		mu.Unlock()

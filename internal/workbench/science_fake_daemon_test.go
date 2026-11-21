@@ -7,7 +7,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"regexp"
@@ -278,6 +277,8 @@ type testScienceFront struct {
 	mu      sync.Mutex
 	epoch   context.Context
 	lock    context.CancelFunc
+	// label is the last entry's (the session's once entered).
+	label string
 }
 
 // newTestScienceFront runs a real front on a loopback port in front of a
@@ -317,31 +318,38 @@ func newTestScienceFrontAt(t *testing.T, port int) *testScienceFront {
 	return env
 }
 
+// base is the origin of the last entry's label.
+func (env *testScienceFront) base() string { return env.front.labelOrigin(env.label) }
+
+// host is its Host.
+func (env *testScienceFront) host() string { return strings.TrimPrefix(env.base(), "http://") }
+
 // sessionOrigin is the origin the frame's requests carry.
-func (env *testScienceFront) sessionOrigin() string { return env.front.origin }
+func (env *testScienceFront) sessionOrigin() string { return env.base() }
 
 // scienceTestFrameSources is the workbench's frame-src for this front.
-func scienceTestFrameSources(env *testScienceFront) string { return env.front.origin }
+func scienceTestFrameSources(env *testScienceFront) string { return scienceFrameSource(env.front.port) }
 
-// client is a browser stand-in: it reaches localhost:Q on 127.0.0.1 and
-// keeps cookies.
+// dial reaches the front on 127.0.0.1 for any name of its port.
+func (env *testScienceFront) dial(ctx context.Context, network, address string) (net.Conn, error) {
+	_, port, err := net.SplitHostPort(address)
+	if err != nil || port != fmt.Sprint(env.front.port) {
+		return nil, fmt.Errorf("test client refused %s", address)
+	}
+	return (&net.Dialer{}).DialContext(ctx, "tcp4", fmt.Sprintf("127.0.0.1:%d", env.front.port))
+}
+
+// client is a browser stand-in without cookies (the front uses none).
 func (env *testScienceFront) client(t *testing.T) *http.Client {
 	t.Helper()
-	jar, _ := cookiejar.New(nil)
-	port := env.front.port
-	transport := &http.Transport{DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
-		if address != fmt.Sprintf("localhost:%d", port) {
-			return nil, fmt.Errorf("test client refused %s", address)
-		}
-		return (&net.Dialer{}).DialContext(ctx, "tcp4", fmt.Sprintf("127.0.0.1:%d", port))
-	}}
+	transport := &http.Transport{DialContext: env.dial}
 	t.Cleanup(transport.CloseIdleConnections)
-	return &http.Client{Jar: jar, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	return &http.Client{Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
 
 func (env *testScienceFront) do(t *testing.T, client *http.Client, method, path, origin, body string, headers map[string]string) *http.Response {
 	t.Helper()
-	request, err := http.NewRequest(method, env.front.origin+path, strings.NewReader(body))
+	request, err := http.NewRequest(method, env.base()+path, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,26 +376,29 @@ func readBody(t *testing.T, response *http.Response) string {
 	return string(data)
 }
 
+// ticket issues an entry and makes its label the one requests use.
 func (env *testScienceFront) ticket(t *testing.T) string {
 	t.Helper()
-	ticketURL := env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
-	parsed, _ := url.Parse(ticketURL)
-	if parsed.Path != "/_cage/enter" || parsed.Host != env.front.host || parsed.Scheme != "http" {
-		t.Fatalf("ticket URL: %s", ticketURL)
+	entry := env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
+	parsed, _ := url.Parse(entry)
+	match := scienceLabelHost.FindStringSubmatch(parsed.Host)
+	if parsed.Path != "/_cage/enter" || parsed.Scheme != "http" || parsed.Fragment != "" || match == nil || match[2] != fmt.Sprint(env.front.port) {
+		t.Fatalf("entry URL: %s", entry)
 	}
-	return parsed.Fragment
+	env.label = match[1]
+	return env.label
 }
 
 // enter performs the entry and the probe as the frame would, returning a
-// client holding the session cookie and the probe's status code.
+// client and the probe's status code; env.label is then the session's.
 func (env *testScienceFront) enter(t *testing.T, reports []scienceProbeReport) (*http.Client, int) {
 	t.Helper()
 	client := env.client(t)
-	body, _ := json.Marshal(map[string]string{"ticket": env.ticket(t)})
-	if r := env.do(t, client, "POST", "/_cage/enter", env.front.origin, string(body), map[string]string{"Content-Type": "application/json"}); r.StatusCode != 204 {
+	env.ticket(t)
+	if r := env.do(t, client, "POST", "/_cage/enter", env.base(), "{}", map[string]string{"Content-Type": "application/json"}); r.StatusCode != 204 {
 		t.Fatalf("enter: %d %s", r.StatusCode, readBody(t, r))
 	}
 	payload, _ := json.Marshal(map[string]any{"reports": reports})
-	r := env.do(t, client, "POST", "/_cage/probe", env.front.origin, string(payload), map[string]string{"Content-Type": "application/json"})
+	r := env.do(t, client, "POST", "/_cage/probe", env.base(), string(payload), map[string]string{"Content-Type": "application/json"})
 	return client, r.StatusCode
 }

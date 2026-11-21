@@ -14,13 +14,17 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
-	"github.com/sylvinus/agent-vm/internal/webfront"
 )
 
 // Claude Science phase 2a, workbench side: when host rendering is on, the
 // workload runs a front (science_front.go) and the Windows shell frames it in
 // the desktop entry's document. Off is the default, and off changes nothing:
 // no listener, frame-src 'none', no request treated differently.
+//
+// The actions that change host rendering (host-render, ticket, release) are
+// the window's alone: they need the fetch metadata of a same-origin script
+// request (scienceFromWindow), which the agent transport's client and the
+// phone do not send.
 //
 // Contract additions (all behind the existing session, Origin and account
 // checks of /api; errors are plain Chinese text):
@@ -37,9 +41,9 @@ import (
 //	POST /api/claude-science/host-render {"enabled": bool} -> host_render
 //	  409 when turning on is unavailable here.
 //	POST /api/claude-science/ticket {"host": {timezone, offset, languages}}
-//	  -> {"url": "http://localhost:<port>/_cage/enter#<ticket>"}; 60 s, single
+//	  -> {"url": "http://<label>.localhost:<port>/_cage/enter"}; 60 s, single
 //	  use, bound to this workbench session's account epoch. host is what the
-//	  page measured after the shell dropped its overrides (for the audit).
+//	  workbench document measures (the shell never changes it).
 //	  409 unavailable, off, environment or Claude Science not running, or the
 //	  guest browser's identity unreadable.
 //	POST /api/claude-science/release {} -> 204: the pane closed its frame;
@@ -59,17 +63,8 @@ type scienceHost struct {
 	front *scienceFront
 	err   string
 	stop  context.CancelFunc
-	cache scienceFrontCache
 	// vmRunning replaces Server.vmRunning in tests.
 	vmRunning func() bool
-}
-
-// scienceFrontCache keeps the desktop entry's scan of local fronts briefly,
-// since the hardening check runs on every request.
-type scienceFrontCache struct {
-	mu    sync.Mutex
-	at    time.Time
-	ports []int
 }
 
 type scienceHostRenderState struct {
@@ -387,24 +382,18 @@ func (s *Server) publishScienceControl(port int, identity *scienceIdentity, keep
 }
 
 // localScienceFronts is the desktop entry's view: the fronts that local
-// workloads published in their control files.
+// workloads published in their control files. Read when a document is
+// served, never on a timer.
 func (s *Server) localScienceFronts() []int {
 	if scienceHostOS != "windows" || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
 		return nil
 	}
-	cache := &s.scienceHost.cache
-	cache.mu.Lock()
-	defer cache.mu.Unlock()
-	if time.Since(cache.at) < time.Second {
-		return cache.ports
-	}
-	cache.at = time.Now()
 	root := s.remote.desktop.localVMs.defaultProfile
 	profiles := []string{root}
 	if matches, err := filepath.Glob(filepath.Join(root, cage.LocalVMDir, "*")); err == nil {
 		profiles = append(profiles, matches...)
 	}
-	cache.ports = nil
+	var ports []int
 	for _, profile := range profiles {
 		data, err := os.ReadFile(filepath.Join(profile, "control.json"))
 		if err != nil || len(data) > 64<<10 {
@@ -412,52 +401,46 @@ func (s *Server) localScienceFronts() []int {
 		}
 		var record controlFile
 		if json.Unmarshal(data, &record) == nil && record.SciencePort >= 1024 && record.SciencePort <= 65535 {
-			cache.ports = append(cache.ports, record.SciencePort)
+			ports = append(ports, record.SciencePort)
 		}
 	}
-	return cache.ports
+	return ports
 }
 
 // scienceFrameSources is the workbench document's frame-src: 'none' unless a
-// local front runs (only the desktop entry's document frames it).
-func (s *Server) scienceFrameSources() string {
+// local front runs (only the desktop entry's document frames it). Only a
+// document navigation needs it; every other response keeps 'none' and
+// reads nothing.
+func (s *Server) scienceFrameSources(r *http.Request) string {
+	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "document" {
+		return "'none'"
+	}
 	ports := s.localScienceFronts()
 	if len(ports) == 0 {
 		return "'none'"
 	}
 	sources := make([]string, 0, len(ports))
 	for _, port := range ports {
-		sources = append(sources, "http://localhost:"+strconv.Itoa(port))
+		sources = append(sources, scienceFrameSource(port))
 	}
 	return strings.Join(sources, " ")
 }
 
-// scienceHardened: a front runs on this host, so a page on another loopback
-// port (the front's guest-served app) is same-site with this workbench.
-func (s *Server) scienceHardened() bool {
-	if s.desktopEntry {
-		return len(s.localScienceFronts()) > 0
-	}
-	return s.scienceFrontRunning() != nil
+// scienceFromWindow: a script request of the workbench document itself
+// (fetch metadata, which browsers always send to loopback). The agent
+// transport's client, the phone link and other programs send none; a local
+// program could forge it.
+func scienceFromWindow(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Site") == "same-origin" && r.Header.Get("Sec-Fetch-Mode") == "cors" && r.Header.Get("Sec-Fetch-Dest") == "empty"
 }
 
-// scienceCrossSite: an /api request a browser made from another site or
-// another loopback port. Requests without fetch metadata (the shell's own
-// helpers, the phone link, the desktop gateway's hop) carry none.
-func scienceCrossSite(r *http.Request) bool {
-	site := r.Header.Get("Sec-Fetch-Site")
-	return site == "same-site" || site == "cross-site"
-}
-
-// sessionCookieValid is the /api session check. While hardened, any of
-// several cookies with the session name may match (a same-site page can set
-// an impostor that would shadow the real one).
-func (s *Server) sessionCookieValid(r *http.Request, hardened bool) bool {
-	if hardened {
-		return webfront.CookieMatches(r, s.cookieName(), s.session)
+// scienceWindowOnly answers 403 when the request is not the window's own.
+func scienceWindowOnly(w http.ResponseWriter, r *http.Request) bool {
+	if scienceFromWindow(r) {
+		return false
 	}
-	c, e := r.Cookie(s.cookieName())
-	return e == nil && equalSecret(c.Value, s.session)
+	http.Error(w, "本机渲染只能在 Super Cage 窗口中操作。", http.StatusForbidden)
+	return true
 }
 
 // scienceEntryRefuses runs in the desktop entry before a request goes to the
@@ -476,6 +459,9 @@ func (s *Server) scienceEntryRefuses(w http.ResponseWriter, r *http.Request) boo
 }
 
 func (s *Server) scienceReleaseAction(w http.ResponseWriter, r *http.Request) {
+	if scienceWindowOnly(w, r) {
+		return
+	}
 	var input struct{}
 	if !readJSON(w, r, &input) {
 		return
@@ -485,6 +471,9 @@ func (s *Server) scienceReleaseAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request) {
+	if scienceWindowOnly(w, r) {
+		return
+	}
 	var input struct {
 		Enabled *bool `json:"enabled"`
 	}
@@ -520,13 +509,17 @@ func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request)
 // scienceHostRenderRead is the pane's poll while its frame is open: the
 // front's state only, without reading the guest.
 func (s *Server) scienceHostRenderRead(w http.ResponseWriter, r *http.Request) {
-	if front := s.scienceFrontRunning(); front != nil {
+	// Only the window's own poll keeps a session alive.
+	if front := s.scienceFrontRunning(); front != nil && scienceFromWindow(r) {
 		front.heard()
 	}
 	jsonReply(w, s.scienceHostRender(r))
 }
 
 func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
+	if scienceWindowOnly(w, r) {
+		return
+	}
 	var input struct {
 		Host scienceHostIdentity `json:"host"`
 	}

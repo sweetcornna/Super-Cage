@@ -41,8 +41,14 @@ type cdpClient struct {
 	write   sync.Mutex
 	mu      sync.Mutex
 	next    int
-	pending map[int]chan cdpMessage
+	pending map[int]cdpPending
 	events  []func(cdpMessage)
+	ordered []func(cdpMessage)
+}
+
+type cdpPending struct {
+	session string
+	reply   chan cdpMessage
 }
 
 func (c *cdpClient) call(session, method string, params any, out any) error {
@@ -57,7 +63,7 @@ func (c *cdpClient) call(session, method string, params any, out any) error {
 	c.next++
 	id := c.next
 	reply := make(chan cdpMessage, 1)
-	c.pending[id] = reply
+	c.pending[id] = cdpPending{session: session, reply: reply}
 	c.mu.Unlock()
 	c.write.Lock()
 	err = c.conn.WriteJSON(cdpMessage{ID: id, Method: method, Params: raw, SessionID: session})
@@ -87,13 +93,21 @@ func (c *cdpClient) on(handler func(cdpMessage)) {
 	c.mu.Unlock()
 }
 
+// onOrdered registers a handler called on the reader, in the order events
+// arrive. It must not wait for the browser.
+func (c *cdpClient) onOrdered(handler func(cdpMessage)) {
+	c.mu.Lock()
+	c.ordered = append(c.ordered, handler)
+	c.mu.Unlock()
+}
+
 func (c *cdpClient) read() {
 	for {
 		var message cdpMessage
 		if err := c.conn.ReadJSON(&message); err != nil {
 			c.mu.Lock()
-			for id, reply := range c.pending {
-				reply <- cdpMessage{ID: id, Error: &cdpError{Message: "connection closed"}}
+			for id, pending := range c.pending {
+				pending.reply <- cdpMessage{ID: id, Error: &cdpError{Message: "connection closed"}}
 				delete(c.pending, id)
 			}
 			c.mu.Unlock()
@@ -101,16 +115,34 @@ func (c *cdpClient) read() {
 		}
 		c.mu.Lock()
 		if message.ID != 0 {
-			if reply, ok := c.pending[message.ID]; ok {
+			if pending, ok := c.pending[message.ID]; ok {
 				delete(c.pending, message.ID)
-				reply <- message
+				pending.reply <- message
 			}
 			c.mu.Unlock()
 			continue
 		}
+		if message.Method == "Target.detachedFromTarget" {
+			// Calls in flight on a detached session get no reply.
+			var detached struct {
+				SessionID string `json:"sessionId"`
+			}
+			_ = json.Unmarshal(message.Params, &detached)
+			for id, pending := range c.pending {
+				if detached.SessionID != "" && pending.session == detached.SessionID {
+					pending.reply <- cdpMessage{ID: id, Error: &cdpError{Message: "target detached"}}
+					delete(c.pending, id)
+				}
+			}
+		}
 		handlers := make([]func(cdpMessage), len(c.events))
 		copy(handlers, c.events)
+		ordered := make([]func(cdpMessage), len(c.ordered))
+		copy(ordered, c.ordered)
 		c.mu.Unlock()
+		for _, handler := range ordered {
+			handler(message)
+		}
 		for _, handler := range handlers {
 			go handler(message)
 		}
@@ -192,7 +224,7 @@ func launchTestBrowserWithPreferences(t *testing.T, preferences map[string]any, 
 		t.Fatal(err)
 	}
 	conn.SetReadLimit(64 << 20)
-	browser.cdpClient = &cdpClient{conn: conn, pending: map[int]chan cdpMessage{}}
+	browser.cdpClient = &cdpClient{conn: conn, pending: map[int]cdpPending{}}
 	go browser.read()
 	return browser
 }
@@ -244,10 +276,11 @@ type cdpCall struct {
 // before it runs: CDP has no navigator.platform override for workers.
 const scienceWorkerPlatformPatch = "Object.defineProperty(WorkerNavigator.prototype, 'platform', { get() { return %s; }, configurable: true, enumerable: true }); true"
 
-// scienceOverrideCalls is the page-level sequence (layer 1). The worker
-// sequence is scienceWorkerCalls. ScienceFrame.cs builds the same calls;
+// scienceFrameCalls prepare the Science frame's own target before its
+// document runs: the only target that gets the guest's identity besides
+// the frame's own workers and frames. ScienceFrame.cs builds the same calls;
 // both are checked against testdata/science-cdp.json.
-func scienceOverrideCalls(identity scienceIdentity) []cdpCall {
+func scienceFrameCalls(identity scienceIdentity) []cdpCall {
 	return []cdpCall{
 		{"Emulation.setTimezoneOverride", map[string]any{"timezoneId": identity.Timezone}},
 		{"Emulation.setLocaleOverride", map[string]any{"locale": identity.Locale}},
@@ -257,6 +290,7 @@ func scienceOverrideCalls(identity scienceIdentity) []cdpCall {
 		{"Page.enable", map[string]any{}},
 		{"Page.setInterceptFileChooserDialog", map[string]any{"enabled": true, "cancel": true}},
 		{"Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}},
+		{"Runtime.runIfWaitingForDebugger", map[string]any{}},
 	}
 }
 
@@ -270,85 +304,34 @@ func scienceWorkerCalls(identity scienceIdentity) []cdpCall {
 	}
 }
 
+// sciencePageAttachCalls: the window's own page session only pauses each
+// new target until the policy has decided (scienceFramePolicy); nothing on
+// the workbench document changes.
+func sciencePageAttachCalls() []cdpCall {
+	return []cdpCall{{"Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}}}
+}
+
+// sciencePageDetachCalls end it, once no guest target is left (turning it
+// off detaches every child session, which drops their overrides and lets
+// paused targets run).
+func sciencePageDetachCalls() []cdpCall {
+	return []cdpCall{{"Target.setAutoAttach", map[string]any{"autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true}}}
+}
+
+func scienceResumeCalls() []cdpCall {
+	return []cdpCall{{"Runtime.runIfWaitingForDebugger", map[string]any{}}}
+}
+
 // scienceUserAgentParams: ua_metadata in the control file already has the
 // CDP UserAgentMetadata shape; the shell passes it through.
 func scienceUserAgentParams(identity scienceIdentity) map[string]any {
 	return map[string]any{"userAgent": identity.UserAgent, "acceptLanguage": identity.AcceptLanguage, "platform": identity.Platform, "userAgentMetadata": identity.Metadata}
 }
 
-// scienceDisarmCalls clears the page-level overrides and stops attaching to
-// new workers.
-func scienceDisarmCalls() []cdpCall {
-	return []cdpCall{
-		{"Target.setAutoAttach", map[string]any{"autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true}},
-		{"Emulation.setTimezoneOverride", map[string]any{"timezoneId": ""}},
-		{"Emulation.setLocaleOverride", map[string]any{}},
-		{"Emulation.setUserAgentOverride", map[string]any{"userAgent": ""}},
-		{"Page.setInterceptFileChooserDialog", map[string]any{"enabled": false}},
-		{"Page.disable", map[string]any{}},
-	}
-}
-
 // scienceBenignOverrideError: the locale override is renderer-process wide,
 // so a second target in the same process reports it as already set.
 func scienceBenignOverrideError(err error) bool {
 	return strings.Contains(err.Error(), "Another locale override is already in effect")
-}
-
-// armIdentity applies layer 1 to a page session the way the shell does. With
-// workers false only the page-level overrides are sent (to show that layer 2
-// notices what that misses).
-func (b *testBrowser) armIdentity(t *testing.T, session string, identity scienceIdentity, workers bool) *sync.Map {
-	t.Helper()
-	seen := &sync.Map{}
-	calls := scienceOverrideCalls(identity)
-	if !workers {
-		calls = calls[:3]
-	}
-	if workers {
-		b.on(func(message cdpMessage) {
-			if message.Method != "Target.attachedToTarget" {
-				return
-			}
-			var attached struct {
-				SessionID  string `json:"sessionId"`
-				TargetInfo struct {
-					Type string `json:"type"`
-					URL  string `json:"url"`
-				} `json:"targetInfo"`
-			}
-			if json.Unmarshal(message.Params, &attached) != nil {
-				return
-			}
-			seen.Store(attached.SessionID, attached.TargetInfo.Type)
-			t.Logf("attached %s %s", attached.TargetInfo.Type, attached.TargetInfo.URL)
-			calls := scienceWorkerCalls(identity)
-			if attached.TargetInfo.Type == "iframe" {
-				// A cross-site frame (never legitimate: the front's CSP
-				// allows 'self' only, and the shell's frame policy refuses
-				// it) still gets the page's overrides before it runs.
-				calls = append(scienceOverrideCalls(identity), cdpCall{"Runtime.runIfWaitingForDebugger", map[string]any{}})
-			}
-			if attached.TargetInfo.Type == "service_worker" || attached.TargetInfo.Type == "shared_worker" {
-				// These targets take no Emulation calls (they hang). The
-				// front refuses their scripts, so resuming lets the
-				// registration fail instead of hanging.
-				calls = []cdpCall{{"Runtime.runIfWaitingForDebugger", map[string]any{}}}
-			}
-			for _, call := range calls {
-				if err := b.call(attached.SessionID, call.Method, call.Params, nil); err != nil && !scienceBenignOverrideError(err) {
-					t.Logf("%s %s: %v", attached.TargetInfo.Type, call.Method, err)
-					return
-				}
-			}
-		})
-	}
-	for _, call := range calls {
-		if err := b.call(session, call.Method, call.Params, nil); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return seen
 }
 
 // captureConsole records console messages, exceptions and browser log

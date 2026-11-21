@@ -188,7 +188,7 @@ func (c *scienceCanary) seen() []string {
 // newScienceWorkbenchPage stands in for the desktop entry's document: the
 // workbench CSP with frame-src narrowed to the front, and the frame
 // attributes of the pane.
-func newScienceWorkbenchPage(t *testing.T, frontOrigin string, ticket func() string) (string, *atomic.Int32) {
+func newScienceWorkbenchPage(t *testing.T, frameSources string, ticket func() string) (string, *atomic.Int32) {
 	t.Helper()
 	var other atomic.Int32
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -199,9 +199,9 @@ func newScienceWorkbenchPage(t *testing.T, frontOrigin string, ticket func() str
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frontOrigin+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frameSources+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<!doctype html><title>Super Cage</title><iframe id=\"science\" src=\"%s\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-modals\" allow=\"clipboard-write\" referrerpolicy=\"no-referrer\" style=\"width:1000px;height:700px\"></iframe>", ticket())
+		fmt.Fprintf(w, "<!doctype html><title>Super Cage</title><div id=\"pane\"><iframe id=\"science\" src=\"%s\" sandbox=\"%s\" allow=\"clipboard-write\" referrerpolicy=\"no-referrer\" style=\"width:1000px;height:700px\"></iframe></div>", ticket(), scienceFrameSandbox)
 	}))
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -273,7 +273,7 @@ func (b *testBrowser) emulateFramePolicy(t *testing.T, session, workbench, front
 			} `json:"request"`
 		}
 		_ = json.Unmarshal(message.Params, &paused)
-		if origin := originOf(paused.Request.URL); origin == workbench || origin == front {
+		if origin := originOf(paused.Request.URL); origin == workbench || origin == front || scienceLabelHost.MatchString(strings.TrimPrefix(origin, "http://")) {
 			_ = b.call(message.SessionID, "Fetch.continueRequest", map[string]any{"requestId": paused.RequestID}, nil)
 			return
 		}
@@ -350,7 +350,7 @@ func runScienceExfiltration(t *testing.T, preferences map[string]any) {
 	env := newTestScienceFront(t)
 	canary := newScienceCanary(t)
 	proxyPort, proxied := newScienceCanaryProxy(t)
-	workbenchOrigin, workbenchOther := newScienceWorkbenchPage(t, env.front.origin, func() string {
+	workbenchOrigin, workbenchOther := newScienceWorkbenchPage(t, scienceTestFrameSources(env), func() string {
 		return env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
 	})
 	env.front.hooks.ancestor = func() string { return workbenchOrigin }
@@ -361,8 +361,9 @@ func runScienceExfiltration(t *testing.T, preferences map[string]any) {
 
 	browser := launchTestBrowserWithPreferences(t, preferences, scienceHostEnv, append(scienceBackstopArgs(proxyPort), "--lang=fr-FR")...)
 	session := browser.page(t)
-	browser.armIdentity(t, session, testScienceIdentity, true)
-	blockedNavigations := browser.emulateFramePolicy(t, session, workbenchOrigin, env.front.origin)
+	shell := newScienceShell(t, browser, session)
+	shell.arm()
+	blockedNavigations := browser.emulateFramePolicy(t, session, workbenchOrigin, "")
 	console := browser.captureConsole(t, session)
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -513,7 +514,7 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 		reason   string
 	}{
 		{"no overrides", false, false, true, false, "时区"},
-		{"page overrides without workers", true, false, true, false, "后台线程"},
+		{"frame overrides without workers", true, false, true, false, "后台线程"},
 		{"the shell's overrides without the backstop", true, true, false, false, "WebRTC"},
 		{"the shell's overrides", true, true, true, true, ""},
 	}
@@ -521,7 +522,7 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newTestScienceFront(t)
 			proxyPort, proxied := newScienceCanaryProxy(t)
-			workbenchOrigin, _ := newScienceWorkbenchPage(t, env.front.origin, func() string {
+			workbenchOrigin, _ := newScienceWorkbenchPage(t, scienceTestFrameSources(env), func() string {
 				return env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
 			})
 			env.front.hooks.ancestor = func() string { return workbenchOrigin }
@@ -532,7 +533,9 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 			browser := launchTestBrowser(t, scienceHostEnv, args...)
 			session := browser.page(t)
 			if tc.arm {
-				browser.armIdentity(t, session, testScienceIdentity, tc.workers)
+				shell := newScienceShell(t, browser, session)
+				shell.workers = tc.workers
+				shell.arm()
 			}
 			if err := browser.call(session, "Page.navigate", map[string]any{"url": workbenchOrigin + "/"}, nil); err != nil {
 				t.Fatal(err)

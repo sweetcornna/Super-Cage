@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -21,40 +20,54 @@ import (
 func TestScienceTicketReplayExpiryAndEpoch(t *testing.T) {
 	env := newTestScienceFront(t)
 	client := env.client(t)
-	post := func(ticket string) int {
-		body, _ := json.Marshal(map[string]string{"ticket": ticket})
-		return env.do(t, client, "POST", "/_cage/enter", env.front.origin, string(body), map[string]string{"Content-Type": "application/json"}).StatusCode
+	post := func() int {
+		return env.do(t, client, "POST", "/_cage/enter", env.base(), "{}", map[string]string{"Content-Type": "application/json"}).StatusCode
 	}
-	ticket := env.ticket(t)
-	if code := post(ticket); code != 204 {
+	page := func() int { return env.do(t, client, "GET", "/_cage/enter", "", "", nil).StatusCode }
+	env.ticket(t)
+	if code := page(); code != 200 {
+		t.Fatalf("entry page: %d", code)
+	}
+	if code := post(); code != 204 {
 		t.Fatalf("first use: %d", code)
 	}
-	if code := post(ticket); code != 401 {
+	if code := post(); code != 401 {
 		t.Fatalf("replay accepted: %d", code)
 	}
-	// Expiry: 60 s on the front's clock.
+	if code := page(); code != 401 {
+		t.Fatalf("entry page after use: %d", code)
+	}
+	// Expiry: 60 s on the front's clock; an expired label is unknown.
 	now := time.Now()
 	env.front.now = func() time.Time { return now }
-	late := env.ticket(t)
+	env.ticket(t)
 	env.front.now = func() time.Time { return now.Add(61 * time.Second) }
-	if code := post(late); code != 401 {
-		t.Fatalf("expired ticket accepted: %d", code)
+	if code := post(); code != 403 {
+		t.Fatalf("expired entry accepted: %d", code)
 	}
 	env.front.now = time.Now
-	// A ticket outlives nothing: locking the account voids it.
-	locked := env.ticket(t)
+	// An entry outlives nothing: locking the account voids it.
+	env.ticket(t)
 	env.lock()
-	if code := post(locked); code != 401 {
-		t.Fatalf("ticket of a locked account accepted: %d", code)
+	if code := post(); code != 403 {
+		t.Fatalf("entry of a locked account accepted: %d", code)
 	}
-	for _, bad := range []string{"", "short", strings.Repeat("g", 64)} {
-		if code := post(bad); code != 401 {
-			t.Fatalf("invalid ticket %q: %d", bad, code)
+	// Labels the front never issued.
+	for _, label := range []string{strings.Repeat("0", 32), strings.Repeat("g", 32), "short"} {
+		env.label = label
+		if code := post(); code != 403 {
+			t.Fatalf("label %q: %d", label, code)
 		}
 	}
-	// The entry needs the front's own Origin and JSON.
+	// The entry needs its own Origin and JSON.
+	env.epoch, env.lock = context.WithCancel(context.Background())
+	t.Cleanup(env.lock)
+	env.ticket(t)
 	if r := env.do(t, client, "POST", "/_cage/enter", "http://localhost:17777", "{}", map[string]string{"Content-Type": "application/json"}); r.StatusCode != 403 {
 		t.Fatalf("foreign origin entry: %d", r.StatusCode)
+	}
+	if r := env.do(t, client, "POST", "/_cage/enter", env.base(), "{}", map[string]string{"Content-Type": "text/plain"}); r.StatusCode != 400 {
+		t.Fatalf("entry without JSON: %d", r.StatusCode)
 	}
 }
 
@@ -76,7 +89,7 @@ func TestScienceTicketsAreSingleUseAndBounded(t *testing.T) {
 	}
 }
 
-func TestScienceFrontHostCookieAndOriginGates(t *testing.T) {
+func TestScienceFrontHostAndOriginGates(t *testing.T) {
 	env := newTestScienceFront(t)
 	client, code := env.enter(t, goodProbeReports(testScienceIdentity))
 	if code != 204 {
@@ -85,9 +98,12 @@ func TestScienceFrontHostCookieAndOriginGates(t *testing.T) {
 	if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 200 {
 		t.Fatalf("session request: %d %s", r.StatusCode, readBody(t, r))
 	}
-	// DNS rebinding: any other Host is refused before anything else.
-	for _, host := range []string{"127.0.0.1:" + fmt.Sprint(env.front.port), "rebind.example:" + fmt.Sprint(env.front.port), "localhost"} {
-		request, _ := http.NewRequest("GET", env.front.origin+"/api/auth/status", nil)
+	// DNS rebinding and every other name: only the session's exact label
+	// host is served.
+	port := fmt.Sprint(env.front.port)
+	for _, host := range []string{"127.0.0.1:" + port, "localhost:" + port, "[::1]:" + port, "rebind.example:" + port, strings.ToUpper(env.label) + ".localhost:" + port,
+		env.label + ".localhost", env.label + ".localhost:1", "x." + env.label + ".localhost:" + port, env.label + ".localhost.:" + port, strings.Repeat("0", 32) + ".localhost:" + port} {
+		request, _ := http.NewRequest("GET", env.base()+"/api/auth/status", nil)
 		request.Host = host
 		response, err := client.Do(request)
 		if err != nil {
@@ -98,23 +114,34 @@ func TestScienceFrontHostCookieAndOriginGates(t *testing.T) {
 			t.Fatalf("Host %q: %d", host, response.StatusCode)
 		}
 	}
-	// No cookie, or a wrong one.
-	if r := env.do(t, env.client(t), "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
-		t.Fatalf("no cookie: %d", r.StatusCode)
-	}
-	if r := env.do(t, env.client(t), "GET", "/api/auth/status", "", "", map[string]string{"Cookie": env.front.cookieName() + "=" + strings.Repeat("0", 64)}); r.StatusCode != 401 {
-		t.Fatalf("forged cookie: %d", r.StatusCode)
-	}
-	// Writes and upgrades need the front's Origin.
-	for _, origin := range []string{"", "http://localhost:17777", "http://localhost:47800", "null"} {
+	// Writes and upgrades need the label's own Origin.
+	for _, origin := range []string{"", "http://localhost:17777", "http://localhost:47800", "null", "http://127.0.0.1:" + port, env.front.labelOrigin(strings.Repeat("0", 32))} {
 		if r := env.do(t, client, "POST", "/api/echo", origin, "{}", map[string]string{"Content-Type": "application/json"}); r.StatusCode != 403 {
 			t.Fatalf("POST from %q: %d", origin, r.StatusCode)
 		}
 	}
-	if r := env.do(t, client, "POST", "/api/echo", env.front.origin, "{}", map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
+	if r := env.do(t, client, "POST", "/api/echo", env.base(), "{}", map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
 		t.Fatalf("POST from the front: %d", r.StatusCode)
 	}
+	// Fetch metadata: only the label's own documents and workers; the
+	// workbench may only navigate the frame to the entry.
+	for _, site := range []string{"cross-site", "same-site", "none"} {
+		if r := env.do(t, client, "GET", "/", "", "", map[string]string{"Sec-Fetch-Site": site, "Sec-Fetch-Mode": "navigate"}); r.StatusCode != 403 {
+			t.Fatalf("%s navigation to the app: %d", site, r.StatusCode)
+		}
+	}
+	if r := env.do(t, client, "GET", "/api/auth/status", "", "", map[string]string{"Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors"}); r.StatusCode != 200 {
+		t.Fatalf("same-origin request: %d", r.StatusCode)
+	}
+	env.ticket(t)
+	if r := env.do(t, client, "GET", "/_cage/enter", "", "", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "iframe"}); r.StatusCode != 200 {
+		t.Fatalf("the workbench opening the entry: %d", r.StatusCode)
+	}
+	if r := env.do(t, client, "GET", "/_cage/enter", "", "", map[string]string{"Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors"}); r.StatusCode != 403 {
+		t.Fatalf("a cross-site fetch of the entry: %d", r.StatusCode)
+	}
 	// Workers that per-target overrides cannot reach.
+	client, _ = env.enter(t, goodProbeReports(testScienceIdentity))
 	for _, header := range []map[string]string{{"Sec-Fetch-Dest": "serviceworker"}, {"Sec-Fetch-Dest": "sharedworker"}, {"Service-Worker": "script"}} {
 		if r := env.do(t, client, "GET", "/assets/sw.js", "", "", header); r.StatusCode != 403 {
 			t.Fatalf("worker script %v: %d", header, r.StatusCode)
@@ -122,7 +149,7 @@ func TestScienceFrontHostCookieAndOriginGates(t *testing.T) {
 	}
 	// Paths the tenant gateway's validPath refuses.
 	for _, path := range []string{"/api/../api/echo", "/api/%2fecho", "/a\\b"} {
-		request, _ := http.NewRequest("GET", env.front.origin+"/", nil)
+		request, _ := http.NewRequest("GET", env.base()+"/", nil)
 		request.URL.Opaque = path
 		response, err := client.Do(request)
 		if err != nil {
@@ -133,27 +160,15 @@ func TestScienceFrontHostCookieAndOriginGates(t *testing.T) {
 			t.Fatalf("path %q: %d", path, response.StatusCode)
 		}
 	}
+	// No cookie means anything: a forged session cookie neither helps nor
+	// hurts.
+	if r := env.do(t, client, "GET", "/api/auth/status", "", "", map[string]string{"Cookie": "cage_science_" + port + "=" + strings.Repeat("0", 64)}); r.StatusCode != 200 {
+		t.Fatalf("session with a stray cookie: %d", r.StatusCode)
+	}
 	// Locking the account ends the session at once.
 	env.lock()
 	if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
 		t.Fatalf("session after lock: %d", r.StatusCode)
-	}
-}
-
-func TestScienceShadowCookieDoesNotLockOut(t *testing.T) {
-	env := newTestScienceFront(t)
-	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
-	// A same-site page sets an impostor with a longer path: browsers send it first.
-	cookies := client.Jar.Cookies(mustURL(t, env.front.origin+"/api/"))
-	var real string
-	for _, c := range cookies {
-		if c.Name == env.front.cookieName() {
-			real = c.Value
-		}
-	}
-	header := env.front.cookieName() + "=" + strings.Repeat("f", 64) + "; " + env.front.cookieName() + "=" + real
-	if r := env.do(t, env.client(t), "GET", "/api/auth/status", "", "", map[string]string{"Cookie": header}); r.StatusCode != 200 {
-		t.Fatalf("shadowed session: %d", r.StatusCode)
 	}
 }
 
@@ -166,7 +181,7 @@ func mustURL(t *testing.T, raw string) *url.URL {
 	return u
 }
 
-func TestScienceProbeDecidesTheCookie(t *testing.T) {
+func TestScienceProbeDecidesTheSession(t *testing.T) {
 	env := newTestScienceFront(t)
 	host := testHostIdentity()
 	cases := map[string]func([]scienceProbeReport){
@@ -187,34 +202,35 @@ func TestScienceProbeDecidesTheCookie(t *testing.T) {
 		if code != 403 {
 			t.Fatalf("%s: probe accepted (%d)", name, code)
 		}
-		for _, c := range client.Jar.Cookies(mustURL(t, env.front.origin+"/")) {
-			if c.Name == env.front.cookieName() {
-				t.Fatalf("%s: session cookie issued", name)
-			}
-		}
-		if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
+		if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 403 {
 			t.Fatalf("%s: daemon reachable after a failed probe: %d", name, r.StatusCode)
 		}
 		if state := env.front.snapshot(); !strings.HasPrefix(state.Refused, "身份核对未通过") || state.Session {
 			t.Fatalf("%s: refusal not reported: %+v", name, state)
 		}
 	}
-	// The probe pages need the probe cookie; the probe cannot be replayed.
+	// The probe pages need an entered label; the probe cannot be skipped or
+	// replayed.
+	env.ticket(t)
 	if r := env.do(t, env.client(t), "GET", "/_cage/probe", "", "", nil); r.StatusCode != 401 {
 		t.Fatalf("probe page without entry: %d", r.StatusCode)
+	}
+	if r := env.do(t, env.client(t), "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
+		t.Fatalf("daemon reachable before the probe: %d", r.StatusCode)
 	}
 	client, code := env.enter(t, goodProbeReports(testScienceIdentity))
 	if code != 204 {
 		t.Fatalf("good probe: %d", code)
 	}
 	payload, _ := json.Marshal(map[string]any{"reports": goodProbeReports(testScienceIdentity)})
-	if r := env.do(t, client, "POST", "/_cage/probe", env.front.origin, string(payload), map[string]string{"Content-Type": "application/json"}); r.StatusCode != 401 {
+	if r := env.do(t, client, "POST", "/_cage/probe", env.base(), string(payload), map[string]string{"Content-Type": "application/json"}); r.StatusCode != 401 {
 		t.Fatalf("probe replay: %d", r.StatusCode)
 	}
 	// A new entry revokes the previous document's session.
-	first := client
+	first := env.label
 	env.enter(t, goodProbeReports(testScienceIdentity))
-	if r := env.do(t, first, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
+	env.label = first
+	if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 403 {
 		t.Fatalf("old session survived a new entry: %d", r.StatusCode)
 	}
 }
@@ -244,7 +260,7 @@ func TestScienceProbeReportCheck(t *testing.T) {
 func TestScienceProxyRewritesBothWays(t *testing.T) {
 	env := newTestScienceFront(t)
 	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
-	request, _ := http.NewRequest("GET", env.front.origin+"/", nil)
+	request, _ := http.NewRequest("GET", env.base()+"/", nil)
 	request.Header.Set("Cookie", "cage_session_17777="+strings.Repeat("b", 64)+"; operon_csrf=keep; operon_auth=stolen; other=1")
 	request.Header.Set("Accept-Language", "fr-FR,fr;q=0.9")
 	request.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Edg/157")
@@ -253,10 +269,8 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 	request.Header.Set("Authorization", "Bearer page-supplied")
 	request.Header.Set("X-Operon-Client", "spa")
 	request.Header.Set("Sec-Ch-Ua-Platform", "\"Windows\"")
-	for _, c := range client.Jar.Cookies(mustURL(t, env.front.origin+"/")) {
-		request.AddCookie(c)
-	}
-	response, err := env.client(t).Do(request)
+	request.Header.Set("If-None-Match", "\"x\"")
+	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +288,10 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 	if last.Host != "localhost:47800" || last.Forwarded || last.Origin != "" {
 		t.Fatalf("upstream identity headers: %+v", last)
 	}
-	if last.Cookie != "operon_csrf=keep" {
-		t.Fatalf("upstream cookies: %q", last.Cookie)
+	// The browser's cookies never reach the daemon (the front holds the
+	// daemon's own, none yet).
+	if last.Cookie != "" || last.Header.Get("If-None-Match") != "" {
+		t.Fatalf("upstream cookies or validators: %q %q", last.Cookie, last.Header.Get("If-None-Match"))
 	}
 	if last.UserAgent != testScienceIdentity.UserAgent || last.AcceptLanguage != "ja-JP,ja;q=0.9" {
 		t.Fatalf("UA/Accept-Language not the guest's: %q %q", last.UserAgent, last.AcceptLanguage)
@@ -303,7 +319,7 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 	}
 	lockdown := webfront.ParsePolicy(policies[1])
 	for directive, want := range map[string]string{
-		"default-src": "'self'", "connect-src": "'self' ws://" + env.front.host + " blob: data:", "img-src": "'self' data: blob:",
+		"default-src": "'self'", "connect-src": "'self' ws://" + env.host() + " blob: data:", "img-src": "'self' data: blob:",
 		"frame-src": "'self'", "form-action": "'self'", "object-src": "'none'", "frame-ancestors": "'self' http://localhost:17777", "report-uri": "/_cage/csp-report",
 	} {
 		if got, _ := lockdown.Get(directive); strings.Join(got, " ") != want {
@@ -315,27 +331,32 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 			t.Fatalf("%s missing", name)
 		}
 	}
-	// Set-Cookie: only operon_csrf survives.
+	// Set-Cookie: none reaches the page; the front keeps them for the
+	// daemon.
 	r := env.do(t, client, "GET", "/api/auth/status", "", "", nil)
-	cookies := r.Header.Values("Set-Cookie")
-	if len(cookies) != 1 || !strings.HasPrefix(cookies[0], "operon_csrf=csrf-status") || strings.Contains(strings.Join(cookies, ";"), "operon_session") {
+	if cookies := r.Header.Values("Set-Cookie"); len(cookies) != 0 {
 		t.Fatalf("Set-Cookie: %q", cookies)
+	}
+	env.do(t, client, "GET", "/api/auth/status", "", "", nil)
+	seen = env.daemon.seen()
+	if held := seen[len(seen)-1].Cookie; held != "operon_csrf=csrf-status; operon_session=jwt-secret" {
+		t.Fatalf("held cookies: %q", held)
 	}
 	// Redirects: the daemon's own origin becomes the front's; others fail.
 	r = env.do(t, client, "GET", "/redirect-internal", "", "", nil)
-	if r.StatusCode != 302 || r.Header.Get("Location") != env.front.origin+"/next?x=1" {
+	if r.StatusCode != 302 || r.Header.Get("Location") != env.base()+"/next?x=1" {
 		t.Fatalf("internal redirect: %d %q", r.StatusCode, r.Header.Get("Location"))
 	}
 	if r = env.do(t, client, "GET", "/redirect-external", "", "", nil); r.StatusCode != 502 || r.Header.Get("Location") != "" {
 		t.Fatalf("external redirect: %d %q", r.StatusCode, r.Header.Get("Location"))
 	}
-	// Cache headers of hashed assets are kept.
+	// Nothing is kept by the browser, hashed assets included.
 	env.daemon.assets["/assets/app-1a2b.js"] = "console.log(1)"
-	if r = env.do(t, client, "GET", "/assets/app-1a2b.js", "", "", nil); !strings.Contains(r.Header.Get("Cache-Control"), "immutable") {
+	if r = env.do(t, client, "GET", "/assets/app-1a2b.js", "", "", nil); r.Header.Get("Cache-Control") != "no-store" {
 		t.Fatalf("asset cache: %q", r.Header.Get("Cache-Control"))
 	}
 	// A request body with a foreign encoding cannot be audited.
-	if r = env.do(t, client, "POST", "/api/echo", env.front.origin, "x", map[string]string{"Content-Encoding": "gzip"}); r.StatusCode != 415 {
+	if r = env.do(t, client, "POST", "/api/echo", env.base(), "x", map[string]string{"Content-Encoding": "gzip"}); r.StatusCode != 415 {
 		t.Fatalf("encoded body: %d", r.StatusCode)
 	}
 }
@@ -358,7 +379,7 @@ func TestScienceIntercepts(t *testing.T) {
 		if !strings.Contains(path, "callback") && !strings.HasPrefix(path, "/api/mcp") {
 			method = "POST"
 		}
-		if r := env.do(t, client, method, path, env.front.origin, "", nil); r.StatusCode != want {
+		if r := env.do(t, client, method, path, env.base(), "", nil); r.StatusCode != want {
 			t.Fatalf("%s %s: %d", method, path, r.StatusCode)
 		}
 	}
@@ -408,7 +429,7 @@ func TestScienceBearerLifecycle(t *testing.T) {
 	// The daemon restarts: the next request gets a 401, the front mints once
 	// more and replays the request (the body too).
 	env.daemon.rotate()
-	r := env.do(t, client, "POST", "/api/echo", env.front.origin, `{"x":1}`, map[string]string{"Content-Type": "application/json"})
+	r := env.do(t, client, "POST", "/api/echo", env.base(), `{"x":1}`, map[string]string{"Content-Type": "application/json"})
 	if r.StatusCode != 200 || readBody(t, r) != `{"x":1}` || env.daemon.exchange != 2 {
 		t.Fatalf("re-mint on 401: %d exchanges %d", r.StatusCode, env.daemon.exchange)
 	}
@@ -424,10 +445,8 @@ func TestScienceBearerLifecycle(t *testing.T) {
 			t.Fatal("bearer leaked to the page")
 		}
 	}
-	for _, c := range client.Jar.Cookies(mustURL(t, env.front.origin+"/")) {
-		if c.Value == first || c.Value == second || c.Name == "operon_auth" {
-			t.Fatal("bearer cookie reached the page")
-		}
+	if strings.Contains(fmt.Sprint(r.Header), "Set-Cookie") {
+		t.Fatal("a cookie reached the page")
 	}
 	// reset (stop, lock, environment stop, VM change) forgets it.
 	env.front.reset("")
@@ -437,7 +456,8 @@ func TestScienceBearerLifecycle(t *testing.T) {
 	if upstream != nil {
 		t.Fatal("upstream kept after reset")
 	}
-	if r = env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 401 {
+	// The session's label is forgotten with it.
+	if r = env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode != 403 {
 		t.Fatalf("session after reset: %d", r.StatusCode)
 	}
 	// Nor in the process log or the status the workbench serves.
@@ -486,7 +506,7 @@ func TestScienceAuditRefusesHostValues(t *testing.T) {
 		for k, v := range tc.headers {
 			headers[k] = v
 		}
-		r := env.do(t, client, "POST", tc.path, env.front.origin, tc.body, headers)
+		r := env.do(t, client, "POST", tc.path, env.base(), tc.body, headers)
 		if r.StatusCode != 403 || !strings.Contains(readBody(t, r), "已拦截") {
 			t.Fatalf("%s passed the audit: %d", tc.name, r.StatusCode)
 		}
@@ -499,7 +519,7 @@ func TestScienceAuditRefusesHostValues(t *testing.T) {
 		t.Fatalf("audit state: %+v", state)
 	}
 	// The guest's own values pass.
-	if r := env.do(t, client, "POST", "/api/echo", env.front.origin, `{"timezone":"Asia/Tokyo","locale":"ja-JP","d":"2026-11-21T08:00:00+09:00"}`, map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
+	if r := env.do(t, client, "POST", "/api/echo", env.base(), `{"timezone":"Asia/Tokyo","locale":"ja-JP","d":"2026-11-21T08:00:00+09:00"}`, map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
 		t.Fatalf("guest values refused: %d", r.StatusCode)
 	}
 	// A WebSocket text frame with the host zone closes the socket before
@@ -573,7 +593,7 @@ func TestScienceWebSocketAndEventStream(t *testing.T) {
 	// An upgrade from a foreign origin is refused.
 	dialer := websocket.Dialer{NetDialContext: env.dial}
 	header := http.Header{"Origin": {"http://localhost:17777"}}
-	if _, response, err := dialer.Dial("ws://"+env.front.host+"/api/ws", header); err == nil || response == nil || response.StatusCode != 403 {
+	if _, response, err := dialer.Dial("ws://"+env.host()+"/api/ws", header); err == nil || response == nil || response.StatusCode != 403 {
 		t.Fatal("cross-origin upgrade accepted")
 	}
 	r := env.do(t, client, "GET", "/api/events", "", "", nil)
@@ -583,14 +603,10 @@ func TestScienceWebSocketAndEventStream(t *testing.T) {
 	}
 }
 
-func (env *testScienceFront) dial(ctx context.Context, network, address string) (net.Conn, error) {
-	return (&net.Dialer{}).DialContext(ctx, "tcp4", fmt.Sprintf("127.0.0.1:%d", env.front.port))
-}
-
 func (env *testScienceFront) dialSocket(t *testing.T, client *http.Client) *websocket.Conn {
 	t.Helper()
-	dialer := websocket.Dialer{NetDialContext: env.dial, Jar: client.Jar, EnableCompression: true}
-	conn, response, err := dialer.Dial("ws://"+env.front.host+"/api/ws", http.Header{"Origin": {env.front.origin}})
+	dialer := websocket.Dialer{NetDialContext: env.dial, EnableCompression: true}
+	conn, response, err := dialer.Dial("ws://"+env.host()+"/api/ws", http.Header{"Origin": {env.base()}})
 	if err != nil {
 		status := 0
 		if response != nil {

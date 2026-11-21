@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"mime"
 	"net"
 	"net/http"
@@ -15,63 +16,172 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/webfront"
 )
 
 // Claude Science phase 2a, the front (design §7.4 "Entry and front session"):
-// a listener on 127.0.0.1 serving the daemon's web app on its own loopback
-// origin http://localhost:Q, which the Windows shell frames inside the
-// workbench. Only the Windows WebView2 shell may use it (see science_host.go).
+// a listener on loopback serving the daemon's web app, which the Windows
+// shell frames inside the workbench. Only the Windows WebView2 shell may use
+// it (see science_host.go).
 //
-// Contract (all on the front origin; exact Host "localhost:Q"):
+// Every session has its own origin, http://<label>.localhost:Q, where label
+// is 128 random bits (32 hex digits) issued with the entry. The label is the
+// session's only secret: no cookie is ever set, read or forwarded by the
+// front. A new origin per session also gives each session its own storage,
+// cache partition, site and renderer process: nothing one session's page
+// leaves behind (or another environment's front on the same port) is seen
+// by the next. The browser resolves *.localhost itself (no DNS) to 127.0.0.1
+// and ::1; the front listens on both.
 //
-//	GET  /_cage/enter#<ticket>   entry page; its script posts the ticket
-//	POST /_cage/enter {ticket}    204 + probe cookie (Path=/_cage/, 2 min)
-//	GET  /_cage/probe             identity probe (main, nested frame,
-//	                              dedicated worker, blob worker)
-//	POST /_cage/probe {reports}   204 + session cookie when every context
-//	                              reports the guest's values; 403 + reason
-//	POST /_cage/csp-report        CSP violation sink (counts only)
-//	anything else                 the daemon, with the session cookie
+// Contract (exact Host "<label>.localhost:Q" for a label that is issued,
+// entered or the active session; anything else 403):
+//
+//	GET  /_cage/enter            entry page while the label is issued (60 s);
+//	                             Clear-Site-Data "cache", "storage"
+//	POST /_cage/enter            204; the label enters its identity check
+//	                             (2 min) and any earlier session ends
+//	GET  /_cage/probe            identity probe (main, nested frame,
+//	                             dedicated worker, blob worker)
+//	POST /_cage/probe {reports}  204 and the label becomes the session when
+//	                             every context reports the guest's values;
+//	                             403 + reason
+//	POST /_cage/csp-report       CSP violation sink (counts only; the label
+//	                             must be checking or the session)
+//	anything else                the daemon, for the session's label
+//
+// Unsafe requests and WebSocket upgrades need Origin http://<label>.localhost:Q.
+// Sec-Fetch-Site, when sent, must be same-origin, except the frame's first
+// navigation to /_cage/enter (cross-site, from the workbench document).
 const (
 	scienceFrontFirstPort = 17840
 	scienceFrontPortCount = 31
 	scienceBodyLimit      = 8 << 20
 	scienceProbeLife      = 2 * time.Minute
+	scienceEntryLife      = 60 * time.Second
+	// The browser keeps up to 180 cookies of 4 KiB per host; the page can
+	// fill its own origin's jar, and the front still reads every request
+	// (it reads no cookie).
+	scienceFrontHeaderLimit = 1 << 20
 )
 
+// scienceLabelHost matches a session host; the port is checked separately.
+var scienceLabelHost = regexp.MustCompile(`^([0-9a-f]{32})\.localhost:([0-9]{1,5})$`)
+
+// scienceFrameSource is the workbench's frame-src for a front on port.
+func scienceFrameSource(port int) string { return "http://*.localhost:" + strconv.Itoa(port) }
+
 // listenScienceFront picks the port like listenController: the fixed range,
-// then the remembered port, then any port (remembered for next time).
+// then the remembered port, then any port (remembered for next time). The
+// port must be free on 127.0.0.1 and on ::1: the browser may try either for
+// a *.localhost name, and whoever listens on the other would get the label.
 func listenScienceFront(profile string) (net.Listener, int, error) {
 	for port := scienceFrontFirstPort; port < scienceFrontFirstPort+scienceFrontPortCount; port++ {
-		if listener, err := listenLoopback(port); err == nil {
+		if listener, err := listenScienceLoopback(port); err == nil {
 			return listener, port, nil
 		}
 	}
 	path := filepath.Join(profile, "science-port.json")
 	var record controllerPortRecord
 	if b, err := os.ReadFile(path); err == nil && json.Unmarshal(b, &record) == nil && record.Port >= 1024 && record.Port <= 65535 {
-		if listener, err := listenLoopback(record.Port); err == nil {
+		if listener, err := listenScienceLoopback(record.Port); err == nil {
 			return listener, record.Port, nil
 		}
 	}
-	listener, err := listenLoopback(0)
-	if err != nil {
-		return nil, 0, fmt.Errorf("无法在本机回环地址上监听 Claude Science 端口: %w", err)
+	for attempt := 0; attempt < 8; attempt++ {
+		probe, err := listenLoopback(0)
+		if err != nil {
+			return nil, 0, fmt.Errorf("无法在本机回环地址上监听 Claude Science 端口: %w", err)
+		}
+		port := probe.Addr().(*net.TCPAddr).Port
+		probe.Close()
+		if port < 1024 {
+			continue
+		}
+		if listener, err := listenScienceLoopback(port); err == nil {
+			_ = writePrivate(path, controllerPortRecord{Port: port})
+			return listener, port, nil
+		}
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	if port < 1024 {
-		listener.Close()
-		return nil, 0, fmt.Errorf("系统分配的 Claude Science 端口 %d 无效", port)
-	}
-	_ = writePrivate(path, controllerPortRecord{Port: port})
-	return listener, port, nil
+	return nil, 0, errors.New("无法在本机回环地址上找到 Claude Science 可用的端口")
 }
+
+// listenScienceLoopback listens on 127.0.0.1:port and, where the host has
+// IPv6 loopback, on [::1]:port as well.
+func listenScienceLoopback(port int) (net.Listener, error) {
+	v4, err := listenLoopback(port)
+	if err != nil {
+		return nil, err
+	}
+	v6, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
+	if err != nil {
+		if errors.Is(err, syscall.EADDRINUSE) {
+			v4.Close()
+			return nil, err
+		}
+		// No IPv6 loopback: the browser cannot reach ::1 either.
+		return v4, nil
+	}
+	return newDualListener(v4, v6), nil
+}
+
+// dualListener accepts from both loopback listeners.
+type dualListener struct {
+	listeners []net.Listener
+	conns     chan net.Conn
+	done      chan struct{}
+	once      sync.Once
+}
+
+func newDualListener(listeners ...net.Listener) *dualListener {
+	d := &dualListener{listeners: listeners, conns: make(chan net.Conn), done: make(chan struct{})}
+	for _, listener := range listeners {
+		go func(listener net.Listener) {
+			for {
+				conn, err := listener.Accept()
+				if err != nil {
+					d.Close()
+					return
+				}
+				select {
+				case d.conns <- conn:
+				case <-d.done:
+					conn.Close()
+					return
+				}
+			}
+		}(listener)
+	}
+	return d
+}
+
+func (d *dualListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-d.conns:
+		return conn, nil
+	case <-d.done:
+		return nil, net.ErrClosed
+	}
+}
+
+func (d *dualListener) Close() error {
+	d.once.Do(func() {
+		close(d.done)
+		for _, listener := range d.listeners {
+			listener.Close()
+		}
+	})
+	return nil
+}
+
+func (d *dualListener) Addr() net.Addr { return d.listeners[0].Addr() }
 
 // scienceTicket is what an entry ticket was issued for.
 type scienceTicket struct {
@@ -100,19 +210,20 @@ type scienceFrontHooks struct {
 
 type scienceFront struct {
 	port     int
-	origin   string
-	host     string
 	listener net.Listener
 	server   *http.Server
-	tickets  *webfront.Tickets[scienceTicket]
 	hooks    scienceFrontHooks
 	now      func() time.Time
 
 	mu       sync.Mutex
 	upstream *scienceUpstream
-	probes   map[string]scienceProbeSession
+	// issued labels wait for their entry; checking labels run the identity
+	// check; session is the label whose page may reach the daemon.
+	issued   map[string]scienceProbeSession
+	checking map[string]scienceProbeSession
 	session  string
 	current  scienceTicket
+	jar      scienceJar
 	audit    *scienceAudit
 	state    scienceFrontState
 	signing  time.Time
@@ -215,12 +326,57 @@ type scienceViolation struct {
 
 func newScienceFront(listener net.Listener, port int, hooks scienceFrontHooks) *scienceFront {
 	f := &scienceFront{
-		port: port, origin: "http://localhost:" + strconv.Itoa(port), host: "localhost:" + strconv.Itoa(port),
-		listener: listener, hooks: hooks, now: time.Now, probes: map[string]scienceProbeSession{},
+		port: port, listener: listener, hooks: hooks, now: time.Now,
+		issued: map[string]scienceProbeSession{}, checking: map[string]scienceProbeSession{},
 	}
-	f.tickets = webfront.NewTickets[scienceTicket](60*time.Second, 16, func() time.Time { return f.now() })
-	f.server = &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: 32 << 10, ErrorLog: log.New(io.Discard, "", 0)}
+	f.server = &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: scienceFrontHeaderLimit, ErrorLog: log.New(io.Discard, "", 0)}
 	return f
+}
+
+// labelOrigin is the origin of a session label.
+func (f *scienceFront) labelOrigin(label string) string {
+	return "http://" + label + ".localhost:" + strconv.Itoa(f.port)
+}
+
+// requestLabel is the label of the request's exact Host, or "" when the
+// Host is not a label host of this front's port.
+func (f *scienceFront) requestLabel(r *http.Request) string {
+	match := scienceLabelHost.FindStringSubmatch(r.Host)
+	if match == nil || match[2] != strconv.Itoa(f.port) {
+		return ""
+	}
+	return match[1]
+}
+
+// labelState says what a label may do now: "issued", "checking", "session"
+// or "" (unknown, expired or revoked). Expired entries are dropped.
+func (f *scienceFront) labelState(label string) string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := f.now()
+	for known, entry := range f.issued {
+		if !now.Before(entry.expires) || entry.epoch.Err() != nil {
+			delete(f.issued, known)
+		}
+	}
+	for known, entry := range f.checking {
+		if !now.Before(entry.expires) || entry.epoch.Err() != nil {
+			delete(f.checking, known)
+		}
+	}
+	switch {
+	case label == "":
+		return ""
+	case f.session != "" && webfront.Equal(label, f.session):
+		return "session"
+	}
+	if _, ok := f.checking[label]; ok {
+		return "checking"
+	}
+	if _, ok := f.issued[label]; ok {
+		return "issued"
+	}
+	return ""
 }
 
 func (f *scienceFront) serve() { _ = f.server.Serve(f.listener) }
@@ -233,11 +389,11 @@ func (f *scienceFront) close() {
 // reset drops every ticket, probe and session and the daemon credential.
 // reason, when set, is shown to the pane as why the frame was closed.
 func (f *scienceFront) reset(reason string) {
-	f.tickets.Clear()
 	f.mu.Lock()
 	upstream := f.upstream
-	f.upstream, f.session, f.current, f.audit = nil, "", scienceTicket{}, nil
-	clear(f.probes)
+	f.upstream, f.session, f.current, f.audit, f.jar = nil, "", scienceTicket{}, nil, scienceJar{}
+	clear(f.issued)
+	clear(f.checking)
 	f.state.Session, f.state.Audit = false, scienceAuditDistinct{}
 	if reason != "" {
 		now := f.now()
@@ -249,13 +405,19 @@ func (f *scienceFront) reset(reason string) {
 	}
 }
 
-// issue mints an entry ticket for a workbench session.
+// issue mints an entry for a workbench session: a new label, usable for
+// scienceEntryLife to enter (once).
 func (f *scienceFront) issue(ticket scienceTicket) string {
+	label := webfront.Secret(16)
 	f.mu.Lock()
-	// The pane waits for the session of the document this ticket opens.
+	// The pane waits for the session of the document this entry opens.
 	f.state.Refused, f.state.RefusedAt, f.state.Session = "", nil, false
+	if len(f.issued) >= 16 {
+		clear(f.issued)
+	}
+	f.issued[label] = scienceProbeSession{scienceTicket: ticket, expires: f.now().Add(scienceEntryLife)}
 	f.mu.Unlock()
-	return f.origin + "/_cage/enter#" + f.tickets.Issue(ticket)
+	return f.labelOrigin(label) + "/_cage/enter"
 }
 
 func (f *scienceFront) snapshot() scienceFrontState {
@@ -267,11 +429,6 @@ func (f *scienceFront) snapshot() scienceFrontState {
 		state.Transport = f.upstream.dialer.Mode()
 	}
 	return state
-}
-
-func (f *scienceFront) cookieName() string { return "cage_science_" + strconv.Itoa(f.port) }
-func (f *scienceFront) probeCookie() string {
-	return "cage_science_probe_" + strconv.Itoa(f.port)
 }
 
 const sciencePermissionsPolicy = "accelerometer=(), autoplay=(), bluetooth=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), hid=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
@@ -290,9 +447,9 @@ func (f *scienceFront) ancestors() string {
 
 // lockdown is the policy appended to every daemon response. Policies
 // intersect, so it only removes non-local sources from what the app needs.
-func (f *scienceFront) lockdown() string {
+func (f *scienceFront) lockdown(host string) string {
 	return "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; " +
-		"connect-src 'self' ws://" + f.host + " blob: data:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; " +
+		"connect-src 'self' ws://" + host + " blob: data:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; " +
 		"frame-src 'self'; child-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; " +
 		"frame-ancestors " + f.ancestors() + "; report-uri /_cage/csp-report"
 }
@@ -323,7 +480,12 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("X-DNS-Prefetch-Control", "off")
 	header.Set("Cross-Origin-Resource-Policy", "same-origin")
 	header.Set("Permissions-Policy", sciencePermissionsPolicy)
-	if r.Host != f.host {
+	header.Set("Cache-Control", "no-store")
+	// The exact Host names a label this front issued: DNS rebinding cannot
+	// produce it (no DNS name resolves to *.localhost but itself).
+	label := f.requestLabel(r)
+	state := f.labelState(label)
+	if state == "" {
 		sciencePlain(w, http.StatusForbidden, "Host refused")
 		return
 	}
@@ -333,14 +495,23 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	upgrade := webfront.IsUpgrade(r)
 	unsafe := (r.Method != http.MethodGet && r.Method != http.MethodHead) || upgrade
-	if unsafe && r.Header.Get("Origin") != f.origin && r.URL.Path != "/_cage/csp-report" {
+	if unsafe && r.Header.Get("Origin") != f.labelOrigin(label) {
 		sciencePlain(w, http.StatusForbidden, "Origin refused")
 		return
 	}
+	// Browsers send fetch metadata to loopback (not on WebSocket handshakes,
+	// which the Origin check covers). Only the label's own documents and
+	// workers may call it, and the workbench may only open the entry.
+	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+		entry := r.Method == http.MethodGet && r.URL.Path == "/_cage/enter" && site == "cross-site" && r.Header.Get("Sec-Fetch-Mode") == "navigate"
+		if !entry {
+			sciencePlain(w, http.StatusForbidden, "请求来源被拒绝")
+			return
+		}
+	}
 	if strings.HasPrefix(r.URL.Path, "/_cage/") {
 		header.Set("Content-Security-Policy", f.ownPolicy())
-		header.Set("Cache-Control", "no-store")
-		f.serveOwn(w, r)
+		f.serveOwn(w, r, label, state)
 		return
 	}
 	// Neither kind of worker is reached by the shell's per-target overrides.
@@ -348,7 +519,7 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sciencePlain(w, http.StatusForbidden, "本机渲染不支持共享 Worker 与 Service Worker")
 		return
 	}
-	current, ok := f.authorized(r)
+	current, ok := f.authorized(label)
 	if !ok {
 		sciencePlain(w, http.StatusUnauthorized, "本机渲染会话已失效，请回到工作台重新打开 Claude Science。")
 		return
@@ -369,12 +540,12 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.proxy(w, r, current)
 }
 
-// authorized checks the session cookie (any of several with that name) and
-// that the workbench session it came from is still unlocked.
-func (f *scienceFront) authorized(r *http.Request) (scienceTicket, bool) {
+// authorized checks that the label is the session's and that the workbench
+// session it came from is still unlocked.
+func (f *scienceFront) authorized(label string) (scienceTicket, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.session == "" || !webfront.CookieMatches(r, f.cookieName(), f.session) {
+	if f.session == "" || label == "" || !webfront.Equal(label, f.session) {
 		return scienceTicket{}, false
 	}
 	if f.current.epoch == nil || f.current.epoch.Err() != nil {
@@ -447,20 +618,23 @@ func (f *scienceFront) block(category string) {
 
 // scienceRequestHeaders is the tenant gateway's request allow-list without
 // Sec-WebSocket-Extensions (compressed frames could not be audited),
-// Accept-Language and Content-Encoding (set or refused here), plus what the
-// daemon's app sends of its own.
+// Accept-Language and Content-Encoding (set or refused here), the
+// conditional headers (nothing the front serves may be kept, so nothing is
+// revalidated), Cookie and X-Csrf-Token (the front holds the daemon's
+// cookies), plus what the daemon's app sends of its own.
 var scienceRequestHeaders = []string{
-	"Accept", "Accept-Encoding", "Content-Type", "Range", "If-Match", "If-None-Match", "If-Range",
-	"If-Modified-Since", "If-Unmodified-Since", "Last-Event-ID", "Connection", "Upgrade",
-	"Sec-WebSocket-Key", "Sec-WebSocket-Protocol", "Sec-WebSocket-Version", "X-Requested-With", "X-Csrf-Token", "Cache-Control",
+	"Accept", "Accept-Encoding", "Content-Type", "Range", "Last-Event-ID", "Connection", "Upgrade",
+	"Sec-WebSocket-Key", "Sec-WebSocket-Protocol", "Sec-WebSocket-Version", "X-Requested-With", "Cache-Control",
 }
 
+// scienceResponseHeaders leaves out every validator and freshness header:
+// each response is no-store.
 var scienceResponseHeaders = []string{
 	"Content-Type", "Content-Encoding", "Content-Length", "Content-Disposition", "Accept-Ranges", "Content-Range",
-	"Location", "Allow", "Retry-After", "Cache-Control", "Etag", "Last-Modified", "Expires", "Vary", "Pragma", "X-Accel-Buffering",
+	"Location", "Allow", "Retry-After", "X-Accel-Buffering",
 }
 
-func scienceOutboundHeaders(in http.Header, identity scienceIdentity, upstreamOrigin string) http.Header {
+func scienceOutboundHeaders(in http.Header, identity scienceIdentity, upstreamOrigin string, jar *scienceJar) http.Header {
 	out := webfront.SelectHeaders(in, scienceRequestHeaders...)
 	for name, values := range in {
 		if strings.HasPrefix(name, "X-Operon-") {
@@ -471,21 +645,80 @@ func scienceOutboundHeaders(in http.Header, identity scienceIdentity, upstreamOr
 	if in.Get("Origin") != "" {
 		out.Set("Origin", upstreamOrigin)
 	}
-	var csrf []string
-	for _, value := range in.Values("Cookie") {
-		for _, part := range strings.Split(value, ";") {
-			name, _, _ := strings.Cut(strings.TrimSpace(part), "=")
-			if name == "operon_csrf" {
-				csrf = append(csrf, strings.TrimSpace(part))
-			}
-		}
+	// The daemon's own cookies, held here; the page can neither read nor set
+	// them. Its CSRF token goes with them (header-authenticated requests skip
+	// the daemon's double-submit check; the front's Origin check is the
+	// guard either way).
+	if cookie := jar.header(); cookie != "" {
+		out.Set("Cookie", cookie)
 	}
-	if len(csrf) > 0 {
-		out.Set("Cookie", strings.Join(csrf, "; "))
+	if csrf := jar.value("operon_csrf"); csrf != "" {
+		out.Set("X-Csrf-Token", csrf)
 	}
 	out.Set("Accept-Language", identity.UpstreamAcceptLanguage)
 	out.Set("User-Agent", identity.UserAgent)
 	return out
+}
+
+// scienceJar holds the daemon's cookies for one session, bounded.
+type scienceJar struct {
+	cookies map[string]string
+}
+
+const (
+	scienceJarCookies = 32
+	scienceJarBytes   = 16 << 10
+)
+
+func (j *scienceJar) value(name string) string {
+	if j == nil {
+		return ""
+	}
+	return j.cookies[name]
+}
+
+func (j *scienceJar) header() string {
+	if j == nil || len(j.cookies) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(j.cookies))
+	for name := range j.cookies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		parts = append(parts, name+"="+j.cookies[name])
+	}
+	return strings.Join(parts, "; ")
+}
+
+// keep stores what the daemon set; deletions and expired cookies leave.
+func (j *scienceJar) keep(cookies []*http.Cookie, now time.Time) {
+	for _, cookie := range cookies {
+		if cookie.Name == "" || strings.ContainsAny(cookie.Value, " ;\r\n") {
+			continue
+		}
+		if cookie.MaxAge < 0 || (!cookie.Expires.IsZero() && !cookie.Expires.After(now)) || cookie.Value == "" {
+			delete(j.cookies, cookie.Name)
+			continue
+		}
+		if j.cookies == nil {
+			j.cookies = map[string]string{}
+		}
+		if _, ok := j.cookies[cookie.Name]; !ok && len(j.cookies) >= scienceJarCookies {
+			continue
+		}
+		previous, had := j.cookies[cookie.Name]
+		j.cookies[cookie.Name] = cookie.Value
+		if len(j.header()) > scienceJarBytes {
+			if had {
+				j.cookies[cookie.Name] = previous
+			} else {
+				delete(j.cookies, cookie.Name)
+			}
+		}
+	}
 }
 
 // auditRequest scans the URL, the outbound header values and the body.
@@ -543,13 +776,14 @@ func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current sci
 	}
 	f.mu.Lock()
 	audit := f.audit
+	jar := scienceJar{cookies: maps.Clone(f.jar.cookies)}
 	f.mu.Unlock()
 	upstream, err := f.upstreamFor()
 	if err != nil {
 		sciencePlain(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	outHeaders := scienceOutboundHeaders(r.Header, current.identity, upstream.origin())
+	outHeaders := scienceOutboundHeaders(r.Header, current.identity, upstream.origin(), &jar)
 	if category := auditRequest(audit, r.URL, outHeaders, body); category != "" {
 		f.block(category)
 		scienceDetail(w, http.StatusForbidden, scienceAuditMessages[category])
@@ -588,7 +822,7 @@ func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current sci
 				p.Out.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
 			}
 		},
-		ModifyResponse: func(response *http.Response) error { return f.rewriteResponse(response, upstream) },
+		ModifyResponse: func(response *http.Response) error { return f.rewriteResponse(response, upstream, r.Host) },
 	}
 	proxy.ServeHTTP(w, r)
 }
@@ -615,8 +849,9 @@ func (t scienceProxyTransport) RoundTrip(request *http.Request) (*http.Response,
 	return response, nil
 }
 
-// rewriteResponse applies the response half of design §7.4.
-func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienceUpstream) error {
+// rewriteResponse applies the response half of design §7.4. host is the
+// session's label host.
+func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienceUpstream, host string) error {
 	if response.StatusCode == http.StatusSwitchingProtocols {
 		if !webfront.ValidSwitchingResponse(response.Request, response) {
 			return errors.New("science protocol upgrade refused")
@@ -625,14 +860,15 @@ func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienc
 		return nil
 	}
 	headers := webfront.SelectHeaders(response.Header, scienceResponseHeaders...)
-	for _, cookie := range response.Cookies() {
-		// The app may read its CSRF token; every credential cookie stays out.
-		if cookie.Name == "operon_csrf" && cookie.Value != "" {
-			kept := &http.Cookie{Name: cookie.Name, Value: cookie.Value, Path: "/", MaxAge: cookie.MaxAge, Expires: cookie.Expires, SameSite: http.SameSiteStrictMode}
-			if value := kept.String(); value != "" {
-				headers.Add("Set-Cookie", value)
-			}
+	// Nothing the front serves is kept by the browser.
+	headers.Set("Cache-Control", "no-store")
+	// The daemon's cookies stay here, for this session only.
+	if cookies := response.Cookies(); len(cookies) > 0 {
+		f.mu.Lock()
+		if f.current.epoch != nil {
+			f.jar.keep(cookies, f.now())
 		}
+		f.mu.Unlock()
 	}
 	if values := headers.Values("Location"); len(values) > 0 {
 		location, err := url.Parse(values[0])
@@ -643,7 +879,7 @@ func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienc
 		if location.Scheme != "http" || (location.Host != upstream.hostPort() && location.Host != "127.0.0.1:"+strconv.Itoa(upstream.port)) || location.User != nil || !webfront.ValidPath(location) {
 			return errors.New("science redirect refused")
 		}
-		location.Scheme, location.Host = "http", f.host
+		location.Scheme, location.Host = "http", host
 		headers.Set("Location", location.String())
 	}
 	ancestors := strings.Fields(f.ancestors())
@@ -651,7 +887,7 @@ func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienc
 		policy = policy.Without("report-uri", "report-to").Set("frame-ancestors", ancestors...)
 		headers.Add("Content-Security-Policy", policy.String())
 	}
-	headers.Add("Content-Security-Policy", f.lockdown())
+	headers.Add("Content-Security-Policy", f.lockdown(host))
 	headers.Set("X-Content-Type-Options", "nosniff")
 	headers.Set("Referrer-Policy", "no-referrer")
 	headers.Set("X-DNS-Prefetch-Control", "off")
@@ -667,7 +903,8 @@ func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienc
 }
 
 // serveOwn answers /_cage/*: the entry, the probe and the report sink.
-func (f *scienceFront) serveOwn(w http.ResponseWriter, r *http.Request) {
+// state is the label's (issued, checking or session).
+func (f *scienceFront) serveOwn(w http.ResponseWriter, r *http.Request, label, state string) {
 	if r.URL.RawQuery != "" || r.URL.ForceQuery {
 		sciencePlain(w, http.StatusBadRequest, "请求格式无效")
 		return
@@ -688,11 +925,18 @@ func (f *scienceFront) serveOwn(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
-		if needsProbe {
-			if _, ok := f.probeSession(r); !ok {
-				sciencePlain(w, http.StatusUnauthorized, "身份核对已过期，请回到工作台重新打开 Claude Science。")
-				return
-			}
+		switch {
+		case needsProbe && state != "checking":
+			sciencePlain(w, http.StatusUnauthorized, "身份核对已过期，请回到工作台重新打开 Claude Science。")
+			return
+		case strings.HasPrefix(path, "/_cage/enter") && state != "issued":
+			sciencePlain(w, http.StatusUnauthorized, "入口已失效，请回到工作台重新打开 Claude Science。")
+			return
+		}
+		if path == "/_cage/enter" {
+			// A fresh origin has nothing to clear; this keeps it so should a
+			// label ever come back.
+			w.Header().Set("Clear-Site-Data", `"cache", "storage"`)
 		}
 		w.Header().Set("Content-Type", kind)
 		if r.Method == http.MethodGet {
@@ -704,70 +948,56 @@ func (f *scienceFront) serveOwn(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	switch path {
-	case "/_cage/enter":
-		f.enter(w, r)
-	case "/_cage/probe":
-		f.probe(w, r)
-	case "/_cage/csp-report":
+	switch {
+	case path == "/_cage/enter" && state == "issued":
+		f.enter(w, r, label)
+	case path == "/_cage/probe" && state == "checking":
+		f.probe(w, r, label)
+	case path == "/_cage/csp-report" && (state == "checking" || state == "session"):
 		f.cspReport(w, r)
+	case path == "/_cage/enter" || path == "/_cage/probe" || path == "/_cage/csp-report":
+		sciencePlain(w, http.StatusUnauthorized, "入口已失效，请回到工作台重新打开 Claude Science。")
 	default:
 		http.NotFound(w, r)
 	}
 }
 
-func (f *scienceFront) probeSession(r *http.Request) (scienceProbeSession, bool) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	now := f.now()
-	for token, session := range f.probes {
-		if !now.Before(session.expires) || session.epoch.Err() != nil {
-			delete(f.probes, token)
-		}
-	}
-	for _, value := range webfront.CookieValues(r, f.probeCookie()) {
-		for token, session := range f.probes {
-			if webfront.Equal(value, token) {
-				return session, true
-			}
-		}
-	}
-	return scienceProbeSession{}, false
-}
-
-func (f *scienceFront) enter(w http.ResponseWriter, r *http.Request) {
-	var input struct {
-		Ticket string `json:"ticket"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
-	decoder.DisallowUnknownFields()
-	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType != "application/json" || decoder.Decode(&input) != nil {
+// enter starts the identity check for an issued label (once) and ends any
+// earlier session.
+func (f *scienceFront) enter(w http.ResponseWriter, r *http.Request, label string) {
+	if mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mediaType != "application/json" {
 		sciencePlain(w, http.StatusBadRequest, "请求格式无效")
 		return
 	}
-	ticket, ok := f.tickets.Consume(input.Ticket)
-	if !ok || ticket.epoch == nil || ticket.epoch.Err() != nil {
+	var input struct{}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&input) != nil {
+		sciencePlain(w, http.StatusBadRequest, "请求格式无效")
+		return
+	}
+	f.mu.Lock()
+	entry, ok := f.issued[label]
+	delete(f.issued, label)
+	if !ok || entry.epoch == nil || entry.epoch.Err() != nil {
+		f.mu.Unlock()
 		sciencePlain(w, http.StatusUnauthorized, "入口已失效，请回到工作台重新打开 Claude Science。")
 		return
 	}
-	token := webfront.Secret(32)
-	f.mu.Lock()
-	// A new entry revokes the session of any earlier document.
-	f.session, f.current, f.audit = "", scienceTicket{}, nil
+	upstream := f.upstream
+	// A new entry ends the session of any earlier document.
+	f.session, f.current, f.audit, f.jar, f.upstream = "", scienceTicket{}, nil, scienceJar{}, nil
 	f.state.Session = false
-	clear(f.probes)
-	f.probes[token] = scienceProbeSession{scienceTicket: ticket, expires: f.now().Add(scienceProbeLife)}
+	clear(f.checking)
+	f.checking[label] = scienceProbeSession{scienceTicket: entry.scienceTicket, expires: f.now().Add(scienceProbeLife)}
 	f.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: f.probeCookie(), Value: token, Path: "/_cage/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(scienceProbeLife.Seconds())})
+	if upstream != nil {
+		upstream.close()
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (f *scienceFront) probe(w http.ResponseWriter, r *http.Request) {
-	session, ok := f.probeSession(r)
-	if !ok {
-		sciencePlain(w, http.StatusUnauthorized, "身份核对已过期，请回到工作台重新打开 Claude Science。")
-		return
-	}
+func (f *scienceFront) probe(w http.ResponseWriter, r *http.Request, label string) {
 	var input struct {
 		Reports []scienceProbeReport `json:"reports"`
 	}
@@ -777,30 +1007,29 @@ func (f *scienceFront) probe(w http.ResponseWriter, r *http.Request) {
 		sciencePlain(w, http.StatusBadRequest, "请求格式无效")
 		return
 	}
+	f.mu.Lock()
+	session, ok := f.checking[label]
+	delete(f.checking, label)
+	f.mu.Unlock()
+	if !ok || session.epoch.Err() != nil || !f.now().Before(session.expires) {
+		sciencePlain(w, http.StatusUnauthorized, "身份核对已过期，请回到工作台重新打开 Claude Science。")
+		return
+	}
 	reason := checkScienceProbe(session.identity, input.Reports, f.now())
 	f.mu.Lock()
-	for token, candidate := range f.probes {
-		if candidate.expires == session.expires && candidate.epoch == session.epoch {
-			delete(f.probes, token)
-		}
-	}
 	if reason != "" {
 		now := f.now()
 		f.state.Refused, f.state.RefusedAt = "身份核对未通过："+reason+"。已改用隔离浏览器打开。", &now
 		f.mu.Unlock()
-		http.SetCookie(w, &http.Cookie{Name: f.probeCookie(), Value: "", Path: "/_cage/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		sciencePlain(w, http.StatusForbidden, reason)
 		return
 	}
-	token := webfront.Secret(32)
-	f.session, f.current = token, session.scienceTicket
+	f.session, f.current, f.jar = label, session.scienceTicket, scienceJar{}
 	f.audit = newScienceAudit(session.host, session.identity, f.now())
 	f.state.Session, f.state.Audit = true, f.audit.Distinct
 	f.state.Refused, f.state.RefusedAt = "", nil
 	f.lastHeard = f.now()
 	f.mu.Unlock()
-	http.SetCookie(w, &http.Cookie{Name: f.probeCookie(), Value: "", Path: "/_cage/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
-	http.SetCookie(w, &http.Cookie{Name: f.cookieName(), Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
 }
 

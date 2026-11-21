@@ -537,7 +537,7 @@ func (s *Server) handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+s.scienceFrameSources()+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+s.scienceFrameSources(r)+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		if (r.Method != "GET" && r.Method != "HEAD") || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			if r.Header.Get("Origin") != s.origin {
 				http.Error(w, "Origin refused", 403)
@@ -558,14 +558,9 @@ func (s *Server) handler() http.Handler {
 			http.NotFound(w, r)
 			return
 		}
-		// Only while a Claude Science front runs here (science_host.go).
-		hardened := s.scienceHardened()
-		if hardened && strings.HasPrefix(r.URL.Path, "/api/") && scienceCrossSite(r) {
-			http.Error(w, "请求来源被拒绝", http.StatusForbidden)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/") && r.URL.Path != "/api/session" && r.URL.Path != "/api/launch" && r.URL.Path != "/api/handoff" {
-			if !s.sessionCookieValid(r, hardened) {
+			c, e := r.Cookie(s.cookieName())
+			if e != nil || !equalSecret(c.Value, s.session) {
 				http.Error(w, "请从 Super Cage 应用重新打开工作台", 401)
 				return
 			}

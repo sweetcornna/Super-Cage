@@ -28,13 +28,11 @@ const scienceProbeReportJS = "const report = (ctx) => { const hints = navigator.
 	"ua_platform: hints ? hints.platform : null, shared_worker: typeof SharedWorker !== \"undefined\" }; };\n"
 
 const scienceEnterJS = `"use strict";
-const ticket = location.hash.slice(1);
-history.replaceState(null, "", location.pathname);
 (async () => {
-  if (!/^[a-f0-9]{64}$/.test(ticket)) throw new Error();
+  // The label in this origin is the entry; it works once.
   const response = await fetch("/_cage/enter", {
-    method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
-    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ticket }),
+    method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
+    headers: { "Content-Type": "application/json" }, body: "{}",
   });
   if (response.status !== 204) throw new Error();
   location.replace("/_cage/probe");
@@ -70,7 +68,7 @@ const send = async () => {
   reports[0].rtc = await rtc;
   try {
     const response = await fetch("/_cage/probe", {
-      method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
+      method: "POST", credentials: "omit", cache: "no-store", redirect: "error",
       headers: { "Content-Type": "application/json" }, body: JSON.stringify({ reports }),
     });
     if (response.status === 204) { location.replace("/"); return; }
