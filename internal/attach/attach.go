@@ -260,6 +260,7 @@ type attacher struct {
 	lastInput  atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
 	inPaste    bool         // input is inside a bracketed paste
 	dropPaste  bool         // the rest of a paste cut by a reconnect is dropped
+	endPaste   bool         // the program received a paste's start, not its end
 	resets     int          // the filter's Resets, to turn focus reports on again
 
 	filter  *termfilter.Filter
@@ -743,6 +744,11 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 			StreamHook(ws)
 		}
 		a.sendSize()
+		if a.endPaste {
+			// A paste the program had begun was cut by the reconnect.
+			a.endPaste = false
+			_ = a.sendInput([]byte(attachPasteEnd))
+		}
 		frames := make(chan error, 1)
 		go func() {
 			defer a.guard()
@@ -834,7 +840,10 @@ const reconnectNotice = "\r\n正在重新连接…（这期间输入的内容不
 // paste cut by the drop is dropped to its end. Ctrl-C or Ctrl-D still
 // detach an observer.
 func (a *attacher) reconnect(ctx context.Context, cause error, inputs <-chan []byte, inputDone <-chan struct{}, paste *attachPaste) (*controlwire.Conn, Exit, bool) {
-	paste.stop() // a paste still being gathered was for the dropped stream
+	// A paste still being gathered was for the dropped stream; one already
+	// passed on (longer than attach holds) is ended once the stream is back.
+	forwarded := a.inPaste && paste.pending == nil
+	paste.stop()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type outcome struct {
@@ -859,7 +868,7 @@ func (a *attacher) reconnect(ctx context.Context, cause error, inputs <-chan []b
 	for {
 		select {
 		case r := <-done:
-			a.dropPaste = a.inPaste
+			a.dropPaste, a.endPaste = a.inPaste, forwarded && r.ok
 			return r.ws, r.exit, r.ok
 		case <-inputDone:
 			return detach()

@@ -1542,3 +1542,31 @@ func TestAttachObserverDetachesWhileReconnecting(t *testing.T) {
 		t.Fatalf("observer did not detach: %+v", result)
 	}
 }
+
+// A paste the program had already begun receiving (longer than attach
+// holds) and that a reconnect cut is ended for the program: it receives the
+// paste's terminator once the stream is back, never the dropped rest.
+func TestAttachEndsAPasteCutByAReconnect(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	release, streams := holdResume(t)
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	a.typeText("\x1b[200~" + strings.Repeat("a", 70<<10))
+	a.waitFor("got:\"\\x1b[200~", 1)
+	time.Sleep(200 * time.Millisecond)
+	_ = streams()[0].NetConn().Close()
+	time.Sleep(100 * time.Millisecond)
+	a.typeText("bbb\x1b[201~")
+	a.waitFor("正在重新连接…", 1)
+	release()
+	for len(streams()) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	a.typeText("kept")
+	out := a.waitFor("kept\"", 1)
+	if strings.Contains(out, "bbb") || !strings.Contains(out, "\\x1b[201~") {
+		t.Fatalf("the cut paste was not ended, or its rest arrived: %q", out[max(0, len(out)-300):])
+	}
+}
