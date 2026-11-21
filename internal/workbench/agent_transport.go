@@ -37,7 +37,10 @@ func agentConnectTarget(ctx context.Context, configPath string, target AgentTarg
 	if target.Scope == "client" {
 		path = configPath
 	}
-	c, err := connectController(filepath.Dir(path))
+	c, err := connectProvenController(filepath.Dir(path))
+	if controllerIdentityError(err) {
+		return nil, &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
+	}
 	if err != nil {
 		return nil, &AgentError{Code: "service_unavailable", Message: "Open the Super Cage desktop before managing client configuration.", NextAction: "open_desktop"}
 	}

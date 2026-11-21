@@ -40,7 +40,8 @@ func agentTestController(t *testing.T) *Server {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { unlockController(lock); lock.Close() })
-	if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: identity}); err != nil {
+	s.proofKey = randomToken()
+	if err := writePrivate(filepath.Join(s.profile, "control.json"), s.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	return s

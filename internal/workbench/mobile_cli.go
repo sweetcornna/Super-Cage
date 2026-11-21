@@ -86,11 +86,15 @@ func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, str
 		return claudeSelection{}, "", empty, errWindowsLegacyMobile
 	}
 	s.mu.Lock()
-	ready, closing, update, configured := s.ready, s.closing, s.guestUpdateRequired, claudeTerminalCommand(s.preferences)
+	ready, closing, sealed, update, configured := s.ready, s.closing, s.appUpdateSealed, s.guestUpdateRequired, claudeTerminalCommand(s.preferences)
 	s.mu.Unlock()
+	if sealed {
+		return claudeSelection{}, "", empty, errAppUpdateSealed
+	}
 	if closing || !ready || !s.vmRunning() || s.busy() {
 		return claudeSelection{}, "", empty, errTerminalNotReady
 	}
+	s.noteAppUpdateActivity()
 	if _, err := s.connectProject(record.Workspace, false); err != nil {
 		return claudeSelection{}, "", empty, err
 	}
