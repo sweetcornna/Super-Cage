@@ -43,8 +43,10 @@ internal static partial class ScienceFrame
         Profiles(root).Any(profile => ReadObject(Path.Combine(profile, "workbench.json"))?["science_host_render"] is JsonValue value &&
             value.TryGetValue<bool>(out var on) && on) ? BackstopArguments : null;
 
-    // Identity is what a workload published in its control.json for the front
-    // at the address's port; null for anything that is not a front's entry.
+    // Identity is what a running workload published in its control.json for
+    // the front at the address's port; null for anything that is not a
+    // front's entry. A record left by a workload that exited is skipped: the
+    // port it names may belong to another environment's front now.
     public static JsonObject? Identity(string root, string raw)
     {
         if (!Uri.TryCreate(raw, UriKind.Absolute, out var url) || url.Scheme != "http" || url.Host != "localhost" ||
@@ -54,9 +56,17 @@ internal static partial class ScienceFrame
         {
             var control = ReadObject(Path.Combine(profile, "control.json"));
             if (control?["science_port"] is not JsonValue port || !port.TryGetValue<int>(out var number) || number != url.Port) continue;
+            if (control["pid"] is not JsonValue pid || !pid.TryGetValue<int>(out var process) || !Running(process)) continue;
             if (control["science_identity"] is JsonObject identity && Valid(identity)) return (JsonObject)identity.DeepClone();
         }
         return null;
+    }
+
+    private static bool Running(int pid)
+    {
+        if (pid <= 0) return false;
+        try { using var process = System.Diagnostics.Process.GetProcessById(pid); return !process.HasExited; }
+        catch (Exception error) when (error is ArgumentException or InvalidOperationException) { return false; }
     }
 
     [GeneratedRegex(@"^[A-Za-z0-9 _.,;:=()/+-]{1,128}$")]

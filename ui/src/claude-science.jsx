@@ -41,7 +41,13 @@ const hostMeasure = () => ({
 // Why the frame gave way, kept across visits to the pane until the switch
 // changes or the window reloads, so a refused probe is not retried on every
 // visit.
-const remembered = { fallback: null };
+const remembered = { fallback: null, release: Promise.resolve() };
+// One automatic reload when the window's document predates the front (its
+// frame-src cannot change); a second refusal asks instead.
+const reloadKey = "cage-science-frame-reload";
+const reloadedRecently = () => {
+  try { return Date.now() - Number(sessionStorage.getItem(reloadKey) || 0) < 120000; } catch { return true; }
+};
 class FrameFallback extends Error {
   constructor(message, fix) { super(message); this.fix = fix; }
 }
@@ -86,6 +92,9 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
     move("preparing");
     setURL("");
     try {
+      // A release from the previous frame must not land after this ticket.
+      await remembered.release;
+      if (disposed.current) return;
       const prepared = await native("scienceFrame", { op: "prepare" });
       if (disposed.current) return;
       if (!prepared?.backstop) throw new FrameFallback(frameMessages.restart, "restart");
@@ -109,14 +118,20 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
       window.removeEventListener("cage-science-frame", ended);
       disposed.current = true;
       void native("scienceFrame", { op: "disarm" }).catch(() => {});
-      void api("/claude-science/release", {}).catch(() => {});
+      remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
     };
   }, []);
   useEffect(() => {
     if (!url) return;
     const origin = new URL(url).origin;
     const blocked = (event) => {
-      if (event.effectiveDirective === "frame-src" && event.blockedURI.startsWith(origin)) fallback.current(frameMessages.reload, "reload");
+      if (event.effectiveDirective !== "frame-src" || !event.blockedURI.startsWith(origin)) return;
+      if (!reloadedRecently()) {
+        try { sessionStorage.setItem(reloadKey, String(Date.now())); } catch { /* storage may be off */ }
+        location.reload();
+        return;
+      }
+      fallback.current(frameMessages.reload, "reload");
     };
     document.addEventListener("securitypolicyviolation", blocked);
     let timer;
@@ -137,9 +152,10 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
           signIn.current(event);
         }
         if (state.refused) { fallback.current(state.refused, "browser"); return; }
-        if (phaseRef.current === "loading" && state.session) move("ready");
-        else if (phaseRef.current === "loading" && Date.now() - opened > 20000) { fallback.current(frameMessages.timeout, "browser"); return; }
-        else if (phaseRef.current === "ready" && !state.session) {
+        if (phaseRef.current === "loading" && state.session) {
+          move("ready");
+          try { sessionStorage.removeItem(reloadKey); } catch { /* storage may be off */ }
+        } else if (phaseRef.current === "ready" && !state.session) {
           // The front restarted or dropped the session: one new ticket.
           if (retried.current) { fallback.current(frameMessages.dropped, "browser"); return; }
           retried.current = true;
@@ -149,6 +165,7 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
       } catch (error) {
         if (stopped || error.status === 423) return;
       }
+      if (phaseRef.current === "loading" && Date.now() - opened > 20000) { fallback.current(frameMessages.timeout, "browser"); return; }
       timer = setTimeout(poll, phaseRef.current === "loading" ? 1000 : 2000);
     };
     timer = setTimeout(poll, 500);
@@ -340,7 +357,7 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
         {(actionError || hostNotice) && (
           <div className="science-notice" data-tone="error" role="alert"><span><SafetyMessage message={actionError || hostNotice} /></span></div>
         )}
-        <ScienceFrame data={data} onFallback={frameFallback} onSignIn={frameSignIn} toolbar={<>
+        <ScienceFrame key={getClientContext().connection_id} data={data} onFallback={frameFallback} onSignIn={frameSignIn} toolbar={<>
           {data.signed_in !== true && tool("登录", LogIn, () => void open(true))}
           {tool("在隔离浏览器中打开", ExternalLink, () => void open())}
           {tool("停止", Power, () => void act({ action: "stop", confirm: true }))}

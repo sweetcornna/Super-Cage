@@ -245,7 +245,6 @@ export function scienceView({ data = null, error = null, actionError = "", job =
 // time zone, language and browser identity. Off by default.
 export const hostRenderLabel = "本机渲染（实验性）";
 export const hostRenderExplanation = "在这个窗口中直接显示 Claude Science，页面看到的仍是环境的时区、语言和浏览器标识。";
-export const hostRenderElsewhere = "本机渲染只能在这台电脑的 Super Cage 窗口中使用，这里继续使用隔离浏览器。";
 export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性";
 
 /**
@@ -264,19 +263,20 @@ export function hostRenderView({ data = null, client = {}, bridge = false, runni
   const render = data?.host_render;
   if (!render || !data.installed) return view;
   const here = Boolean(client.desktop_gateway) && client.mode === "local" && client.client_platform === "windows" && bridge;
-  const usable = Boolean(render.available) && here;
-  // Shown where it can be used, and wherever it is on (so it can be turned off).
-  if (!usable && !render.enabled) return view;
+  // Only where it can be used: elsewhere (macOS, Linux, a browser, the
+  // phone, a remote host) the pane stays as it was and the server refuses
+  // the switch anyway.
+  if (!render.available || !here) return view;
   view.toggle = {
     label: hostRenderLabel,
     checked: Boolean(render.enabled),
-    disabled: busy || (!usable && !render.enabled),
-    explanation: usable ? hostRenderExplanation : (here && render.unavailable_reason) || hostRenderElsewhere,
+    disabled: busy,
+    explanation: hostRenderExplanation,
   };
   if (render.error) view.notice = render.error;
   const daemonReady = Boolean(data.installed && data.running && data.ready);
-  view.frame = usable && Boolean(render.enabled && render.running) && running && !locked && !busy && daemonReady && !fallback;
-  if (usable && render.enabled && fallback) view.fallback = fallback;
+  view.frame = Boolean(render.enabled && render.running) && running && !locked && !busy && daemonReady && !fallback;
+  if (render.enabled && fallback) view.fallback = fallback;
   return view;
 }
 

@@ -216,19 +216,23 @@ async function walk(mode) {
   }
 }
 
-// Where the switch never shows: macOS window, a browser, a remote host.
+// Where the switch never shows, even when it is on: macOS window, a browser
+// (no desktop gateway), a remote host.
 async function elsewhere() {
-  for (const clientContext of [
-    { mode: "local", connection_id: "local", client_platform: "darwin", server_platform: "darwin", desktop_gateway: true, connection: { state: "connected" } },
-    { ...windowsWindow, mode: "remote", connection_id: "remote-1" },
+  for (const [clientContext, claudeScience] of [
+    [{ mode: "local", connection_id: "local", client_platform: "darwin", server_platform: "darwin", desktop_gateway: true, connection: { state: "connected" } }, "running-host-render-available"],
+    [{ ...windowsWindow, mode: "remote", connection_id: "remote-1" }, "running-host-render-available"],
+    [{ ...windowsWindow, mode: "remote", connection_id: "remote-1" }, "running-host-render"],
+    [{ mode: "local", connection_id: "local", client_platform: "windows", server_platform: "windows", connection: { state: "connected" } }, "running-host-render"],
   ]) {
-    const { browser, page, native, errors } = await open({ mode: "light", clientContext, claudeScience: "running-host-render-available" });
+    const { browser, page, native, errors } = await open({ mode: "light", clientContext, claudeScience });
     try {
       await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "Claude Science", exact: true }).click();
       const pane = page.getByRole("main", { name: "Claude Science", exact: true });
       await pane.locator('.claude-science[data-state="running"]').waitFor({ timeout: 15000 });
       await page.waitForTimeout(500);
-      assert.equal(await pane.getByRole("switch").count(), 0, clientContext.client_platform + " " + clientContext.mode);
+      assert.equal(await pane.getByRole("switch").count(), 0, clientContext.client_platform + " " + clientContext.mode + " " + claudeScience);
+      assert.equal(await pane.locator("iframe").count(), 0);
       assert.deepEqual(native, []);
       assert.deepEqual(errors, []);
     } finally {
@@ -238,13 +242,19 @@ async function elsewhere() {
 }
 
 // The window's document was loaded before the front ran: CSP refuses the
-// frame, and the pane asks for a reload instead of showing a blank frame.
+// frame. The pane reloads the window once by itself; a second refusal asks
+// instead of showing a blank frame.
 async function blockedByPolicy() {
   const { browser, page, native, errors, bridge, state } = await open({ mode: "light", clientContext: windowsWindow, claudeScience: "running-host-render", csp: true });
   bridge.backstop = true;
   try {
-    await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "Claude Science", exact: true }).click();
+    const row = page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "Claude Science", exact: true });
     const pane = page.getByRole("main", { name: "Claude Science", exact: true });
+    const loaded = page.waitForEvent("load", { timeout: 15000 });
+    await row.click();
+    await loaded;
+    assert.ok(await page.evaluate(() => Number(sessionStorage.getItem("cage-science-frame-reload")) > 0), "reloaded once");
+    await row.click();
     await pane.getByText("窗口打开时本机渲染还没有就绪，重新载入窗口后生效。").waitFor({ timeout: 15000 });
     await pane.getByRole("button", { name: "重新载入窗口", exact: true }).waitFor();
     assert.equal(native.at(-1).op, "disarm");
@@ -261,4 +271,4 @@ for (const mode of ["light", "dark"]) {
 }
 await elsewhere();
 await blockedByPolicy();
-console.log(`PASS: switch off by default, restart asked without the network switches, ticket+arm+frame edge to edge, sign-in hands over to the browser pane, one re-ticket then fallback (remembered), refused probe, off from both switches, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; CSP refusal asks for a reload`);
+console.log(`PASS: switch off by default, restart asked without the network switches, ticket+arm+frame edge to edge, sign-in hands over to the browser pane, one re-ticket then fallback (remembered), refused probe, off from both switches, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; CSP refusal reloads once, then asks`);

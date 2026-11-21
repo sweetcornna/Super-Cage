@@ -43,7 +43,10 @@ import (
 //	  409 unavailable, off, environment or Claude Science not running, or the
 //	  guest browser's identity unreadable.
 //	POST /api/claude-science/release {} -> 204: the pane closed its frame;
-//	  the front ends the session and forgets the daemon credential.
+//	  the front ends the session and forgets the daemon credential. When
+//	  the release cannot arrive (the window switched to another environment
+//	  or closed), the session ends after 90 s without the pane's poll or
+//	  the page's requests (scienceFront.dropOrphan).
 //
 // In the desktop entry, host-render and ticket are refused unless the
 // selected environment is this computer's (scienceEntryRefuses).
@@ -227,6 +230,7 @@ func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
 			}
 			started = last.StartedAt
 		}
+		front.dropOrphan()
 		front.dropIdle()
 	}
 }
@@ -516,6 +520,9 @@ func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request)
 // scienceHostRenderRead is the pane's poll while its frame is open: the
 // front's state only, without reading the guest.
 func (s *Server) scienceHostRenderRead(w http.ResponseWriter, r *http.Request) {
+	if front := s.scienceFrontRunning(); front != nil {
+		front.heard()
+	}
 	jsonReply(w, s.scienceHostRender(r))
 }
 
@@ -539,6 +546,7 @@ func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "本机渲染尚未开启。", http.StatusConflict)
 		return
 	}
+	front.heard()
 	if s.claudeScienceOperation() != "" {
 		http.Error(w, "Claude Science 正在安装、更新、启动或关闭，请等待完成后再打开。", http.StatusConflict)
 		return

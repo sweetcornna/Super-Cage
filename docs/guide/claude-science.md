@@ -1,9 +1,9 @@
 ---
 title: Claude Science
-description: 在 x86-64 Linux 环境中按需安装 Claude Science，在 Super Cage 浏览器内登录和使用，了解磁盘需求与当前限制。
+description: 在 x86-64 Linux 环境中按需安装 Claude Science，在 Super Cage 浏览器内登录和使用，在 Windows 窗口中试用本机渲染，了解磁盘需求与当前限制。
 group: 日常工作
 order: 6.2
-keywords: Claude Science Operon 科研 数据分析 Python R 安装 登录 磁盘 arm64
+keywords: Claude Science Operon 科研 数据分析 Python R 安装 登录 磁盘 arm64 本机渲染
 ---
 ## 哪些环境可以使用
 
@@ -35,13 +35,36 @@ Super Cage 为每个版本固定一个经过核对的 Claude Science 版本，�
 
 ## 网络、隐私与文件
 
-Claude Science 的服务只在环境内的本机地址监听，端口不会转发到主机或局域网，外部设备无法访问。它的网络请求和环境中其他程序一样，经过 Super Cage 的代理出口。Super Cage 按官方文档关闭了它的使用数据上报。
+Claude Science 的服务只在环境内的本机地址监听，端口不会转发到主机或局域网，外部设备无法访问。开启下文的本机渲染后，主机上的 Super Cage 经与环境的加密连接转交页面请求，只供这台电脑上的 Super Cage 窗口使用，同样不对局域网开放。它的网络请求和环境中其他程序一样，经过 Super Cage 的代理出口。Super Cage 按官方文档关闭了它的使用数据上报。
 
 复制粘贴、下载与上传遵循[浏览器与网站数据](browser.md)中的规则。Claude Science 的项目、会话和环境保存在客机用户目录的 `.claude-science` 中，随环境保留。
 
+## 本机渲染（实验性）
+
+只在 Windows 版 Super Cage 窗口中提供，默认关闭，每个环境分别设置。开启后，Claude Science 的页面直接显示在 Super Cage 窗口里，不再经过浏览器窗格的画面传输，滚动和输入没有额外延迟。页面仍由环境内的 Claude Science 服务提供，看到的时区、语言和浏览器标识是环境的，不是这台电脑的。
+
+在 Claude Science 页面卡片下方打开“本机渲染（实验性）”。第一次开启时，按提示重新载入窗口一次，让窗口带上本机渲染需要的网络限制；之后进入 Claude Science 页面即直接显示。关闭开关会立即回到浏览器窗格方式，窗口的网络限制在下次重新载入窗口后解除。
+
+开启后：
+
+- 每次打开时，窗口先核对页面看到的时区、语言、浏览器标识和网络限制。任何一项不符，这次改用隔离浏览器打开，并说明原因；可以在页面上重试。
+- 页面的请求只交给主机上的 Super Cage，再经与环境的加密连接转交 Claude Science。页面不能直接连接其他网站；请求中出现这台电脑的时区或语言时会被拦截，工具栏会提示。
+- 登录 Claude 账号仍在隔离浏览器中完成：点击页面中的登录，或工具栏中的“登录”，Super Cage 会切换到浏览器窗格中的登录页。
+- 停留在 Claude Science 页面期间，整个工作台窗口都使用环境的时区与语言；离开该页面后恢复。
+- 离开页面、锁定 Super Cage、停止环境或 Claude Science、切换虚拟机后，主机上的 Super Cage 会结束这次会话并丢弃从环境取得的凭据；切换虚拟机或关闭窗口时，最迟约 90 秒后结束。
+- 窗口本身不再连接外部网络（工作台始终只连接这台电脑上的 Super Cage），环境与 Super Cage 后台的联网不受影响。
+
+当前限制：
+
+- macOS 与 Linux 窗口、浏览器、手机和远程主机继续使用浏览器窗格。
+- 不支持下载、文件选择、连接器授权和预览沙箱；需要时点击工具栏中的“在隔离浏览器中打开”。
+- 页面可以把内容复制到剪贴板；页面主动读取剪贴板的请求会被拒绝，在输入框中粘贴不受影响。
+- 每次进入 Claude Science 页面都会重新加载页面。
+- Super Cage 刚启动时窗口可能会自动重新载入一次，之后再次进入 Claude Science 页面即可。
+
 ## 当前阶段尚不提供
 
-- 工作台内独立的 Claude Science 界面。目前通过浏览器窗格使用，操作延迟与浏览器窗格相同。
+- macOS 与 Linux 窗口中的本机渲染。这些窗口通过浏览器窗格使用 Claude Science，操作延迟与浏览器窗格相同。
 - macOS 客机、Windows 客机与 arm64 环境。
 - 跟随应用内更新。版本由 Super Cage 决定，请通过 Super Cage 更新。
-- 在主机上直接访问 Claude Science 的网页或端口。
+- 在主机的浏览器中直接访问 Claude Science 的网页或端口。本机渲染只供 Super Cage 窗口使用。

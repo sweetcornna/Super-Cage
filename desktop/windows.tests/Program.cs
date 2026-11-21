@@ -83,7 +83,8 @@ assertions = 0;
         Check(ScienceFrame.BackstopArguments.Contains("--proxy-server=http://127.0.0.1:9") && ScienceFrame.BackstopArguments.Contains("--webrtc-ip-handling-policy=disable_non_proxied_udp") &&
             ScienceFrame.BackstopArguments.Contains("--disable-shared-workers") && ScienceFrame.BackstopArguments.Contains("--no-pings"), "a network switch is missing");
 
-        var control = golden["control"]!;
+        var control = golden["control"]!.DeepClone().AsObject();
+        control["pid"] = Environment.ProcessId; // the golden record names no process
         var entry = "http://localhost:" + control["science_port"] + "/_cage/enter#" + new string('a', 43);
         Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity without a control file");
         File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
@@ -96,6 +97,16 @@ assertions = 0;
             entry.Replace("/_cage/enter#", "/_cage/enter?x=1#"), "http://localhost:17840/_cage/enter", "http://localhost/_cage/enter#x", "not a url",
         })
             Check(ScienceFrame.Identity(scienceRoot, other) == null, "identity for a foreign address: " + other);
+        // A record left by an exited workload with the same port is skipped.
+        var stale = control.DeepClone().AsObject();
+        stale["pid"] = int.MaxValue;
+        stale["science_identity"]!["timezone"] = "Europe/Paris";
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), stale.ToJsonString());
+        Check(Same(ScienceFrame.Identity(scienceRoot, entry), control["science_identity"]), "a stale control file shadowed the running workload");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), stale.ToJsonString());
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity from an exited workload");
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
         var unsafeIdentity = control.DeepClone().AsObject();
         unsafeIdentity["science_identity"]!["platform"] = "Linux\"; alert(1); \"";
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), unsafeIdentity.ToJsonString());

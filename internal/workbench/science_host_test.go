@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -437,6 +438,7 @@ func liveScienceFront(t *testing.T, s *Server) (*scienceFront, *fakeScienceDaemo
 	front.mu.Lock()
 	front.upstream, front.session, front.current = upstream, webfront.Secret(32), scienceTicket{epoch: epoch, identity: testScienceIdentity}
 	front.state.Session = true
+	front.lastHeard = time.Now() // as the probe does
 	front.mu.Unlock()
 	return front, daemon
 }
@@ -519,6 +521,7 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 		front.mu.Lock()
 		front.now = func() time.Time { return now.Add(scienceIdleDrop + time.Second) }
 		front.lastActive = now
+		front.lastHeard = now.Add(scienceIdleDrop) // the pane still polls
 		front.mu.Unlock()
 		waitFor(t, 5*time.Second, "the idle drop", func() bool {
 			front.mu.Lock()
@@ -531,6 +534,34 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 		if session == "" {
 			t.Fatal("idle ended the session too")
 		}
+	})
+	t.Run("environment switch (the pane went quiet)", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		now := time.Now()
+		var mu sync.Mutex
+		later := now.Add(scienceOrphanAfter / 2)
+		front.mu.Lock()
+		front.lastHeard, front.lastActive = now, now
+		front.now = func() time.Time { mu.Lock(); defer mu.Unlock(); return later }
+		front.mu.Unlock()
+		time.Sleep(60 * time.Millisecond)
+		if frontCleared(front) {
+			t.Fatal("ended while the pane was recent")
+		}
+		// The pane's poll keeps it; silence past the lease ends it.
+		(requestShape{method: "GET", path: "/api/claude-science/host-render", trusted: true}).send(s)
+		mu.Lock()
+		later = later.Add(scienceOrphanAfter - time.Second)
+		mu.Unlock()
+		time.Sleep(60 * time.Millisecond)
+		if frontCleared(front) {
+			t.Fatal("ended although the pane polled")
+		}
+		mu.Lock()
+		later = later.Add(scienceOrphanAfter)
+		mu.Unlock()
+		waitFor(t, 5*time.Second, "the orphan drop", func() bool { return frontCleared(front) })
 	})
 	t.Run("busy is not idle", func(t *testing.T) {
 		s := start(t)

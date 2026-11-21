@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { formatMB, hostFrameStatus, hostRenderElsewhere, hostRenderExplanation, hostRenderView, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
+import { formatMB, hostFrameStatus, hostRenderExplanation, hostRenderView, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
 
 const fixtures = createRequire(import.meta.url)("../scripts/claude-science-fixtures.json");
 const body = (name) => fixtures[name].body;
@@ -238,9 +238,11 @@ test("host rendering: the frame only while everything holds", () => {
   }
   const stopped = { ...body("running-host-render"), running: false, ready: false };
   assert.equal(hostRenderView({ data: stopped, client: windowsWindow, bridge: true, running: true }).frame, false, "daemon stopped");
-  // On but unusable here: the switch stays so it can be turned off, and says why.
-  const elsewhere = render("running-host-render", { client: { ...windowsWindow, mode: "remote" } });
-  assert.deepEqual(elsewhere.toggle, { label: "本机渲染（实验性）", checked: true, disabled: false, explanation: hostRenderElsewhere });
+  // On but not usable here (the server refuses the switch from here too):
+  // the pane stays as it was.
+  for (const client of [{ ...windowsWindow, mode: "remote" }, { ...windowsWindow, client_platform: "linux" }, { mode: "local", client_platform: "windows" }]) {
+    assert.deepEqual(render("running-host-render", { client }), { toggle: null, frame: false, fallback: "", notice: "" });
+  }
   assert.equal(render("running-host-render", { fallback: "身份核对未通过" }).fallback, "身份核对未通过");
 });
 

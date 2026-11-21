@@ -120,11 +120,16 @@ type scienceFront struct {
 	// of the last one: an idle front forgets the daemon credential.
 	active     int
 	lastActive time.Time
+	lastHeard  time.Time
 }
 
 // scienceIdleDrop is how long an idle front keeps the daemon credential. The
 // session survives: the next request mints a new one.
 const scienceIdleDrop = 2 * time.Minute
+
+// scienceOrphanAfter: the pane polls every two seconds while its frame
+// shows; a minimized window's timers may run once a minute.
+const scienceOrphanAfter = 90 * time.Second
 
 func (f *scienceFront) begin() {
 	f.mu.Lock()
@@ -137,6 +142,32 @@ func (f *scienceFront) end() {
 	f.active--
 	f.lastActive = f.now()
 	f.mu.Unlock()
+}
+
+// heard records the pane's poll (or its ticket): its frame is still open.
+func (f *scienceFront) heard() {
+	f.mu.Lock()
+	f.lastHeard = f.now()
+	f.mu.Unlock()
+}
+
+// dropOrphan ends the session and its credential when neither the pane nor
+// the frame's page has been heard from for scienceOrphanAfter: the window
+// switched to another environment (whose workload now gets the pane's
+// polls), closed, or lost its renderer. Nothing on this workload sees a
+// switch happen; silence is the signal.
+func (f *scienceFront) dropOrphan() bool {
+	f.mu.Lock()
+	last := f.lastHeard
+	if f.lastActive.After(last) {
+		last = f.lastActive
+	}
+	orphan := f.session != "" && f.active == 0 && f.now().Sub(last) > scienceOrphanAfter
+	f.mu.Unlock()
+	if orphan {
+		f.reset("")
+	}
+	return orphan
 }
 
 // dropIdle forgets the daemon credential when nothing has used it for
@@ -766,6 +797,7 @@ func (f *scienceFront) probe(w http.ResponseWriter, r *http.Request) {
 	f.audit = newScienceAudit(session.host, session.identity, f.now())
 	f.state.Session, f.state.Audit = true, f.audit.Distinct
 	f.state.Refused, f.state.RefusedAt = "", nil
+	f.lastHeard = f.now()
 	f.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: f.probeCookie(), Value: "", Path: "/_cage/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 	http.SetCookie(w, &http.Cookie{Name: f.cookieName(), Value: token, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode})
