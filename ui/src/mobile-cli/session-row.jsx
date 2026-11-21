@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Archive, LoaderCircle, MoreHorizontal, Pencil, Pin, PinOff, Terminal } from "lucide-react";
+import { useBackDismiss } from "./web-shell.mjs";
 
 export function ProviderBadge({ provider }) {
   return provider === "codex" ? <span className="provider-badge codex">Codex</span> : null;
@@ -84,6 +85,7 @@ export function SessionActionDialog({ action, busy, error, onCancel, onSubmit })
   const panel = useRef(null);
   const [title, setTitle] = useState(action.session.title || "");
   const rename = action.kind === "rename";
+  useBackDismiss(true, () => { if (!busy) onCancel(); });
   React.useEffect(() => { panel.current.showModal(); }, []);
   return <dialog className="session-dialog" ref={panel} aria-label={rename ? "重命名会话" : "归档会话"}
     onCancel={event => { event.preventDefault(); if (!busy) onCancel(); }}>

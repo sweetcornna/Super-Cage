@@ -22,6 +22,7 @@ import { usePasswordVault } from "./password-vault";
 import { validGuestChoice } from "./guest-system-picker";
 import { AppearanceProvider } from "./appearance";
 import { WorkspaceSidebar } from "./workspace-sidebar";
+import { sidebarDrawer, useSidebarDrawer } from "./sidebar-drawer.mjs";
 import { useCLISessions, sessionsChanged, SessionListView, useSessionSnapshot } from "./cli-sessions";
 import { archiveCopy, codexMenuLabel, codexSessionAccountLabel, codexSessionAction, isCodexSession, isCodexTab, READONLY_REASONS, SESSION_PROVIDERS } from "./session-provider.mjs";
 import { CodexOpening, CodexTerminalActions, CodexTerminalDetail, codexOutputArrived } from "./codex-terminal-header";
@@ -141,7 +142,7 @@ function App() {
     [settingsSection, setSettingsSection] = useState("keyboard"),
     [home, setHome] = useState(true),
     [sidebarCollapsed, setSidebarCollapsed] = useState(
-      readLocal(clientStorageKey("cage-sidebar-collapsed"), false),
+      sidebarDrawer() || readLocal(clientStorageKey("cage-sidebar-collapsed"), false),
     ),
     [browserTabLayout, setBrowserTabLayout] = useState(
       readLocal(clientStorageKey("cage-browser-tab-layout"), "horizontal"),
@@ -210,6 +211,8 @@ function App() {
   const sessionCapabilities = useSessionSnapshot(sessionList, (list) => list.capabilities);
   const sessionsHeld = useSessionSnapshot(sessionList, (list) => list.held);
   const sessionPane = managementPage.startsWith(sessionPanePrefix) ? managementPage.slice(sessionPanePrefix.length) : "";
+  // A touch tablet held upright has the sidebar as a drawer (sidebar-drawer.mjs).
+  useSidebarDrawer(sidebarCollapsed, setSidebarCollapsed, clientStorageKey("cage-sidebar-collapsed"), [layout.active, managementPage, showHome, desktopOpen, settingsOpen]);
   useEffect(() => {
     if (storageRecovery) {
       setDesktopOpen(false);
