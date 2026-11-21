@@ -105,3 +105,17 @@ func TestLaunchFilesExpire(t *testing.T) {
 		t.Fatal("a file that replaced the script was removed")
 	}
 }
+
+// An AppleScript step may wait for the owner far longer than other steps.
+func TestPromptStepsWaitForTheOwner(t *testing.T) {
+	step, prompt := stepWait, promptWait
+	stepWait, promptWait = 100*time.Millisecond, 3*time.Second
+	t.Cleanup(func() { stepWait, promptWait = step, prompt })
+	slow := []string{"/bin/sleep", "0.5"}
+	if err := (ExecRunner{}).Run(context.Background(), Step{Argv: slow}); err == nil {
+		t.Fatal("a plain step outlived its bound")
+	}
+	if err := (ExecRunner{}).Run(context.Background(), Step{Argv: slow, Prompt: true}); err != nil {
+		t.Fatal("an AppleScript step was cut short:", err)
+	}
+}

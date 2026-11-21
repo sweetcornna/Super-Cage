@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/attach"
@@ -38,6 +39,10 @@ var localTerminalDetect = localterm.Detect
 // localTerminalHome is the owner's home, where Warp reads its launch
 // configurations; tests replace it.
 var localTerminalHome = os.UserHomeDir
+
+// localTerminalOpening is set while a window is being opened. The desktop
+// app runs one server, so it is per desktop.
+var localTerminalOpening atomic.Bool
 
 var localTerminalConnection = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
@@ -208,7 +213,17 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	// One open at a time: one may wait while macOS asks the owner to allow
+	// controlling the application, and after "Allow" every waiting open
+	// would become a window.
+	if !localTerminalOpening.CompareAndSwap(false, true) {
+		http.Error(w, "正在打开上一个本机终端窗口：如果 macOS 在询问权限，先选择后再试", http.StatusConflict)
+		return
+	}
+	defer localTerminalOpening.Store(false)
+	// The launch outlives the request: stopping osascript mid-prompt leaves
+	// the prompt on screen with nothing behind it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 150*time.Second)
 	defer cancel()
 	if err := localterm.Launch(ctx, plan, localTerminalRunner); err != nil {
 		http.Error(w, "无法在 "+app.Name+" 中打开："+err.Error(), http.StatusBadGateway)

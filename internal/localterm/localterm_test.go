@@ -51,7 +51,6 @@ func TestPlansPerApplication(t *testing.T) {
 		{"ghostty", func(s string) [][]string {
 			return [][]string{
 				{"/usr/bin/osascript", "-e", "tell application id \"com.mitchellh.ghostty\"\nset cfg to new surface configuration\nset command of cfg to \"" + s + "\"\nnew window with configuration cfg\nend tell"},
-				{"/usr/bin/open", "-na", "/Applications/Ghostty.app", "--args", "-e", s},
 			}
 		}},
 		{"warp", func(string) [][]string {
@@ -176,8 +175,8 @@ func (r *recordingRunner) Run(_ context.Context, step Step) error {
 }
 
 func TestLaunchWritesPrivateFilesAndFallsBack(t *testing.T) {
-	plan, script := planFor(t, "ghostty")
-	runner := &recordingRunner{fail: 1} // the owner refused Automation
+	plan, script := planFor(t, "alacritty")
+	runner := &recordingRunner{fail: 1} // Alacritty was not running
 	if err := Launch(context.Background(), plan, runner); err != nil {
 		t.Fatal(err)
 	}
@@ -196,6 +195,9 @@ func TestLaunchWritesPrivateFilesAndFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 	stale := []string{script, filepath.Join(warp, "super-cage-0123456789abcdef.yaml")}
+	if err := os.WriteFile(script, []byte("x"), 0o700); err != nil && !os.IsExist(err) {
+		t.Fatal(err)
+	}
 	kept := []string{filepath.Join(warp, "super-cage-fresh.yaml"), filepath.Join(warp, "my-own.yaml")}
 	old := time.Now().Add(-time.Hour)
 	for _, path := range append(stale[1:], kept...) {
@@ -274,5 +276,23 @@ func TestCommandRefusesEveryControl(t *testing.T) {
 	}
 	if err := (Command{"/bin/cage", "--project", "/work/项目 一"}).Validate(); err != nil {
 		t.Error(err)
+	}
+}
+
+func TestAppleScriptErrorsInTheOwnersWords(t *testing.T) {
+	for _, row := range []struct {
+		output   string
+		timedOut bool
+		want     string
+	}{
+		{"36:120: execution error: Not authorized to send Apple events to iTerm. (-1743)", false, "自动化"},
+		{"", true, "超时"},
+		{"execution error: iTerm got an error: AppleEvent timed out. (-1712)", false, "没有及时回应"},
+		{"62:83: syntax error: Expected end of line but found identifier. (-2741)", false, "1.3"},
+		{"something else", false, "something else"},
+	} {
+		if err := appleScriptError([]byte(row.output), row.timedOut, errors.New("exit status 1")); !strings.Contains(err.Error(), row.want) {
+			t.Errorf("%q: %v", row.output, err)
+		}
 	}
 }

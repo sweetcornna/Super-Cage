@@ -257,3 +257,92 @@ func TestLocalTerminalOpensTheSameTerminalTwice(t *testing.T) {
 		}
 	}
 }
+
+// blockingLaunches holds every step until released, as osascript does while
+// macOS shows its Automation prompt.
+type blockingLaunches struct {
+	entered, release chan struct{}
+	mu               sync.Mutex
+	steps            int
+	cancelled        bool
+}
+
+func (b *blockingLaunches) Run(ctx context.Context, step localterm.Step) error {
+	b.mu.Lock()
+	b.steps++
+	b.mu.Unlock()
+	b.entered <- struct{}{}
+	<-b.release
+	b.mu.Lock()
+	b.cancelled = ctx.Err() != nil
+	b.mu.Unlock()
+	return nil
+}
+
+func blockingOpen(t *testing.T) (*Server, string, *blockingLaunches, string) {
+	t.Helper()
+	desktop, workload, _ := desktopBeforeWorkload(t)
+	launches := &blockingLaunches{entered: make(chan struct{}, 4), release: make(chan struct{})}
+	localTerminalRunner = launches
+	home := t.TempDir()
+	localTerminalHome = func() (string, error) { return home, nil }
+	localTerminalDetect = func() []localterm.Installed {
+		return []localterm.Installed{{App: *localterm.Lookup("iterm2"), Path: "/Applications/iTerm.app"}}
+	}
+	t.Cleanup(func() {
+		localTerminalRunner, localTerminalHome, localTerminalDetect = localterm.ExecRunner{}, os.UserHomeDir, localterm.Detect
+	})
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"iterm2\"}", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	session := startChild(t, workload, "report")
+	return desktop, desktop.remote.desktop.generation, launches, "{\"terminal_id\":\"" + session.id + "\"}"
+}
+
+// While one window waits for the owner to answer macOS's Automation prompt,
+// a second open is refused: after "Allow", two windows would appear.
+func TestLocalTerminalOpensOneAtATime(t *testing.T) {
+	desktop, generation, launches, open := blockingOpen(t)
+	first := make(chan int, 1)
+	go func() { first <- clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation).Code }()
+	<-launches.entered
+	second := make(chan *httptest.ResponseRecorder, 1)
+	go func() { second <- clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation) }()
+	select {
+	case w := <-second:
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "正在打开") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	case <-time.After(2 * time.Second):
+		close(launches.release)
+		t.Fatal("a second open waited behind the first instead of being refused")
+	}
+	close(launches.release)
+	if code := <-first; code != 200 {
+		t.Fatal(code)
+	}
+}
+
+// The window opens even if the page that asked stops waiting: a launch is
+// not stopped in the middle of macOS's permission prompt.
+func TestLocalTerminalOpenOutlivesTheRequest(t *testing.T) {
+	desktop, generation, launches, open := blockingOpen(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	r := httptest.NewRequest("POST", desktop.origin+"/api/client/local-terminal/open", strings.NewReader(open)).WithContext(ctx)
+	r.Header.Set("Origin", desktop.origin)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(connectionHeader, generation)
+	r.AddCookie(&http.Cookie{Name: desktop.cookieName(), Value: desktop.session})
+	done := make(chan struct{})
+	go func() { desktop.handler().ServeHTTP(httptest.NewRecorder(), r); close(done) }()
+	<-launches.entered
+	cancel()
+	time.Sleep(50 * time.Millisecond)
+	close(launches.release)
+	<-done
+	launches.mu.Lock()
+	defer launches.mu.Unlock()
+	if launches.cancelled {
+		t.Fatal("the launch was stopped when the request ended")
+	}
+}

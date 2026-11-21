@@ -29,10 +29,13 @@ type PlanFile struct {
 
 // Step is one program to run. Detach marks a program that may become the
 // application itself (it keeps running): it is started on its own and
-// counted as done once it is still running after a moment.
+// counted as done once it is still running after a moment. Prompt marks an
+// AppleScript step, which waits while macOS asks the owner whether Super
+// Cage may control the application.
 type Step struct {
 	Argv   []string
 	Detach bool
+	Prompt bool
 }
 
 // PlanInput is everything a plan is built from.
@@ -79,11 +82,11 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/open", "-a", bundle, script}}}}, nil
 	case "iterm2":
 		source := "tell application id " + AppleScriptString(in.App.bundleID()) + " to create window with default profile command " + AppleScriptString(ShellQuote(script))
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}}}}, nil
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}, Prompt: true}}}, nil
 	case "ghostty":
 		// Ghostty 1.3 and later: a new window with a surface configuration.
-		// Without Automation permission, a new instance whose first window
-		// runs the script (-e sets initial-command).
+		// Without Automation permission it fails and says so: a second
+		// Ghostty instance would not be the owner's.
 		source := strings.Join([]string{
 			"tell application id " + AppleScriptString(in.App.bundleID()),
 			"set cfg to new surface configuration",
@@ -91,10 +94,7 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 			"new window with configuration cfg",
 			"end tell",
 		}, "\n")
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{
-			{Argv: []string{"/usr/bin/osascript", "-e", source}},
-			{Argv: []string{"/usr/bin/open", "-na", bundle, "--args", "-e", script}},
-		}}, nil
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}, Prompt: true}}}, nil
 	case "warp":
 		if !filepath.IsAbs(in.Home) {
 			return Plan{}, errors.New("启动信息无效")
