@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   FileCode2,
+  Anchor,
   Archive,
   LoaderCircle,
   Monitor,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
+import { api } from "./api";
 
 const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
 // A Codex session another device or process writes: a quiet chip at the row's end.
@@ -68,6 +70,13 @@ export function WorkspaceTabs({
   sessionOpenError,
 }) {
   const [menu, setMenu] = useState(null);
+  // 本机终端: "保留" on a terminal an ssh session opened, so it outlives the
+  // connection; the terminal list's next revision shows the change.
+  const [keepError, setKeepError] = useState(null);
+  const keep = (tab) => {
+    setKeepError(null);
+    api("/terminals/" + encodeURIComponent(tab.sessionId) + "/keep", {}).catch((error) => setKeepError({ id: tab.id, message: error.message }));
+  };
   const [drag, setDrag] = useState(null);
   const [allOpen, setAllOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -267,6 +276,18 @@ export function WorkspaceTabs({
                 <Pin size={14} />
                 {saved[menu.tab.id]?.pinned ? "取消置顶" : "置顶标签"}
               </button>
+              {menu.tab.origin?.kind === "ssh" && !menu.tab.origin.kept && (
+                <button
+                  role="menuitem"
+                  title="连接断开后，这个终端继续运行"
+                  onClick={() => {
+                    setMenu(null);
+                    keep(menu.tab);
+                  }}
+                >
+                  保留终端
+                </button>
+              )}
               <button
                 role="menuitem"
                 onClick={() => {
@@ -398,6 +419,8 @@ export function WorkspaceTabs({
                 <span>{title}</span>
                 {/* A phone or external row names its owner instead; the account is in the label and tooltip. */}
                 {tab.claudeLabel && !ownerChip && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
+                {tab.origin?.kind === "ssh" && !tab.claudeLabel && !ownerChip &&
+                  <small className="claude-tab-profile" title={tab.origin.kept ? "来自本机终端，已保留" : "来自本机终端，连接断开时结束"}>来自 {tab.origin.device}</small>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
                 {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
                 {!horizontal && !vertical && (opening
@@ -422,12 +445,15 @@ export function WorkspaceTabs({
                 <div className="terminal-row-actions" role="group" aria-label={`${title} 的操作`}>
                   <TerminalAction label={saved[tab.id]?.pinned ? "取消置顶" : "置顶"}
                     icon={saved[tab.id]?.pinned ? PinOff : Pin} disabled={busy} onClick={() => onPin(tab.id)} />
+                  {tab.origin?.kind === "ssh" && !tab.origin.kept &&
+                    <TerminalAction label="保留终端" icon={Anchor} disabled={busy} onClick={() => keep(tab)} />}
                   <TerminalAction label="重命名" icon={Pencil} disabled={busy} onClick={() => onRename(tab)} />
                   <TerminalAction label={tab.cli_session_id ? "归档" : "关闭终端"} icon={tab.cli_session_id ? Archive : X} disabled={busy} onClick={event => onClose(tab, event.currentTarget)} />
                 </div>
               )}
             </div>
             {openError && <p id={errorID} className="sidebar-session-open-error" role="alert">{openError}</p>}
+            {keepError?.id === tab.id && <p className="sidebar-session-open-error" role="alert">{keepError.message}</p>}
             </React.Fragment>
           );
         })}
