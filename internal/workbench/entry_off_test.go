@@ -134,7 +134,10 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 // on the workbench's existing handler. Its only timers are bounded and live
 // within one connection: the SSH handshake deadline (entryServe) and the
 // retry while an ssh terminal waits for the operation lock
-// (entryLockOperation). This reads the entry's sources.
+// (entryLockOperation); and the idle check of kept ssh terminals (entryKeep,
+// entryCheckKept), which runs only while a terminal is kept
+// (TestEntryKeptTerminalsHaveTheirOwnCapAndExpire). This reads the entry's
+// sources.
 func TestEntryHasNoListenerOfItsOwn(t *testing.T) {
 	sources, _ := filepath.Glob("entry_*.go")
 	files := 0
@@ -160,7 +163,7 @@ func TestEntryHasNoListenerOfItsOwn(t *testing.T) {
 				}
 				name := selector.Sel.Name
 				timer := name == "NewTicker" || name == "Tick" || name == "AfterFunc" && selector.X.(*ast.Ident).Name == "time"
-				bounded := map[string]string{"entryLockOperation": "NewTicker", "entryServe": "AfterFunc"}
+				bounded := map[string]string{"entryLockOperation": "NewTicker", "entryServe": "AfterFunc", "entryKeep": "AfterFunc", "entryCheckKept": "AfterFunc"}
 				if timer && function != nil && bounded[function.Name.Name] == name {
 					return true
 				}
