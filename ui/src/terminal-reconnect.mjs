@@ -53,6 +53,18 @@ export function terminalStreamPath(id, offset, viewer) {
   return typeof viewer === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(viewer) ? `${path}&viewer=${viewer}` : path;
 }
 
+// terminalViewer is this page's identity for one terminal, the same on every
+// reconnect: the server keeps the size and answer rules for this view. Two
+// pages (two windows) are two viewers.
+const terminalViewers = new Map();
+export function terminalViewer(id) {
+  if (!terminalViewers.has(id)) {
+    const bytes = crypto.getRandomValues(new Uint8Array(12));
+    terminalViewers.set(id, "web-" + Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join(""));
+  }
+  return terminalViewers.get(id);
+}
+
 // terminalHistoryPlan reads a history marker. The bytes that follow it are
 // replayed output; reset means the view must clear its screen first because
 // they do not continue what it shows. A server without offsets replays its

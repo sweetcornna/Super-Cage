@@ -93,7 +93,7 @@ test("the copied command is quoted for any shell", () => {
 test("messages follow the design's wording", () => {
   assert.equal(launchFailure("Ghostty", "应用没有响应。"), "没能打开 Ghostty：应用没有响应。可在设置 → 本机终端应用里换一个。");
   assert.equal(automationNotice({ name: "Ghostty", automation: true }).title, "Super Cage 需要控制 Ghostty 来打开窗口");
-  assert.deepEqual([automationNotice({ name: "Ghostty", automation: true }).cancel, automationNotice({ name: "Ghostty", automation: true }).confirm], ["改用其他应用", "继续"]);
+  assert.deepEqual([automationNotice({ name: "Ghostty", automation: true }).cancel, automationNotice({ name: "Ghostty", automation: true }).confirm], ["取消", "继续"]);
   assert.equal(automationNotice({ name: "Ghostty", automation: true }, true), null);
   assert.equal(automationNotice({ name: "kitty", automation: false }), null);
 });

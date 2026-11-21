@@ -50,6 +50,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     setError("");
     try {
       const result = await api(SETTINGS_PATH, draft, "PUT");
+      window.dispatchEvent(new Event("cage-local-terminal-settings"));
       const settings = normalizeSettings(result?.settings);
       setSaved(settings);
       setDraft(settings);

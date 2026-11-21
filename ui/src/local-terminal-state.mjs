@@ -197,8 +197,8 @@ export function automationNotice(app, acknowledged = false) {
   if (!app?.automation || acknowledged) return null;
   return {
     title: "Super Cage 需要控制 " + app.name + " 来打开窗口",
-    body: "macOS 接下来会询问是否允许 Super Cage 控制 " + app.name + "。Super Cage 只用它打开新窗口；如果不允许，会改用不需要权限的方式打开。",
-    cancel: "改用其他应用",
+    body: "macOS 接下来会询问是否允许 Super Cage 控制 " + app.name + "。Super Cage 只用它打开新窗口；如果不允许，窗口不会打开，之后可以在“系统设置 › 隐私与安全性 › 自动化”里允许，或在设置里换一个应用。",
+    cancel: "取消",
     confirm: "继续",
   };
 }
