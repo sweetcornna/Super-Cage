@@ -8,6 +8,7 @@
 import http from "node:http";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPhoneFixture } from "./phone-fixture.mjs";
@@ -281,7 +282,12 @@ export async function startMockServer({
     if ((req.method === "GET" || req.method === "HEAD") && STATIC[url.pathname]) {
       const [name, type] = STATIC[url.pathname];
       const body = await readFile(join(uiDir, name));
-      return send(res, 200, req.method === "HEAD" ? "" : body, type);
+      // As the gateway does (internal/tenant/portal_static.go): gzip when accepted, never cached.
+      if (/\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
+        const packed = gzipSync(body, { level: 9 });
+        return send(res, 200, req.method === "HEAD" ? "" : packed, type, { "Content-Encoding": "gzip", Vary: "Accept-Encoding" });
+      }
+      return send(res, 200, req.method === "HEAD" ? "" : body, type, { Vary: "Accept-Encoding" });
     }
     if (!url.pathname.startsWith("/api/tenant/")) return problem(res, 404, "not_found", "未找到。");
     let body = {};

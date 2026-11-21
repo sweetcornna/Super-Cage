@@ -111,15 +111,14 @@ function inspect({ insets, keyboard }) {
     const outside = (!inRow && (rect.left < box.left - 0.5 || rect.right > box.right + 0.5)) || (!inScroller && (rect.top < box.top - 0.5 || rect.bottom > box.bottom + 0.5));
     if (outside) failures.push(`outside the safe viewport: ${describe(el)} at ${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`);
     const inlineLink = el.tagName === "A" && getComputedStyle(el).display === "inline" && el.closest("p, li, td");
-    // A framed document is content, not a tap target (its own controls are checked inside it). Spacing is
-    // measured on the part a scroller shows (a tab half scrolled out of its strip is not next to its neighbour).
+    // A framed document is content, not a tap target (its own controls are checked inside it). A control mostly
+    // scrolled out of its scroller (a tab at the end of its strip) is scrolled into view before anyone taps it.
     const shown = around.reduce((r, node) => {
       const b = node.getBoundingClientRect();
       return { left: Math.max(r.left, b.left), top: Math.max(r.top, b.top), right: Math.min(r.right, b.right), bottom: Math.min(r.bottom, b.bottom) };
     }, { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
-    // A control mostly scrolled out of its row is scrolled into view before anyone taps it.
     const mostlyShown = shown.right - shown.left >= rect.width / 2 && shown.bottom - shown.top >= rect.height / 2;
-    if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect: { ...shown, width: shown.right - shown.left, height: shown.bottom - shown.top } });
+    if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect });
   }
   // A scroller that runs under the home bar must let its last control scroll clear of it.
   const bottomEdge = viewport.height - insets.bottom;
@@ -214,17 +213,17 @@ async function newContext(device, variant, layout) {
     // client hints, so drop the claim for the iPad agent.
     extraHTTPHeaders: (device.agent || (device.kind === "phone" ? iPhone : iPad)) === iPad && engine === "chromium" ? { "sec-ch-ua-mobile": "?0" } : undefined,
   });
-  await context.addInitScript(({ css, text }) => {
+  await context.addInitScript(({ css }) => {
     // The notch belongs to the top-level page; a framed workspace is placed clear of it by the portal.
     if (window.top !== window) return;
     const apply = () => {
       const style = document.createElement("style");
       style.dataset.matrix = "insets";
-      style.textContent = css + (text !== 1 ? `html{font-size:${text * 100}% !important;-webkit-text-size-adjust:${text * 100}% !important}` : "");
+      style.textContent = css;
       document.documentElement.append(style);
     };
     if (document.documentElement) apply(); else document.addEventListener("DOMContentLoaded", apply);
-  }, { css: insetStyle(device.insets), text: variant.text });
+  }, { css: insetStyle(device.insets) });
   if (layout) context.layout = layout;
   return context;
 }
@@ -280,9 +279,11 @@ async function portalScreens(device, variant, sheet) {
     await sleep(1500);
     const inner = page.frames().find((f) => f !== page.mainFrame() && f.url().startsWith("http://vm-"));
     await check(page, sheet, "portal workspace", { insets });
-    if (inner) await check(page, sheet, "portal workspace (frame)", { insets: none, frame: inner });
+    // WebKit keeps no VM cookie in the frame on *.localhost (see mobile-web-smoke.mjs): no frame checks there.
+    if (inner && engine === "webkit") console.log(`  ${sheet} / portal workspace (frame): skipped on WebKit`);
+    if (inner && engine !== "webkit") await check(page, sheet, "portal workspace (frame)", { insets: none, frame: inner });
     // The keyboard inside the framed phone UI: the portal sizes the frame to the visible area.
-    if (inner && device.kind === "phone" && wanted("portal keyboard")) {
+    if (inner && engine !== "webkit" && device.kind === "phone" && wanted("portal keyboard")) {
       const field = inner.locator(".composer textarea, .compose textarea").first();
       if (await field.count()) {
         await field.focus();
@@ -427,8 +428,15 @@ try {
     for (const variant of variants) {
       const sheet = `${device.name}-${variant.theme}${variant.text !== 1 ? "-text" + Math.round(variant.text * 100) : ""}`;
       console.log(sheet);
+      // Larger text as phones apply it (iOS text size, Android display size): everything grows, so the same
+      // screen is a smaller viewport in CSS pixels at a higher pixel ratio.
+      const scaled = variant.text === 1 ? device : {
+        ...device, width: Math.round(device.width / variant.text), height: Math.round(device.height / variant.text), dpr: device.dpr * variant.text,
+        insets: Object.fromEntries(Object.entries(device.insets).map(([side, value]) => [side, Math.round(value / variant.text)])),
+        unfold: device.unfold && { width: Math.round(device.unfold.width / variant.text), height: Math.round(device.unfold.height / variant.text) },
+      };
       for (const run of device.kind === "phone" ? [portalScreens, phoneScreens] : [portalScreens, tabletScreens]) {
-        try { await run(device, variant, sheet); }
+        try { await run(scaled, variant, sheet); }
         catch (error) { results.push({ sheet, screen: run.name, failures: [`flow broke: ${error.message.split("\n")[0]}`] }); failed++; console.log(`  ${sheet} / ${run.name} broke: ${error.message.split("\n")[0]}`); }
       }
     }

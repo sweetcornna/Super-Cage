@@ -2,7 +2,6 @@
 // (the workbench serves it there to phones, see ui/src/entry-layout.mjs). Everything here is inert in
 // the native apps, which load the same bundle with "CageMobile/1" in the user agent.
 import { useEffect, useRef, useState } from "react";
-import { settlePhoneEntry } from "../entry-layout.mjs";
 
 export const nativeShell = String(globalThis.navigator?.userAgent || "").includes("CageMobile/1");
 // Only the phone document (mobile.html, marked by its cage-entry meta) served at "/" to a browser.
@@ -15,6 +14,17 @@ export const portalFrame = webPhone && window.top !== window.self;
 export const edgeSwipe = !webPhone || globalThis.navigator?.standalone === true;
 
 const ROUTE = "cage-phone-route";
+
+// The phone side of ui/src/entry-layout.mjs (same cookie, flag and size test), kept here so the phone page
+// does not share a chunk with the desktop entry: the hand-over arrived; forget an automatic choice the
+// device no longer warrants, so the next load decides afresh (no bounce now).
+function settlePhoneEntry() {
+  try { sessionStorage.removeItem("cage-entry-guard"); } catch { /* storage may be unavailable */ }
+  const auto = document.cookie.split(";").some((part) => part.trim() === "cage-layout=phone-auto");
+  const phoneSized = matchMedia("(pointer: coarse)").matches && !matchMedia("(hover: hover)").matches &&
+    (innerWidth < 740 || innerHeight < 500);
+  if (auto && !phoneSized) document.cookie = "cage-layout=; Path=/; SameSite=Lax; Max-Age=0" + (location.protocol === "https:" ? "; Secure" : "");
+}
 const load = Math.random().toString(36).slice(2, 8);
 let overlays = 0;
 let portalOrigin = "";
@@ -77,6 +87,13 @@ export function toPortal(message) {
   return true;
 }
 
+// "返回门户": the portal goes back past this workspace's own history entries (screens and overlays pushed
+// since it loaded; each records its depth) to the VM list, leaving nothing behind to press Back through.
+export function backToPortal() {
+  toPortal({ type: "cage:portal-home", depth: depth() });
+}
+const depth = () => (Number.isInteger(history.state?.cageDepth) ? history.state.cageDepth : 0);
+
 // Opens an http(s) link outside the app: the portal's sandbox has no pop-ups, so the portal opens it.
 export function openExternal(url) {
   if (portalFrame && toPortal({ type: "cage:open-link", url })) return;
@@ -119,7 +136,9 @@ export function useDocked() {
 // it, and the route is remembered for this tab.
 export function writeRoute(route, push) {
   const overlay = history.state?.cageOverlay;
-  history[push && !overlay ? "pushState" : "replaceState"]({ ...history.state, cageCLI: route, cageOverlay: undefined }, "");
+  const next = { ...history.state, cageCLI: route, cageOverlay: undefined };
+  if (webPhone && push && !overlay) next.cageDepth = depth() + 1;
+  history[push && !overlay ? "pushState" : "replaceState"](next, "");
   if (webPhone) {
     try { sessionStorage.setItem(ROUTE, JSON.stringify(route)); } catch { /* storage may be unavailable */ }
   }
@@ -136,7 +155,7 @@ export function useBackDismiss(open, close) {
     if (!open || !webPhone || !closeRef.current) return undefined;
     const id = load + ":" + ++overlays;
     openOverlays.add(id);
-    history.pushState({ ...history.state, cageOverlay: id }, "");
+    history.pushState({ ...history.state, cageOverlay: id, cageDepth: depth() + 1 }, "");
     const pop = () => { if (history.state?.cageOverlay !== id) closeRef.current?.(); };
     window.addEventListener("popstate", pop);
     return () => {

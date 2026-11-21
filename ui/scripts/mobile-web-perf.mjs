@@ -1,7 +1,8 @@
 // Phone path load numbers through the portal mock (ui/tenant/mock-server.mjs serves the real build with
 // the workbench's caching and brotli). Per document: requests and bytes to the first usable screen, cold and
 // cached, under Lighthouse's slow-4G profile (150 ms RTT, 1.6 Mbit/s down) with 4x CPU slowdown; layout shift;
-// long tasks; idle requests and CPU with the session list open; heap on the terminal screen.
+// long tasks (and which elements shifted); the portal's sign-in page and VM list the same way; idle requests
+// and CPU with the session list open; heap on the terminal screen.
 // Run after npm --prefix ui run build. Chromium only (CDP). Prints JSON; MOBILE_WEB_PERF_OUT=<file> saves it.
 import { createRequire } from "node:module";
 import { writeFile } from "node:fs/promises";
@@ -22,9 +23,10 @@ try {
   const context = await browser.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 3, isMobile: true, hasTouch: true, userAgent: iPhone });
   const page = await context.newPage();
   await page.addInitScript(() => {
-    window.__perf = { usable: 0, shift: 0, shiftAfterPaint: 0, longTasks: 0, longTaskMs: 0 };
-    // The phone home (greeting and recent sessions) or the desktop home (greeting and sidebar).
-    const usable = () => document.querySelector(".mobile-app .recent .session-select, .mobile-app .greeting, .workbench-shell .home-greeting");
+    window.__perf = { usable: 0, shift: 0, shiftAfterPaint: 0, longTasks: 0, longTaskMs: 0, shifted: [] };
+    // The phone home (greeting and recent sessions), the desktop home (greeting and sidebar), or the portal's
+    // sign-in form or VM list.
+    const usable = () => document.querySelector(".mobile-app .recent .session-select, .mobile-app .greeting, .workbench-shell .home-greeting, .auth-form, .shell .vm-card");
     new MutationObserver(() => { if (!window.__perf.usable && usable()) window.__perf.usable = performance.now(); })
       .observe(document, { subtree: true, childList: true });
     try {
@@ -32,6 +34,10 @@ try {
         for (const entry of list.getEntries()) {
           if (entry.hadRecentInput) continue;
           window.__perf.shift += entry.value;
+          for (const source of entry.sources || []) {
+            const node = source.node?.nodeType === 1 ? source.node : source.node?.parentElement;
+            if (node) window.__perf.shifted.push(`${node.tagName.toLowerCase()}${node.className && typeof node.className === "string" ? "." + node.className.trim().split(/\s+/).join(".") : ""} ${entry.value.toFixed(4)}`);
+          }
           if (performance.getEntriesByName("first-contentful-paint")[0]?.startTime < entry.startTime) window.__perf.shiftAfterPaint += entry.value;
         }
       }).observe({ type: "layout-shift", buffered: true });
@@ -39,19 +45,6 @@ try {
         .observe({ type: "longtask", buffered: true });
     } catch { /* not supported */ }
   });
-  const post = (path, data) => page.request.post(mock.origin + path, { data, headers: { Origin: mock.origin } });
-  await post("/api/tenant/register", { username: "perfowner", password: "fixture password only" });
-  const { vm } = await (await post("/api/tenant/vms", { name: "开发环境" })).json();
-  let open;
-  for (let i = 0; i < 200; i++) {
-    open = await post(`/api/tenant/vms/${vm.id}/open`, {});
-    if (open.status() === 200) break;
-    await sleep(50);
-  }
-  const { workspace_url: entry } = await open.json();
-  const origin = new URL(entry).origin;
-  await page.goto(entry);
-  await page.waitForURL((url) => url.pathname === "/", { timeout: 15000 });
   const cdp = await context.newCDPSession(page);
   await cdp.send("Network.enable");
   await cdp.send("Performance.enable");
@@ -65,12 +58,12 @@ try {
       : { offline: false, latency: 0, downloadThroughput: -1, uploadThroughput: -1 });
     await cdp.send("Emulation.setCPUThrottlingRate", { rate: on ? 4 : 1 });
   };
-  const load = async (cold) => {
+  const load = async (url, cold) => {
     if (cold) await cdp.send("Network.clearBrowserCache");
     requests.clear();
     await throttle(true);
     const start = Date.now();
-    await page.goto(origin + "/", { waitUntil: "commit" });
+    await page.goto(url, { waitUntil: "commit" });
     await page.waitForFunction(() => window.__perf?.usable > 0, null, { timeout: 120000, polling: 200 });
     await page.waitForLoadState("networkidle").catch(() => {});
     const perf = await page.evaluate(() => ({ ...window.__perf, fcp: performance.getEntriesByName("first-contentful-paint")[0]?.startTime || 0 }));
@@ -87,13 +80,30 @@ try {
       transferred_bytes: list.reduce((sum, r) => sum + r.bytes, 0),
       asset_bytes: assets.reduce((sum, r) => sum + r.bytes, 0),
       revalidated_or_cached: list.filter((r) => r.cached).length,
+      shifted: perf.shifted,
       desktop_chunks: assets.filter((r) => /\/assets\/(?:desktop|main|remote-hosts)-/.test(r.url)).map((r) => new URL(r.url).pathname),
       files: assets.map((r) => `${new URL(r.url).pathname} ${r.bytes}`),
     };
   };
+  // The portal: what a tenant user sees first.
+  results.documents["portal sign-in"] = { cold: await load(mock.origin + "/", true), cached: await load(mock.origin + "/", false) };
+  const post = (path, data) => page.request.post(mock.origin + path, { data, headers: { Origin: mock.origin } });
+  await post("/api/tenant/register", { username: "perfowner", password: "fixture password only" });
+  const { vm } = await (await post("/api/tenant/vms", { name: "开发环境" })).json();
+  results.documents["portal VM list"] = { cold: await load(mock.origin + "/", true), cached: await load(mock.origin + "/", false) };
+  let open;
+  for (let i = 0; i < 200; i++) {
+    open = await post(`/api/tenant/vms/${vm.id}/open`, {});
+    if (open.status() === 200) break;
+    await sleep(50);
+  }
+  const { workspace_url: entry } = await open.json();
+  const origin = new URL(entry).origin;
+  await page.goto(entry);
+  await page.waitForURL((url) => url.pathname === "/", { timeout: 15000 });
   for (const [name, layout] of [["desktop document at / (what a phone got before)", "desktop"], ["phone document at /", "phone"]]) {
     await context.addCookies([{ name: "cage-layout", value: layout, url: origin }]);
-    results.documents[name] = { cold: await load(true), cached: await load(false) };
+    results.documents[name] = { cold: await load(origin + "/", true), cached: await load(origin + "/", false) };
   }
   // Idle: the phone home with the session list, unthrottled.
   requests.clear();

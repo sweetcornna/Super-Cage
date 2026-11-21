@@ -63,9 +63,12 @@ export function mountPhoneSwitch() {
   document.body.append(button);
 }
 
-// Phone page: the hand-over arrived. Forget an automatic choice the device no longer warrants, so the
-// next load decides afresh (no bounce now).
-export function settlePhoneEntry() {
-  try { sessionStorage.removeItem(GUARD); } catch { /* storage may be unavailable */ }
-  if (layoutChoice() === "phone-auto" && !phoneSized()) writeCookie("", 0);
+// Desktop page inside the portal's frame on a phone: tell the portal, which hides its bars for the phone UI,
+// that this workspace now shows the desktop workbench (the message carries nothing else).
+export function announceDesktopInFrame() {
+  if (window.top === window.self || !phoneSized()) return;
+  try { window.parent.postMessage({ type: "cage:desktop-ui" }, "*"); } catch { /* no portal */ }
 }
+
+// The phone page's side of this (dropping phone-auto on a device that no longer warrants it) lives in
+// ui/src/mobile-cli/web-shell.mjs, so the phone page does not load this module.

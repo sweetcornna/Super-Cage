@@ -1,7 +1,12 @@
 package tenant
 
 import (
+	"bytes"
+	"compress/gzip"
 	"encoding/json"
+	"io"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 )
@@ -36,4 +41,46 @@ func TestPortalManifestAndIcons(t *testing.T) {
 	}
 	wantStatus(t, fixture.request("GET", portalOrigin, "/icon-1.png", "", nil), 404, "not_found")
 	wantStatus(t, fixture.request("GET", portalOrigin, "/portal-icons/icon-192.png", "", nil), 404, "not_found")
+}
+
+// The portal's own files travel gzipped to browsers that accept it, and stay uncached like every gateway page.
+func TestPortalFilesAreCompressed(t *testing.T) {
+	fixture := newFixture(t, false)
+	for _, path := range []string{"/", "/index.html"} {
+		plain := fixture.request("GET", portalOrigin, path, "", nil)
+		wantStatus(t, plain, 200, "")
+		if plain.Header().Get("Content-Encoding") != "" || plain.Body.Len() == 0 {
+			t.Fatalf("%s without Accept-Encoding: %q", path, plain.Header().Get("Content-Encoding"))
+		}
+		request := httptest.NewRequest("GET", path, nil)
+		request.Host = strings.TrimPrefix(portalOrigin, "https://")
+		request.Host = strings.TrimPrefix(request.Host, "http://")
+		request.Header.Set("Accept-Encoding", "br, gzip;q=0.8")
+		packed := fixture.serve(request)
+		wantStatus(t, packed, 200, "")
+		if packed.Header().Get("Content-Encoding") != "gzip" || !strings.Contains(packed.Header().Get("Vary"), "Accept-Encoding") {
+			t.Fatalf("%s: encoding %q vary %q", path, packed.Header().Get("Content-Encoding"), packed.Header().Get("Vary"))
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(packed.Body.Bytes()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		unpacked, _ := io.ReadAll(reader)
+		if !bytes.Equal(unpacked, plain.Body.Bytes()) {
+			t.Fatalf("%s: gzip body does not match (%d -> %d)", path, plain.Body.Len(), packed.Body.Len())
+		}
+	}
+	// The real script shrinks to well under half.
+	if script, err := os.ReadFile("../../ui/tenant/app.mjs"); err == nil {
+		request := httptest.NewRequest("GET", "/app.mjs", nil)
+		request.Header.Set("Accept-Encoding", "gzip")
+		response := httptest.NewRecorder()
+		servePortalFile(response, request, "text/javascript; charset=utf-8", script)
+		if response.Header().Get("Content-Encoding") != "gzip" || response.Body.Len()*3 > len(script) {
+			t.Fatalf("app.mjs: %d -> %d bytes", len(script), response.Body.Len())
+		}
+	}
+	if acceptsGzip("gzip;q=0") || acceptsGzip("br") || !acceptsGzip("*") || !acceptsGzip("deflate, GZIP") {
+		t.Fatal("Accept-Encoding parsing")
+	}
 }

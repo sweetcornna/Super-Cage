@@ -59,6 +59,7 @@ func TestRootDocumentFollowsTheDevice(t *testing.T) {
 		{"desktop chose the phone", entryMac, "cage-layout=phone", "", phone},
 		{"tablet page guard", entryMac, "cage-layout=phone-auto", "", phone},
 		{"gateway hint, no browser headers", "", "", "phone", phone},
+		{"gateway hint for the desktop", "", "", "desktop", desktop},
 		{"gateway hint wins", entryIPhone, "", "desktop", desktop},
 		{"invalid hint falls back to the device", entryIPhone, "", "tablet", phone},
 	} {
@@ -97,6 +98,26 @@ func TestRootDocumentFollowsTheDevice(t *testing.T) {
 		s.handler().ServeHTTP(w, r)
 		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), want) || strings.Contains(strings.Join(w.Header().Values("Vary"), ","), "User-Agent") {
 			t.Fatalf("%s changed", path)
+		}
+	}
+}
+
+// The request internal/tenant's proxy makes for a phone at "/": no user agent, no browser cookies, only the
+// gateway's own workbench session, the workbench's origin and the gateway's entry hint (see
+// internal/tenant/entry_test.go for the gateway's half of this contract).
+func TestRootDocumentForTheTenantGateway(t *testing.T) {
+	desktop, phone := entryDocuments(t)
+	s := testServer(t)
+	for hint, want := range map[string][]byte{webentry.Phone: phone, webentry.Desktop: desktop} {
+		r := httptest.NewRequest("GET", s.origin+"/", nil)
+		r.Header.Set("User-Agent", "")
+		r.Header.Set("Origin", s.origin)
+		r.Header.Set(webentry.Header, hint)
+		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+		w := httptest.NewRecorder()
+		s.handler().ServeHTTP(w, r)
+		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), want) {
+			t.Fatalf("hint %s: status %d, wrong document", hint, w.Code)
 		}
 	}
 }

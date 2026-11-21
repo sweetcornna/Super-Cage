@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -321,11 +320,7 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request) {
 				unavailable(w)
 				return
 			}
-			w.Header().Set("Content-Type", contentType)
-			w.Header().Set("Content-Length", strconv.Itoa(len(body)))
-			if r.Method == http.MethodGet {
-				_, _ = w.Write(body)
-			}
+			servePortalFile(w, r, contentType, body)
 			return
 		}
 	}

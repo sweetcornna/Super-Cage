@@ -1859,17 +1859,31 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     // Back (the system button or swipe) leaves the workspace for the list once the workspace has no
     // screen of its own left to go back to.
     let phoneFrame = null;
+    // The workspace frame for which the portal holds a history entry: Back past it returns to the list.
+    let backTo = null;
     let lastReentry = 0;
-    function phoneMessage(frame, { type, url }) {
+    function phoneMessage(frame, { type, url, depth }) {
       if (type === "cage:phone-ui") {
+        backTo = frame;
         if (phoneFrame === frame) return true;
         phoneFrame = frame;
         el.dataset.phoneUi = "true";
         if (!win.history.state?.cagePortal) win.history.pushState({ ...win.history.state, cagePortal: "workspace" }, "");
         return true;
       }
+      if (type === "cage:desktop-ui") {
+        // The phone switched this workspace to the desktop workbench: the portal's bars come back.
+        if (phoneFrame === frame) {
+          phoneFrame = null;
+          delete el.dataset.phoneUi;
+        }
+        return true;
+      }
       if (type === "cage:portal-home") {
-        if (win.history.state?.cagePortal) win.history.back();
+        // Straight to the list: back past the workspace's own entries (it reports how many) and the portal's;
+        // the popstate below then leaves the workspace. Without the portal's entry, leave it directly.
+        const steps = Number.isInteger(depth) && depth >= 0 && depth < 1000 ? depth + 1 : 0;
+        if (steps && win.history.state?.cagePortal && backTo === frame) win.history.go(-steps);
         else portal.goHome();
         return true;
       }
@@ -1901,7 +1915,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       return false;
     }
     win.addEventListener("popstate", () => {
-      if (phoneFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
+      if (backTo && backTo === mountedFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
     }, { signal: shellListeners.signal });
     // The browser blocked the new tab (no tap reached the portal itself): one tap here opens it.
     let linkNotice = null;
@@ -1926,6 +1940,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         phoneFrame = null;
         delete el.dataset.phoneUi;
       }
+      if (backTo === mountedFrame) backTo = null;
       mountedFrame.listeners.abort(); // 释放 load/error 回调
       mountedFrame.el.remove(); // 移除即销毁浏览上下文，断开其中的流和 WebSocket
       mountedFrame = null;
