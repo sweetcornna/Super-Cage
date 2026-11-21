@@ -64,6 +64,18 @@ function trackViewport() {
   viewport.addEventListener("resize", update);
   viewport.addEventListener("scroll", update);
   update();
+  // The keyboard took part of the screen (here, or the portal shrank this frame to what is left): keep the
+  // field being typed in on screen, as a page that scrolls would.
+  let pending = 0;
+  const reveal = () => {
+    cancelAnimationFrame(pending);
+    pending = requestAnimationFrame(() => {
+      const field = document.activeElement;
+      if (field?.matches?.("input, textarea, [contenteditable=true]")) field.scrollIntoView({ block: "nearest" });
+    });
+  };
+  viewport.addEventListener("resize", reveal);
+  window.addEventListener("resize", reveal);
 }
 
 async function readContext() {
