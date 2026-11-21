@@ -85,6 +85,8 @@ function useSettings() {
   return { settings, setSettings, error, retry: () => setAttempt(attempt + 1) };
 }
 const saveSettings = input => api("/browser/data-settings", input);
+// A message from the host, ended as a sentence before more text follows.
+const sentence = text => String(text || "").replace(/[。.！!]?\s*$/, "。");
 
 const privateOpen = tabs => (tabs || []).some(tab => tab.incognito && !tab.login);
 
@@ -157,7 +159,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
           </label>}
         </div>
         {isPrivate && <p className="bd-note">无痕会话只在内存中保存，按整个会话清除；它没有浏览记录。</p>}
-        {settingsError && !isPrivate && <div className="bd-unavailable"><p className="error-message" role="alert">{settingsError}{needsKept ? " 读出来之前不清除 Cookie 和网站数据，以免清掉保持登录的网站。" : ""}</p>
+        {settingsError && !isPrivate && <div className="bd-unavailable"><p className="error-message" role="alert">{sentence(settingsError)}{needsKept ? "读出来之前不清除 Cookie 和网站数据，以免清掉保持登录的网站。" : ""}</p>
           <button className="compact" onClick={retrySettings}><RefreshCw size={14} />重试</button></div>}
         <div className="choice-list bd-categories" role="group" aria-label="要清除的内容">
           {visible.map(item => <label key={item.id} className={"choice" + (types.has(item.id) ? " checked" : "")}>
@@ -508,7 +510,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
     </div>
     {notice && <p className="bd-notice" role="status">{notice}</p>}
     {settingsError ? <section className="bd-block" aria-label="保持登录的网站" id="bd-kept"><h3>保持登录的网站和自动清理</h3>
-      <Unavailable value={{ message: settingsError + " 读出来之前，清除浏览数据不会清除 Cookie 和网站数据。" }} onRetry={retrySettings} /></section> : <>
+      <Unavailable value={{ message: sentence(settingsError) + "读出来之前，清除浏览数据不会清除 Cookie 和网站数据。" }} onRetry={retrySettings} /></section> : <>
       <KeptSites settings={settings} onSettings={setSettings} tabs={tabs} />
       <AutoClean settings={settings} onSettings={setSettings} />
     </>}

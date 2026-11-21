@@ -1,8 +1,10 @@
 // Review 3 cases against the real controller and a local Chromium-family
 // browser (each failed before its fix): a kept or cleared IPv4 site no
 // longer breaks a clear (finding 2), a kept domain keeps a subdomain's
-// localStorage with no tab and no history (finding 6), and history replies
-// stay bounded with long URLs (finding 12).
+// localStorage with no tab and no history (finding 6), history replies stay
+// bounded with long URLs (finding 12), and a reset names its request and
+// reports how it ended after the controller's restart (finding 10; here the
+// script restarts the controller, as systemd does in the guest).
 // CAGE_TEST_BROWSER_PATH=... node scripts/browser-data-review-live.mjs
 import assert from "node:assert/strict";
 import { setTimeout as delay } from "node:timers/promises";
@@ -61,6 +63,19 @@ try {
   const size = page ? JSON.stringify(page).length : 0;
   check("history reply stays under 512 KiB", page && size < 512 * 1024);
   results.f12 = { error, size, longest: page ? Math.max(...page.items.map(item => item.url.length)) : 0 };
+
+  // Finding 10: reset with an id; the controller exits, starts on a fresh
+  // profile and reports the outcome of that request.
+  const before = (await c.cdp(undefined, "Storage.getCookies", {})).cookies.length;
+  const exited = new Promise(resolve => c.agent().once("exit", resolve));
+  await data({ mode: "reset", id: "review3-reset" });
+  const code = await Promise.race([exited, delay(30_000).then(() => "timeout")]);
+  await c.start();
+  const status = await data({ mode: "reset-status", id: "review3-reset" }).catch(error => ({ error: error.message }));
+  const after = (await c.cdp(undefined, "Storage.getCookies", {})).cookies.length;
+  check("a reset restarts on a fresh profile and reports done for its id", code === 1 && status.state === "done" && before > 0 && after === 0);
+  check("another id is unknown", (await data({ mode: "reset-status", id: "other" }).catch(() => ({}))).state === "unknown");
+  results.f10 = { exitCode: code, status: status.state || status.error, cookiesBefore: before, cookiesAfter: after };
 } finally {
   await c.close(); server.close();
 }
