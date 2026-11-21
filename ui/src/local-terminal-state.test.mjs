@@ -85,9 +85,9 @@ test("the open request names the current connection and carries ids only", () =>
 });
 
 test("the copied command is quoted for any shell", () => {
-  assert.equal(copyCommand({ kind: "terminal", id: "0123456789abcdef" }), "cage attach current --terminal 0123456789abcdef");
+  assert.equal(copyCommand({ kind: "terminal", id: "0123456789abcdef" }), "cage attach --terminal 0123456789abcdef current");
   assert.equal(copyCommand({ kind: "project", path: "/work/it's mine", run: "codex", codexAccount: "acct-1" }),
-    "cage attach current --new codex --project '/work/it'\\''s mine' --codex-account acct-1");
+    "cage attach --new codex --project '/work/it'\\''s mine' --codex-account acct-1 current");
 });
 
 test("messages follow the design's wording", () => {
@@ -102,5 +102,5 @@ test("a project path with any control character is refused, by code point", () =
   for (const path of ["/w/a\u001b[201~b", "/w/a\u007fb", "/w/a\u0085b", "/w/a\u009bb", "/w/a\u000fb", "/w/a\tb", "/w/a\ud800b"]) {
     assert.throws(() => copyCommand({ kind: "project", path }), /无法识别这个项目/, JSON.stringify(path));
   }
-  assert.equal(copyCommand({ kind: "project", path: "/w/项目 一" }), "cage attach current --new shell --project '/w/项目 一'");
+  assert.equal(copyCommand({ kind: "project", path: "/w/项目 一" }), "cage attach --new shell --project '/w/项目 一' current");
 });

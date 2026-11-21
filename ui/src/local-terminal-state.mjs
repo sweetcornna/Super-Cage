@@ -106,7 +106,7 @@ const accountID = /^[A-Za-z0-9_-]{1,128}$/;
 const kinds = new Set(["shell", "claude", "codex"]);
 // Any control character (C0, DEL, C1) or a lone surrogate, as the desktop
 // and cage attach refuse: the path reaches a command line and the clipboard.
-const controls = /\p{Cc}|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+const controls = /[\p{Cc}\p{Cs}]/u;
 
 // targetProblem says why a terminal, project or session cannot be opened.
 function targetProblem(target) {
@@ -176,13 +176,15 @@ const shellWord = word => /^[A-Za-z0-9_./=:,@+%-]+$/.test(word) ? word : "'" + w
 // opened by hand in any terminal, on the desktop's current connection.
 export function copyCommand(target) {
   const { body } = openRequest(target, {});
-  const args = ["cage", "attach", "current"];
+  // The environment operand goes last: cage attach stops reading flags at it.
+  const args = ["cage", "attach"];
   if (body.terminal_id) args.push("--terminal", body.terminal_id);
   if (body.observe) args.push("--observe");
   if (body.session_id) args.push("--resume", body.session_id);
   if (body.project) args.push("--new", body.kind, "--project", body.project);
   if (body.claude_account_id) args.push("--claude-account", body.claude_account_id);
   if (body.codex_account_id) args.push("--codex-account", body.codex_account_id);
+  args.push("current");
   return args.map(shellWord).join(" ");
 }
 

@@ -1,6 +1,6 @@
 // The desktop window's "在本机终端中打开": loaded only in the desktop app
 // (main.jsx imports it on demand), so none of it is in the first chunk.
-import { api } from "./api";
+import { api, writeClipboard } from "./api";
 import { getClientContext } from "./client-context.mjs";
 import { APPS_PATH, SETTINGS_PATH, appName, automationNotice, copyCommand, launchFailure, menuItem, normalizeSettings, openRequest } from "./local-terminal-state.mjs";
 
@@ -44,7 +44,7 @@ export async function localTerminalOpener(changed) {
         // another; a lock, the bound or an open in progress say so.
         if (error.status === 502) {
           const reason = String(error.message || "").replace(/^无法在 .+? 中打开：/, "");
-          notify(launchFailure(appName(settings.app, apps), reason), { label: "复制命令", run: () => navigator.clipboard.writeText(copyCommand(target)) });
+          notify(launchFailure(appName(settings.app, apps), reason), { label: "复制命令", run: () => writeClipboard(copyCommand(target)) });
         } else notify(error.message);
       } finally {
         pending = false;

@@ -677,7 +677,7 @@ function App() {
   // In a terminal's heading the item opens that terminal; elsewhere a new
   // terminal in the menu's project.
   const localTerminalItem = (location) => {
-    const tab = location === "heading" ? current : location.startsWith("heading-") ? tabs.find(item => item.id === location.slice(8)) : null;
+    const tab = home ? null : location === "heading" ? (terminal ? current : null) : location.startsWith("heading-") ? tabs.find(item => item.id === location.slice(8)) : null;
     const target = tab?.kind === "terminal" ? { kind: "terminal", id: tab.id } : { kind: "project", path: terminalChoice.path, run: "shell" };
     const item = localTerminal?.item(target);
     return item?.visible ? { ...item, onSelect: () => {

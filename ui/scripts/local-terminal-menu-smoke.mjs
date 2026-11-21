@@ -98,7 +98,7 @@ async function run({ theme, viewport, desktop = true }) {
     await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await toast.getByRole("button", { name: "复制命令" }).click();
     await page.locator(".toast").getByText("已复制命令").waitFor();
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "cage attach current --new shell --project " + project);
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "cage attach --new shell --project " + project + " current");
     // Locked: the server's sentence, no 复制命令 and no advice to switch apps.
     replies.push({ status: 423, body: "Super Cage 已锁定：解锁后再打开本机终端" });
     await openProjectMenu();

@@ -78,3 +78,24 @@ func TestServerTextIsPrinted(t *testing.T) {
 		t.Fatalf("server text printed as %q", message)
 	}
 }
+
+// The desktop's 复制命令 (ui/src/local-terminal-state.mjs copyCommand) gives
+// these; each must run as it is.
+func TestParseArgsCopiedCommands(t *testing.T) {
+	for _, line := range []string{
+		"--terminal 0123456789abcdef current",
+		"--terminal 0123456789abcdef --observe current",
+		"--resume 3f2a8c1e-1111-4222-8333-944455556666 current",
+		"--new shell --project /work/x current",
+		"--new claude --project /work/x --claude-account acct-1 current",
+	} {
+		cfg, err := ParseArgs(strings.Fields(line))
+		if err != nil || cfg.Target.Connection != "current" {
+			t.Errorf("%q: %+v %v", line, cfg.Target, err)
+		}
+	}
+	// The operand first stops flag parsing: refused, never misread.
+	if _, err := ParseArgs([]string{"current", "--terminal", "0123456789abcdef"}); err == nil {
+		t.Error("operand before flags accepted")
+	}
+}
