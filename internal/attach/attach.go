@@ -254,6 +254,7 @@ type attacher struct {
 	focusState atomic.Int32 // focusUnknown, focusIn or focusOut
 	lastInput  atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
 	inPaste    bool         // input is inside a bracketed paste
+	dropPaste  bool         // the rest of a paste cut by a reconnect is dropped
 	resets     int          // the filter's Resets, to turn focus reports on again
 
 	filter  *termfilter.Filter
@@ -300,6 +301,9 @@ const ResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, 
 // StreamHook sees every stream an attach opens; tests use it to drop
 // one mid-output.
 var StreamHook func(*controlwire.Conn)
+
+// ResumeHook, when set, runs before each reconnect attempt. Tests only.
+var ResumeHook func(ctx context.Context)
 
 // The stream to the controller is a single WebSocket. The server speaks at
 // least every 20 seconds (a heartbeat frame and a ping, which is answered),
@@ -766,6 +770,16 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 					}
 					continue
 				}
+				if a.dropPaste {
+					end := bytes.Index(data, []byte(attachPasteEnd))
+					if end < 0 {
+						continue
+					}
+					data, a.dropPaste = data[end+len(attachPasteEnd):], false
+					if len(data) == 0 {
+						continue
+					}
+				}
 				if err := paste.feed(ctx, data); err != nil {
 					streamErr = err
 					break pump
@@ -799,12 +813,75 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 		if a.ended {
 			return a.endedExit(ctx)
 		}
-		next, exit, ok := a.resume(ctx, streamErr)
+		next, exit, ok := a.reconnect(ctx, streamErr, inputs, inputDone, paste)
 		if !ok {
 			return exit
 		}
 		ws = next
 	}
+}
+
+// reconnectNotice is shown once per reconnect, when the owner types.
+const reconnectNotice = "\r\n正在重新连接…（这期间输入的内容不会发送）\r\n"
+
+// reconnect resumes the stream while the owner can still type. Keys typed
+// meanwhile are dropped, not sent late, and the first says so on screen; a
+// paste cut by the drop is dropped to its end. Ctrl-C or Ctrl-D still
+// detach an observer.
+func (a *attacher) reconnect(ctx context.Context, cause error, inputs <-chan []byte, inputDone <-chan struct{}, paste *attachPaste) (*controlwire.Conn, Exit, bool) {
+	paste.stop() // a paste still being gathered was for the dropped stream
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	type outcome struct {
+		ws   *controlwire.Conn
+		exit Exit
+		ok   bool
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		defer a.guard()
+		ws, exit, ok := a.resume(ctx, cause)
+		done <- outcome{ws, exit, ok}
+	}()
+	detach := func() (*controlwire.Conn, Exit, bool) {
+		cancel()
+		if r := <-done; r.ws != nil {
+			r.ws.Close()
+		}
+		return nil, Exit{}, false
+	}
+	told := false
+	for {
+		select {
+		case r := <-done:
+			a.dropPaste = a.inPaste
+			return r.ws, r.exit, r.ok
+		case <-inputDone:
+			return detach()
+		case data := <-inputs:
+			data = a.noteInput(data)
+			if a.cfg.Observe && bytes.ContainsAny(data, "\x03\x04") {
+				return detach()
+			}
+			if !told && typedKey(data) && !a.filter.Streaming() {
+				told = true
+				_, _ = a.tty.Out.Write([]byte(reconnectNotice))
+			}
+		}
+	}
+}
+
+// typedKey reports whether input holds a key, not only reports the terminal
+// application sent by itself.
+func typedKey(data []byte) bool {
+	for i := 0; i < len(data); {
+		n, kind, _ := termfilter.NextInput(data[i:])
+		if kind == termfilter.InputKey {
+			return true
+		}
+		i += n
+	}
+	return false
 }
 
 // readStream copies one stream to the local terminal until it ends. Output
@@ -936,6 +1013,9 @@ func (a *attacher) resume(ctx context.Context, cause error) (*controlwire.Conn, 
 	deadline := time.Now().Add(RetryWindow)
 	delay := 250 * time.Millisecond
 	for {
+		if ResumeHook != nil {
+			ResumeHook(ctx)
+		}
 		if exit, final := a.explain(ctx); final {
 			return nil, exit, false
 		}

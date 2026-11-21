@@ -158,6 +158,13 @@ func New(opts Options) *Filter { return &Filter{opts: opts} }
 // draws.
 func (f *Filter) SetReplay(on bool) { f.replay = on }
 
+// Streaming reports whether the application is inside a string it was given
+// the start of (a clipboard write streaming through): nothing else may be
+// written to it until the string ends.
+func (f *Filter) Streaming() bool {
+	return f.st == stStringPass || f.st == stStrEsc && f.strState == stStringPass
+}
+
 // Pending is the number of bytes held for an unfinished sequence.
 func (f *Filter) Pending() int { return f.n + f.u8n }
 

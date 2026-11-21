@@ -1470,3 +1470,75 @@ func TestAttachRefusesAControllerThatDidNotVerifyIt(t *testing.T) {
 		t.Fatalf("%+v, terminals %d -> %d", result, before, len(s.terminals.snapshot()))
 	}
 }
+
+// holdResume makes the next reconnect wait until the returned func is
+// called, and returns the streams attach opened, to drop the first.
+func holdResume(t *testing.T) (release func(), streams func() []*controlwire.Conn) {
+	var mu sync.Mutex
+	var opened []*controlwire.Conn
+	attach.StreamHook = func(ws *controlwire.Conn) { mu.Lock(); opened = append(opened, ws); mu.Unlock() }
+	hold := make(chan struct{})
+	var once sync.Once
+	attach.ResumeHook = func(ctx context.Context) {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+		}
+	}
+	t.Cleanup(func() { once.Do(func() { close(hold) }); attach.StreamHook, attach.ResumeHook = nil, nil })
+	return func() { once.Do(func() { close(hold) }) }, func() []*controlwire.Conn {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]*controlwire.Conn(nil), opened...)
+	}
+}
+
+// Keys typed while the stream is down never reach the program late: they
+// are dropped, the first says so on screen, and a paste cut by the drop is
+// dropped to its end.
+func TestAttachDropsKeysWhileReconnecting(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	release, streams := holdResume(t)
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	_ = streams()[0].NetConn().Close()
+	time.Sleep(100 * time.Millisecond)
+	a.typeText("lost")
+	a.waitFor("正在重新连接…", 1)
+	a.typeText("\x1b[200~pasted-while-down")
+	time.Sleep(100 * time.Millisecond)
+	release()
+	for len(streams()) < 2 {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond)
+	a.typeText("tail\x1b[201~")
+	a.typeText("kept")
+	out := a.waitFor("kept\"", 1)
+	for _, late := range []string{"lost", "pasted", "tail"} {
+		if strings.Contains(out, late) { // attach never echoes: only the program prints what it read
+			t.Fatalf("%q typed during the reconnect reached the program: %q", late, out)
+		}
+	}
+	if strings.Count(out, "正在重新连接…") != 1 {
+		t.Fatalf("the notice was not shown once: %q", out)
+	}
+}
+
+// An observer detaches with Ctrl-C even while the stream is down.
+func TestAttachObserverDetachesWhileReconnecting(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	_, streams := holdResume(t)
+	cfg := attachTo(s, session.id)
+	cfg.Observe = true
+	a := startAttach(t, cfg)
+	a.waitFor("ready", 1)
+	_ = streams()[0].NetConn().Close()
+	time.Sleep(100 * time.Millisecond)
+	a.typeText("\x03")
+	if result := a.exit(2 * time.Second); result.Code != 0 {
+		t.Fatalf("observer did not detach: %+v", result)
+	}
+}
