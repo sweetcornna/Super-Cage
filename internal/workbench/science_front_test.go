@@ -290,7 +290,7 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 		t.Fatalf("policies: %q", policies)
 	}
 	daemonPolicy := webfront.ParsePolicy(policies[0])
-	if ancestors, _ := daemonPolicy.Get("frame-ancestors"); strings.Join(ancestors, " ") != "http://localhost:17777" {
+	if ancestors, _ := daemonPolicy.Get("frame-ancestors"); strings.Join(ancestors, " ") != "'self' http://localhost:17777" {
 		t.Fatalf("daemon frame-ancestors: %q", policies[0])
 	}
 	if script, _ := daemonPolicy.Get("script-src"); !strings.Contains(strings.Join(script, " "), "'nonce-") {
@@ -302,7 +302,7 @@ func TestScienceProxyRewritesBothWays(t *testing.T) {
 	lockdown := webfront.ParsePolicy(policies[1])
 	for directive, want := range map[string]string{
 		"default-src": "'self'", "connect-src": "'self' ws://" + env.front.host + " blob: data:", "img-src": "'self' data: blob:",
-		"frame-src": "'self'", "form-action": "'self'", "object-src": "'none'", "frame-ancestors": "http://localhost:17777", "report-uri": "/_cage/csp-report",
+		"frame-src": "'self'", "form-action": "'self'", "object-src": "'none'", "frame-ancestors": "'self' http://localhost:17777", "report-uri": "/_cage/csp-report",
 	} {
 		if got, _ := lockdown.Get(directive); strings.Join(got, " ") != want {
 			t.Fatalf("lock-down %s = %q", directive, got)
@@ -470,7 +470,7 @@ func TestScienceAuditRefusesHostValues(t *testing.T) {
 		headers          map[string]string
 	}{
 		{"body zone", "/api/echo", `{"timezone":"America/Los_Angeles"}`, nil},
-		{"escaped zone", "/api/echo", `{"tz":"America/Los_Angeles"}`, nil},
+		{"escaped zone", "/api/echo", `{"tz":"America\/Los_Angeles"}`, nil},
 		{"header zone", "/api/echo", "{}", map[string]string{"X-Operon-Timezone": "America/Los_Angeles"}},
 		{"query zone", "/api/echo?tz=America%2FLos_Angeles", "{}", nil},
 		{"date string", "/api/echo", `{"d":"Sat Nov 21 2026 08:00:00 GMT` + offset + ` (Pacific Standard Time)"}`, nil},

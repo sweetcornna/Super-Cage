@@ -127,6 +127,8 @@ func newFakeScienceDaemon(t *testing.T) *fakeScienceDaemon {
 				kind = "text/css; charset=utf-8"
 			} else if strings.HasSuffix(r.URL.Path, ".wasm") {
 				kind = "application/wasm"
+			} else if strings.HasSuffix(r.URL.Path, ".html") {
+				kind = "text/html; charset=utf-8"
 			}
 			w.Header().Set("Content-Type", kind)
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")

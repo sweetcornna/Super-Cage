@@ -216,7 +216,7 @@ var scienceProbeContexts = []string{"main", "nested", "dedicated", "blob"}
 // The returned reason is Chinese and names the first context and value that
 // differ; it never echoes the reported value.
 func checkScienceProbe(guest scienceIdentity, reports []scienceProbeReport, now time.Time) string {
-	names := map[string]string{"main": "页面", "nested": "嵌套页面", "dedicated": "Worker", "blob": "Blob Worker"}
+	names := map[string]string{"main": "页面", "nested": "嵌套页面", "dedicated": "后台线程", "blob": "临时后台线程"}
 	byContext := map[string]scienceProbeReport{}
 	for _, report := range reports {
 		if _, known := names[report.Context]; !known {

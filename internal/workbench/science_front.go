@@ -207,10 +207,13 @@ func (f *scienceFront) probeCookie() string {
 
 const sciencePermissionsPolicy = "accelerometer=(), autoplay=(), bluetooth=(), camera=(), display-capture=(), geolocation=(), gyroscope=(), hid=(), magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
 
-func (f *scienceFront) ancestor() string {
+// ancestors is the frame-ancestors source list: the workbench document,
+// and the front itself for the app's own nested frames (every ancestor must
+// match).
+func (f *scienceFront) ancestors() string {
 	if f.hooks.ancestor != nil {
 		if origin := f.hooks.ancestor(); origin != "" {
-			return origin
+			return "'self' " + origin
 		}
 	}
 	return "'none'"
@@ -222,11 +225,11 @@ func (f *scienceFront) lockdown() string {
 	return "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; " +
 		"connect-src 'self' ws://" + f.host + " blob: data:; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; " +
 		"frame-src 'self'; child-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; form-action 'self'; base-uri 'self'; object-src 'none'; " +
-		"frame-ancestors " + f.ancestor() + "; report-uri /_cage/csp-report"
+		"frame-ancestors " + f.ancestors() + "; report-uri /_cage/csp-report"
 }
 
 func (f *scienceFront) ownPolicy() string {
-	return "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors " + f.ancestor()
+	return "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; worker-src 'self' blob:; frame-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors " + f.ancestors()
 }
 
 func sciencePlain(w http.ResponseWriter, code int, message string) {
@@ -572,9 +575,9 @@ func (f *scienceFront) rewriteResponse(response *http.Response, upstream *scienc
 		location.Scheme, location.Host = "http", f.host
 		headers.Set("Location", location.String())
 	}
-	ancestor := f.ancestor()
+	ancestors := strings.Fields(f.ancestors())
 	for _, policy := range webfront.ParsePolicies(response.Header.Values("Content-Security-Policy")) {
-		policy = policy.Without("report-uri", "report-to").Set("frame-ancestors", ancestor)
+		policy = policy.Without("report-uri", "report-to").Set("frame-ancestors", ancestors...)
 		headers.Add("Content-Security-Policy", policy.String())
 	}
 	headers.Add("Content-Security-Policy", f.lockdown())
