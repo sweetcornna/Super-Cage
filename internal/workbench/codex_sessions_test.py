@@ -628,6 +628,191 @@ class CodexSessionTests(unittest.TestCase):
         self.assertNotIn("lease", self.state(connection))
         self.assertEqual(self.calls_of("tui"), [])
 
+    def test_unknown_process_state_counts_as_running(self):
+        # A phone turn whose process cannot be told from a reused PID, or whose
+        # start time cannot be read, is running for every exclusion: a desktop
+        # TUI never starts beside it and no second turn is admitted.
+        thread, _ = self.rollout(self.turn_rows("unknown", "ok"))
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(self.finish, sleeper)
+        mine = {"request_id": str(uuid.uuid4()), "argv": ["codex"], "pid": sleeper.pid, "start": sessions.fingerprint(sleeper.pid)}
+        self.assertTrue(mine["start"] and sessions.alive(mine))
+        real_start = sessions.process_start
+        with patch.object(sessions, "process_start", return_value=None):
+            self.assertTrue(sessions.alive(mine))
+        self.assertTrue(sessions.alive({**mine, "start": ""}))
+        # Ended: no such process, a recorded exit, nothing launched.
+        self.assertFalse(sessions.alive({**mine, "pid": 999999}))
+        self.assertFalse(sessions.alive({**mine, "pid": 999999, "start": ""}))
+        self.assertFalse(sessions.alive({**mine, "exit_code": 0}))
+        self.assertFalse(sessions.alive({"request_id": mine["request_id"]}))
+        # Admitted, but the send was cut off before it recorded the PID: held
+        # while a supervisor of the connection may run.
+        connection = str(uuid.uuid4())
+        admitted = {"request_id": mine["request_id"], "argv": ["codex"]}
+        self.assertTrue(sessions.alive(admitted))
+        with patch.object(sessions, "supervising", return_value=None):
+            self.assertTrue(sessions.alive(admitted, connection))
+        with patch.object(sessions, "supervising", return_value=True):
+            self.assertTrue(sessions.alive(admitted, connection))
+        with patch.object(sessions, "supervising", return_value=False):
+            self.assertFalse(sessions.alive(admitted, connection))
+        with sessions.state_file(connection) as state:
+            state.update(thread_id=thread, account="default", cwd=str(self.project), run=mine)
+        with patch.object(sessions, "process_start", side_effect=lambda pid: None if pid == sleeper.pid else real_start(pid)):
+            with self.assertRaisesRegex(ValueError, "已有消息正在处理"):
+                self.send(connection, thread)
+            # Stop signals only a process it can identify.
+            with self.assertRaisesRegex(ValueError, "无法确认"):
+                sessions.stop({"connection": connection, "request_id": mine["request_id"]})
+
+    def test_a_phone_turn_of_another_connection_excludes_the_thread(self):
+        # Two records for one thread (two workbenches adopting it): a phone
+        # turn admitted on connection A whose Codex has not started yet is
+        # seen by a desktop open and by a phone send on connection B.
+        thread, _ = self.rollout(self.turn_rows("shared", "ok"))
+        sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"], start_new_session=True)
+        self.addCleanup(self.finish, sleeper)
+        first = str(uuid.uuid4())
+        with sessions.state_file(first) as state:
+            state.update(thread_id=thread, account="default", cwd=str(self.project),
+                         run={"request_id": str(uuid.uuid4()), "pid": sleeper.pid, "start": sessions.fingerprint(sleeper.pid)})
+        second = str(uuid.uuid4())
+        refused = self.launch(second, thread=thread, wait=False)
+        _, error = refused.communicate(timeout=15)
+        self.assertEqual(refused.returncode, sessions.LAUNCH_REFUSED, error)
+        self.assertIn(sessions.PHONE_RUNNING, error.decode())
+        self.assertEqual(self.calls_of("tui"), [])
+        with self.assertRaisesRegex(ValueError, "已有消息正在处理"):
+            self.send(second, thread)
+        with self.assertRaisesRegex(ValueError, "仍在处理"):
+            sessions.purge({"thread": thread, "account": "default", "workspace": str(self.project), "connection": second})
+
+    def test_an_unreadable_state_is_never_overwritten_while_something_may_run(self):
+        thread, path = self.rollout(self.turn_rows("corrupt", "ok"))
+        connection = str(uuid.uuid4())
+        folder = sessions.ROOT / connection
+        folder.mkdir(parents=True)
+        (folder / "state.json").write_text("{not json")
+        proc = self.home / "proc"
+        (proc / "4000001/fd").mkdir(parents=True)
+        (proc / "4000001/cmdline").write_bytes(b"codex\0exec\0resume\0" + thread.encode() + b"\0")
+        os.symlink(path, proc / "4000001/fd/7")
+        (proc / "stat").write_text("cpu 1 2 3\nbtime %d\n" % (time.time() - 3600))
+        request = {"connection": connection, "lease": str(uuid.uuid4()), "thread": thread, "account": "default", "subject": "",
+                   "cwd": str(self.project), "additional_directories": []}
+        sessions.probe({})
+
+        def refused(request):
+            started = AssertionError("the terminal started")
+            with patch.object(sessions, "PROC", proc), patch.object(sessions.os, "execve", side_effect=started):
+                with self.assertRaisesRegex(ValueError, "状态无法读取"):
+                    sessions.tui_launch(request)
+            self.assertEqual((folder / "state.json").read_text(), "{not json")
+
+        # A process holds the thread: refused, the file stays as it is.
+        refused(request)
+        # A phone turn's supervisor of this connection runs: refused, also for
+        # a file from before this boot (the boot time moves when the clock is
+        # stepped).
+        shutil.rmtree(proc / "4000001")
+        (proc / "4000002").mkdir()
+        (proc / "4000002/cmdline").write_bytes(b"/usr/bin/python3\0-I\0/home/x/codex.py\0supervise\0" + connection.encode() + b"\0")
+        refused(request)
+        stamp = time.time() - 7200
+        os.utime(folder / "state.json", (stamp, stamp))
+        refused(request)
+        # A new session (no thread) from this boot: what it recorded is
+        # unknown, refused.
+        shutil.rmtree(proc / "4000002")
+        os.utime(folder / "state.json", None)
+        refused({**request, "thread": ""})
+        # Nothing runs and the thread is free: set aside, not overwritten, and
+        # the terminal starts.
+        launched = []
+        cwd, umask = os.getcwd(), os.umask(0o077)
+        os.umask(umask)
+        self.addCleanup(os.chdir, cwd)
+        self.addCleanup(os.umask, umask)
+        with patch.object(sessions, "PROC", proc), patch.object(sessions.os, "execve", side_effect=lambda *args: launched.append(args) or (_ for _ in ()).throw(SystemExit(0))):
+            with self.assertRaises(SystemExit):
+                sessions.tui_launch(request)
+        self.assertEqual(len(launched), 1)
+        self.assertEqual([item.read_text() for item in folder.glob("state.json.unreadable-*")], ["{not json"])
+        self.assertEqual(self.state(connection)["lease"]["thread"], thread)
+
+    def test_admission_is_one_at_a_time_across_connections(self):
+        # Two records of one thread: a desktop open on one connection and a
+        # phone send on another each check the other's run or lease and
+        # record their own under the admission lock, never side by side.
+        thread, _ = self.rollout(self.turn_rows("shared", "ok"))
+        import fcntl
+        sessions.ROOT.mkdir(parents=True, exist_ok=True)
+        holder = (sessions.ROOT / "admission.lock").open("a")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        desktop, phone = str(uuid.uuid4()), str(uuid.uuid4())
+        os.environ["FAKE_CODEX_MODE"] = "sleep"
+        launch = self.launch(desktop, thread=thread, wait=False)
+        sender = subprocess.Popen([sys.executable, "-I", str(source), "send", json.dumps({"connection": phone, "request_id": str(uuid.uuid4()), "text": "x",
+                                   "account": "default", "thread": thread, "cwd": str(self.project)})], env=self.env_now(), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(self.finish, sender)
+        time.sleep(1)
+        self.assertEqual((self.calls_of("tui"), self.calls_of("exec")), ([], []))
+        self.assertIsNone(sender.poll())
+        self.assertEqual((self.state(desktop), self.state(phone)), ({}, {}))
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        out, _ = sender.communicate(timeout=15)
+        deadline = time.monotonic() + 15
+        while not self.calls_of("tui") and launch.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        admitted = [bool(self.calls_of("tui")), b'"ok": true' in out]
+        self.assertEqual(sum(admitted), 1, (admitted, out))
+
+    def test_help_options_match_whole_tokens(self):
+        # A CLI whose help lists look-alike options only: none is taken for
+        # the real one (a wrong -C makes the TUI exit at once).
+        fake = self.home / "bin" / "codex"
+        text = fake.read_text()
+        for before, after in (('level in ("all", "old")', 'level in ("all", "old", "lookalike")'),
+                              ('if flags else ""', 'if flags else ("      --cdp-port <PORT>\\n      --add-dirs <DIRS>\\n      --no-daemonize\\n      --force-color\\n" if level == "lookalike" else "")')):
+            self.assertIn(before, text)
+            text = text.replace(before, after, 1)
+        fake.write_text(text)
+        os.environ["FAKE_CODEX_FLAGS"] = "lookalike"
+        result = sessions.probe({})
+        self.assertEqual({key: result[key] for key in ("complete", "resume", "cd", "add_dir", "no_daemon", "resume_cd", "resume_add_dir", "resume_no_daemon")},
+                         {"complete": True, "resume": True, "cd": False, "add_dir": False, "no_daemon": False, "resume_cd": False,
+                          "resume_add_dir": False, "resume_no_daemon": False})
+        top = "Codex CLI\n\nCommands:\n  resume  Resume\n\nOptions:\n      --cdp-port <PORT>\n      --add-dirs <DIRS>\n      --no-daemonize\n"
+        self.assertFalse(sessions.has_option(top, "--cd"))
+        self.assertFalse(sessions.has_option(top, "--add-dir"))
+        self.assertFalse(sessions.has_option(top, "--no-daemon"))
+        self.assertFalse(sessions.has_option("Usage: codex delete [OPTIONS] <SESSION>\n      --force-color\n", "--force"))
+        for text, name in (("  -C, --cd <DIR>  Tell the agent", "--cd"), ("      --add-dir <DIR>", "--add-dir"), ("      --no-daemon\n", "--no-daemon"),
+                           ("      --cd=<DIR>", "--cd"), ("Usage: codex delete [--force] <SESSION>", "--force")):
+            self.assertTrue(sessions.has_option(text, name), (text, name))
+
+    def test_probe_timeouts_are_not_cached_and_purge_keeps_to_its_budget(self):
+        fake = self.home / "bin" / "codex"
+        source_text = fake.read_text()
+        fake.write_text(source_text.replace('if args[-1:] == ["--help"]:', 'if args[-1:] == ["--help"] and args[:1] != ["--help"]:\n    time.sleep(float(os.environ.get("FAKE_CODEX_SLOW_HELP", "0")))\nif args[-1:] == ["--help"]:', 1))
+        os.environ["FAKE_CODEX_SLOW_HELP"] = "2"
+        # A sub-command's help that times out is not taken for "unsupported".
+        with patch.object(sessions, "PROBE_TIMEOUT", 0.5):
+            result = sessions.probe({})
+        self.assertFalse(result["complete"])
+        self.assertFalse((sessions.ROOT / "probe.json").exists())
+        # Purge finishes within its budget although the probe is slow; the
+        # rollout goes all the same.
+        thread, path = self.rollout(self.turn_rows("remove me", "ok"))
+        started = time.monotonic()
+        with patch.object(sessions, "PURGE_BUDGET", 1.0, create=True):
+            self.assertEqual(sessions.purge({"thread": thread, "account": "default", "workspace": str(self.project)}), {"ok": True})
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertFalse(path.exists())
+
     def test_newer_rollout_names(self):
         thread, path = self.rollout(self.turn_rows("suffixed", "ok"))
         suffixed = path.with_name(path.name[:-len(".jsonl")] + "_" + str(uuid.uuid4()) + ".jsonl")

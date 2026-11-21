@@ -15,6 +15,16 @@ test("HTTP failures name the operation and avoid upstream HTML or opaque runtime
   assert.match(httpErrorMessage("/settings", 503, "", "", "POST"), /无法确认设置是否已保存.*核对设置/);
 });
 
+test("Claude Science failures name Claude Science, not the workbench connection", () => {
+  assert.match(httpErrorMessage("/claude-science", 503, "Service Unavailable", "text/plain"), /^读取 Claude Science 状态失败（HTTP 503）/);
+  for (const action of ["install", "open", "uninstall", "signin"]) {
+    const message = httpErrorMessage(`/claude-science/${action}`, 500, "internal error", "text/plain", "POST");
+    assert.match(message, /^操作 Claude Science失败（HTTP 500）/);
+    assert.ok(!message.includes("Super Cage 工作台"));
+  }
+  assert.match(connectionErrorMessage("/claude-science/open", "POST"), /^操作 Claude Science失败：.*连接已中断/);
+});
+
 test("native errors retain precise rules and explain opaque failures in context", () => {
   assert.match(nativeFailureMessage("exportDiagnostics", "Native operation timeout"), /导出诊断包.*超时/);
   assert.match(nativeFailureMessage("uploadHostFiles", "operation failed token=private"), /上传本机文件失败.*可识别的原因/);
