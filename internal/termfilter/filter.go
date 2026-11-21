@@ -114,11 +114,31 @@ func (f *Filter) Report() string {
 	return b.String()
 }
 
+// maxDropKinds bounds the counts: the names come from what the program
+// sent, so past this many kinds the rest count as one.
+const maxDropKinds = 256
+
 func (f *Filter) count(kind string) {
 	if f.dropped == nil {
 		f.dropped = map[string]int{}
 	}
+	if _, known := f.dropped[kind]; !known && len(f.dropped) >= maxDropKinds-1 {
+		kind = "other"
+	}
 	f.dropped[kind]++
+}
+
+// Abort ends what the application was given of an unfinished string, so the
+// reset that follows cannot complete it: a clipboard write streaming through
+// is spoiled, as when it breaks its alphabet. It appends the bytes to write
+// to dst and forgets everything held.
+func (f *Filter) Abort(dst []byte) []byte {
+	if f.st == stStringPass || f.st == stStrEsc && f.strState == stStringPass {
+		dst = append(dst, '!', 0x07)
+		f.count("OSC 52 unfinished")
+	}
+	f.Reset()
+	return dst
 }
 
 // New returns a filter for one stream.
@@ -220,9 +240,12 @@ func (f *Filter) ground(dst []byte, b byte) []byte {
 	case b == 0x1b:
 		f.startEscape()
 	case b == 0x05: // ENQ: the answerback can name the application
+		f.count("ENQ")
 	case b == 0x07:
 		if !f.replay {
 			dst = append(dst, b)
+		} else {
+			f.count("BEL (replay)")
 		}
 	case b < 0x20 || b == 0x7f:
 		dst = append(dst, b)
@@ -240,6 +263,7 @@ func (f *Filter) ground(dst []byte, b byte) []byte {
 	default:
 		// A stray continuation byte or an invalid lead: an application that
 		// does not decode UTF-8 could read 0x80-0x9f as a C1 control.
+		f.count("invalid UTF-8 or C1")
 	}
 	return dst
 }
@@ -264,6 +288,7 @@ func (f *Filter) utf8(dst []byte, b byte) []byte {
 	}
 	if b < lo || b > hi {
 		f.u8n, f.st = 0, stGround
+		f.count("invalid UTF-8 or C1")
 		if b >= 0x80 && b <= 0xbf {
 			return dst // the rest of the invalid character
 		}
@@ -285,9 +310,15 @@ func (f *Filter) control(dst *[]byte, b byte) bool {
 	case b == 0x1b:
 		f.startEscape()
 	case b == 0x18 || b == 0x1a: // CAN, SUB abort the sequence
+		f.count("sequence aborted by CAN or SUB")
 		f.n, f.st = 0, stGround
 	case b < 0x20:
-		if b != 0x05 && (b != 0x07 || !f.replay) {
+		switch {
+		case b == 0x05:
+			f.count("ENQ")
+		case b == 0x07 && f.replay:
+			f.count("BEL (replay)")
+		default:
 			*dst = append(*dst, b)
 		}
 	case b == 0x7f: // ignored inside sequences
@@ -302,6 +333,7 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 		return dst
 	}
 	if b >= 0x80 {
+		f.count("ESC broken by an 8-bit byte")
 		f.n, f.st = 0, stGround
 		return f.ground(dst, b)
 	}
@@ -325,6 +357,7 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 	}
 	if b < 0x30 { // intermediate
 		if !f.push(b) {
+			f.count("ESC too long")
 			f.n, f.st = 0, stGround
 			return dst
 		}
@@ -362,10 +395,12 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 	}
 	switch {
 	case b >= 0x80:
+		f.count("CSI broken by an 8-bit byte")
 		f.n, f.st = 0, stGround
 		return f.ground(dst, b)
 	case b >= 0x40:
 		if !f.push(b) {
+			f.count("CSI too long")
 			f.n, f.st = 0, stGround
 			return dst
 		}
@@ -381,10 +416,12 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 	case b >= 0x30 && f.n > 2 && f.hold[f.n-1] < 0x30:
 		// A parameter after an intermediate: the application ignores the
 		// whole sequence, and so does the filter.
+		f.count("CSI malformed")
 		f.n, f.st = 0, stCSIDrop
 		return dst
 	}
 	if !f.push(b) {
+		f.count("CSI too long")
 		f.n, f.st = 0, stCSIDrop
 	}
 	return dst
@@ -404,6 +441,9 @@ func (f *Filter) str(dst []byte, b byte) []byte {
 		if f.st == stStringPass {
 			dst = append(dst, b) // the application aborts what it was given
 		}
+		if f.st == stString {
+			f.count(f.kindName() + " aborted by CAN or SUB")
+		}
 		f.n, f.st = 0, stGround
 		return dst
 	}
@@ -419,14 +459,28 @@ func (f *Filter) str(dst []byte, b byte) []byte {
 	}
 	if b < 0x20 || b == 0x7f || b >= 0x80 && f.kind != kindOSC {
 		// Only OSC text may hold UTF-8; it is validated when decided.
+		f.count(f.kindName() + " with a control byte")
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
 	if !f.push(b) {
+		f.count(f.kindName() + " too long")
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
 	return f.classify(dst)
+}
+
+func (f *Filter) kindName() string {
+	switch f.kind {
+	case kindOSC:
+		return "OSC"
+	case kindDCS:
+		return "DCS"
+	case kindAPC:
+		return "APC"
+	}
+	return "PM/SOS"
 }
 
 func base64Byte(b byte) bool {
@@ -469,8 +523,28 @@ func (f *Filter) endString(dst []byte, from state, term []byte) []byte {
 		dst = f.emitHold(dst)
 		return append(dst, term...)
 	}
+	f.count(f.refusedName())
 	f.n = 0
 	return dst
+}
+
+// refusedName names a held string refused at its end: OSC by its number,
+// which classifyOSC has bounded to five digits.
+func (f *Filter) refusedName() string {
+	body := f.body()
+	if f.kind == kindOSC {
+		number := body
+		for i, c := range body {
+			if c == ';' {
+				number = body[:i]
+				break
+			}
+		}
+		if len(number) <= 5 {
+			return "OSC " + string(number) + " refused"
+		}
+	}
+	return f.kindName() + " refused"
 }
 
 // classify runs after each held string byte: it may stream or drop early.
@@ -549,6 +623,7 @@ func (f *Filter) classifyClipboard(dst []byte, rest []byte) []byte {
 	}
 	f.limit = ClipboardLimit
 	if !base64Byte(data[0]) {
+		f.count("OSC 52 malformed")
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
@@ -599,7 +674,6 @@ func (f *Filter) decide(_ bool) bool {
 		case "m", "r", " q", "\"q", "\"p":
 			return true
 		}
-		f.count("DCS $q")
 		return false
 	case kindOSC:
 		return f.decideOSC()
@@ -765,12 +839,21 @@ func (f *Filter) rewriteKittyNotification(semi int) bool {
 		}
 		switch pair[0] {
 		case 'a':
-			keep = false
+			keep = false // actions: a=report would answer the click
+			f.count("OSC 99 a= removed")
 		case 'p':
 			if v := string(pair[2:]); v != "title" && v != "body" {
 				return false
 			}
-		case 'i', 'd', 'u', 'o', 'e':
+		case 'i':
+			// kitty's identifier alphabet; the id only names the
+			// notification to update or close.
+			for _, c := range pair[2:] {
+				if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '+' || c == '.') {
+					return false
+				}
+			}
+		case 'd', 'u', 'o', 'e':
 		default:
 			return false
 		}

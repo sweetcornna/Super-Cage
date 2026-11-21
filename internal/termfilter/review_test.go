@@ -166,6 +166,10 @@ func TestFilterReviewCases(t *testing.T) {
 		if got != want {
 			t.Errorf("%s: %q -> %q, want %q", c.name, c.in, got, want)
 		}
+		// Whatever does not pass unchanged is counted, replayed or live.
+		if got != c.in && len(f.Dropped()) == 0 && f.Pending() == 0 {
+			t.Errorf("%s: %q -> %q with nothing counted", c.name, c.in, got)
+		}
 		// Byte at a time gives the same.
 		g := New(Options{ClipboardWrite: c.clip})
 		g.SetReplay(c.replay)
@@ -260,7 +264,7 @@ var reviewWant = map[string]string{
 	"OSC 99 p=?":                   "",
 	"OSC 99 c=1 close evt":         "",
 	"OSC 99 e=1 b64":               "\x1b]99;i=1:e=1;Y3VybA==\a",
-	"OSC 99 i= weird":              "\x1b]99;i=$(id);hi\a",
+	"OSC 99 i= weird":              "",
 	"OSC 4 query":                  "\x1b]4;1;?\a",
 	"OSC 4 set":                    "\x1b]4;1;rgb:00/00/00\a",
 	"OSC 10 query":                 "\x1b]10;?\a",

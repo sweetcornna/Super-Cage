@@ -2,6 +2,7 @@ package termfilter
 
 import (
 	"bytes"
+	"fmt"
 	"math/rand"
 	"regexp"
 	"strings"
@@ -382,5 +383,38 @@ func TestFilterRemembersGuestFocusAndResets(t *testing.T) {
 	}
 	if len(f.Dropped()) != 0 {
 		t.Fatal(f.Report())
+	}
+}
+
+// The counts are named after what the program sent, so their number is
+// bounded: a program cannot grow the viewer's memory with distinct drops.
+func TestFilterDropCountsAreBounded(t *testing.T) {
+	f := New(Options{})
+	for i := 0; i < 100000; i++ {
+		f.Append(nil, []byte(fmt.Sprintf(esc+"[%dt"+esc+"]%d;x\x07", i, 20000+i%9999)))
+	}
+	if len(f.Dropped()) > maxDropKinds {
+		t.Fatal(len(f.Dropped()))
+	}
+	total := 0
+	for _, n := range f.Dropped() {
+		total += n
+	}
+	if total != 200000 {
+		t.Fatal(total)
+	}
+}
+
+// Ending mid clipboard write spoils it, so the reset after it cannot apply
+// a truncated clipboard.
+func TestFilterAbortSpoilsAnOpenClipboardWrite(t *testing.T) {
+	f := New(Options{ClipboardWrite: true})
+	out := f.Append(nil, []byte(esc+"]52;c;QUFBQUFB"))
+	if out = f.Abort(out); string(out) != esc+"]52;c;QUFBQUFB!\x07" || f.Pending() != 0 {
+		t.Fatalf("%q", out)
+	}
+	g := New(Options{ClipboardWrite: true})
+	if out := g.Abort(g.Append(nil, []byte(esc+"]0;tit"))); len(out) != 0 {
+		t.Fatalf("a held title was sent: %q", out)
 	}
 }

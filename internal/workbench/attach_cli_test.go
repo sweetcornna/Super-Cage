@@ -79,6 +79,9 @@ func TestAttachChild(t *testing.T) {
 		case strings.Contains(chunk, "?effects"):
 			// A query, a clipboard write, a notification and a bell.
 			fmt.Print("\x1b[c\x1b]52;c;aGk=\x07\x1b]9;done\x07\x07effects-shown\r\n")
+		case strings.Contains(chunk, "?clip-open"):
+			// A clipboard write the program never finishes.
+			fmt.Print("clip-open-shown\r\n\x1b]52;c;" + strings.Repeat("QUFB", 64))
 		case strings.Contains(chunk, "?dropped"):
 			// DA2, in-band resize reports and focus reports.
 			fmt.Print("\x1b[>c\x1b[?2048h\x1b[?1004hdropped-shown\r\n")
@@ -1149,6 +1152,23 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 		t.Fatalf("%+v", result)
 	}
 	b.leftReset()
+}
+
+// A window left inside a clipboard write when the attach ends gets it
+// spoiled before the reset, so no truncated clipboard is applied.
+func TestAttachExitSpoilsAnOpenClipboardWrite(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	a.typeText("?clip-open")
+	a.waitFor(strings.Repeat("QUFB", 64), 1)
+	a.cancel()
+	a.exit(5 * time.Second)
+	a.leftReset()
+	if out := a.output(); !strings.HasSuffix(out, "QUFB!\x07"+attach.ResetSequence) {
+		t.Fatalf("not spoiled: %q", out[max(0, len(out)-len(attach.ResetSequence)-20):])
+	}
 }
 
 // Reconnecting gives up after the retry window, and resets the window too.

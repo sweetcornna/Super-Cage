@@ -24,7 +24,9 @@ func TestDroppedPathsPerApplication(t *testing.T) {
 		// Ghostty: Shell.escape, joined by spaces, no trailing space
 		// (NSPasteboard+Extension.swift getOpinionatedStringContents).
 		{"Ghostty", "/Users/o/My\\ Pictures/a\\ \\(1\\).png /tmp/b.png", two},
-		// Terminal: backslash escapes, a trailing space (no source; observed).
+		// Terminal: backslash escapes, a trailing space. Unverified: no
+		// source, and no application can be launched here. Warp has no row:
+		// closed source, unverified.
 		{"Terminal", "/Users/o/My\\ Pictures/a\\ \\(1\\).png /tmp/b.png ", two},
 		// WezTerm: quote_dropped_files = SpacesOnly, a trailing space
 		// (termwindow/mod.rs DroppedFile, config DroppedFileQuoting).

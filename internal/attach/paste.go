@@ -117,13 +117,21 @@ func (p *attachPaste) deliver(ctx context.Context, paste []byte) error {
 		return p.a.sendInput(paste)
 	}
 	// The switch is read for each paste: turning it off in Super Cage
-	// applies to windows already open.
-	if settings, _ := localterm.LoadSettings(filepath.Dir(p.a.cfg.ConfigPath)); !settings.ImageUpload {
+	// applies to windows already open. An unreadable file keeps the choice
+	// read at the start.
+	upload := p.a.settings.ImageUpload
+	if settings, err := localterm.LoadSettings(filepath.Dir(p.a.cfg.ConfigPath)); err == nil {
+		upload = settings.ImageUpload
+	}
+	if !upload {
 		return p.a.sendInput(paste)
 	}
 	images := make([][]byte, 0, len(paths))
 	for _, path := range paths {
 		data, err := readImage(path)
+		if err == nil {
+			data, err = acceptImage(data)
+		}
 		if err != nil {
 			return p.a.sendInput(paste) // not an image: an ordinary paste
 		}
@@ -254,15 +262,15 @@ func attachLocalPath(word string) (string, bool) {
 }
 
 // imageReadTimeout bounds reading one dropped file, so a stalled network
-// volume cannot hold up the window.
+// volume cannot hold up the window. Decoding is not under it: it works on
+// the bytes read, bounded by the size and pixel limits.
 var imageReadTimeout = 5 * time.Second
 
-// loadImage is attachImageFile; tests replace it.
-var loadImage = attachImageFile
+// loadImage is readImageFile; tests replace it.
+var loadImage = readImageFile
 
-// readImage reads one dropped image off the input loop and gives up at the
-// deadline. A decoder that panics on a crafted file makes it unreadable,
-// not the attach dead.
+// readImage reads one dropped file off the input loop and gives up at the
+// deadline.
 func readImage(path string) ([]byte, error) {
 	type result struct {
 		data []byte
@@ -270,11 +278,6 @@ func readImage(path string) ([]byte, error) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		defer func() {
-			if recover() != nil {
-				done <- result{nil, errNotImage}
-			}
-		}()
 		data, err := loadImage(path)
 		done <- result{data, err}
 	}()
@@ -290,12 +293,11 @@ func readImage(path string) ([]byte, error) {
 
 var errNotImage = errors.New("not an accepted image file")
 
-// attachImageFile reads an image the web terminal would accept and returns
-// it as PNG, which is what the workbench takes. Only a regular file is
-// read, not through a symbolic link, never a FIFO or device (opened without
+// readImageFile reads a dropped file whole. Only a regular file is read,
+// not through a symbolic link, never a FIFO or device (opened without
 // blocking); its size is checked before anything is read and again on the
-// file actually opened, and the content decides, not the name.
-func attachImageFile(path string) ([]byte, error) {
+// file actually opened, and at most MaxImageBytes are read.
+func readImageFile(path string) ([]byte, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > MaxImageBytes {
 		return nil, errNotImage
@@ -309,34 +311,53 @@ func attachImageFile(path string) ([]byte, error) {
 	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() == 0 || opened.Size() > MaxImageBytes {
 		return nil, errNotImage
 	}
-	file := io.NewSectionReader(f, 0, MaxImageBytes+1)
-	config, format, err := image.DecodeConfig(file)
-	if err != nil || config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 40_000_000 {
-		return nil, errors.New("not an accepted image")
+	data, err := io.ReadAll(io.NewSectionReader(f, 0, MaxImageBytes+1))
+	if err != nil || len(data) > MaxImageBytes {
+		return nil, errNotImage
 	}
-	if format != "png" && format != "jpeg" && format != "gif" && format != "webp" {
-		return nil, errors.New("not an accepted image")
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return nil, err
-	}
-	if format == "png" {
-		data, err := io.ReadAll(file)
-		if err != nil || len(data) > MaxImageBytes {
-			return nil, errors.New("image too large")
+	return data, nil
+}
+
+// acceptImage keeps an image the web terminal would accept and returns it
+// as PNG, which is what the workbench takes: the content decides, not the
+// name. A decoder that panics on a crafted file makes it unreadable, not
+// the attach dead.
+func acceptImage(data []byte) (out []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			out, err = nil, errNotImage
 		}
+	}()
+	config, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil || config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 40_000_000 {
+		return nil, errNotImage
+	}
+	switch format {
+	case "png":
 		return data, nil
+	case "jpeg", "gif", "webp":
+	default:
+		return nil, errNotImage
 	}
 	// Like the browser, keep one frame of an animated image.
-	decoded, _, err := image.Decode(file)
+	decoded, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return nil, err
 	}
-	var out bytes.Buffer
-	if err := png.Encode(&out, decoded); err != nil || out.Len() > MaxImageBytes {
+	var converted bytes.Buffer
+	if err := png.Encode(&converted, decoded); err != nil || converted.Len() > MaxImageBytes {
 		return nil, errors.New("image too large")
 	}
-	return out.Bytes(), nil
+	return converted.Bytes(), nil
+}
+
+// attachImageFile reads and checks one dropped image, as a paste does.
+func attachImageFile(path string) ([]byte, error) {
+	data, err := readImageFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return acceptImage(data)
 }
 
 // uploadImage sends one image the way the web terminal does

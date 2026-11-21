@@ -347,7 +347,7 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 // panic in any of the attach's goroutines included.
 func (a *attacher) leave() {
 	a.leaveOnce.Do(func() {
-		_, _ = a.tty.Out.Write([]byte(ResetSequence))
+		_, _ = a.tty.Out.Write(append(a.filter.Abort(nil), ResetSequence...))
 		if a.restore != nil {
 			a.restore()
 		}
@@ -773,9 +773,9 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 			}
 			if frame.Reset || *frame.Offset != a.offset {
 				// The bytes that follow do not continue what this window
-				// shows: start from a clean screen.
-				a.filter.Reset()
-				if _, err := a.tty.Out.Write([]byte("\x1bc")); err != nil {
+				// shows: start from a clean screen, after ending what the
+				// last bytes left open.
+				if _, err := a.tty.Out.Write(append(a.filter.Abort(nil), "\x1bc"...)); err != nil {
 					return err
 				}
 			}
