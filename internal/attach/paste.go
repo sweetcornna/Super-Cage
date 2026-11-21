@@ -1,4 +1,4 @@
-package workbench
+package attach
 
 import (
 	"bytes"
@@ -111,7 +111,7 @@ func (p *attachPaste) deliver(ctx context.Context, paste []byte) error {
 	if !p.a.settings.ImageUpload {
 		return p.a.sendInput(paste)
 	}
-	paths, ok := attachDroppedPaths(content)
+	paths, ok := DroppedPaths(content)
 	if !ok {
 		return p.a.sendInput(paste)
 	}
@@ -129,7 +129,7 @@ func (p *attachPaste) deliver(ctx context.Context, paste []byte) error {
 		if err != nil {
 			// The paste is not sent: it would give the environment this
 			// computer's path. The bell says it did not arrive.
-			_, _ = p.a.tty.out.Write([]byte("\a"))
+			_, _ = p.a.tty.Out.Write([]byte("\a"))
 			return nil
 		}
 		guest = append(guest, path)
@@ -146,11 +146,11 @@ func attachShellPaths(paths []string) string {
 	return strings.Join(quoted, " ") + " "
 }
 
-// attachDroppedPaths reads a paste as the paths terminal applications insert
+// DroppedPaths reads a paste as the paths terminal applications insert
 // for dropped files: separated by spaces or new lines, with backslash
 // escapes, single or double quotes, or as file:// URLs. ok is false unless
 // every word is an absolute path.
-func attachDroppedPaths(text string) (paths []string, ok bool) {
+func DroppedPaths(text string) (paths []string, ok bool) {
 	var word strings.Builder
 	inWord := false
 	end := func() bool {
@@ -239,7 +239,7 @@ func attachLocalPath(word string) (string, bool) {
 // anything is read, and the content decides, not the name.
 func attachImageFile(path string) ([]byte, error) {
 	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > maxImageBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > MaxImageBytes {
 		return nil, errors.New("not an image file")
 	}
 	file, err := os.Open(path)
@@ -258,8 +258,8 @@ func attachImageFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if format == "png" {
-		data, err := io.ReadAll(io.LimitReader(file, maxImageBytes+1))
-		if err != nil || len(data) > maxImageBytes {
+		data, err := io.ReadAll(io.LimitReader(file, MaxImageBytes+1))
+		if err != nil || len(data) > MaxImageBytes {
 			return nil, errors.New("image too large")
 		}
 		return data, nil
@@ -270,7 +270,7 @@ func attachImageFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	var out bytes.Buffer
-	if err := png.Encode(&out, decoded); err != nil || out.Len() > maxImageBytes {
+	if err := png.Encode(&out, decoded); err != nil || out.Len() > MaxImageBytes {
 		return nil, errors.New("image too large")
 	}
 	return out.Bytes(), nil

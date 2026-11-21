@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -31,6 +32,9 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
 
+	"github.com/sylvinus/agent-vm/internal/attach"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
+	"github.com/sylvinus/agent-vm/internal/controlwire"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
@@ -53,6 +57,14 @@ func TestAttachChild(t *testing.T) {
 		}
 		chunk := string(buffer[:n])
 		if mode == "echo" {
+			if chunk == "\x06" { // Ctrl+F: 4 MB of output at once
+				line := strings.Repeat("x", 78) + "\r\n"
+				for i := 0; i < (4<<20)/len(line); i++ {
+					os.Stdout.WriteString(line)
+				}
+				os.Stdout.WriteString("flood-done\r\n")
+				continue
+			}
 			os.Stdout.Write(buffer[:n])
 			continue
 		}
@@ -140,14 +152,14 @@ type attachClient struct {
 	resized       chan struct{}
 	cancel        context.CancelFunc
 	done          chan struct{} // closed when runAttach returned result
-	result        attachExit
+	result        attach.Exit
 	raw           chan struct{}
 	mu            sync.Mutex
 	out           bytes.Buffer
 	changed       chan struct{}
 }
 
-func startAttach(t *testing.T, cfg attachConfig) *attachClient {
+func startAttach(t *testing.T, cfg attach.Config) *attachClient {
 	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
@@ -174,21 +186,21 @@ func startAttach(t *testing.T, cfg attachConfig) *attachClient {
 			}
 		}
 	}()
-	tty := attachTTY{in: slave, out: slave, errOut: io.Discard, resized: c.resized,
-		size: func() (int, int, bool) {
+	tty := attach.TTY{In: slave, Out: slave, ErrOut: io.Discard, Resized: c.resized,
+		Size: func() (int, int, bool) {
 			size, err := pty.GetsizeFull(slave)
 			if err != nil {
 				return 0, 0, false
 			}
 			return int(size.Cols), int(size.Rows), true
 		},
-		makeRaw: func() (func(), error) {
+		MakeRaw: func() (func(), error) {
 			state, err := term.MakeRaw(int(slave.Fd()))
 			c.raw <- struct{}{}
 			return func() { _ = term.Restore(int(slave.Fd()), state) }, err
 		},
 	}
-	go func() { c.result = runAttach(ctx, cfg, tty); close(c.done) }()
+	go func() { c.result = attach.Run(ctx, cfg, tty, attach.Options{Check: agentSameBuild}); close(c.done) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -230,7 +242,7 @@ func (c *attachClient) typeText(text string) {
 	}
 }
 
-func (c *attachClient) exit(within time.Duration) attachExit {
+func (c *attachClient) exit(within time.Duration) attach.Exit {
 	c.t.Helper()
 	select {
 	case <-c.done:
@@ -238,11 +250,11 @@ func (c *attachClient) exit(within time.Duration) attachExit {
 	case <-time.After(within):
 		c.t.Fatalf("attach did not end within %v; output %q", within, c.output())
 	}
-	return attachExit{}
+	return attach.Exit{}
 }
 
-func attachTo(s *Server, terminal string) attachConfig {
-	return attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, terminal: terminal}
+func attachTo(s *Server, terminal string) attach.Config {
+	return attach.Config{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, Terminal: terminal}
 }
 
 func startChild(t *testing.T, s *Server, mode string) *terminalSession {
@@ -268,7 +280,7 @@ func TestAttachTypingResizeDetachAndReattach(t *testing.T) {
 	a.waitFor("size=120x40", 1)
 	// Closing the window detaches; the terminal keeps running.
 	a.cancel()
-	if result := a.exit(5 * time.Second); result.code != 0 || result.message != "" {
+	if result := a.exit(5 * time.Second); result.Code != 0 || result.Message != "" {
 		t.Fatalf("detach: %+v", result)
 	}
 	if session.summary()["closed"] == true {
@@ -289,15 +301,15 @@ func TestAttachResumesWithoutLossOrDuplication(t *testing.T) {
 	s := attachController(t, nil)
 	session := startChild(t, s, "report")
 	var mu sync.Mutex
-	var streams []*websocket.Conn
-	attachStreamHook = func(ws *websocket.Conn) { mu.Lock(); streams = append(streams, ws); mu.Unlock() }
-	t.Cleanup(func() { attachStreamHook = nil })
+	var streams []*controlwire.Conn
+	attach.StreamHook = func(ws *controlwire.Conn) { mu.Lock(); streams = append(streams, ws); mu.Unlock() }
+	t.Cleanup(func() { attach.StreamHook = nil })
 	a := startAttach(t, attachTo(s, session.id))
 	a.waitFor("ready", 1)
 	a.typeText("?burst")
 	a.waitFor("line-0400", 1)
 	mu.Lock()
-	_ = streams[0].UnderlyingConn().Close() // the network drops the stream
+	_ = streams[0].NetConn().Close() // the network drops the stream
 	mu.Unlock()
 	out := a.waitFor("line-3000", 1)
 	mu.Lock()
@@ -386,7 +398,7 @@ func TestAttachObserverCannotType(t *testing.T) {
 	s := attachController(t, nil)
 	session := startChild(t, s, "report")
 	cfg := attachTo(s, session.id)
-	cfg.observe = true
+	cfg.Observe = true
 	a := startAttach(t, cfg)
 	a.waitFor("ready", 1)
 	a.typeText("rm -rf /\r")
@@ -395,7 +407,7 @@ func TestAttachObserverCannotType(t *testing.T) {
 		t.Fatal("an observer typed")
 	}
 	a.typeText("\x03")
-	if result := a.exit(5 * time.Second); result.code != 0 {
+	if result := a.exit(5 * time.Second); result.Code != 0 {
 		t.Fatalf("%+v", result)
 	}
 }
@@ -408,7 +420,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	a := startAttach(t, attachTo(s, session.id))
 	a.waitFor("ready", 1)
 	a.typeText("exit")
-	if result := a.exit(5 * time.Second); result.code != 0 || result.message != "终端已结束。" {
+	if result := a.exit(5 * time.Second); result.Code != 0 || result.Message != "终端已结束。" {
 		t.Fatalf("%+v", result)
 	}
 	// The environment stops.
@@ -417,7 +429,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	b.waitFor("ready", 1)
 	running = false
 	s.terminals.closeAll()
-	if result := b.exit(5 * time.Second); result.code != 0 || result.message != "环境已停止，终端已随之结束。" {
+	if result := b.exit(5 * time.Second); result.Code != 0 || result.Message != "环境已停止，终端已随之结束。" {
 		t.Fatalf("%+v", result)
 	}
 	// The account locks: the attach ends at once and says why.
@@ -428,7 +440,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	locked := time.Now()
 	s.account.lock()
 	result := c.exit(5 * time.Second)
-	if result.code != 3 || !strings.Contains(result.message, "已锁定") {
+	if result.Code != 3 || !strings.Contains(result.Message, "已锁定") {
 		t.Fatalf("%+v", result)
 	}
 	t.Logf("lock to attach end: %v", time.Since(locked))
@@ -453,7 +465,7 @@ func TestAttachRefusesAServerWithoutViewers(t *testing.T) {
 	session := startChild(t, s, "report")
 	a := startAttach(t, attachTo(s, session.id))
 	result := a.exit(5 * time.Second)
-	if result.code != 1 || !strings.HasPrefix(result.message, "需要更新 Super Cage") {
+	if result.Code != 1 || !strings.HasPrefix(result.Message, "需要更新 Super Cage") {
 		t.Fatalf("%+v", result)
 	}
 	select {
@@ -480,7 +492,7 @@ func TestAttachCreatesWithTheDesktopsRequest(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	})
-	cfg := attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, newKind: "claude", project: "/project", claudeAccount: "work"}
+	cfg := attach.Config{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, NewKind: "claude", Project: "/project", ClaudeAccount: "work"}
 	a := startAttach(t, cfg)
 	result := a.exit(10 * time.Second)
 	mu.Lock()
@@ -490,7 +502,7 @@ func TestAttachCreatesWithTheDesktopsRequest(t *testing.T) {
 	if len(created) != 1 || created[0]["kind"] != "claude" || created[0]["workspace"] != "/project" || created[0]["claude_account_id"] != "work" {
 		t.Fatalf("%v", created)
 	}
-	if result.code != 1 || result.message != errTerminalNotReady.Error() {
+	if result.Code != 1 || result.Message != errTerminalNotReady.Error() {
 		t.Fatalf("%+v", result)
 	}
 }
@@ -614,7 +626,7 @@ func TestAttachDroppedPathParsing(t *testing.T) {
 		{"file://host/a.png", nil},
 		{"'/unterminated", nil},
 	} {
-		got, ok := attachDroppedPaths(row.in)
+		got, ok := attach.DroppedPaths(row.in)
 		if ok != (row.want != nil) || strings.Join(got, "|") != strings.Join(row.want, "|") {
 			t.Errorf("%q: %q %v", row.in, got, ok)
 		}
@@ -713,7 +725,7 @@ func TestAttachClientProcess(t *testing.T) {
 	if args == "" {
 		return
 	}
-	os.Exit(AttachMain(strings.Fields(args), os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(attach.Main(strings.Fields(args), os.Stdin, os.Stdout, os.Stderr, attach.Options{Check: agentSameBuild}))
 }
 
 func processRSS(t *testing.T, pid int) int {
@@ -742,85 +754,171 @@ func processFootprint(pid int) string {
 }
 
 // TestAttachProcessFootprint runs cage attach as a separate process in a
-// pseudo-terminal, measures keystroke latency through it and its resident
-// memory idle and after output. CAGE_ATTACH_BENCH=1 runs it.
+// pseudo-terminal and measures its start, keystroke latency, resident memory
+// idle and after output, and optionally its idle CPU. CAGE_ATTACH_BENCH=1
+// runs it; CAGE_ATTACH_BINARY runs a built program (cage-attach, or cage
+// with "attach" as its first argument) instead of this test binary;
+// CAGE_ATTACH_BASELINE names a program that only connects to the controller
+// and prints, for the start baseline; CAGE_ATTACH_IDLE=60s samples idle CPU.
 func TestAttachProcessFootprint(t *testing.T) {
 	if os.Getenv("CAGE_ATTACH_BENCH") == "" {
 		t.Skip("set CAGE_ATTACH_BENCH=1")
 	}
 	s := attachController(t, nil)
 	session := startChild(t, s, "echo")
-	cmd := exec.Command(os.Args[0], "-test.run=^TestAttachClientProcess$")
-	cmd.Env = append(os.Environ(), "CAGE_ATTACH_CLIENT=--config "+s.configPath+" --terminal "+session.id)
-	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 30})
+	args := []string{"--config", s.configPath, "--terminal", session.id}
+	record, err := controlclient.ReadRecord(filepath.Dir(s.configPath))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); master.Close() })
-	var mu sync.Mutex
-	var out bytes.Buffer
-	changed := make(chan struct{}, 1)
-	go func() {
-		buffer := make([]byte, 64<<10)
-		for {
-			n, err := master.Read(buffer)
-			mu.Lock()
-			out.Write(buffer[:n])
-			mu.Unlock()
-			select {
-			case changed <- struct{}{}:
-			default:
-			}
-			if err != nil {
-				return
-			}
+	// start runs a program on a pseudo-terminal and returns the time to its
+	// first byte of output.
+	type running struct {
+		cmd    *exec.Cmd
+		master *os.File
+		first  time.Duration
+		mu     sync.Mutex
+		out    bytes.Buffer
+		change chan struct{}
+	}
+	start := func(cmd *exec.Cmd) *running {
+		r := &running{cmd: cmd, change: make(chan struct{}, 1)}
+		began := time.Now()
+		master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 30})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	count := func(want string) int { mu.Lock(); defer mu.Unlock(); return strings.Count(out.String(), want) }
-	wait := func(want string, n int) {
-		deadline := time.After(10 * time.Second)
-		for count(want) < n {
+		r.master = master
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); master.Close() })
+		go func() {
+			buffer := make([]byte, 64<<10)
+			for {
+				n, err := master.Read(buffer)
+				r.mu.Lock()
+				if n > 0 && r.first == 0 {
+					r.first = time.Since(began)
+				}
+				r.out.Write(buffer[:n])
+				r.mu.Unlock()
+				select {
+				case r.change <- struct{}{}:
+				default:
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+		return r
+	}
+	count := func(r *running, want string) int {
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return strings.Count(r.out.String(), want)
+	}
+	wait := func(r *running, want string, n int) {
+		deadline := time.After(20 * time.Second)
+		for count(r, want) < n {
 			select {
-			case <-changed:
+			case <-r.change:
 			case <-deadline:
-				mu.Lock()
-				t.Fatalf("never saw %q: %q", want, out.String())
+				r.mu.Lock()
+				t.Fatalf("never saw %q: %q", want, r.out.String())
 			}
 		}
 	}
-	wait("ready", 1)
-	time.Sleep(300 * time.Millisecond)
-	idle := processRSS(t, cmd.Process.Pid)
-	idleFootprint := processFootprint(cmd.Process.Pid)
+	firstByte := func(r *running) time.Duration { r.mu.Lock(); defer r.mu.Unlock(); return r.first }
+	if baseline := os.Getenv("CAGE_ATTACH_BASELINE"); baseline != "" {
+		var starts []time.Duration
+		for i := 0; i < 21; i++ {
+			b := start(exec.Command(baseline, strconv.Itoa(record.Port)))
+			wait(b, "ready", 1)
+			starts = append(starts, firstByte(b))
+			_ = b.cmd.Wait()
+		}
+		sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+		t.Logf("baseline (connect to the controller, one request, print): first byte median %v min %v max %v", starts[len(starts)/2], starts[0], starts[len(starts)-1])
+	}
+	command := func() *exec.Cmd {
+		if program := os.Getenv("CAGE_ATTACH_BINARY"); program != "" {
+			fields := strings.Fields(program)
+			return exec.Command(fields[0], append(fields[1:], args...)...)
+		}
+		cmd := exec.Command(os.Args[0], "-test.run=^TestAttachClientProcess$")
+		cmd.Env = append(os.Environ(), "CAGE_ATTACH_CLIENT="+strings.Join(args, " "))
+		return cmd
+	}
+	// Starts: each attach replays the terminal's history, whose first bytes
+	// are the program's "ready".
+	var starts []time.Duration
+	for i := 0; i < 21; i++ {
+		a := start(command())
+		wait(a, "ready", 1)
+		starts = append(starts, firstByte(a))
+		_ = a.cmd.Process.Signal(syscall.SIGHUP)
+		_ = a.cmd.Wait()
+	}
+	sort.Slice(starts, func(i, j int) bool { return starts[i] < starts[j] })
+	t.Logf("cage attach: first byte median %v min %v max %v", starts[len(starts)/2], starts[0], starts[len(starts)-1])
+	a := start(command())
+	wait(a, "ready", 1)
+	time.Sleep(2 * time.Second)
+	pid := a.cmd.Process.Pid
+	idle, idleFootprint := processRSS(t, pid), processFootprint(pid)
 	latencies := make([]time.Duration, 0, 150)
 	for i := 0; i < 150; i++ {
 		key := string(rune('a' + i%26))
-		before := count(key)
-		start := time.Now()
-		if _, err := master.Write([]byte(key)); err != nil {
+		before := count(a, key)
+		began := time.Now()
+		if _, err := a.master.Write([]byte(key)); err != nil {
 			t.Fatal(err)
 		}
-		wait(key, before+1)
-		latencies = append(latencies, time.Since(start))
+		wait(a, key, before+1)
+		latencies = append(latencies, time.Since(began))
 		time.Sleep(30 * time.Millisecond)
 	}
 	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
-	// 4 MB through the filter: 2000 chunks of 2 KB typed and echoed.
+	// 4 MB of output at once.
+	if _, err := a.master.Write([]byte{6}); err != nil {
+		t.Fatal(err)
+	}
+	wait(a, "flood-done", 1)
+	time.Sleep(500 * time.Millisecond)
+	flood, floodFootprint := processRSS(t, pid), processFootprint(pid)
+	// 4 MB typed and echoed: 2000 chunks of 2 KB.
 	chunk := strings.Repeat("0123456789abcdef", 128)
 	for i := 0; i < 2000; i++ {
-		if _, err := master.Write([]byte(chunk)); err != nil {
+		if _, err := a.master.Write([]byte(chunk)); err != nil {
 			t.Fatal(err)
 		}
 		if i%50 == 49 {
-			wait("0123456789abcdef", (i+1)*128)
+			wait(a, "0123456789abcdef", (i+1)*128)
 		}
 	}
-	wait("0123456789abcdef", 2000*128)
-	busy := processRSS(t, cmd.Process.Pid)
-	busyFootprint := processFootprint(cmd.Process.Pid)
-	t.Logf("separate process: keystroke median %v p95 %v max %v", latencies[len(latencies)/2], latencies[len(latencies)*95/100], latencies[len(latencies)-1])
-	t.Logf("cage attach RSS: idle %d KB, after 4 MB of output %d KB", idle, busy)
-	t.Logf("cage attach footprint: idle %s, after 4 MB of output %s", idleFootprint, busyFootprint)
+	wait(a, "0123456789abcdef", 2000*128)
+	time.Sleep(500 * time.Millisecond)
+	typed, typedFootprint := processRSS(t, pid), processFootprint(pid)
+	t.Logf("keystroke through the process: median %v p95 %v max %v", latencies[len(latencies)/2], latencies[len(latencies)*95/100], latencies[len(latencies)-1])
+	t.Logf("RSS: idle %d KB, after 4 MB of output %d KB, after 4 MB typed and echoed %d KB", idle, flood, typed)
+	t.Logf("footprint: idle %s, after 4 MB of output %s, after 4 MB typed and echoed %s", idleFootprint, floodFootprint, typedFootprint)
+	if sample := os.Getenv("CAGE_ATTACH_IDLE"); sample != "" {
+		d, err := time.ParseDuration(sample)
+		if err != nil {
+			t.Fatal(err)
+		}
+		cpu := func() string {
+			out, _ := exec.Command("/bin/ps", "-o", "time=", "-p", strconv.Itoa(pid)).Output()
+			return strings.TrimSpace(string(out))
+		}
+		wakeups := func() string {
+			out, _ := exec.Command("/usr/bin/top", "-l", "1", "-pid", strconv.Itoa(pid), "-stats", "pid,idlew,time").Output()
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			return lines[len(lines)-1]
+		}
+		cpu0, wake0 := cpu(), wakeups()
+		time.Sleep(d)
+		t.Logf("idle %v: CPU time %s -> %s; top pid,idlew,time %q -> %q; RSS %d KB", d, cpu0, cpu(), wake0, wakeups(), processRSS(t, pid))
+	}
 }
 
 // desktopBeforeWorkload is the desktop's own listener (a desktop gateway)
@@ -891,7 +989,7 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 	desktop, workload, full := desktopBeforeWorkload(t)
 	gateway := desktop.remote.desktop
 	through := func(session *terminalSession) *attachClient {
-		a := startAttach(t, attachConfig{configPath: full, target: AgentTarget{Scope: "selected", Connection: gateway.generation}, terminal: session.id})
+		a := startAttach(t, attach.Config{ConfigPath: full, Target: AgentTarget{Scope: "selected", Connection: gateway.generation}, Terminal: session.id})
 		a.waitFor("ready", 1)
 		a.typeText("hello")
 		a.waitFor("got:\"hello\"", 1)
@@ -901,7 +999,7 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 	a := through(startChild(t, workload, "report"))
 	locked := time.Now()
 	workload.account.lock()
-	if result := a.exit(5 * time.Second); result.code != 3 || !strings.Contains(result.message, "已锁定") {
+	if result := a.exit(5 * time.Second); result.Code != 3 || !strings.Contains(result.Message, "已锁定") {
 		t.Fatalf("%+v", result)
 	}
 	t.Logf("lock to attach end through the desktop: %v", time.Since(locked))
@@ -914,7 +1012,7 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 	gateway.mu.Unlock()
 	old.cancel()
 	result := b.exit(5 * time.Second)
-	if result.code != 1 || !strings.Contains(result.message, "已切换") {
+	if result.Code != 1 || !strings.Contains(result.Message, "已切换") {
 		t.Fatalf("%+v", result)
 	}
 }
@@ -940,7 +1038,7 @@ func TestAttachResumesAConversationThroughCagesLauncher(t *testing.T) {
 	mu.Lock()
 	target = session.id
 	mu.Unlock()
-	a := startAttach(t, attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, resume: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"})
+	a := startAttach(t, attach.Config{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, Resume: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"})
 	a.waitFor("ready", 1)
 	a.typeText("resumed")
 	a.waitFor("got:\"resumed\"", 1)
@@ -953,8 +1051,56 @@ func TestAttachResumesAConversationThroughCagesLauncher(t *testing.T) {
 	target = ""
 	mu.Unlock()
 	// A conversation the launcher could not put in a terminal.
-	b := startAttach(t, attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, resume: "another-session"})
-	if result := b.exit(5 * time.Second); result.code != 1 || !strings.Contains(result.message, "没有在终端中打开") {
+	b := startAttach(t, attach.Config{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, Resume: "another-session"})
+	if result := b.exit(5 * time.Second); result.Code != 1 || !strings.Contains(result.Message, "没有在终端中打开") {
 		t.Fatalf("%+v", result)
+	}
+}
+
+// cage attach has no keepalive timer of its own: it answers the server's
+// pings, so an idle window stays attached past the server's read timeout.
+func TestAttachIdleStaysAttachedWithoutItsOwnTimers(t *testing.T) {
+	interval, timeout := terminalHeartbeatInterval, terminalReadTimeout
+	terminalHeartbeatInterval, terminalReadTimeout = 50*time.Millisecond, 300*time.Millisecond
+	t.Cleanup(func() { terminalHeartbeatInterval, terminalReadTimeout = interval, timeout })
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	var mu sync.Mutex
+	streams := 0
+	attach.StreamHook = func(*controlwire.Conn) { mu.Lock(); streams++; mu.Unlock() }
+	t.Cleanup(func() { attach.StreamHook = nil })
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	time.Sleep(time.Second)
+	a.typeText("after-idle")
+	a.waitFor("got:\"after-idle\"", 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if streams != 1 {
+		t.Fatal("an idle stream was dropped", streams)
+	}
+}
+
+// A stream that stops speaking (a sleeping laptop, a stalled tunnel) is
+// replaced after the silence, without losing or repeating output.
+func TestAttachReplacesASilentStream(t *testing.T) {
+	interval, silence := terminalHeartbeatInterval, attach.Silence
+	terminalHeartbeatInterval, attach.Silence = time.Hour, 300*time.Millisecond
+	t.Cleanup(func() { terminalHeartbeatInterval, attach.Silence = interval, silence })
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	var mu sync.Mutex
+	streams := 0
+	attach.StreamHook = func(*controlwire.Conn) { mu.Lock(); streams++; mu.Unlock() }
+	t.Cleanup(func() { attach.StreamHook = nil })
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	time.Sleep(time.Second)
+	a.typeText("after-silence")
+	out := a.waitFor("got:\"after-silence\"", 1)
+	mu.Lock()
+	defer mu.Unlock()
+	if streams < 2 || strings.Count(out, "ready") != 1 {
+		t.Fatalf("streams %d, output %q", streams, out)
 	}
 }

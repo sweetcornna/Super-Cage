@@ -13,7 +13,7 @@ if [[ "${1:-}" != --prebuilt-backend ]]; then
 else
   # For constrained remote test hosts. The caller supplies the backend built
   # from this exact source tree, and npm licenses from a locked npm ci.
-  [[ -x _output/bin/cage ]] || { echo 'Missing prebuilt Linux backend.' >&2; exit 1; }
+  [[ -x _output/bin/cage && -x _output/bin/cage-attach ]] || { echo 'Missing prebuilt Linux backend.' >&2; exit 1; }
   _output/bin/cage help >/dev/null
 fi
 _output/bin/cage verify-web-assets
@@ -27,6 +27,7 @@ cc -std=c11 -O2 -Wall -Wextra -Werror -Wno-deprecated-declarations \
   $(pkg-config --cflags --libs gtk+-3.0 webkit2gtk-4.1 json-glib-1.0) \
   -o "$app/cage-desktop"
 install -m 755 _output/bin/cage "$app/cage"
+install -m 755 _output/bin/cage-attach "$app/cage-attach"
 node scripts/bundle-cloud-kit.mjs "$app"
 install -m 755 _output/linux-deps/mihomo "$app/mihomo"
 cp _output/linux-deps/{LICENSE,NOTICE} "$app/licenses/mihomo/"
@@ -36,6 +37,7 @@ else
   node scripts/collect-app-licenses.mjs "$app/licenses"
 fi
 "$app/cage" help >/dev/null
+"$app/cage-attach" --help >/dev/null 2>&1 || [[ $? == 2 ]]
 "$app/cage-desktop" --version
 "$app/cage-desktop" --self-test
 "$app/mihomo" -v

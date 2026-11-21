@@ -1,6 +1,6 @@
 //go:build windows
 
-package workbench
+package attach
 
 import (
 	"io"
@@ -14,9 +14,9 @@ import (
 	"golang.org/x/term"
 )
 
-// attachLocalTTY is the console cage attach runs in. Windows has no SIGWINCH,
+// localTTY is the console cage attach runs in. Windows has no SIGWINCH,
 // so the size is read again a few times a second while attached.
-func attachLocalTTY(stdin, stdout *os.File, stderr io.Writer) (attachTTY, func()) {
+func localTTY(stdin, stdout *os.File, stderr io.Writer) (TTY, func()) {
 	resized := make(chan struct{}, 1)
 	closed := make(chan struct{})
 	done := make(chan struct{})
@@ -28,12 +28,12 @@ func attachLocalTTY(stdin, stdout *os.File, stderr io.Writer) (attachTTY, func()
 			once.Do(func() { close(closed) })
 		}
 	}()
-	tty := attachTTY{in: stdin, out: stdout, errOut: stderr, resized: resized, closed: closed}
+	tty := TTY{In: stdin, Out: stdout, ErrOut: stderr, Resized: resized, Closed: closed}
 	size := func() (int, int, bool) {
 		cols, rows, err := term.GetSize(int(stdout.Fd()))
 		return cols, rows, err == nil
 	}
-	tty.size = size
+	tty.Size = size
 	go func() {
 		lastCols, lastRows, _ := size()
 		ticker := time.NewTicker(300 * time.Millisecond)
@@ -55,7 +55,7 @@ func attachLocalTTY(stdin, stdout *os.File, stderr io.Writer) (attachTTY, func()
 	}()
 	in := int(stdin.Fd())
 	if term.IsTerminal(in) {
-		tty.makeRaw = func() (func(), error) {
+		tty.MakeRaw = func() (func(), error) {
 			state, err := term.MakeRaw(in)
 			if err != nil {
 				return nil, err

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/localterm"
 )
 
@@ -103,10 +104,10 @@ type localTerminalOpen struct {
 }
 
 // localTerminalArgs builds the arguments of cage attach: ids, a project path
-// and the desktop's connection, never a secret. parseAttachArgs is the
+// and the desktop's connection, never a secret. attach.ParseArgs is the
 // judge of what is valid, so the window never opens on a refusal.
 func localTerminalArgs(configPath, connection string, input localTerminalOpen) ([]string, error) {
-	args := []string{"attach", "--config", configPath, "--connection", connection}
+	args := []string{"--config", configPath, "--connection", connection}
 	switch {
 	case input.TerminalID != "":
 		args = append(args, "--terminal", input.TerminalID)
@@ -133,7 +134,7 @@ func localTerminalArgs(configPath, connection string, input localTerminalOpen) (
 	if !filepath.IsAbs(configPath) || !localTerminalConnection.MatchString(connection) {
 		return nil, errors.New("连接已经切换，请重新打开当前工作台")
 	}
-	if _, err := parseAttachArgs(args[1:]); err != nil {
+	if _, err := attach.ParseArgs(args); err != nil {
 		return nil, err
 	}
 	if input.Project != "" && (!strings.HasPrefix(input.Project, "/") || strings.ContainsAny(input.Project, "\x00\r\n")) {
@@ -178,7 +179,7 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	cage, err := s.localTerminalExecutable()
+	command, err := s.localTerminalCommand()
 	if err != nil {
 		requestError(w, err)
 		return
@@ -196,7 +197,7 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	scratch := filepath.Join(dir, "local-terminal")
 	localterm.PruneScratch(scratch, home, 10*time.Minute)
-	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(localterm.Command{cage}, args...), Name: name, Scratch: scratch, Home: home})
+	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(command, args...), Name: name, Scratch: scratch, Home: home})
 	if err != nil {
 		requestError(w, err)
 		return
@@ -217,18 +218,23 @@ func (s *Server) localTerminalConfig() string {
 	return s.configPath
 }
 
-// localTerminalExecutable is the cage of this app, by absolute path.
-func (s *Server) localTerminalExecutable() (string, error) {
+// localTerminalCommand is the program that attaches, by absolute path: the
+// slim cage-attach beside this app's cage, which keeps an attached window
+// small, or else cage attach.
+func (s *Server) localTerminalCommand() (localterm.Command, error) {
 	path := s.exe
 	if path == "" || !filepath.IsAbs(path) {
 		executable, err := os.Executable()
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 		path = executable
 	}
 	if runtime.GOOS == "windows" {
-		return "", errors.New("本机终端应用还不支持 Windows")
+		return nil, errors.New("本机终端应用还不支持 Windows")
 	}
-	return path, nil
+	if slim := attach.Beside(path); slim != "" {
+		return localterm.Command{slim}, nil
+	}
+	return localterm.Command{path, "attach"}, nil
 }

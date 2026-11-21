@@ -12,36 +12,22 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/containerenv"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/version"
 )
 
-const controlProtocol = 1
+const controlProtocol = controlclient.Protocol
 
-type ControllerIdentity struct {
-	Version  string `json:"version"`
-	Build    string `json:"build"`
-	Protocol int    `json:"protocol"`
-	PID      int    `json:"pid"`
-}
+type ControllerIdentity = controlclient.ControllerIdentity
 
 func currentController() (ControllerIdentity, error) {
 	build, err := version.ExecutableIdentity()
 	return ControllerIdentity{Version: version.Version, Build: build, Protocol: controlProtocol, PID: os.Getpid()}, err
 }
 
-func (identity ControllerIdentity) matches(other ControllerIdentity) bool {
-	return identity.Build != "" && identity.Build == other.Build && identity.Protocol == other.Protocol
-}
-
-type launchResponse struct {
-	ConfigPath     string             `json:"config_path,omitempty"`
-	ClientOnly     bool               `json:"client_only,omitempty"`
-	DesktopGateway bool               `json:"desktop_gateway,omitempty"`
-	URL            string             `json:"url"`
-	Controller     ControllerIdentity `json:"controller"`
-}
+type launchResponse = controlclient.LaunchResponse
 
 func (s *Server) launcherAuthenticated(w http.ResponseWriter, r *http.Request) bool {
 	var input struct {

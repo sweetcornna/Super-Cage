@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/localterm"
 )
 
@@ -121,8 +122,8 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	}
 	// The command the window would run works: it reaches the terminal through
 	// the desktop's current connection.
-	cfg, err := parseAttachArgs(argv[4:])
-	if err != nil || cfg.configPath != full || cfg.target.Connection != generation || cfg.terminal != session.id {
+	cfg, err := attach.ParseArgs(argv[4:])
+	if err != nil || cfg.ConfigPath != full || cfg.Target.Connection != generation || cfg.Terminal != session.id {
 		t.Fatal(cfg, err)
 	}
 	a := startAttach(t, cfg)
@@ -130,7 +131,7 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	a.typeText("through-the-desktop")
 	a.waitFor("got:\"through-the-desktop\"", 1)
 	a.cancel()
-	if result := a.exit(5 * time.Second); result.code != 0 {
+	if result := a.exit(5 * time.Second); result.Code != 0 {
 		t.Fatalf("%+v", result)
 	}
 	// A new terminal in a project, and a resumed conversation.
@@ -145,5 +146,22 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 		if !strings.HasSuffix(last, "--connection "+generation+" "+want) {
 			t.Fatal(last)
 		}
+	}
+	// With cage-attach installed beside cage, the window runs it directly:
+	// the same arguments, without "attach".
+	dir := t.TempDir()
+	for _, name := range []string{"cage", "cage-attach"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexit 9\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desktop.exe = filepath.Join(dir, "cage")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	resolved, _ := filepath.EvalSymlinks(dir)
+	slim := launches.steps[len(launches.steps)-1]
+	if slim[2] != filepath.Join(resolved, "cage-attach") || slim[3] != "--config" || strings.Join(slim[3:], " ") != strings.Join(argv[4:], " ") {
+		t.Fatal(slim)
 	}
 }

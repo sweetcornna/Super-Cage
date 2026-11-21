@@ -10,14 +10,13 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
 // The entry and the local workload must never share a controller lock,
 // shutdown hook or service cookie, even with an explicitly selected profile.
-func desktopConfigPath(fullConfig string) string {
-	return filepath.Join(filepath.Dir(fullConfig), "desktop-entry", "config.json")
-}
+func desktopConfigPath(fullConfig string) string { return controlclient.DesktopConfigPath(fullConfig) }
 
 // DesktopHelperConfig routes native calls that captured a selected connection.
 // Plain CLI operations and older clients using the legacy "local" identity
@@ -43,7 +42,7 @@ func DesktopEntry(fullConfig string, opts DesktopOptions) (DesktopResult, error)
 			if err != nil {
 				return DesktopResult{}, err
 			}
-			if !want.matches(c.launch.Controller) {
+			if !want.Matches(c.launch.Controller) {
 				return DesktopResult{Status: "existing", URL: c.launch.URL, Controller: c.launch.Controller, Legacy: c.launch.Controller.Protocol == 0}, nil
 			}
 		} else if !errors.Is(err, errControllerUnavailable) {

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/guestprofile"
@@ -34,14 +35,9 @@ import (
 //go:embed web/*
 var assets embed.FS
 
-const cookieName = "cage_session"
+const cookieName = controlclient.CookieName
 
-type controlFile struct {
-	Port       int                `json:"port"`
-	Token      string             `json:"token"`
-	PID        int                `json:"pid"`
-	Controller ControllerIdentity `json:"controller"`
-}
+type controlFile = controlclient.ControlFile
 type Server struct {
 	desktopViews                                     displayViewDemand
 	desktopDisplayUpdate                             func(bool) error

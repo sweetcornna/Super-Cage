@@ -54,12 +54,19 @@ cage: cage-ui assets tailnet-assets
 ifeq ($(GOOS),darwin)
 	codesign -f --entitlements third_party/lima/vz.entitlements -s - _output/bin/cage
 endif
+	$(MAKE) cage-attach
+
+# cage attach runs the slim cage-attach installed beside cage, so an attached
+# window stays small (cmd/cage-attach). Same version flags as cage, so that
+# it accepts the controller of its own release; never cgo.
+cage-attach:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o _output/bin/cage-attach$(EXE) ./cmd/cage-attach
 
 cage-ui:
 	npm --prefix ui ci --no-audit --no-fund
 	npm run --prefix ui build
 
-.PHONY: cage cage-ui cage-windows package-windows cage-linux package-linux check-linux
+.PHONY: cage cage-attach cage-ui cage-windows package-windows cage-linux package-linux check-linux
 cage-linux:
 	bash scripts/build-linux.sh
 

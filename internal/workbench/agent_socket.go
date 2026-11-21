@@ -12,19 +12,14 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 )
 
 // agentDialSocket opens a workload WebSocket on an authenticated controller
 // connection, exactly as the UI does, without exporting its cookies.
 func agentDialSocket(ctx context.Context, c *controllerClient, target AgentTarget, path string) (*websocket.Conn, error) {
-	if !strings.HasPrefix(path, "/api/") || strings.ContainsAny(path, "\r\n\\") || strings.Contains(path, "#") || strings.Contains(path, "://") {
-		return nil, &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
-	}
-	if target.Scope == "desktop" {
-		return nil, &AgentError{Code: "invalid_input", Message: "Use local or selected scope for a workload WebSocket", NextAction: "client.context"}
-	}
-	if target.Scope == "client" && target.Connection == "" {
-		return nil, &AgentError{Code: "invalid_input", Message: "Client sockets require an explicit connection generation", NextAction: "client.context"}
+	if err := controlclient.CheckSocket(target, path); err != nil {
+		return nil, err
 	}
 	req, _ := http.NewRequest("GET", c.origin, nil)
 	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{agentConnection(target)}}
@@ -44,12 +39,7 @@ func agentDialSocket(ctx context.Context, c *controllerClient, target AgentTarge
 
 // agentConnection is the connection generation a request names: the
 // selected one, or the local workload.
-func agentConnection(target AgentTarget) string {
-	if target.Connection != "" {
-		return target.Connection
-	}
-	return "local"
-}
+func agentConnection(target AgentTarget) string { return controlclient.Connection(target) }
 
 // AgentSocket carries the same WebSocket messages as the UI without exporting
 // session cookies. One NDJSON line in/out is {type:"text"|"binary",data:...};

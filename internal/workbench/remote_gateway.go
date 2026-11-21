@@ -11,10 +11,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
-const connectionHeader = "X-Cage-Connection"
+const connectionHeader = controlclient.ConnectionHeader
 
 type remoteGateway struct {
 	mu           sync.Mutex
