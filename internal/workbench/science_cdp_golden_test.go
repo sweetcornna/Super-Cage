@@ -37,7 +37,9 @@ func TestScienceCDPGolden(t *testing.T) {
 			"verified": scienceProxyVerified,
 		},
 		"preferences": sciencePreferences(),
-		"scenarios":   scienceScenarios(),
+		// After auto-attach ends, per session origin the window framed.
+		"clear_origin": scienceClearOriginCalls("ORIGIN", "SITE"),
+		"scenarios":    scienceScenarios(),
 		// The shell's switches; the browser tests replace port 9 (nothing
 		// listens) with a recording proxy.
 		"backstop": scienceBackstopArgs(9),

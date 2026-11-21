@@ -169,9 +169,4 @@ export function normalizeURL(text) {
   return "https://www.google.com/search?q=" + encodeURIComponent(value);
 }
 
-// Claude Science's frame is the window's own (claude-science.jsx): the agent
-// transport may not drive it.
-const agentNative = (action, extra) => action === "scienceFrame"
-  ? Promise.reject(new Error("本机渲染只能在 Super Cage 窗口中操作。"))
-  : native(action, extra);
-installAgentNativeConsumer({ api, native: agentNative, nativeAvailable, getContext: getClientContext });
+installAgentNativeConsumer({ api, native, nativeAvailable, getContext: getClientContext });

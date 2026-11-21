@@ -30,6 +30,7 @@ internal sealed class ScienceFrameHost
     private readonly ScienceFrame.Policy policy = new();
     private readonly CoreWebView2DevToolsProtocolEventReceiver attached, detached;
     private string origin = "";
+    private readonly HashSet<string> framed = new(StringComparer.Ordinal);
     private string heldUri = "";
     private int navigation;
 
@@ -68,6 +69,7 @@ internal sealed class ScienceFrameHost
         var actions = policy.Arm(next);
         if (actions.Any(action => action.End)) throw new InvalidDataException("窗口正在跳转，本机渲染未打开。");
         origin = ScienceFrame.LabelOrigin(url)!;
+        framed.Add(origin);
         Apply(actions);
     }
 
@@ -114,6 +116,8 @@ internal sealed class ScienceFrameHost
         }
         await Task.WhenAll(list.Where(action => action.Call != null).GroupBy(action => action.Session)
             .Select(group => Run(group.Key, group.Select(action => action.Call!).ToList())));
+        if (list.Any(action => action.Session.Length == 0 && action.Call?.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"]?.GetValue<bool>() == false))
+            await ClearFramed();
         if (!list.Any(action => action.Proceed)) return;
         navigation++;
         var uri = heldUri;
@@ -134,6 +138,23 @@ internal sealed class ScienceFrameHost
                 await Task.Delay(ScienceFrame.SettleMilliseconds);
                 Apply(policy.Settle(session));
                 return;
+            }
+        }
+    }
+
+    // ClearFramed empties the storage of the session origins framed since
+    // auto-attach began (their targets are gone by now).
+    private async Task ClearFramed()
+    {
+        if (!Uri.TryCreate(core.Source, UriKind.Absolute, out var page)) return;
+        var site = page.Scheme + "://" + page.Host;
+        foreach (var framedOrigin in framed.ToList())
+        {
+            framed.Remove(framedOrigin);
+            foreach (var call in ScienceFrame.ClearOrigin(framedOrigin, site))
+            {
+                try { await Send("", call); }
+                catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { }
             }
         }
     }

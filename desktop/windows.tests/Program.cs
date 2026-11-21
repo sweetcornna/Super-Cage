@@ -126,6 +126,7 @@ assertions = 0;
         Check(Same(Calls(ScienceFrame.Frame(identity!)), golden["frame"]), "frame calls differ from the contract");
         Check(Same(Calls(ScienceFrame.Worker(identity!)), golden["worker"]), "worker calls differ from the contract");
         Check(Same(Calls(ScienceFrame.Resume), golden["resume"]), "resume differs from the contract");
+        Check(Same(Calls(ScienceFrame.ClearOrigin("ORIGIN", "SITE")), golden["clear_origin"]), "origin clearing differs from the contract");
         Check(ScienceFrame.Benign("Another locale override is already in effect") && !ScienceFrame.Benign("Target closed"), "benign locale error");
         var proxy = golden["proxy_check"]!.AsObject();
         Check(ScienceFrame.ProxyCheckURL("NONCE") == proxy["url"]!.GetValue<string>(), "proxy check address differs");

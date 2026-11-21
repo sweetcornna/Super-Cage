@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -420,4 +421,79 @@ func scienceCookieSummary(header string) string {
 		parts = append(parts, name+"="+value)
 	}
 	return fmt.Sprintf("%q (%d bytes)", strings.Join(parts, "; "), len(header))
+}
+
+const scienceStoringPage = `<!doctype html><title>Claude Science</title><script nonce="%[1]s">
+localStorage.setItem("env", "kept");
+(async () => {
+  const db = await new Promise((resolve, reject) => { const open = indexedDB.open("science", 1); open.onupgradeneeded = () => open.result.createObjectStore("s"); open.onsuccess = () => resolve(open.result); open.onerror = () => reject(open.error); });
+  await new Promise((resolve) => { const tx = db.transaction("s", "readwrite"); tx.objectStore("s").put("x".repeat(200000), "k"); tx.oncomplete = resolve; });
+  const cache = await caches.open("science");
+  await cache.put("/kept", new Response("y".repeat(100000)));
+  fetch("/api/test/results", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ doc: "stored" }) });
+})();
+</script>`
+
+// A session's origin keeps nothing once its frame is gone: the window
+// clears the label origin's storage after detaching (each session has its
+// own origin, so nothing else would ever reach it; it would only pile up).
+func TestScienceBrowserSessionStorageIsCleared(t *testing.T) {
+	env := newTestScienceFront(t)
+	env.daemon.page = func(nonce string) string { return fmt.Sprintf(scienceStoringPage, nonce) }
+	harness := newScienceFrameHarness(t, scienceTestFrameSources(env))
+	env.front.hooks.ancestor = func() string { return harness.origin }
+	proxyPort, _ := newScienceCanaryProxy(t)
+	browser := launchTestBrowser(t, scienceHostEnv, scienceBackstopArgs(proxyPort)...)
+	page := browser.page(t)
+	shell := newScienceShell(t, browser, page)
+	shell.load(t, harness.origin+"/")
+	entry := env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
+	origin := strings.TrimSuffix(entry, "/_cage/enter")
+	shell.open(t, entry)
+	waitFor(t, 30*time.Second, "the page's storage", func() bool { return len(scienceDocReports(env.daemon)) > 0 })
+	shell.close(t)
+	waitFor(t, 10*time.Second, "auto-attach to end", func() bool { return !shell.pageAttached() })
+	waitFor(t, 10*time.Second, "the origin cleared", func() bool { return shell.cleared.Load() > 0 })
+	// A document of the same origin under the same window (the same storage
+	// partition) finds nothing: the front no longer knows the label and
+	// answers 403, which still gives a document at that origin.
+	shell.eval(t, `(() => { const f = document.createElement("iframe"); f.id = "probe"; f.src = `+strconv.Quote(origin+"/_cage/gone")+`; document.getElementById("pane").append(f); return true })()`)
+	var probe string
+	waitFor(t, 10*time.Second, "the probe frame", func() bool {
+		var targets struct {
+			TargetInfos []struct {
+				TargetID string `json:"targetId"`
+				Type     string `json:"type"`
+				URL      string `json:"url"`
+			} `json:"targetInfos"`
+		}
+		if browser.call("", "Target.getTargets", map[string]any{}, &targets) != nil {
+			return false
+		}
+		for _, target := range targets.TargetInfos {
+			if target.Type == "iframe" && strings.HasPrefix(target.URL, origin) {
+				var attached struct {
+					SessionID string `json:"sessionId"`
+				}
+				if browser.call("", "Target.attachToTarget", map[string]any{"targetId": target.TargetID, "flatten": true}, &attached) == nil {
+					probe = attached.SessionID
+					return true
+				}
+			}
+		}
+		return false
+	})
+	var value struct {
+		Result struct {
+			Value any `json:"value"`
+		} `json:"result"`
+	}
+	expression := `(async () => JSON.stringify({ local: localStorage.getItem("env"), databases: (await indexedDB.databases()).map(d => d.name), caches: await caches.keys() }))()`
+	waitFor(t, 10*time.Second, "the probe's answer", func() bool {
+		return browser.call(probe, "Runtime.evaluate", map[string]any{"expression": expression, "returnByValue": true, "awaitPromise": true}, &value) == nil && value.Result.Value != nil
+	})
+	t.Logf("after the frame went: %v", value.Result.Value)
+	if value.Result.Value != `{"local":null,"databases":[],"caches":[]}` {
+		t.Fatalf("the session's origin kept %v", value.Result.Value)
+	}
 }

@@ -3,7 +3,9 @@ package workbench
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -268,14 +270,38 @@ type scienceShell struct {
 	// The held top-level navigation and whether it went.
 	target    string
 	navigated atomic.Int32
+	// origins are the session origins framed since auto-attach began: their
+	// storage is cleared once it ends.
+	origins map[string]bool
+	cleared atomic.Int32
+	// site is the window document's site (scheme and host).
+	site string
 }
+
+// scienceClearOriginCalls is what the window sends for each session origin
+// once the frame's targets are gone: each session has its own origin, so
+// what it stored would never be read again, only pile up. The frame's
+// storage is partitioned under the window's site (the storage key
+// "<origin>/^0<site>", Chromium's serialization, read with
+// Storage.getStorageKeyForFrame in Chrome 157); clearDataForOrigin alone
+// leaves it. The origin's own key is cleared too, for a browser that does
+// not partition.
+func scienceClearOriginCalls(origin, site string) []cdpCall {
+	return []cdpCall{
+		{Method: "Storage.clearDataForStorageKey", Params: map[string]any{"storageKey": origin + "/^0" + site, "storageTypes": "all"}},
+		{Method: "Storage.clearDataForOrigin", Params: map[string]any{"origin": origin, "storageTypes": "all"}},
+	}
+}
+
+// scienceSessionOrigin is the origin of an entry address.
+func scienceSessionOrigin(entry string) string { return strings.TrimSuffix(entry, "/_cage/enter") }
 
 // scienceFrameSandbox is the pane's sandbox attribute (claude-science.jsx).
 const scienceFrameSandbox = "allow-scripts allow-same-origin allow-forms"
 
 func newScienceShell(t *testing.T, browser *testBrowser, page string) *scienceShell {
 	t.Helper()
-	s := &scienceShell{t: t, browser: browser, page: page, workers: true, policy: newScienceFramePolicy(), events: make(chan cdpMessage, 4096)}
+	s := &scienceShell{t: t, browser: browser, page: page, workers: true, policy: newScienceFramePolicy(), events: make(chan cdpMessage, 4096), origins: map[string]bool{}}
 	browser.onOrdered(func(message cdpMessage) {
 		if message.Method == "Target.attachedToTarget" || message.Method == "Target.detachedFromTarget" {
 			s.events <- message
@@ -388,6 +414,23 @@ func (s *scienceShell) run(actions []scienceAction) {
 		}(session, bySession[session])
 	}
 	wg.Wait()
+	for _, action := range actions {
+		if action.Session == "" && action.Call.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"] == false {
+			s.mu.Lock()
+			origins := s.origins
+			s.origins = map[string]bool{}
+			s.mu.Unlock()
+			for origin := range origins {
+				for _, call := range scienceClearOriginCalls(origin, s.site) {
+					err := s.browser.call(s.page, call.Method, call.Params, nil)
+					if scienceShellTrace {
+						s.t.Logf("%s %s: %v", call.Method, origin, err)
+					}
+				}
+				s.cleared.Add(1)
+			}
+		}
+	}
 	if proceed {
 		s.mu.Lock()
 		target := s.target
@@ -435,6 +478,11 @@ func (s *scienceShell) eval(t *testing.T, expression string) any {
 // load opens the workbench document in the window.
 func (s *scienceShell) load(t *testing.T, url string) {
 	t.Helper()
+	if parsed, err := neturl.Parse(url); err == nil {
+		s.mu.Lock()
+		s.site = parsed.Scheme + "://" + parsed.Hostname()
+		s.mu.Unlock()
+	}
 	if err := s.browser.call(s.page, "Page.navigate", map[string]any{"url": url}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -448,6 +496,9 @@ func scienceAddFrame(url string) string {
 // open is the pane opening its frame: arm, then the entry URL.
 func (s *scienceShell) open(t *testing.T, url string) {
 	t.Helper()
+	s.mu.Lock()
+	s.origins[scienceSessionOrigin(url)] = true
+	s.mu.Unlock()
 	s.arm()
 	s.eval(t, scienceAddFrame(url))
 }
@@ -464,6 +515,9 @@ func (s *scienceShell) close(t *testing.T) {
 // React replaces the element in one commit; the window stays armed.
 func (s *scienceShell) reticket(t *testing.T, url string) {
 	t.Helper()
+	s.mu.Lock()
+	s.origins[scienceSessionOrigin(url)] = true
+	s.mu.Unlock()
 	s.eval(t, "document.getElementById('science')?.remove(); "+scienceAddFrame(url))
 }
 

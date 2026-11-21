@@ -331,7 +331,8 @@ async function olderWindow() {
 
 // The agent transport's consumer runs in this window, but an agent's
 // scienceFrame request is answered with an error and never reaches the
-// bridge (api.js).
+// bridge (agent-native.js agentNativeAccess; the server refuses it before
+// queueing too).
 async function agentRefused() {
   const completions = [];
   let handed = false;
@@ -350,7 +351,7 @@ async function agentRefused() {
   const { browser, page, native, errors } = await open({ mode: "light", clientContext: windowsWindow, claudeScience: "running-host-render-available", routes });
   try {
     await waitUntil(page, () => completions.length > 0, "the agent's completion");
-    assert.deepEqual(completions[0], { error: "本机渲染只能在 Super Cage 窗口中操作。" });
+    assert.deepEqual(completions[0], { error: "这个原生操作只能在桌面窗口中由用户进行。" });
     assert.ok(handed);
     assert.ok(!native.some(call => call.op === "attach"), "the agent reached the bridge");
     assert.deepEqual(errors, []);

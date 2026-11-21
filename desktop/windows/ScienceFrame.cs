@@ -152,6 +152,16 @@ internal static partial class ScienceFrame
         .. Resume,
     ];
 
+    // Once auto-attach has ended, per session origin the window framed: each
+    // session has its own origin, so what it stored would never be read
+    // again, only pile up. The frame's storage is partitioned under the
+    // window's site (storage key "<origin>/^0<site>", Chromium's
+    // serialization); the origin's own key is cleared too.
+    public static Call[] ClearOrigin(string origin, string site) => [
+        Make("Storage.clearDataForStorageKey", new JsonObject { ["storageKey"] = origin + "/^0" + site, ["storageTypes"] = "all" }),
+        Make("Storage.clearDataForOrigin", new JsonObject { ["origin"] = origin, ["storageTypes"] = "all" }),
+    ];
+
     // The locale override is per renderer process: a second target in the
     // same process reports the one already set.
     public static bool Benign(string message) => message.Contains("Another locale override is already in effect", StringComparison.Ordinal);

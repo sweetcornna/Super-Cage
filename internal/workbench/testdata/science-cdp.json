@@ -5,6 +5,22 @@
     "--disable-shared-workers",
     "--no-pings"
   ],
+  "clear_origin": [
+    {
+      "method": "Storage.clearDataForStorageKey",
+      "params": {
+        "storageKey": "ORIGIN/^0SITE",
+        "storageTypes": "all"
+      }
+    },
+    {
+      "method": "Storage.clearDataForOrigin",
+      "params": {
+        "origin": "ORIGIN",
+        "storageTypes": "all"
+      }
+    }
+  ],
   "contract": 2,
   "control": {
     "port": 17777,
