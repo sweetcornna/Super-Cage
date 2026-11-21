@@ -645,13 +645,7 @@ func (s *Server) handler() http.Handler {
 			}
 			ctx, cancel := context.WithCancel(r.Context())
 			ctx = context.WithValue(ctx, accountEpochKey{}, epoch)
-			stop := func() bool { return true }
-			// The local SSH entry ends its connections on a lock itself
-			// (entrySSH): cancelling the request would cut its socket before
-			// the reset it owes the owner's terminal.
-			if r.URL.Path != "/api/entry/ssh" {
-				stop = context.AfterFunc(epoch, cancel)
-			}
+			stop := context.AfterFunc(epoch, cancel)
 			defer func() { stop(); cancel() }()
 			if phoneRoom != nil {
 				stopPhone := context.AfterFunc(phoneRoom, cancel)
@@ -659,7 +653,12 @@ func (s *Server) handler() http.Handler {
 			}
 			r = r.WithContext(ctx)
 		}
-		defer interruptHTTPOnCancel(w, r)()
+		// The local SSH entry's socket ends through entryServe, which lets
+		// its terminal sessions write their reset first; a deadline set here
+		// on a lock or a quit would cut it before.
+		if r.URL.Path != "/api/entry/ssh" {
+			defer interruptHTTPOnCancel(w, r)()
+		}
 		response := &diagnosticResponse{ResponseWriter: w}
 		w = response
 		defer func() {

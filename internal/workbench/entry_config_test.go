@@ -174,20 +174,20 @@ func TestEntryClientFilesModesAndBlock(t *testing.T) {
 
 func TestEntryHostAliases(t *testing.T) {
 	paths := entryTestPaths(t)
-	if got := entryHostAlias(paths, defaultLocalVMID, "默认环境"); got != "cage-default" {
+	if got, _ := entryHostAlias(paths, defaultLocalVMID, "默认环境"); got != "cage-default" {
 		t.Fatal(got)
 	}
-	if got := entryHostAlias(paths, "0123456789abcdef0123456789abcdef", "My Box!  (GPU)"); got != "cage-my-box-gpu" {
+	if got, _ := entryHostAlias(paths, "0123456789abcdef0123456789abcdef", "My Box!  (GPU)"); got != "cage-my-box-gpu" {
 		t.Fatal(got)
 	}
-	if got := entryHostAlias(paths, "0123456789abcdef0123456789abcdef", "研究机"); got != "cage-01234567" {
+	if got, _ := entryHostAlias(paths, "0123456789abcdef0123456789abcdef", "研究机"); got != "cage-01234567" {
 		t.Fatal(got)
 	}
 	host, _ := entryHostSigner(paths.ComputerDir, true)
 	if _, err := entryWriteClient(paths, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "work", host.PublicKey()); err != nil {
 		t.Fatal(err)
 	}
-	if got := entryHostAlias(paths, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Work"); got != "cage-work-bbbbbb" {
+	if got, _ := entryHostAlias(paths, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "Work"); got != "cage-work-bbbbbb" {
 		t.Fatal(got)
 	}
 	if command, err := entrySSHCommand(paths, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", []string{"-t", "ls"}); err != nil || strings.Join(command, " ") != "ssh -F "+paths.clientFile()+" cage-work -t ls" {

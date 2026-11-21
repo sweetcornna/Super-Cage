@@ -149,6 +149,9 @@ func (s *Server) entryGuestStarting() {
 	w.mu.Lock()
 	w.ready = false
 	w.generation++
+	if w.cancel != nil {
+		w.cancel()
+	}
 	w.mu.Unlock()
 }
 
@@ -161,6 +164,18 @@ type entryWrapper struct {
 	ready      bool
 	generation int           // counts guest starts; an install for an older guest does not count
 	running    chan struct{} // closed when the install in progress ends
+	cancel     context.CancelFunc
+}
+
+// entryCancelWrapper stops an install in progress: the entry was turned off
+// or the guest is going away.
+func (s *Server) entryCancelWrapper() {
+	w := &s.entry.wrapper
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.cancel != nil {
+		w.cancel()
+	}
 }
 
 var errEntryWrapper = errors.New("无法在环境里准备本机终端组件，请确认环境正在运行")
@@ -187,13 +202,14 @@ func (s *Server) entryStartWrapper() <-chan struct{} {
 			return err
 		}
 	}
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), entryWrapperTimeout)
+	w.cancel = cancel
 	go func() {
-		ctx, cancel := context.WithTimeout(s.lifetimeContext(), entryWrapperTimeout)
 		err := install(ctx)
 		cancel()
 		w.mu.Lock()
 		w.ready = err == nil && w.generation == generation
-		w.running = nil
+		w.running, w.cancel = nil, nil
 		w.mu.Unlock()
 		close(done)
 	}()
@@ -299,9 +315,8 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.ctx, conn.cancel = context.WithCancelCause(r.Context())
 	defer conn.cancel(nil)
-	// A lock cuts the connection like any other event, so its terminal
-	// sessions write their reset first (the account middleware leaves this
-	// route's request running on a lock).
+	// A lock cuts the connection like any other event, with its cause; the
+	// account middleware ends the request too.
 	stopLock := context.AfterFunc(conn.epoch, func() { conn.cancel(errEntryLocked) })
 	defer stopLock()
 	// Register before deciding, so an event between the decision and the
@@ -1037,7 +1052,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	if _, err := channel.Write(out); err != nil {
 		gone = true
 	}
-	for !gone {
+	for !gone && ctx.Err() == nil {
 		batch := subscription.next(terminalFrameLimit)
 		if len(batch.Data) > 0 {
 			out = entryFrame(out[:0], filter, batch.Data, batch.Resync && batch.Reset)

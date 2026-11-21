@@ -101,11 +101,16 @@ func defaultEntryPaths(profile, executable string) (entryPaths, error) {
 		}
 		device = filepath.Join(data, "super-cage", "entry")
 	}
+	system := "/etc/ssh/ssh_config"
+	if runtime.GOOS == "windows" {
+		system = filepath.Join(os.Getenv("ProgramData"), "ssh", "ssh_config")
+	}
 	return entryPaths{
-		SSHDir:      filepath.Join(home, ".ssh"),
-		DeviceDir:   device,
-		ComputerDir: entryComputerProfile(profile),
-		HomeSSH:     true,
+		SystemConfig: system,
+		SSHDir:       filepath.Join(home, ".ssh"),
+		DeviceDir:    device,
+		ComputerDir:  entryComputerProfile(profile),
+		HomeSSH:      true,
 		Proxy: func(environment string) string {
 			return entryProxyCommand(executable, environment)
 		},
@@ -448,7 +453,7 @@ func validEntryConfigValue(value string) bool {
 // the Host blocks already written on this computer and never a name the
 // owner's own ssh configuration already uses (F6 of the review): Super
 // Cage's Include comes first, so its block would take that host over.
-func entryHostAlias(paths entryPaths, environment, name string) string {
+func entryHostAlias(paths entryPaths, environment, name string) (string, error) {
 	var slug []byte
 	dash := false
 	for _, r := range strings.ToLower(name) {
@@ -477,23 +482,22 @@ func entryHostAlias(paths entryPaths, environment, name string) string {
 	taken := entryAliasesInUse(paths, environment)
 	owner := entryOwnerPatterns(paths)
 	candidates := []string{"cage-" + base, "cage-" + base + "-" + suffix, "super-cage-" + base, "super-cage-" + base + "-" + suffix}
-	for n := 2; ; n++ {
-		if len(candidates) == 0 {
-			candidates = append(candidates, fmt.Sprintf("super-cage-%s-%s-%d", base, suffix, n))
-		}
-		alias := candidates[0]
-		candidates = candidates[1:]
+	for n := 2; n <= 9; n++ {
+		candidates = append(candidates, fmt.Sprintf("super-cage-%s-%s-%d", base, suffix, n))
+	}
+	for _, alias := range candidates {
 		if !slices.Contains(taken, alias) && !entryClaimed(owner, alias) {
-			return alias
+			return alias, nil
 		}
 	}
+	return "", fmt.Errorf("~/.ssh/config 里的主机名规则（Host 或 Match）已经包括 %s 这样的名字：请改一改那条规则，或换一个环境名称", candidates[0])
 }
 
 // entryChooseAlias keeps the environment's alias unless the owner's own
 // configuration has come to use it since, and picks a new one then.
-func entryChooseAlias(paths entryPaths, environment, name string) string {
+func entryChooseAlias(paths entryPaths, environment, name string) (string, error) {
 	if alias := entryReadAlias(paths.hostFile(environment)); alias != "" && !entryClaimed(entryOwnerPatterns(paths), alias) {
-		return alias
+		return alias, nil
 	}
 	return entryHostAlias(paths, environment, name)
 }
@@ -866,7 +870,10 @@ func entryWriteClient(paths entryPaths, environment, name string, hostKey ssh.Pu
 	if err := entryWriteFile(paths.clientFile(), []byte(include), 0o600); err != nil {
 		return "", err
 	}
-	alias := entryChooseAlias(paths, environment, name)
+	alias, err := entryChooseAlias(paths, environment, name)
+	if err != nil {
+		return "", err
+	}
 	if err := entryPinHostKey(paths, environment, hostKey); err != nil {
 		return "", err
 	}
@@ -947,7 +954,14 @@ func entryBackup(paths entryPaths, content []byte) (string, error) {
 // the whole Host block the line brings in, as the confirmation shows them.
 func entryIncludePreviewFor(paths entryPaths, environment, name string) entryInclude {
 	view := entryIncludePreview(paths)
-	view.Alias = entryChooseAlias(paths, environment, name)
+	alias, err := entryChooseAlias(paths, environment, name)
+	if err != nil {
+		if view.Error == "" {
+			view.Error = err.Error()
+		}
+		return view
+	}
+	view.Alias = alias
 	view.Block = entryHostBlock(paths, environment, name, view.Alias)
 	if data, err := os.ReadFile(paths.hostFile(environment)); err == nil && entryReadAlias(paths.hostFile(environment)) == view.Alias {
 		view.Block = string(data)
@@ -1100,7 +1114,7 @@ func entryIncludePreview(paths entryPaths) entryInclude {
 		return view
 	}
 	view.Present = entryHasInclude(content, entryIncludeLines(paths))
-	if info, err := os.Stat(target); err == nil && info.Mode().Perm()&0o200 == 0 {
+	if info, err := os.Stat(target); err == nil && info.Mode().Perm()&0o200 == 0 && !view.Present {
 		view.Error = errEntryConfigReadOnly.Error()
 		return view
 	}

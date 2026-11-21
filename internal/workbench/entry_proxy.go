@@ -32,10 +32,9 @@ import (
 //   - entryRefusal and its messages (entry_registry.go) and entryClientError,
 //     whose AgentError cases become controlclient's errors;
 //   - from entry_config.go: entryPaths, defaultEntryPaths,
-//     entryProfileConfig, entryReadComputer, entryPinnedHostKey and
-//     entrySweepOrphans with entryRemoveClient and the Include helpers; they
-//     use only internal/cage's LocalVMDir, internal/host, x/crypto/ssh and
-//     validLocalVMID.
+//     entryProfileConfig, entryReadComputer and entryPinnedHostKey; they use
+//     only internal/cage's LocalVMDir, internal/host, x/crypto/ssh and
+//     validLocalVMID. The proxy never edits ~/.ssh.
 
 // cage entry proxy <environment> is the ProxyCommand of a generated Host
 // block. It reaches the environment's local controller the way cage agent
@@ -117,10 +116,10 @@ func entryProxy(ctx context.Context, configPath, environment string, paths entry
 		return entryProxyFailure
 	}
 	if _, err := os.Stat(filepath.Dir(configPath)); errors.Is(err, os.ErrNotExist) && environment != defaultLocalVMID {
-		// A deleted local VM: its block goes, and the Include line with
-		// the last one.
-		_ = entrySweepOrphans(paths)
-		return fail("这个环境已经删除，Super Cage 已移除它的 ssh 配置")
+		// A deleted local VM. The proxy changes nothing in ~/.ssh: the
+		// controller removes the block (entrySweepOrphans) the next time
+		// the entry is turned on or off.
+		return fail("这个环境已经删除：在 Super Cage 里开启或关闭任一环境的本机终端时，会移除它的 ssh 配置")
 	}
 	computer, ok, err := entryReadComputer(paths)
 	if err != nil || !ok {

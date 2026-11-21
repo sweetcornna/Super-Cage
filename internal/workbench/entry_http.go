@@ -273,6 +273,7 @@ func (s *Server) entryOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.entry.registry.cutAll(errEntryOff)
+	s.entryCancelWrapper()
 	if err := entryRemoveClient(paths, entryEnvironmentID(s.profile)); err != nil {
 		requestError(w, errors.New("本机终端已关闭，但 ssh 配置没能全部移除："+err.Error()))
 		return
@@ -375,7 +376,8 @@ func (s *Server) entryRevoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !input.Propagated {
-		s.entryRevokeElsewhere(paths, id)
+		// The answer does not wait for the other controllers.
+		go s.entryRevokeElsewhere(paths, id)
 	}
 	jsonReply(w, s.entryView())
 }

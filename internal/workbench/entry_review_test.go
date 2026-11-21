@@ -152,6 +152,37 @@ func TestEntryLockKeepsTheTerminalAndOffersToRejoin(t *testing.T) {
 	}
 }
 
+// The reset reaches a terminal that never stops writing, on a lock and on
+// quitting: the session stops reading output as soon as it is cut.
+func TestEntryCutResetsABusyTerminal(t *testing.T) {
+	for _, event := range []string{"lock", "quit"} {
+		t.Run(event, func(t *testing.T) {
+			f := newEntryFixture(t, true)
+			f.on()
+			client, err := f.dial(f.device)
+			if err != nil {
+				t.Fatal(err)
+			}
+			shell := entryOpenShell(t, client, 100, 30, "")
+			shell.send("exec yes 0123456789abcdef0123456789abcdef\n")
+			entryAwait(t, 5*time.Second, "steady output", func() bool { return strings.Count(shell.text(), "0123456789abcdef0123456789abcdef\r\n") > 200 })
+			ended := make(chan struct{})
+			go func() { _ = client.Wait(); close(ended) }()
+			if event == "lock" {
+				f.s.account.lock()
+			} else {
+				go func() { _ = f.s.closeService() }()
+			}
+			select {
+			case <-ended:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("%s did not end the connection", event)
+			}
+			entryAwait(t, 2*time.Second, "the reset", func() bool { return strings.Contains(shell.text(), entryResetSequence) })
+		})
+	}
+}
+
 // F9: replayed history and output after a gap go through the filter in
 // replay mode after an abort and a clean screen; live output does not.
 func TestEntryFrameResetsTheFilterAtGaps(t *testing.T) {
@@ -239,9 +270,11 @@ func TestEntryOffAndRevokeNeverWaitForAHungInstall(t *testing.T) {
 	f := newEntryFixture(t, true)
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
+	cancelled := make(chan time.Time, 4)
 	f.s.entry.install = func(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
+			cancelled <- time.Now()
 			return ctx.Err()
 		case <-release:
 			return errors.New("released")
@@ -280,6 +313,15 @@ func TestEntryOffAndRevokeNeverWaitForAHungInstall(t *testing.T) {
 			}
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s left the connection open", action)
+		}
+		if action == "off" {
+			// Turning the entry off also stops the install in the guest.
+			select {
+			case at := <-cancelled:
+				t.Logf("off stopped the install %v after the request", at.Sub(start))
+			case <-time.After(time.Second):
+				t.Fatal("off left the install running")
+			}
 		}
 	}
 }
@@ -488,6 +530,29 @@ func TestEntryIncludeEditsReadOnlyBackupsAndBOM(t *testing.T) {
 	if err := os.Chmod(config, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// The line already there in a read-only file: nothing to write, no error;
+	// taking it out is refused with what to do.
+	if _, err := entryIncludeApply(paths, entryIncludePreview(paths).Token); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(config, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if preview := entryIncludePreview(paths); !preview.Present || preview.Error != "" {
+		t.Fatalf("read-only with the line: %+v", preview)
+	}
+	if err := entryIncludeRemove(paths); err == nil || !strings.Contains(err.Error(), "只读") || !strings.Contains(err.Error(), paths.includeLine()) {
+		t.Fatalf("removal from a read-only file: %v", err)
+	}
+	if err := os.Chmod(config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := entryIncludeRemove(paths); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(paths.DeviceDir, "ssh-config-backups", "config.first")); err != nil {
+		t.Fatal(err)
+	}
 	// Apply, remove, apply, remove: the first backup keeps the original.
 	for range 2 {
 		if _, err := entryIncludeApply(paths, entryIncludePreview(paths).Token); err != nil {
@@ -586,6 +651,20 @@ func TestEntryAliasSkipsNamesTheOwnerAlreadyUses(t *testing.T) {
 				t.Fatalf("cage entry include asks:\n%s", prompt)
 			}
 		})
+	}
+	// A rule that takes every candidate is said plainly, and nothing hangs.
+	every := entryTestPaths(t)
+	if err := os.MkdirAll(every.SSHDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(every.userConfig(), []byte("Host *-*\n  User owner\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := entryWriteClient(every, defaultLocalVMID, "lab1", key); err == nil || !strings.Contains(err.Error(), "主机名规则") {
+		t.Fatalf("every name taken: %v", err)
+	}
+	if preview := entryIncludePreviewFor(every, defaultLocalVMID, "lab1"); !strings.Contains(preview.Error, "主机名规则") {
+		t.Fatalf("preview %+v", preview)
 	}
 	// A "Host *" default is not a claim on any name.
 	paths := entryTestPaths(t)
