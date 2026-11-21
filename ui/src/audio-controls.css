@@ -1,0 +1,30 @@
+/* Status bar audio control and its volume popover (moved from style.css;
+   tokens only). Loads with the browser chrome (desktop-styles.js). */
+.audio-controls { position: relative; display: flex; align-items: center; flex-shrink: 0; }
+.audio-volume-panel {
+  position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%); z-index: 20;
+  display: flex; justify-content: center; padding: 12px 10px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper);
+  box-shadow: var(--shadow-float);
+}
+.audio-volume-panel input[type="range"] {
+  appearance: none; -webkit-appearance: none;
+  writing-mode: vertical-lr; direction: rtl; width: 24px; height: 100px;
+  margin: 0; padding: 0; border: 0; background: transparent; cursor: pointer;
+}
+.audio-volume-panel input[type="range"]::-webkit-slider-runnable-track {
+  width: 4px; height: 100%; border-radius: 4px;
+  background: linear-gradient(to top, var(--clay) var(--volume-level), var(--line) var(--volume-level));
+}
+.audio-volume-panel input[type="range"]::-webkit-slider-thumb {
+  appearance: none; -webkit-appearance: none;
+  width: 22px; height: 10px; margin-left: -9px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--paper); box-shadow: 0 1px 3px var(--scrim);
+}
+.audio-volume-panel input[type="range"]::-moz-range-track { width: 4px; height: 100%; border-radius: 4px; background: var(--line); }
+.audio-volume-panel input[type="range"]::-moz-range-progress { width: 4px; border-radius: 4px; background: var(--clay); }
+.audio-volume-panel input[type="range"]::-moz-range-thumb {
+  width: 20px; height: 8px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--paper); box-shadow: 0 1px 3px var(--scrim);
+}
+.audio-volume-panel input[type="range"]:focus-visible { outline: 2px solid var(--focus); outline-offset: 3px; border-radius: 5px; }

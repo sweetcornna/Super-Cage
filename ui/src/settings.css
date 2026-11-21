@@ -234,7 +234,9 @@
 }
 
 /* ── Buttons ─────────────────────────────────────────────── */
-.settings-page .settings-content button:not(.text-button):not(.icon-button):not(.inline-select-trigger) {
+/* The sub-pages (settings-pages.css) size their own buttons; :where keeps
+   this rule's weight unchanged for 通用 and 外观. */
+.settings-page .settings-content:where(:not(.settings-subpage)) button:not(.text-button):not(.icon-button):not(.inline-select-trigger) {
   min-height: var(--h-control);
   padding: 0 14px;
   font-size: var(--s-sm);
@@ -457,19 +459,6 @@
   font-size: var(--s-xs);
 }
 
-/* ── Password vault ──────────────────────────────────────── */
-.settings-page .vault-note {
-  font-size: var(--s-xs);
-}
-.settings-page .vault-entry strong {
-  font-size: var(--s-md);
-}
-.settings-page .settings-content .vault-actions button {
-  min-height: 32px;
-  padding: 4px 12px;
-  font-size: var(--s-xs);
-}
-
 /* ── Appearance ──────────────────────────────────────────── */
 .settings-page .appearance-row > div:first-child > span {
   font-size: var(--s-md);
@@ -543,30 +532,6 @@
 .settings-page .proxy-source strong,
 .settings-page .proxy-yaml-file strong {
   font-size: var(--s-md);
-}
-
-/* ── About ───────────────────────────────────────────────── */
-.settings-page .about-build > div {
-  padding: 14px 0;
-  font-size: var(--s-md);
-}
-.settings-page .about-result h4 {
-  margin: 0 0 8px;
-  font-size: var(--s-md);
-}
-.settings-page .about-result-detail {
-  font-size: var(--s-xs);
-}
-
-/* ── Remote connection ───────────────────────────────────── */
-.settings-page .settings-content .remote-link-settings .section-title h3 {
-  font-size: var(--s-xl);
-}
-.settings-page .settings-content .remote-relay-settings h4 {
-  margin-top: 0;
-}
-.settings-page .remote-pair-privacy {
-  font-size: var(--s-xs);
 }
 
 /* ── Footer ──────────────────────────────────────────────── */
