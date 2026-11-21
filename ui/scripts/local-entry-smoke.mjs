@@ -13,6 +13,7 @@ await fs.mkdir(output, { recursive: true });
 const now = Date.now();
 const ago = (minutes) => new Date(now - minutes * 60000).toISOString();
 const fingerprint = "SHA256:o/+qFR975llb1cjqdgUG0z2vIkIUeG0n2P6A+7yb6/A";
+const hostBlock = "# Super Cage 本机终端 — generated, do not edit. Environment: 默认环境\nHost cage-default\n  HostName cage-default.invalid\n  User cage\n  ProxyCommand '/Applications/Super Cage.app/Contents/MacOS/cage' entry proxy default\n  HostKeyAlias cage-default\n  StrictHostKeyChecking yes\n  IdentitiesOnly yes\n  ControlMaster no\n  ControlPath none\n";
 
 function entryState() {
   return {
@@ -50,7 +51,7 @@ async function routeEntry(page, entry) {
     if (entry.variant === "remote") return route.fulfill({ status: 403, json: { status: 403, code: "local_only", message: "本机终端只能在这台电脑上开启和连接" } });
     const view = entry.view;
     if (path === "/entry" && method === "GET") return route.fulfill({ json: view });
-    if (path === "/entry/include" && method === "GET") return route.fulfill({ json: { path: "/Users/shihao/.ssh/config", display_path: "~/.ssh/config", line: "Include ~/.ssh/super-cage/config", present: entry.includePresent, token: entry.includePresent ? "" : "token-1" } });
+    if (path === "/entry/include" && method === "GET") return route.fulfill({ json: { path: "/Users/shihao/.ssh/config", display_path: "~/.ssh/config", line: "Include ~/.ssh/super-cage/config", present: entry.includePresent, token: entry.includePresent ? "" : "token-1", alias: "cage-default", block: hostBlock } });
     if (path === "/entry/include") {
       if (body.token !== "token-1") return route.fulfill({ status: 409, contentType: "text/plain", body: "~/.ssh/config 在确认后又有变化：请重新确认" });
       entry.includePresent = true;
@@ -129,6 +130,9 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByRole("button", { name: "开启本机终端" }).click();
       const dialog = page.getByRole("dialog", { name: "让 ssh 认识这个环境" });
       await dialog.getByText("Include ~/.ssh/super-cage/config", { exact: true }).waitFor();
+      // The host name and the whole block the line brings in (F6).
+      await dialog.getByText("之后用 ssh cage-default 连接。这一行引入的配置：").waitFor();
+      assert.equal(await dialog.locator("pre.local-entry-include-block").textContent(), hostBlock);
       await shot("dialog");
       await dialog.getByRole("button", { name: "取消", exact: true }).click();
       assert.equal(entry.requests.filter((r) => r.method === "POST").length, 0, "取消 must not write");
@@ -139,6 +143,8 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText("cage ssh default", { exact: true }).waitFor();
       assert.equal(entry.requests.some((r) => r.method === "POST" && r.path === "/entry/include"), false);
       await content.getByText(/还没有包含 Super Cage 的配置/).waitFor();
+      // What is not filtered is said on the page.
+      await content.getByText(/scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
       await shot("on-without-include");
       // Writing it later, from the row.
       await content.getByRole("button", { name: "写入 ~/.ssh/config" }).click();
