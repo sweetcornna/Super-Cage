@@ -1,0 +1,101 @@
+/* Settings → 本机终端应用. The rows reuse the settings page's choice list and
+   toggle rows; only what is new to this section is styled here. */
+.local-terminal-settings {
+  position: relative;
+}
+.local-terminal-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.local-terminal-gone {
+  margin: 0 0 16px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.local-terminal-apps .local-terminal-app {
+  align-items: center;
+}
+.local-terminal-apps .local-terminal-app input {
+  margin-top: 0;
+  flex: none;
+}
+.local-terminal-app-text {
+  flex: 1;
+  min-width: 0;
+}
+.local-terminal-app-text strong,
+.local-terminal-app-text small {
+  overflow-wrap: anywhere;
+}
+/* The built-in terminal closes the group of applications found here. */
+.local-terminal-apps .local-terminal-app.built-in {
+  border-bottom-color: var(--line-strong);
+}
+.local-terminal-apps .local-terminal-app.unavailable {
+  cursor: default;
+}
+.local-terminal-apps .local-terminal-app.unavailable strong {
+  color: var(--faint);
+}
+.local-terminal-apps .local-terminal-app.unavailable:hover {
+  background: transparent;
+}
+.local-terminal-chip {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  line-height: 1.5;
+  white-space: nowrap;
+}
+/* The group heading of the two switches, as the settings page's own groups. */
+.local-terminal-settings .local-terminal-subtitle {
+  margin: 44px 0 8px;
+  font-size: var(--s-lg, 1.15rem);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--strong);
+}
+.local-terminal-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  animation: appear var(--dur) var(--ease-out);
+}
+.local-terminal-savebar .save-note {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.local-terminal-savebar button.primary {
+  font-weight: 550;
+}
+.local-terminal-saved {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+@media (prefers-reduced-motion: reduce) {
+  .local-terminal-savebar {
+    animation: none;
+  }
+}
