@@ -244,6 +244,26 @@ func (c *attachClient) waitFor(want string, n int) string {
 	}
 }
 
+// leftReset checks that the window was left as a shell expects: the title
+// pushed before the first output, the reset written last.
+func (c *attachClient) leftReset() {
+	c.t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out := c.output()
+		if strings.HasPrefix(out, attach.TitlePush) && strings.HasSuffix(out, attach.ResetSequence) {
+			return
+		}
+		if time.Now().After(deadline) {
+			c.t.Fatalf("the window was not reset: %q", out[max(0, len(out)-120):])
+		}
+		select {
+		case <-c.changed:
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
 func (c *attachClient) typeText(text string) {
 	c.t.Helper()
 	if _, err := c.master.Write([]byte(text)); err != nil {
@@ -292,6 +312,7 @@ func TestAttachTypingResizeDetachAndReattach(t *testing.T) {
 	if result := a.exit(5 * time.Second); result.Code != 0 || result.Message != "" {
 		t.Fatalf("detach: %+v", result)
 	}
+	a.leftReset()
 	if session.summary()["closed"] == true {
 		t.Fatal("detaching ended the terminal")
 	}
@@ -439,6 +460,7 @@ func TestAttachObserverCannotType(t *testing.T) {
 	if result := a.exit(5 * time.Second); result.Code != 0 {
 		t.Fatalf("%+v", result)
 	}
+	a.leftReset()
 }
 
 func TestAttachEndsWithAPlainMessage(t *testing.T) {
@@ -452,6 +474,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	if result := a.exit(5 * time.Second); result.Code != 0 || result.Message != "终端已结束。" {
 		t.Fatalf("%+v", result)
 	}
+	a.leftReset()
 	// The environment stops.
 	session = startChild(t, s, "report")
 	b := startAttach(t, attachTo(s, session.id))
@@ -461,6 +484,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	if result := b.exit(5 * time.Second); result.Code != 0 || result.Message != "环境已停止，终端已随之结束。" {
 		t.Fatalf("%+v", result)
 	}
+	b.leftReset()
 	// The account locks: the attach ends at once and says why.
 	running = true
 	session = startChild(t, s, "report")
@@ -472,6 +496,7 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	if result.Code != 3 || !strings.Contains(result.Message, "已锁定") {
 		t.Fatalf("%+v", result)
 	}
+	c.leftReset()
 	t.Logf("lock to attach end: %v", time.Since(locked))
 	if time.Since(locked) > 2*time.Second {
 		t.Fatal("too slow")
@@ -1039,6 +1064,7 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 	if result := a.exit(5 * time.Second); result.Code != 3 || !strings.Contains(result.Message, "已锁定") {
 		t.Fatalf("%+v", result)
 	}
+	a.leftReset()
 	t.Logf("lock to attach end through the desktop: %v", time.Since(locked))
 	workload.account.setKey(make([]byte, 32))
 	// The desktop switches to another environment: the window ends and says why.
@@ -1051,6 +1077,139 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 	result := b.exit(5 * time.Second)
 	if result.Code != 1 || !strings.Contains(result.Message, "已切换") {
 		t.Fatalf("%+v", result)
+	}
+	b.leftReset()
+}
+
+// Reconnecting gives up after the retry window, and resets the window too.
+func TestAttachGivesUpAndResets(t *testing.T) {
+	window := attach.RetryWindow
+	attach.RetryWindow = 500 * time.Millisecond
+	t.Cleanup(func() { attach.RetryWindow = window })
+	var mu sync.Mutex
+	refuse := false
+	s := attachController(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			busy := refuse
+			mu.Unlock()
+			if busy {
+				http.Error(w, "busy", http.StatusServiceUnavailable)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	session := startChild(t, s, "report")
+	var streams []*controlwire.Conn
+	attach.StreamHook = func(ws *controlwire.Conn) { mu.Lock(); streams = append(streams, ws); mu.Unlock() }
+	t.Cleanup(func() { attach.StreamHook = nil })
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	mu.Lock()
+	refuse = true
+	_ = streams[0].NetConn().Close()
+	mu.Unlock()
+	if result := a.exit(10 * time.Second); result.Code != 1 || !strings.Contains(result.Message, "已停止重试") {
+		t.Fatalf("%+v", result)
+	}
+	a.leftReset()
+}
+
+// TestAttachExitPathChild is cage attach as its own process for
+// TestAttachProcessEndsReset: CAGE_ATTACH_EXIT_PATH says how it will end.
+func TestAttachExitPathChild(t *testing.T) {
+	mode := os.Getenv("CAGE_ATTACH_EXIT_PATH")
+	if mode == "" {
+		return
+	}
+	if mode == "panic" {
+		attach.StreamHook = func(*controlwire.Conn) { panic("attach test panic") }
+	}
+	os.Exit(attach.Main(strings.Fields(os.Getenv("CAGE_ATTACH_ARGS")), os.Stdin, os.Stdout, os.Stderr, attach.Options{Check: agentSameBuild}))
+}
+
+// A signal or a panic ends cage attach with the window reset and back in
+// line mode. kill -9 cannot be caught: the launch script runs
+// cage attach --reset after it.
+func TestAttachProcessEndsReset(t *testing.T) {
+	for _, mode := range []string{"SIGTERM", "SIGHUP", "panic"} {
+		t.Run(mode, func(t *testing.T) {
+			s := attachController(t, nil)
+			session := startChild(t, s, "report")
+			master, slave, err := pty.Open()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer master.Close()
+			defer slave.Close()
+			_ = pty.Setsize(slave, &pty.Winsize{Cols: 100, Rows: 30})
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAttachExitPathChild$")
+			cmd.Env = append(os.Environ(), "CAGE_ATTACH_EXIT_PATH="+mode, "CAGE_ATTACH_ARGS=--config "+s.configPath+" --terminal "+session.id)
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = slave, slave, slave
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			var outMu sync.Mutex
+			go func() {
+				buffer := make([]byte, 4096)
+				for {
+					n, err := master.Read(buffer)
+					outMu.Lock()
+					out.Write(buffer[:n])
+					outMu.Unlock()
+					if err != nil {
+						return
+					}
+				}
+			}()
+			read := func() string { outMu.Lock(); defer outMu.Unlock(); return out.String() }
+			if mode != "panic" {
+				deadline := time.Now().Add(10 * time.Second)
+				for !strings.Contains(read(), "ready") {
+					if time.Now().After(deadline) {
+						t.Fatalf("never attached: %q", read())
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				signal := map[string]syscall.Signal{"SIGTERM": syscall.SIGTERM, "SIGHUP": syscall.SIGHUP}[mode]
+				_ = cmd.Process.Signal(signal)
+			}
+			done := make(chan error, 1)
+			go func() { done <- cmd.Wait() }()
+			select {
+			case err = <-done:
+			case <-time.After(10 * time.Second):
+				_ = cmd.Process.Kill()
+				t.Fatalf("did not end: %q", read())
+			}
+			if (mode == "panic") != (err != nil) {
+				t.Fatalf("exit %v: %q", err, read())
+			}
+			time.Sleep(100 * time.Millisecond)
+			got := read()
+			push := strings.Index(got, attach.TitlePush)
+			reset := strings.Index(got, attach.ResetSequence)
+			if push < 0 || reset < push {
+				t.Fatalf("not reset: %q", got)
+			}
+			if mode == "panic" && !strings.Contains(got[reset:], "attach test panic") {
+				t.Fatalf("the panic was not reported after the reset: %q", got[reset:])
+			}
+			// Back in line mode: the terminal echoes what is typed again.
+			before := len(got)
+			if _, err := master.Write([]byte("echo-check")); err != nil {
+				t.Fatal(err)
+			}
+			deadline := time.Now().Add(2 * time.Second)
+			for !strings.Contains(read()[before:], "echo-check") {
+				if time.Now().After(deadline) {
+					t.Fatalf("left in raw mode: %q", read()[before:])
+				}
+				time.Sleep(20 * time.Millisecond)
+			}
+		})
 	}
 }
 

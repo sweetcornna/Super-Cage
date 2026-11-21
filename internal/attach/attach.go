@@ -78,6 +78,9 @@ type Config struct {
 	// FilterStats prints what the output filter dropped when the attach
 	// ends (the hidden --filter-stats).
 	FilterStats bool
+	// Reset only writes ResetSequence (--reset): the launch script runs it
+	// after an attach that may not have reset the window itself.
+	Reset bool
 }
 
 // TTY is the local terminal. The real one is a raw-mode tty; tests use
@@ -112,6 +115,10 @@ func Main(args []string, stdin, stdout *os.File, stderr io.Writer, options Optio
 	if err != nil {
 		fmt.Fprintln(stderr, err.Error())
 		return 2
+	}
+	if cfg.Reset {
+		_, _ = stdout.WriteString(ResetSequence)
+		return 0
 	}
 	tty, stop := localTTY(stdin, stdout, stderr)
 	defer stop()
@@ -155,8 +162,12 @@ func ParseArgs(args []string) (Config, error) {
 	flags.StringVar(&cfg.Resume, "resume", "", "")
 	flags.BoolVar(&cfg.Observe, "observe", false, "")
 	flags.BoolVar(&cfg.FilterStats, "filter-stats", false, "")
+	flags.BoolVar(&cfg.Reset, "reset", false, "")
 	if err := flags.Parse(args); err != nil || flags.NArg() > 1 {
 		return cfg, errors.New(attachUsage)
+	}
+	if cfg.Reset {
+		return cfg, nil
 	}
 	// The environment operand: "local" (the default) or "current", the
 	// desktop's current connection.
@@ -234,6 +245,9 @@ type attacher struct {
 	sendMu sync.Mutex
 	ws     *controlwire.Conn
 
+	restore   func() // the local terminal's mode before the attach
+	leaveOnce sync.Once
+
 	filter  *termfilter.Filter
 	in      []byte // one read of output; output is never held whole
 	buf     []byte
@@ -242,6 +256,28 @@ type attacher struct {
 	ended   bool
 	started bool // the first stream was accepted
 }
+
+// TitlePush saves the window's title and icon name before anything else is
+// written: ResetSequence pops them back.
+const TitlePush = "\x1b[22;0t"
+
+// ResetSequence returns the local terminal to what a shell expects, whatever
+// the program in the Cage terminal left set. It is written on every way out
+// of an attach after its first output, and by cage attach --reset. It sets
+// only defaults, so it is harmless when nothing was changed.
+const ResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, end a string
+	"\x1b[?2026l" + // end a synchronized update
+	"\x1b[?1049l" + // leave the alternate screen
+	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // every mouse mode
+	"\x1b[?1004l\x1b[?2004l\x1b[?2048l\x1b[?2031l" + // focus, bracketed paste, in-band resize, colour scheme reports
+	"\x1b[<99u" + // pop every kitty keyboard level
+	"\x1b[?1l\x1b[?66l\x1b>" + // normal cursor keys and keypad
+	"\x1b7\x1b[r\x1b8" + // whole-screen scroll region, cursor kept where it is
+	"\x1b[?6l\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // origin, wrap, reverse wrap, insert and new line modes
+	"\x1b(B\x1b)B\x0f" + // US ASCII in G0 and G1, G0 in use
+	"\x1b[m\x1b[0 q\x1b[?25h" + // character attributes, cursor style, visible cursor
+	"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07" + // palette and dynamic colours
+	"\x1b[23;0t" // the title and icon name TitlePush saved
 
 // StreamHook sees every stream an attach opens; tests use it to drop
 // one mid-output.
@@ -278,20 +314,47 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 	if !ok {
 		return exit
 	}
-	restore := func() {}
+	a.restore = func() {}
 	if tty.MakeRaw != nil {
 		var err error
-		if restore, err = tty.MakeRaw(); err != nil {
+		if a.restore, err = tty.MakeRaw(); err != nil {
 			ws.Close()
 			return Exit{1, "无法把这个窗口切换到终端模式：" + err.Error()}
 		}
 	}
+	defer a.guard()
+	if _, err := tty.Out.Write([]byte(TitlePush)); err != nil {
+		a.leave()
+		ws.Close()
+		return Exit{}
+	}
 	exit = a.run(ctx, ws)
-	restore()
+	a.leave()
 	if options.FilterReport != nil {
 		options.FilterReport(a.filter.Report())
 	}
 	return exit
+}
+
+// leave returns the local terminal to how it was, once: the reset, then the
+// terminal mode. Every way out after the first output comes through here, a
+// panic in any of the attach's goroutines included.
+func (a *attacher) leave() {
+	a.leaveOnce.Do(func() {
+		_, _ = a.tty.Out.Write([]byte(ResetSequence))
+		if a.restore != nil {
+			a.restore()
+		}
+	})
+}
+
+// guard is deferred by every goroutine of a running attach: a panic leaves
+// the window usable before it ends the program.
+func (a *attacher) guard() {
+	if r := recover(); r != nil {
+		a.leave()
+		panic(r)
+	}
 }
 
 func attachViewerID() string {
@@ -553,7 +616,10 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 		}
 		a.sendSize()
 		frames := make(chan error, 1)
-		go func() { frames <- a.readStream(ws) }()
+		go func() {
+			defer a.guard()
+			frames <- a.readStream(ws)
+		}()
 		var streamErr error
 		detached, readerDone := false, false
 	pump:
@@ -714,6 +780,7 @@ func (a *attacher) writeOutput(data []byte) error {
 }
 
 func (a *attacher) readInput(inputs chan<- []byte, done chan<- struct{}) {
+	defer a.guard()
 	defer close(done)
 	if a.tty.In == nil {
 		return
