@@ -57,6 +57,10 @@ type ControlFile struct {
 	Token      string             `json:"token"`
 	PID        int                `json:"pid"`
 	Controller ControllerIdentity `json:"controller"`
+	// Auth and ProofKey let a client check who answers before it sends
+	// Token (proof.go). A record without them predates that check.
+	Auth     int    `json:"auth,omitempty"`
+	ProofKey string `json:"proof_key,omitempty"`
 }
 
 // LaunchResponse is the controller's answer to the launcher token.
@@ -70,6 +74,8 @@ type LaunchResponse struct {
 
 // ErrUnavailable means no controller serves this profile.
 var ErrUnavailable = errors.New("control service is unavailable")
+
+var errInvalidRecord = errors.New("后台记录无效，请保留现有环境并检查私有配置。")
 
 // TrustedViewProof is the desktop proof derived from the launcher token.
 // Only the local launcher possesses the token; its independent cookie jar
@@ -112,7 +118,7 @@ func ReadRecord(profile string) (ControlFile, error) {
 		return record, err
 	}
 	if json.Unmarshal(b, &record) != nil || record.Port < 1024 || record.Port > 65535 || len(record.Token) != 64 || record.PID < 1 {
-		return record, errors.New("后台记录无效，请保留现有环境并检查私有配置。")
+		return record, errInvalidRecord
 	}
-	return record, nil
+	return record, checkRecordProof(record)
 }

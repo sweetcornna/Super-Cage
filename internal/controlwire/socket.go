@@ -72,6 +72,9 @@ func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, pat
 	}
 	failed := &controlclient.AgentError{Code: "connection_failed", Message: "WebSocket connection failed", NextAction: "status"}
 	conn, err := c.dial(ctx, handshakeTimeout)
+	if identity := controlclient.IdentityAgentError(err); identity != nil {
+		return nil, identity
+	}
 	if err != nil {
 		return nil, failed
 	}

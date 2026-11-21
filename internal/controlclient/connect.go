@@ -21,8 +21,22 @@ type Conn interface {
 }
 
 // Connect proves the launcher token to the controller of profile. open reads
-// the record and prepares a connection; the caller keeps the launch answer.
+// the record and prepares a connection, which proves the controller before it
+// carries anything when the record has a proof key; the caller keeps the
+// launch answer. A controller from before the proof is still reached: the
+// window saves and stops its environment to complete an update.
 func Connect(profile string, open func(string) (Conn, error)) (Conn, LaunchResponse, error) {
+	return connectController(profile, open, true)
+}
+
+// ConnectProven is Connect for clients that never talk to a controller that
+// cannot prove itself: a record from before the proof is refused with
+// ErrControllerOutdated, without contacting its controller.
+func ConnectProven(profile string, open func(string) (Conn, error)) (Conn, LaunchResponse, error) {
+	return connectController(profile, open, false)
+}
+
+func connectController(profile string, open func(string) (Conn, error), older bool) (Conn, LaunchResponse, error) {
 	var launch LaunchResponse
 	if LockFree(profile) {
 		return nil, launch, ErrUnavailable
@@ -35,9 +49,16 @@ func Connect(profile string, open func(string) (Conn, error)) (Conn, LaunchRespo
 		return nil, launch, err
 	}
 	record := c.Record()
+	if record.Auth == 0 && !older {
+		c.Close()
+		return nil, launch, ErrControllerOutdated
+	}
 	status, err := c.CallContext(context.Background(), "POST", "/api/launch", map[string]string{"token": record.Token}, &launch)
 	if err != nil {
 		c.Close()
+		if known := Identity(err); known != nil {
+			return nil, launch, known
+		}
 		var networkError *url.Error
 		if errors.As(err, &networkError) {
 			return nil, launch, ErrUnavailable
@@ -96,6 +117,9 @@ func CheckLocal(launch LaunchResponse, configPath string, accepted bool) error {
 func Session(ctx context.Context, c Conn) error {
 	u, _ := url.Parse(c.Launch().URL)
 	code, err := c.CallContext(ctx, "POST", "/api/session", map[string]string{"token": u.Fragment}, nil)
+	if known := Identity(err); known != nil {
+		return known
+	}
 	if err != nil || code != 200 {
 		return HTTPError(401)
 	}
@@ -106,6 +130,9 @@ func Session(ctx context.Context, c Conn) error {
 // AgentConnect opens an authenticated session on the local workload.
 func AgentConnect(ctx context.Context, configPath string, check Check, connect func(string) (Conn, error)) (Conn, error) {
 	c, err := connect(filepath.Dir(configPath))
+	if identity := IdentityAgentError(err); identity != nil {
+		return nil, identity
+	}
 	if err != nil {
 		return nil, &AgentError{Code: "service_unavailable", Message: "The local Super Cage controller is unavailable. Run service.start or doctor.", NextAction: "service.start"}
 	}
@@ -114,7 +141,7 @@ func AgentConnect(ctx context.Context, configPath string, check Check, connect f
 		return fail(err)
 	}
 	if err := Session(ctx, c); err != nil {
-		return fail(err)
+		return fail(agentError(err))
 	}
 	return c, nil
 }
@@ -136,6 +163,9 @@ func AgentConnectTarget(ctx context.Context, configPath string, target AgentTarg
 		path = configPath
 	}
 	c, err := connect(filepath.Dir(path))
+	if identity := IdentityAgentError(err); identity != nil {
+		return nil, identity
+	}
 	if err != nil {
 		return nil, &AgentError{Code: "service_unavailable", Message: "Open the Super Cage desktop before managing client configuration.", NextAction: "open_desktop"}
 	}
@@ -146,7 +176,15 @@ func AgentConnectTarget(ctx context.Context, configPath string, target AgentTarg
 	}
 	if err := Session(ctx, c); err != nil {
 		c.Close()
-		return nil, err
+		return nil, agentError(err)
 	}
 	return c, nil
+}
+
+// agentError is err in the agent transport's vocabulary.
+func agentError(err error) error {
+	if identity := IdentityAgentError(err); identity != nil {
+		return identity
+	}
+	return err
 }

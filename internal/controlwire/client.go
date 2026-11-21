@@ -194,7 +194,51 @@ func (c *Client) dial(ctx context.Context, timeout time.Duration) (net.Conn, err
 		return nil, err
 	}
 	_ = conn.SetDeadline(deadline)
+	if c.record.ProofKey != "" {
+		stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
+		err = c.prove(conn)
+		if !stop() && err == nil {
+			err = ctx.Err()
+		}
+		if err != nil {
+			conn.Close()
+			return nil, err
+		}
+	}
 	return conn, nil
+}
+
+// prove runs the controller's challenge on a new connection before anything
+// else is written on it: no cookie, no connection generation, no token. The
+// connection is handed on only if the server keeps it open and nothing else
+// is waiting in it. A connection that fails reads as an unavailable
+// controller; a wrong answer is ErrControllerUnproven.
+func (c *Client) prove(conn net.Conn) error {
+	nonce, body := controlclient.ProofChallenge()
+	request := "POST " + controlclient.ProofPath + " HTTP/1.1\r\nHost: " + c.host + "\r\nOrigin: " + c.origin +
+		"\r\nContent-Type: application/json\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n"
+	if _, err := conn.Write(append([]byte(request), body...)); err != nil {
+		return err
+	}
+	r := bufio.NewReader(conn)
+	reply, err := readReply(r)
+	if err != nil {
+		return err
+	}
+	// The controller sends this small answer with its length; one without
+	// would be read until the server closes the connection.
+	if reply.status != 200 || reply.version != "HTTP/1.1" || hasToken(reply.header["connection"], "close") ||
+		reply.chunked || reply.contentLength < 0 || reply.contentLength > controlclient.ProofLimit {
+		return controlclient.ErrControllerUnproven
+	}
+	data, err := readBody(r, reply, controlclient.ProofLimit)
+	if err != nil {
+		return err
+	}
+	if r.Buffered() != 0 {
+		return controlclient.ErrControllerUnproven
+	}
+	return controlclient.CheckProof(data, c.record.ProofKey, c.host, conn.LocalAddr().String(), conn.RemoteAddr().String(), nonce)
 }
 
 // writeHead writes the request line and the headers every request carries,
@@ -309,6 +353,7 @@ func validCookie(name, value string) bool {
 
 // reply is a parsed status line and the headers this client reads.
 type reply struct {
+	version       string // HTTP/1.0 or HTTP/1.1
 	status        int
 	contentLength int64 // -1 when absent
 	chunked       bool
@@ -328,6 +373,7 @@ func readReply(r *bufio.Reader) (reply, error) {
 	if !strings.HasPrefix(version, "HTTP/1.") || len(code) != 3 {
 		return out, errors.New("malformed reply")
 	}
+	out.version = version
 	if out.status, err = strconv.Atoi(code); err != nil || out.status < 100 {
 		return out, errors.New("malformed reply status")
 	}

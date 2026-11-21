@@ -9,9 +9,12 @@ type AgentError struct {
 	NextAction string `json:"next_action"`
 	Retryable  bool   `json:"retryable"`
 	HTTPStatus int    `json:"http_status,omitempty"`
+	// cause is the error the refusal stands for, when one does.
+	cause error
 }
 
 func (e *AgentError) Error() string { return e.Message }
+func (e *AgentError) Unwrap() error { return e.cause }
 
 // HTTPError names an HTTP refusal.
 func HTTPError(code int) *AgentError {

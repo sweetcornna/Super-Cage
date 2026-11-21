@@ -279,30 +279,11 @@ var ClipboardWindow = 3 * time.Second
 // updateNeeded is the answer to a workload from before the viewer rules.
 const updateNeeded = "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"
 
-// TitlePush saves the window's title and icon name before anything else is
-// written: ResetSequence pops them back.
-const TitlePush = "\x1b[22;0t"
-
-// ResetSequence returns the local terminal to what a shell expects, whatever
-// the program in the Cage terminal left set. It is written on every way out
-// of an attach after its first output, and by cage attach --reset. It sets
-// only defaults, so it is harmless when nothing was changed.
-const ResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, end a string
-	"\x1b[?2026l" + // end a synchronized update
-	// Back to the main screen with a whole-screen scroll region, the cursor
-	// where it was: both the main screen's restore (when in the alternate
-	// screen) and the region reset move it, and the saved cursor is per
-	// screen.
-	"\x1b7\x1b[?1049l\x1b[r\x1b8" +
-	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // every mouse mode
-	"\x1b[?1004l\x1b[?2004l\x1b[?2048l\x1b[?2031l" + // focus, bracketed paste, in-band resize, colour scheme reports
-	"\x1b[<99u" + // pop every kitty keyboard level
-	"\x1b[?1l\x1b[?66l\x1b>" + // normal cursor keys and keypad
-	"\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // wrap, reverse wrap, insert and new line modes
-	"\x1b(B\x1b)B\x0f" + // US ASCII in G0 and G1, G0 in use
-	"\x1b[m\x1b[0 q\x1b[?25h" + // character attributes, cursor style, visible cursor
-	"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07" + // palette and dynamic colours
-	"\x1b[23;0t" // the title and icon name TitlePush saved
+// TitlePush and ResetSequence are termfilter's, which the SSH entry shares.
+const (
+	TitlePush     = termfilter.TitlePush
+	ResetSequence = termfilter.ResetSequence
+)
 
 // StreamHook sees every stream an attach opens; tests use it to drop
 // one mid-output.
@@ -442,7 +423,7 @@ func (a *attacher) noteInput(data []byte) []byte {
 // panic in any of the attach's goroutines included.
 func (a *attacher) leave() {
 	a.leaveOnce.Do(func() {
-		_, _ = a.tty.Out.Write(append(a.filter.Abort(nil), ResetSequence...))
+		_, _ = a.tty.Out.Write(a.filter.End(nil))
 		if a.restore != nil {
 			a.restore()
 		}
@@ -522,6 +503,9 @@ func (a *attacher) currentConnection(ctx context.Context) (string, error) {
 
 // attachFailure turns a transport error into the owner's language.
 func attachFailure(err error) Exit {
+	if known := controlclient.Identity(err); known != nil {
+		return Exit{1, known.Error()}
+	}
 	var ae *controlclient.AgentError
 	if errors.As(err, &ae) {
 		switch ae.Code {
@@ -550,6 +534,9 @@ func (a *attacher) request(ctx context.Context, method, path string, input, outp
 		}
 	}
 	status, data, err := a.c.Do(ctx, method, path, body, input != nil, 2*time.Minute)
+	if identity := controlclient.IdentityAgentError(err); identity != nil {
+		return identity
+	}
 	if err != nil {
 		return &controlclient.AgentError{Code: "service_unavailable", Message: err.Error()}
 	}
@@ -1041,6 +1028,9 @@ func (a *attacher) resume(ctx context.Context, cause error) (*controlwire.Conn, 
 				a.c.Close()
 				a.c = c
 				ws, err = a.c.Dial(ctx, a.cfg.Target, a.streamPath())
+			} else if controlclient.Identity(connectErr) != nil {
+				// What answers now cannot prove itself: stop, sending nothing.
+				return nil, attachFailure(connectErr), false
 			}
 		}
 		if err == nil {
@@ -1081,6 +1071,9 @@ func (a *attacher) explain(ctx context.Context) (Exit, bool) {
 		Unlocked *bool `json:"unlocked"`
 	}
 	if err := a.request(ctx, "GET", "/api/account", nil, &account); err != nil {
+		if controlclient.Identity(err) != nil {
+			return attachFailure(err), true
+		}
 		var refused *attachHTTPError
 		if errors.As(err, &refused) && refused.status != 503 && refused.status != 429 {
 			return refused.exit(), true
