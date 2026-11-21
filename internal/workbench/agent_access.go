@@ -347,7 +347,7 @@ var agentNativeWindowOnly = map[string]string{
 // agentNativeAhead are classified native actions of branches not merged yet,
 // by branch. The shell test fails once a shell answers one of them, so the
 // entry is dropped from this list when its branch merges.
-var agentNativeAhead = map[string]string{}
+var agentNativeAhead = map[string]string{"scienceFrame": "claude-science-p2"}
 
 // agentNativeRefusal returns why an agent may not queue request, or "".
 func agentNativeRefusal(request map[string]json.RawMessage) string {
