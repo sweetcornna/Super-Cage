@@ -726,6 +726,21 @@ func processRSS(t *testing.T, pid int) int {
 	return kb
 }
 
+// processFootprint is macOS's physical footprint of a process (what
+// Activity Monitor shows as memory), or "" where footprint(1) is missing.
+func processFootprint(pid int) string {
+	out, err := exec.Command("/usr/bin/footprint", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "Footprint:") {
+			return strings.TrimSpace(line[strings.Index(line, "Footprint:")+len("Footprint:"):])
+		}
+	}
+	return ""
+}
+
 // TestAttachProcessFootprint runs cage attach as a separate process in a
 // pseudo-terminal, measures keystroke latency through it and its resident
 // memory idle and after output. CAGE_ATTACH_BENCH=1 runs it.
@@ -776,6 +791,7 @@ func TestAttachProcessFootprint(t *testing.T) {
 	wait("ready", 1)
 	time.Sleep(300 * time.Millisecond)
 	idle := processRSS(t, cmd.Process.Pid)
+	idleFootprint := processFootprint(cmd.Process.Pid)
 	latencies := make([]time.Duration, 0, 150)
 	for i := 0; i < 150; i++ {
 		key := string(rune('a' + i%26))
@@ -801,8 +817,10 @@ func TestAttachProcessFootprint(t *testing.T) {
 	}
 	wait("0123456789abcdef", 2000*128)
 	busy := processRSS(t, cmd.Process.Pid)
+	busyFootprint := processFootprint(cmd.Process.Pid)
 	t.Logf("separate process: keystroke median %v p95 %v max %v", latencies[len(latencies)/2], latencies[len(latencies)*95/100], latencies[len(latencies)-1])
 	t.Logf("cage attach RSS: idle %d KB, after 4 MB of output %d KB", idle, busy)
+	t.Logf("cage attach footprint: idle %s, after 4 MB of output %s", idleFootprint, busyFootprint)
 }
 
 // desktopBeforeWorkload is the desktop's own listener (a desktop gateway)
