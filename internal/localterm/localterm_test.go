@@ -265,3 +265,14 @@ func TestSettingsDefaultsAndValidation(t *testing.T) {
 		t.Fatal("unknown app accepted")
 	}
 }
+
+func TestCommandRefusesEveryControl(t *testing.T) {
+	for _, arg := range []string{"a\x1bb", "a\x7fb", "a\u0085b", "a\u009bb", "a\xffb", "a\tb"} {
+		if err := (Command{"/bin/cage", "--project", arg}).Validate(); err == nil {
+			t.Errorf("%q accepted", arg)
+		}
+	}
+	if err := (Command{"/bin/cage", "--project", "/work/项目 一"}).Validate(); err != nil {
+		t.Error(err)
+	}
+}

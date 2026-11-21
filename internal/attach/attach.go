@@ -114,7 +114,7 @@ var (
 func Main(args []string, stdin, stdout *os.File, stderr io.Writer, options Options) int {
 	cfg, err := ParseArgs(args)
 	if err != nil {
-		fmt.Fprintln(stderr, err.Error())
+		fmt.Fprintln(stderr, termfilter.Plain(err.Error()))
 		return 2
 	}
 	if cfg.Reset {
@@ -138,7 +138,8 @@ func Main(args []string, stdin, stdout *os.File, stderr io.Writer, options Optio
 	}
 	result := Run(ctx, cfg, tty, options)
 	if result.Message != "" {
-		fmt.Fprint(stderr, "\r\n"+result.Message+"\r\n")
+		// Messages can quote the server; they are printed only as text.
+		fmt.Fprint(stderr, "\r\n"+strings.ReplaceAll(termfilter.Plain(result.Message), "\n", "\r\n")+"\r\n")
 	}
 	if cfg.FilterStats {
 		if stats == "" {
@@ -224,6 +225,10 @@ func ParseArgs(args []string) (Config, error) {
 	cfg.Target = controlclient.AgentTarget{Scope: "local"}
 	if *connection != "" {
 		cfg.Target = controlclient.AgentTarget{Scope: "selected", Connection: *connection}
+	}
+	if termfilter.Controls(cfg.Project) {
+		// The path reaches a command line, and a copied command.
+		return cfg, errors.New("项目路径无效：不能含有控制字符")
 	}
 	if cfg.Project != "" && cfg.Target.Scope == "local" && !filepath.IsAbs(cfg.Project) {
 		if cfg.Project, err = filepath.Abs(cfg.Project); err != nil {
@@ -597,7 +602,7 @@ func (e *attachHTTPError) exit() Exit {
 		return Exit{1, updateNeeded}
 	}
 	if e.text != "" && len(e.text) < 300 && !strings.HasPrefix(e.text, "{") {
-		return Exit{1, e.text}
+		return Exit{1, termfilter.Plain(e.text)}
 	}
 	return attachFailure(controlclient.HTTPError(e.status))
 }

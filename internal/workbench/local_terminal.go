@@ -15,6 +15,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/localterm"
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // The "本机终端" client routes belong to the desktop on the owner's computer:
@@ -137,7 +138,7 @@ func localTerminalArgs(configPath, connection string, input localTerminalOpen) (
 	if _, err := attach.ParseArgs(args); err != nil {
 		return nil, err
 	}
-	if input.Project != "" && (!strings.HasPrefix(input.Project, "/") || strings.ContainsAny(input.Project, "\x00\r\n")) {
+	if input.Project != "" && (!strings.HasPrefix(input.Project, "/") || termfilter.Controls(input.Project)) {
 		return nil, errors.New("项目路径无效")
 	}
 	return args, nil

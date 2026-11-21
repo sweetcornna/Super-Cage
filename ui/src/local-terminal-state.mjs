@@ -104,6 +104,9 @@ const terminalID = /^[0-9a-f]{16}$/;
 const sessionID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const accountID = /^[A-Za-z0-9_-]{1,128}$/;
 const kinds = new Set(["shell", "claude", "codex"]);
+// Any control character (C0, DEL, C1) or a lone surrogate, as the desktop
+// and cage attach refuse: the path reaches a command line and the clipboard.
+const controls = /\p{Cc}|[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
 
 // targetProblem says why a terminal, project or session cannot be opened.
 function targetProblem(target) {
@@ -113,7 +116,7 @@ function targetProblem(target) {
       if (target.closed) return "终端已结束";
       return "";
     case "project":
-      if (typeof target.path !== "string" || !target.path.startsWith("/") || /[\0\r\n]/.test(target.path)) return "无法识别这个项目";
+      if (typeof target.path !== "string" || !target.path.startsWith("/") || controls.test(target.path)) return "无法识别这个项目";
       if (target.run && !kinds.has(target.run)) return "无法识别运行内容";
       return "";
     case "session":

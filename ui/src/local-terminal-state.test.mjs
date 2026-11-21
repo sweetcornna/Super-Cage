@@ -97,3 +97,10 @@ test("messages follow the design's wording", () => {
   assert.equal(automationNotice({ name: "Ghostty", automation: true }, true), null);
   assert.equal(automationNotice({ name: "kitty", automation: false }), null);
 });
+
+test("a project path with any control character is refused, by code point", () => {
+  for (const path of ["/w/a\u001b[201~b", "/w/a\u007fb", "/w/a\u0085b", "/w/a\u009bb", "/w/a\u000fb", "/w/a\tb", "/w/a\ud800b"]) {
+    assert.throws(() => copyCommand({ kind: "project", path }), /无法识别这个项目/, JSON.stringify(path));
+  }
+  assert.equal(copyCommand({ kind: "project", path: "/w/项目 一" }), "cage attach current --new shell --project '/w/项目 一'");
+});

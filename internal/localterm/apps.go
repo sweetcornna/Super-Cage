@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // App is one terminal application this build knows.
@@ -99,7 +101,7 @@ func (c Command) Validate() error {
 		return errors.New("启动命令必须是绝对路径")
 	}
 	for _, arg := range c {
-		if arg == "" || strings.ContainsAny(arg, "\x00\r\n") {
+		if arg == "" || termfilter.Controls(arg) {
 			return errors.New("启动命令含有无效参数")
 		}
 	}

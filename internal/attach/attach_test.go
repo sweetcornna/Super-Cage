@@ -3,6 +3,7 @@ package attach
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseArgsFilterStatsIsHidden(t *testing.T) {
@@ -50,5 +51,30 @@ func TestParseArgsReset(t *testing.T) {
 	cfg, err := ParseArgs([]string{"--reset"})
 	if err != nil || !cfg.Reset {
 		t.Fatal(cfg, err)
+	}
+}
+
+// A project path reaches the window's command line and a copied command:
+// no control character, read by rune, and valid UTF-8; any other text is
+// fine.
+func TestParseArgsRefusesControlsInProject(t *testing.T) {
+	for _, path := range []string{"/work/a\x1b[201~b", "/work/a\x7fb", "/work/a\u0085b", "/work/a\u009b31mb", "/work/a\xffb", "/work/a\x0fb", "/work/a\tb"} {
+		if _, err := ParseArgs([]string{"--new", "shell", "--project", path}); err == nil {
+			t.Errorf("%q accepted", path)
+		}
+	}
+	for _, path := range []string{"/work/项目 一", "/work/it's mine", "/work/émoji-😀"} {
+		if _, err := ParseArgs([]string{"--new", "shell", "--project", path}); err != nil {
+			t.Errorf("%q refused: %v", path, err)
+		}
+	}
+}
+
+// What a server says is printed only as text.
+func TestServerTextIsPrinted(t *testing.T) {
+	refused := &attachHTTPError{status: 409, text: "\x1b]0;owned\x07项目不存在\x1b[2J\u009b31m\xff"}
+	message := refused.exit().Message
+	if strings.ContainsAny(message, "\x1b\x07\u009b") || !utf8.ValidString(message) || !strings.Contains(message, "项目不存在") {
+		t.Fatalf("server text printed as %q", message)
 	}
 }
