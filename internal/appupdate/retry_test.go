@@ -34,7 +34,7 @@ func TestUpdateSourceRetryInstructions(t *testing.T) {
 			client := &http.Client{Transport: roundTrip(func(r *http.Request) (*http.Response, error) {
 				return &http.Response{StatusCode: tc.status, Header: tc.headers, Body: io.NopCloser(strings.NewReader("private response must stay out of errors")), Request: r}, nil
 			})}
-			_, err := findRelease(context.Background(), client, "0.1.0")
+			_, _, err := findRelease(context.Background(), client, "0.1.0")
 			if err == nil || strings.Contains(err.Error(), "private response") {
 				t.Fatalf("unsafe error: %v", err)
 			}

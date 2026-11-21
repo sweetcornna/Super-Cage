@@ -48,6 +48,8 @@ func (s *Server) startMonitors() {
 				if err := diagnostics.New(s.profile).Clean(); err != nil {
 					diagnostics.Log("error", "diagnostics", "log cleanup failed: "+err.Error())
 				}
+				// Silent updates share this ticker; manual mode returns at once.
+				s.appUpdateTick(ctx)
 			}
 		}
 	}()
