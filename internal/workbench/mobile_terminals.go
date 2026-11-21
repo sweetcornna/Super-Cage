@@ -169,15 +169,19 @@ func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	// The account decides whether the phone may type; reading the input and
+	// queueing it happen after, so a program that stopped reading cannot
+	// hold the account for everyone.
 	s.account.mu.Lock()
+	authorized := s.mobileAuthorized(r.Context())
+	s.account.mu.Unlock()
 	err := errMobileLocked
-	if s.mobileAuthorized(r.Context()) {
+	if authorized {
 		var data string
 		if data, err = session.peerInput(session.phonePeer(), input.Data); err == nil {
 			err = session.enqueueInput(r.Context(), data)
 		}
 	}
-	s.account.mu.Unlock()
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)

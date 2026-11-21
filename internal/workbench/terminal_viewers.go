@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -207,17 +208,77 @@ func (t *terminalSession) applySizeOf(p *terminalPeer) error {
 	t.mu.Lock()
 	cols, rows := p.cols, p.rows
 	same := cols == t.sizing.cols && rows == t.sizing.rows
+	if cols != 0 && !same {
+		t.sizing.cols, t.sizing.rows = cols, rows
+	}
 	t.mu.Unlock()
 	if cols == 0 || same {
 		return nil
 	}
-	if err := t.file.Resize(cols, rows); err != nil {
-		return err
-	}
-	t.mu.Lock()
-	t.sizing.cols, t.sizing.rows = cols, rows
-	t.mu.Unlock()
+	t.resize(cols, rows)
 	return nil
+}
+
+// terminalResizeWait is how long a request waits for its size to reach the
+// PTY. A program that stopped reading (a Windows guest takes sizes through
+// a pipe) can keep a resize from returning; then the request goes on
+// without it, and the size is applied when the program reads again.
+var terminalResizeWait = 250 * time.Millisecond
+
+// terminalResizer applies sizes to the PTY off the request path, one at a
+// time, the latest wanted size winning. Guarded by its own mutex: nothing
+// else is held while the PTY takes a size.
+type terminalResizer struct {
+	mu      sync.Mutex
+	cols    uint16
+	rows    uint16
+	pending bool
+	busy    bool
+	waiters []chan struct{}
+}
+
+// resize asks for a PTY size and waits for it, at most terminalResizeWait,
+// and not at all while an earlier size is still being applied.
+func (t *terminalSession) resize(cols, rows uint16) {
+	r := &t.resizer
+	done := make(chan struct{})
+	r.mu.Lock()
+	r.cols, r.rows, r.pending = cols, rows, true
+	r.waiters = append(r.waiters, done)
+	stuck := r.busy
+	if !r.busy {
+		r.busy = true
+		go t.applyResizes()
+	}
+	r.mu.Unlock()
+	if stuck {
+		return
+	}
+	timer := time.NewTimer(terminalResizeWait)
+	defer timer.Stop()
+	select {
+	case <-done:
+	case <-timer.C:
+	}
+}
+
+func (t *terminalSession) applyResizes() {
+	r := &t.resizer
+	for {
+		r.mu.Lock()
+		if !r.pending {
+			r.busy = false
+			r.mu.Unlock()
+			return
+		}
+		cols, rows, waiters := r.cols, r.rows, r.waiters
+		r.pending, r.waiters = false, nil
+		r.mu.Unlock()
+		_ = t.file.Resize(cols, rows)
+		for _, done := range waiters {
+			close(done)
+		}
+	}
 }
 
 // peerResize records a viewer's size and applies it when that viewer decides
@@ -240,13 +301,11 @@ func (t *terminalSession) peerResize(p *terminalPeer, cols, rows uint16) error {
 		return nil
 	}
 	if p.legacy {
-		// Exactly as before: every resize from such a viewer reaches the PTY.
-		if err := t.file.Resize(cols, rows); err != nil {
-			return err
-		}
+		// As before: every resize from such a viewer reaches the PTY.
 		t.mu.Lock()
 		z.cols, z.rows = cols, rows
 		t.mu.Unlock()
+		t.resize(cols, rows)
 		return nil
 	}
 	return t.applySizeOf(p)

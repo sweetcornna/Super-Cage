@@ -52,6 +52,7 @@ type terminalSession struct {
 	cliStartupDone        chan struct{}
 	sizing                terminalSizing // viewers and the size owner; guarded by mu
 	sizeMu                sync.Mutex     // serialises deciding and applying a size
+	resizer               terminalResizer
 }
 
 func (t *terminalSession) ownsConversation() bool {

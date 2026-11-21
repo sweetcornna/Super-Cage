@@ -1,10 +1,12 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,7 @@ type recordingPTY struct {
 	changed chan struct{}
 	release chan struct{}
 	once    sync.Once
+	stuck   chan struct{} // when set, Resize waits for it: a program that stopped reading
 }
 
 func newRecordingSession(t *testing.T) (*terminalSession, *recordingPTY) {
@@ -47,6 +50,9 @@ func (f *recordingPTY) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 func (f *recordingPTY) Resize(cols, rows uint16) error {
+	if f.stuck != nil {
+		<-f.stuck
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sizes = append(f.sizes, [2]uint16{cols, rows})
@@ -356,4 +362,57 @@ func TestTerminalMixedViewersStillAnswerTwice(t *testing.T) {
 	if n := count(); n != 1 {
 		t.Fatalf("legacy owner with an identified viewer: %d answers", n)
 	}
+}
+
+// A program that stops reading its terminal (a Windows guest whose resize
+// goes through a pipe) stalls no one: a resize request returns within its
+// deadline, and input from any viewer and the account lock stay free.
+func TestStuckResizeStallsNoOne(t *testing.T) {
+	s := testServer(t)
+	t.Cleanup(s.terminals.close)
+	reader, writer := io.Pipe()
+	file := &recordingPTY{reader: reader, writer: writer, changed: make(chan struct{}, 1), release: make(chan struct{}), stuck: make(chan struct{})}
+	t.Cleanup(func() { close(file.stuck); file.once.Do(func() { close(file.release) }) })
+	session, err := s.terminals.startSessionWithPTY(exec.Command("true"), "/project", "shell", claudeSelection{}, nil, func() (terminalPTY, error) { return file, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	within := func(what string, limit time.Duration, f func()) {
+		t.Helper()
+		done := make(chan struct{})
+		go func() { f(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(limit):
+			t.Fatalf("%s stalled", what)
+		}
+	}
+	base := "/api/mobile/terminals/" + session.id
+	// The phone's resize decides the size; the PTY never takes it.
+	within("a resize", 2*time.Second, func() {
+		if w := request(s, "POST", base+"/resize", s.origin, `{"cols":90,"rows":30}`, true); w.Code != http.StatusNoContent {
+			t.Errorf("resize: %d %s", w.Code, w.Body.String())
+		}
+	})
+	within("the account lock", time.Second, func() { s.account.mu.Lock(); s.account.mu.Unlock() })
+	// Typing from the phone claims the size: another stuck resize.
+	within("phone input", 2*time.Second, func() {
+		if w := request(s, "POST", base+"/input", s.origin, `{"data":"x"}`, true); w.Code != http.StatusNoContent {
+			t.Errorf("input: %d %s", w.Code, w.Body.String())
+		}
+	})
+	within("the account lock", time.Second, func() { s.account.mu.Lock(); s.account.mu.Unlock() })
+	// Another viewer's typing and resizing go on.
+	desktop := session.openPeer("desktop-tab", false)
+	within("another viewer's resize", 2*time.Second, func() { _ = session.peerResize(desktop, 120, 40) })
+	within("another viewer's input", 2*time.Second, func() {
+		data, err := session.peerInput(desktop, "y")
+		if err == nil {
+			err = session.enqueueInput(context.Background(), data)
+		}
+		if err != nil || data != "y" {
+			t.Errorf("%q %v", data, err)
+		}
+	})
+	file.received(t, "xy")
 }
