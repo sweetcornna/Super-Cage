@@ -14,6 +14,7 @@ import (
 	"image/png"
 	"io"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
 	"os"
@@ -29,6 +30,8 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 	"golang.org/x/term"
+
+	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
 // TestAttachChild is the program inside the Cage terminal: it reports what
@@ -800,4 +803,140 @@ func TestAttachProcessFootprint(t *testing.T) {
 	busy := processRSS(t, cmd.Process.Pid)
 	t.Logf("separate process: keystroke median %v p95 %v max %v", latencies[len(latencies)/2], latencies[len(latencies)*95/100], latencies[len(latencies)-1])
 	t.Logf("cage attach RSS: idle %d KB, after 4 MB of output %d KB", idle, busy)
+}
+
+// desktopBeforeWorkload is the desktop's own listener (a desktop gateway)
+// with a workload controller selected as its local environment, wired as in
+// production: cage attach --connection reaches the workload through it.
+func desktopBeforeWorkload(t *testing.T) (desktop, workload *Server, full string) {
+	t.Helper()
+	workload = attachController(t, nil)
+	jar, _ := cookiejar.New(nil)
+	upstream, _ := url.Parse(workload.origin)
+	jar.SetCookies(upstream, []*http.Cookie{
+		{Name: workload.cookieName(), Value: workload.session, Path: "/", HttpOnly: true},
+		{Name: workload.cookieName() + "-desktop", Value: trustedViewProof(workload.token), Path: "/", HttpOnly: true},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	session, err := remotehost.LocalSession(ctx, workload.origin, remotehost.PublicManifest{Platform: "darwin", InstanceID: randomToken()}, jar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { session.Close() })
+	desktop = attachController(t, nil)
+	desktop.desktopEntry = true
+	desktop.remote = newDesktopGateway(desktop.profile, &desktopLocal{profile: workload.profile})
+	t.Cleanup(desktop.remote.close)
+	gateway := desktop.remote.desktop
+	gateway.active = &desktopTarget{id: gateway.generation, mode: "local", ctx: ctx, cancel: cancel, session: session}
+	// The desktop's listener lives under the desktop-entry configuration.
+	full = filepath.Join(t.TempDir(), "config.json")
+	path := desktopConfigPath(full)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	record, err := os.ReadFile(filepath.Join(desktop.profile, "control.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "control.json"), record, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := openControllerLock(filepath.Dir(path), os.O_CREATE|os.O_RDWR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := lockController(lock); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { unlockController(lock); lock.Close() })
+	desktop.configPath = path
+	desktop.appUpdateConfigPath = full
+	return desktop, workload, full
+}
+
+func clientCall(s *Server, method, path, body, connection string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, s.origin+path, strings.NewReader(body))
+	r.Header.Set("Origin", s.origin)
+	r.Header.Set("Content-Type", "application/json")
+	if connection != "" {
+		r.Header.Set(connectionHeader, connection)
+	}
+	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+	w := httptest.NewRecorder()
+	s.handler().ServeHTTP(w, r)
+	return w
+}
+
+func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
+	desktop, workload, full := desktopBeforeWorkload(t)
+	gateway := desktop.remote.desktop
+	through := func(session *terminalSession) *attachClient {
+		a := startAttach(t, attachConfig{configPath: full, target: AgentTarget{Scope: "selected", Connection: gateway.generation}, terminal: session.id})
+		a.waitFor("ready", 1)
+		a.typeText("hello")
+		a.waitFor("got:\"hello\"", 1)
+		return a
+	}
+	// The workload locks: the window says so at once.
+	a := through(startChild(t, workload, "report"))
+	locked := time.Now()
+	workload.account.lock()
+	if result := a.exit(5 * time.Second); result.code != 3 || !strings.Contains(result.message, "已锁定") {
+		t.Fatalf("%+v", result)
+	}
+	t.Logf("lock to attach end through the desktop: %v", time.Since(locked))
+	workload.account.setKey(make([]byte, 32))
+	// The desktop switches to another environment: the window ends and says why.
+	b := through(startChild(t, workload, "report"))
+	gateway.mu.Lock()
+	old := gateway.active
+	gateway.generation = randomToken()
+	gateway.mu.Unlock()
+	old.cancel()
+	result := b.exit(5 * time.Second)
+	if result.code != 1 || !strings.Contains(result.message, "已切换") {
+		t.Fatalf("%+v", result)
+	}
+}
+
+func TestAttachResumesAConversationThroughCagesLauncher(t *testing.T) {
+	var mu sync.Mutex
+	var opened []string
+	var target string
+	s := attachController(t, func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == "POST" && strings.HasPrefix(r.URL.Path, "/api/cli/sessions/") && strings.HasSuffix(r.URL.Path, "/open") {
+				mu.Lock()
+				opened = append(opened, strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/cli/sessions/"), "/open"))
+				id := target
+				mu.Unlock()
+				jsonReply(w, map[string]any{"desktop_terminal_id": id})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+	session := startChild(t, s, "report")
+	mu.Lock()
+	target = session.id
+	mu.Unlock()
+	a := startAttach(t, attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, resume: "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"})
+	a.waitFor("ready", 1)
+	a.typeText("resumed")
+	a.waitFor("got:\"resumed\"", 1)
+	a.cancel()
+	a.exit(5 * time.Second)
+	mu.Lock()
+	if len(opened) != 1 || opened[0] != "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0" {
+		t.Fatal(opened)
+	}
+	target = ""
+	mu.Unlock()
+	// A conversation the launcher could not put in a terminal.
+	b := startAttach(t, attachConfig{configPath: s.configPath, target: AgentTarget{Scope: "local"}, resume: "another-session"})
+	if result := b.exit(5 * time.Second); result.code != 1 || !strings.Contains(result.message, "没有在终端中打开") {
+		t.Fatalf("%+v", result)
+	}
 }

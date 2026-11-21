@@ -328,3 +328,32 @@ func TestTerminalStreamsAnswerOnceOnlyForIdentifiedViewers(t *testing.T) {
 		t.Fatal("observe without identity accepted")
 	}
 }
+
+// TestTerminalMixedViewersStillAnswerTwice records what an identified viewer
+// cannot fix alone: a viewer without identity (today's web tab and phone)
+// keeps answering as before, so with an identified owner the program reads
+// two answers until those views send an identity too. When the viewer
+// without identity owns the terminal, the identified one stays silent.
+func TestTerminalMixedViewersStillAnswerTwice(t *testing.T) {
+	session, _ := newRecordingSession(t)
+	web := session.openPeer("", false)
+	attach := session.openPeer("attach-identity-1", false)
+	answer := "\x1b[?62;22c"
+	count := func() int {
+		n := 0
+		for _, p := range []*terminalPeer{web, attach} {
+			if data, _ := session.peerInput(p, answer); data == answer {
+				n++
+			}
+		}
+		return n
+	}
+	_, _ = session.peerInput(attach, "x")
+	if n := count(); n != 2 {
+		t.Fatalf("identified owner with a legacy viewer: %d answers", n)
+	}
+	_, _ = session.peerInput(web, "y")
+	if n := count(); n != 1 {
+		t.Fatalf("legacy owner with an identified viewer: %d answers", n)
+	}
+}

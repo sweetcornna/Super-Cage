@@ -66,10 +66,12 @@ func Lookup(id string) *App {
 	return nil
 }
 
-// Installed is a detected application: where its bundle is.
+// Installed is a detected application: where its bundle is and which of its
+// release channels (bundle identifiers) was found.
 type Installed struct {
 	App
-	Path string `json:"path,omitempty"`
+	Path     string `json:"path,omitempty"`
+	BundleID string `json:"-"`
 }
 
 // Detect finds the known applications installed on this computer, without
@@ -79,7 +81,7 @@ func Detect() []Installed {
 	for _, app := range Apps() {
 		for _, id := range app.BundleIDs {
 			if path := applicationPath(id); path != "" {
-				found = append(found, Installed{App: app, Path: path})
+				found = append(found, Installed{App: app, Path: path, BundleID: id})
 				break
 			}
 		}

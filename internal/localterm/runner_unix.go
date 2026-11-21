@@ -5,6 +5,7 @@ package localterm
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -23,13 +24,16 @@ func (ExecRunner) Run(ctx context.Context, step Step) error {
 	if !step.Detach {
 		ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		output, err := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...).CombinedOutput()
+		cmd := exec.CommandContext(ctx, step.Argv[0], step.Argv[1:]...)
+		cmd.Env = LaunchEnvironment(os.Environ())
+		output, err := cmd.CombinedOutput()
 		if err != nil {
 			return errors.New(firstLine(output, err))
 		}
 		return nil
 	}
 	cmd := exec.Command(step.Argv[0], step.Argv[1:]...)
+	cmd.Env = LaunchEnvironment(os.Environ())
 	// Its own session: the application outlives Super Cage.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {

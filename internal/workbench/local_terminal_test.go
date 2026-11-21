@@ -5,9 +5,7 @@ package workbench
 import (
 	"context"
 	"net/http"
-	"net/http/cookiejar"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +14,6 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/localterm"
-	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
 type recordingLaunches struct {
@@ -29,70 +26,6 @@ func (r *recordingLaunches) Run(_ context.Context, step localterm.Step) error {
 	defer r.mu.Unlock()
 	r.steps = append(r.steps, step.Argv)
 	return nil
-}
-
-// desktopBeforeWorkload is the desktop's own listener (a desktop gateway)
-// with a workload controller selected as its local environment, wired as in
-// production: cage attach --connection reaches the workload through it.
-func desktopBeforeWorkload(t *testing.T) (desktop, workload *Server, full string) {
-	t.Helper()
-	workload = attachController(t, nil)
-	jar, _ := cookiejar.New(nil)
-	upstream, _ := url.Parse(workload.origin)
-	jar.SetCookies(upstream, []*http.Cookie{
-		{Name: workload.cookieName(), Value: workload.session, Path: "/", HttpOnly: true},
-		{Name: workload.cookieName() + "-desktop", Value: trustedViewProof(workload.token), Path: "/", HttpOnly: true},
-	})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	session, err := remotehost.LocalSession(ctx, workload.origin, remotehost.PublicManifest{Platform: "darwin", InstanceID: randomToken()}, jar)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { session.Close() })
-	desktop = attachController(t, nil)
-	desktop.desktopEntry = true
-	desktop.remote = newDesktopGateway(desktop.profile, &desktopLocal{profile: workload.profile})
-	t.Cleanup(desktop.remote.close)
-	gateway := desktop.remote.desktop
-	gateway.active = &desktopTarget{id: gateway.generation, mode: "local", ctx: ctx, cancel: cancel, session: session}
-	// The desktop's listener lives under the desktop-entry configuration.
-	full = filepath.Join(t.TempDir(), "config.json")
-	path := desktopConfigPath(full)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	record, err := os.ReadFile(filepath.Join(desktop.profile, "control.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(filepath.Dir(path), "control.json"), record, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	lock, err := openControllerLock(filepath.Dir(path), os.O_CREATE|os.O_RDWR)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := lockController(lock); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { unlockController(lock); lock.Close() })
-	desktop.configPath = path
-	desktop.appUpdateConfigPath = full
-	return desktop, workload, full
-}
-
-func clientCall(s *Server, method, path, body, connection string) *httptest.ResponseRecorder {
-	r := httptest.NewRequest(method, s.origin+path, strings.NewReader(body))
-	r.Header.Set("Origin", s.origin)
-	r.Header.Set("Content-Type", "application/json")
-	if connection != "" {
-		r.Header.Set(connectionHeader, connection)
-	}
-	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
-	w := httptest.NewRecorder()
-	s.handler().ServeHTTP(w, r)
-	return w
 }
 
 func TestLocalTerminalSettingsStayOnThisComputer(t *testing.T) {

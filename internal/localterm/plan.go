@@ -100,7 +100,7 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 			scheme = "warppreview"
 		}
 		yaml := "---\nname: " + YAMLString("Super Cage "+in.Name) + "\nwindows:\n  - tabs:\n      - title: \"Super Cage\"\n        layout:\n          cwd: " + YAMLString(in.Home) + "\n          commands:\n            - exec: " + YAMLString(ShellQuote(script)) + "\n"
-		return Plan{Files: []PlanFile{scriptFile, {Path: filepath.Join(in.Home, ".warp", "launch_configurations", config), Content: yaml, Mode: 0o600}},
+		return Plan{Files: []PlanFile{scriptFile, {Path: filepath.Join(warpConfigDir(in.Home), config), Content: yaml, Mode: 0o600}},
 			Steps: []Step{{Argv: []string{"/usr/bin/open", scheme + "://launch/" + config}}}}, nil
 	case "wezterm":
 		// wezterm start asks a running WezTerm for a new window, or starts one.
@@ -118,7 +118,16 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 	return Plan{}, errors.New("不支持这个本机终端应用")
 }
 
-func (a App) bundleID() string { return a.BundleIDs[0] }
+// bundleID is the release channel that was found, else the main one.
+func (a Installed) bundleID() string {
+	if a.BundleID != "" {
+		return a.BundleID
+	}
+	return a.BundleIDs[0]
+}
+
+// warpConfigDir is where Warp reads launch configurations on macOS.
+func warpConfigDir(home string) string { return filepath.Join(home, ".warp", "launch_configurations") }
 
 // Runner runs one step. Tests record steps instead of running them.
 type Runner interface {
@@ -150,15 +159,24 @@ func Launch(ctx context.Context, plan Plan, run Runner) error {
 	return failure
 }
 
-// PruneScratch removes launch scripts older than age that were never run,
-// for instance when the owner refused the Automation permission.
-func PruneScratch(dir string, age time.Duration) {
+// PruneScratch removes what earlier launches left behind once it is older
+// than age: scripts that were never run (the owner refused the Automation
+// permission, say) and Warp launch configurations, which Warp would
+// otherwise keep listing.
+func PruneScratch(dir, home string, age time.Duration) {
+	pruneFiles(dir, ".command", age)
+	if filepath.IsAbs(home) {
+		pruneFiles(warpConfigDir(home), ".yaml", age)
+	}
+}
+
+func pruneFiles(dir, suffix string, age time.Duration) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), ScriptPrefix) || !strings.HasSuffix(entry.Name(), ".command") {
+		if !strings.HasPrefix(entry.Name(), ScriptPrefix) || !strings.HasSuffix(entry.Name(), suffix) || !entry.Type().IsRegular() {
 			continue
 		}
 		if info, err := entry.Info(); err == nil && time.Since(info.ModTime()) > age {

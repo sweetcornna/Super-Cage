@@ -108,6 +108,13 @@ func TestPlansPerApplication(t *testing.T) {
 	if err := yaml.Unmarshal([]byte(plan.Files[1].Content), &config); err != nil || config.Windows[0].Tabs[0].Layout.Commands[0].Exec != script || config.Windows[0].Tabs[0].Layout.Cwd != "/Users/owner name" {
 		t.Fatalf("%v %+v", err, config)
 	}
+	// Warp Preview alone: its own URL scheme.
+	preview := installed(t, "warp")
+	preview.BundleID = "dev.warp.Warp-Preview"
+	plan, err := PlanLaunch(PlanInput{App: preview, Command: attachCommand, Name: "0123456789abcdef", Scratch: t.TempDir(), Home: "/Users/owner name"})
+	if err != nil || plan.Steps[0].Argv[1] != "warppreview://launch/super-cage-0123456789abcdef.yaml" {
+		t.Fatal(plan.Steps, err)
+	}
 	// Herdr is detected but cannot host cage attach yet.
 	if _, err := PlanLaunch(PlanInput{App: installed(t, "herdr"), Command: attachCommand, Name: "x", Scratch: "/tmp", Home: "/Users/x"}); err == nil {
 		t.Fatal("herdr planned")
@@ -181,16 +188,46 @@ func TestLaunchWritesPrivateFilesAndFallsBack(t *testing.T) {
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatal(info, err)
 	}
-	// Scripts never run are removed later.
+	// Scripts never run and Warp launch configurations are removed later;
+	// recent ones and other files stay.
+	home := t.TempDir()
+	warp := filepath.Join(home, ".warp", "launch_configurations")
+	if err := os.MkdirAll(warp, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stale := []string{script, filepath.Join(warp, "super-cage-0123456789abcdef.yaml")}
+	kept := []string{filepath.Join(warp, "super-cage-fresh.yaml"), filepath.Join(warp, "my-own.yaml")}
 	old := time.Now().Add(-time.Hour)
-	_ = os.Chtimes(script, old, old)
-	PruneScratch(filepath.Dir(script), 10*time.Minute)
-	if _, err := os.Stat(script); !os.IsNotExist(err) {
-		t.Fatal("stale script kept")
+	for _, path := range append(stale[1:], kept...) {
+		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range append(stale, kept[1]) {
+		_ = os.Chtimes(path, old, old)
+	}
+	PruneScratch(filepath.Dir(script), home, 10*time.Minute)
+	for _, path := range stale {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatal("stale file kept", path)
+		}
+	}
+	for _, path := range kept {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatal("removed", path)
+		}
 	}
 	runner = &recordingRunner{fail: 9}
 	if err := Launch(context.Background(), plan, runner); err == nil {
 		t.Fatal("all steps failed but launch succeeded")
+	}
+}
+
+func TestLaunchEnvironmentKeepsOnlySessionBasics(t *testing.T) {
+	got := LaunchEnvironment([]string{"HOME=/Users/o", "PATH=/usr/bin", "LANG=zh_CN.UTF-8", "LC_CTYPE=UTF-8", "SHELL=/bin/zsh",
+		"CAGE_CONFIG=/x/config.json", "CAGE_DESKTOP_START_ID=abc", "HTTPS_PROXY=http://127.0.0.1:7890", "GITHUB_TOKEN=secret", "broken"})
+	if strings.Join(got, " ") != "HOME=/Users/o PATH=/usr/bin LANG=zh_CN.UTF-8 LC_CTYPE=UTF-8 SHELL=/bin/zsh" {
+		t.Fatal(got)
 	}
 }
 

@@ -195,7 +195,7 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		name = hex.EncodeToString(b[:])
 	}
 	scratch := filepath.Join(dir, "local-terminal")
-	localterm.PruneScratch(scratch, 10*time.Minute)
+	localterm.PruneScratch(scratch, home, 10*time.Minute)
 	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(localterm.Command{cage}, args...), Name: name, Scratch: scratch, Home: home})
 	if err != nil {
 		requestError(w, err)
