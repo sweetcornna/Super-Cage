@@ -516,7 +516,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
 	web, _ := fs.Sub(assets, "web")
-	mux.Handle("GET /", newStaticHandler(web))
+	mux.Handle("GET /", newEntryStaticHandler(web, s.phoneEntry))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin, err := url.Parse(s.origin)
 		if err != nil || r.Host != origin.Host {

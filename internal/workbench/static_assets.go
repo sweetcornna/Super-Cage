@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/webentry"
 )
 
 // The workbench UI is a static build embedded in the executable and reached
@@ -121,10 +123,20 @@ type staticHandler struct {
 	files  fs.FS
 	mu     sync.Mutex
 	assets map[string]*staticAsset
+	// phone, when set, picks the document at "/": true serves the phone UI
+	// (mobile.html) there instead of the desktop workbench (index.html).
+	phone func(*http.Request) bool
 }
 
 func newStaticHandler(files fs.FS) http.Handler {
 	return &staticHandler{files: files, assets: map[string]*staticAsset{}}
+}
+
+// newEntryStaticHandler serves files like newStaticHandler and answers "/" with
+// the document phone chooses (see internal/webentry). Both documents live at the
+// same URL, so deep links, reloads and Back are the same in either layout.
+func newEntryStaticHandler(files fs.FS, phone func(*http.Request) bool) http.Handler {
+	return &staticHandler{files: files, assets: map[string]*staticAsset{}, phone: phone}
 }
 
 // companion reports whether name is a build-time compressed copy of another
@@ -319,8 +331,12 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(path.Clean(p), "/")
+	root := name == "" && h.phone != nil
 	if name == "" {
 		name = "index.html"
+		if root && h.phone(r) {
+			name = "mobile.html"
+		}
 	}
 	asset := h.lookup(name)
 	if asset == nil {
@@ -334,6 +350,9 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("ETag", representation.etag)
 	if asset.varies {
 		header.Add("Vary", "Accept-Encoding")
+	}
+	if root {
+		header.Add("Vary", webentry.Vary)
 	}
 	if encoding != "" {
 		// ServeContent leaves Content-Length unset when Content-Encoding is.
