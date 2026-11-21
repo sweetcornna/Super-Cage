@@ -600,6 +600,9 @@ func (s *Server) handler() http.Handler {
 			http.Error(w, "此功能尚未接入 macOS 客机", http.StatusConflict)
 			return
 		}
+		if s.scienceEntryRefuses(w, r) {
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/mobile/") {
 			// Device trust is scoped to this host. Never forward a paired phone
 			// into a different host selected by the desktop SSH client.

@@ -38,6 +38,11 @@ import (
 //	  shell measured before applying its overrides (for the audit).
 //	  409 unavailable, off, environment or Claude Science not running, or the
 //	  guest browser's identity unreadable.
+//	POST /api/claude-science/release {} -> 204: the pane closed its frame;
+//	  the front ends the session and forgets the daemon credential.
+//
+// In the desktop entry, host-render and ticket are refused unless the
+// selected environment is this computer's (scienceEntryRefuses).
 
 // scienceHostOS is where host rendering may run (tests replace it).
 var scienceHostOS = runtime.GOOS
@@ -48,6 +53,8 @@ type scienceHost struct {
 	err   string
 	stop  context.CancelFunc
 	cache scienceFrontCache
+	// vmRunning replaces Server.vmRunning in tests.
+	vmRunning func() bool
 }
 
 // scienceFrontCache keeps the desktop entry's scan of local fronts briefly,
@@ -178,10 +185,15 @@ func (s *Server) stopScienceFront() {
 	}
 }
 
+// scienceWatchInterval is how often the front's watchdog looks (tests
+// shorten it).
+var scienceWatchInterval = 3 * time.Second
+
 // watchScienceFront drops every session and the daemon credential when the
-// environment stops, the account locks or the daemon restarts.
+// account locks, the environment stops or the daemon stops or restarts, and
+// the credential alone after scienceIdleDrop without use.
 func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
-	ticker := time.NewTicker(3 * time.Second)
+	ticker := time.NewTicker(scienceWatchInterval)
 	defer ticker.Stop()
 	started := ""
 	for {
@@ -190,7 +202,6 @@ func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
 			return
 		case <-ticker.C:
 		}
-		state := front.snapshot()
 		front.mu.Lock()
 		active := front.upstream != nil || front.session != ""
 		front.mu.Unlock()
@@ -201,21 +212,34 @@ func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
 			front.reset("Super Cage 已锁定，本机渲染已关闭。")
 			continue
 		}
-		if !s.vmRunning() {
+		if !s.scienceVMRunning() {
 			front.reset("环境已停止，本机渲染已关闭。")
 			continue
 		}
 		if last, ok := s.scienceLast.get(); ok {
-			if !last.Ready {
-				front.reset("")
-				continue
-			}
-			if started != "" && last.StartedAt != started {
+			if !last.Ready || (started != "" && last.StartedAt != started) {
+				// Stopped, or restarted with a new credential.
 				front.reset("")
 			}
 			started = last.StartedAt
 		}
-		_ = state
+		front.dropIdle()
+	}
+}
+
+// scienceVMRunning is vmRunning, replaceable in tests.
+func (s *Server) scienceVMRunning() bool {
+	if s.scienceHost.vmRunning != nil {
+		return s.scienceHost.vmRunning()
+	}
+	return s.vmRunning()
+}
+
+// resetScienceFront ends the frame's session and forgets the daemon
+// credential (Claude Science stopping or updating, the pane closing).
+func (s *Server) resetScienceFront() {
+	if front := s.scienceFrontRunning(); front != nil {
+		front.reset("")
 	}
 }
 
@@ -233,7 +257,7 @@ func (s *Server) scienceFrontHooks() scienceFrontHooks {
 			readyAt = time.Now()
 			readyErr = nil
 			switch {
-			case !s.vmRunning():
+			case !s.scienceVMRunning():
 				readyErr = errors.New("请先启动 Super Cage 环境")
 			case s.claudeScienceOperation() != "":
 				readyErr = errors.New("Claude Science 正在安装、更新、启动或关闭，请稍候。")
@@ -246,10 +270,11 @@ func (s *Server) scienceFrontHooks() scienceFrontHooks {
 		},
 		ancestor: s.scienceAncestor,
 		upstream: func() (*scienceUpstream, error) {
-			if !s.vmRunning() {
+			if !s.scienceVMRunning() {
 				return nil, errors.New("请先启动 Super Cage 环境")
 			}
-			return newScienceUpstream(s.newScienceDialer(cage.ClaudeSciencePort), cage.ClaudeSciencePort, s.scienceLink), nil
+			port := s.sciencePort()
+			return newScienceUpstream(s.newScienceDialer(port), port, s.scienceLink), nil
 		},
 		signIn: func() (claudeScienceTab, error) {
 			ctx, cancel := context.WithTimeout(s.lifetimeContext(), 20*time.Second)
@@ -268,6 +293,15 @@ func (s *Server) scienceFrontHooks() scienceFrontHooks {
 			return tab, err
 		},
 	}
+}
+
+// sciencePort is the daemon's port as its status reports it (the unit
+// starts it on cage.ClaudeSciencePort).
+func (s *Server) sciencePort() int {
+	if last, ok := s.scienceLast.get(); ok && last.Port >= 1024 && last.Port <= 65535 {
+		return last.Port
+	}
+	return cage.ClaudeSciencePort
 }
 
 // scienceLink mints the daemon's single-use link in the guest; the value
@@ -347,7 +381,7 @@ func (s *Server) publishScienceControl(port int, identity *scienceIdentity, keep
 // localScienceFronts is the desktop entry's view: the fronts that local
 // workloads published in their control files.
 func (s *Server) localScienceFronts() []int {
-	if !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
+	if scienceHostOS != "windows" || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
 		return nil
 	}
 	cache := &s.scienceHost.cache
@@ -416,6 +450,30 @@ func (s *Server) sessionCookieValid(r *http.Request, hardened bool) bool {
 	}
 	c, e := r.Cookie(s.cookieName())
 	return e == nil && equalSecret(c.Value, s.session)
+}
+
+// scienceEntryRefuses runs in the desktop entry before a request goes to the
+// selected workload: the front lives on this computer, so a remote host's
+// switch and tickets are not offered here. The workload cannot tell a remote
+// desktop client from the local window (both carry the trusted-view proof).
+func (s *Server) scienceEntryRefuses(w http.ResponseWriter, r *http.Request) bool {
+	if !s.desktopEntry || r.Method != http.MethodPost || (r.URL.Path != "/api/claude-science/host-render" && r.URL.Path != "/api/claude-science/ticket") {
+		return false
+	}
+	if scienceHostOS == "windows" && s.remote != nil && s.remote.desktop != nil && s.remote.desktop.context().Mode == "local" {
+		return false
+	}
+	http.Error(w, scienceReasonHostClient, http.StatusConflict)
+	return true
+}
+
+func (s *Server) scienceReleaseAction(w http.ResponseWriter, r *http.Request) {
+	var input struct{}
+	if !readJSON(w, r, &input) {
+		return
+	}
+	s.resetScienceFront()
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request) {

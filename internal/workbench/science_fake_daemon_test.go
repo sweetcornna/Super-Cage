@@ -261,6 +261,8 @@ func goodProbeReports(identity scienceIdentity) []scienceProbeReport {
 	for _, ctx := range scienceProbeContexts {
 		reports = append(reports, scienceProbeReport{Context: ctx, Timezone: identity.Timezone, Offset: offset, Language: identity.Language, Languages: identity.Languages, UserAgent: identity.UserAgent, Platform: identity.Platform, UAPlatform: &platform})
 	}
+	none := 0
+	reports[0].RTC = &none
 	return reports
 }
 

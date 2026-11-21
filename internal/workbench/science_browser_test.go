@@ -338,6 +338,15 @@ var scienceRefusedFrames = map[string]bool{
 var scienceHostEnv = []string{"TZ=America/Los_Angeles", "LANG=fr_FR.UTF-8", "LC_ALL=fr_FR.UTF-8"}
 
 func TestScienceBrowserExfiltration(t *testing.T) {
+	// What the shell applies today, and the same with Chromium's network
+	// prediction turned off (the preference that ends the preconnect).
+	t.Run("shell backstop", func(t *testing.T) { runScienceExfiltration(t, nil) })
+	t.Run("network prediction off", func(t *testing.T) {
+		runScienceExfiltration(t, map[string]any{"net": map[string]any{"network_prediction_options": 2}})
+	})
+}
+
+func runScienceExfiltration(t *testing.T, preferences map[string]any) {
 	env := newTestScienceFront(t)
 	canary := newScienceCanary(t)
 	proxyPort, proxied := newScienceCanaryProxy(t)
@@ -350,7 +359,7 @@ func TestScienceBrowserExfiltration(t *testing.T) {
 	env.daemon.assets["/assets/blank.html"] = "<!doctype html><title>blank</title>"
 	env.daemon.assets["/assets/sw.js"] = "self.onfetch = () => {};"
 
-	browser := launchTestBrowser(t, scienceHostEnv, append(scienceBackstopArgs(proxyPort), "--lang=fr-FR")...)
+	browser := launchTestBrowserWithPreferences(t, preferences, scienceHostEnv, append(scienceBackstopArgs(proxyPort), "--lang=fr-FR")...)
 	session := browser.page(t)
 	browser.armIdentity(t, session, testScienceIdentity, true)
 	blockedNavigations := browser.emulateFramePolicy(t, session, workbenchOrigin, env.front.origin)
@@ -417,6 +426,10 @@ func TestScienceBrowserExfiltration(t *testing.T) {
 	// local connection). No request is ever sent through it.
 	for _, line := range pageRequests(proxied()) {
 		fields := strings.Fields(strings.TrimPrefix(line, "connection: "))
+		if preferences != nil {
+			t.Errorf("connection to the backstop with prediction off: %q", line)
+			continue
+		}
 		if len(fields) == 0 {
 			continue
 		}
@@ -433,7 +446,11 @@ func TestScienceBrowserExfiltration(t *testing.T) {
 			t.Errorf("loopback canary got a request: %q", hit)
 		}
 	}
-	if len(hits) > 2 || canary.packets.Load() != 0 {
+	limit := 2 // the two refused loopback frames
+	if preferences != nil {
+		limit = 0
+	}
+	if len(hits) > limit || canary.packets.Load() != 0 {
 		t.Errorf("loopback canary reached: %q, %d datagrams", hits, canary.packets.Load())
 	}
 	if workbenchOther.Load() != 0 {
@@ -488,14 +505,17 @@ func TestScienceBrowserExfiltration(t *testing.T) {
 
 func TestScienceBrowserIdentityProbe(t *testing.T) {
 	cases := []struct {
-		name    string
-		arm     bool
-		workers bool
-		pass    bool
+		name     string
+		arm      bool
+		workers  bool
+		backstop bool
+		pass     bool
+		reason   string
 	}{
-		{"no overrides", false, false, false},
-		{"page overrides without workers", true, false, false},
-		{"the shell's overrides", true, true, true},
+		{"no overrides", false, false, true, false, "时区"},
+		{"page overrides without workers", true, false, true, false, "后台线程"},
+		{"the shell's overrides without the backstop", true, true, false, false, "WebRTC"},
+		{"the shell's overrides", true, true, true, true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,7 +525,11 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 				return env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
 			})
 			env.front.hooks.ancestor = func() string { return workbenchOrigin }
-			browser := launchTestBrowser(t, scienceHostEnv, append(scienceBackstopArgs(proxyPort), "--lang=fr-FR")...)
+			args := []string{"--lang=fr-FR", "--disable-shared-workers"}
+			if tc.backstop {
+				args = append(scienceBackstopArgs(proxyPort), "--lang=fr-FR")
+			}
+			browser := launchTestBrowser(t, scienceHostEnv, args...)
 			session := browser.page(t)
 			if tc.arm {
 				browser.armIdentity(t, session, testScienceIdentity, tc.workers)
@@ -519,7 +543,7 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 			})
 			state := env.front.snapshot()
 			t.Logf("session=%v refused=%q", state.Session, state.Refused)
-			if state.Session != tc.pass {
+			if state.Session != tc.pass || !strings.Contains(state.Refused, tc.reason) {
 				t.Fatalf("session %v, want %v (%s)", state.Session, tc.pass, state.Refused)
 			}
 			if tc.pass {

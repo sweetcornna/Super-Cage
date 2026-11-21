@@ -129,11 +129,27 @@ var devToolsListening = regexp.MustCompile(`DevTools listening on (ws://\S+)`)
 // time; the tests using it are not parallel) and stops it by its own PID.
 func launchTestBrowser(t *testing.T, env []string, args ...string) *testBrowser {
 	t.Helper()
+	return launchTestBrowserWithPreferences(t, nil, env, args...)
+}
+
+// launchTestBrowserWithPreferences seeds the profile's Preferences file
+// first (the WebView2 user data folder has the same file).
+func launchTestBrowserWithPreferences(t *testing.T, preferences map[string]any, env []string, args ...string) *testBrowser {
+	t.Helper()
 	path := os.Getenv("CAGE_TEST_BROWSER_PATH")
 	if path == "" {
 		t.Skip("CAGE_TEST_BROWSER_PATH is not set")
 	}
 	profile := t.TempDir()
+	if preferences != nil {
+		data, _ := json.Marshal(preferences)
+		if err := os.MkdirAll(profile+"/Default", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(profile+"/Default/Preferences", data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	netLog := profile + "/netlog.json"
 	base := []string{
 		"--headless=new", "--remote-debugging-port=0", "--user-data-dir=" + profile,
@@ -250,13 +266,21 @@ func scienceWorkerCalls(identity scienceIdentity) []cdpCall {
 	}
 }
 
+// scienceUserAgentParams: ua_metadata in the control file already has the
+// CDP UserAgentMetadata shape; the shell passes it through.
 func scienceUserAgentParams(identity scienceIdentity) map[string]any {
-	metadata := map[string]any{
-		"brands": identity.Metadata.Brands, "fullVersionList": identity.Metadata.FullVersionList,
-		"platform": identity.Metadata.Platform, "platformVersion": "", "architecture": identity.Metadata.Architecture,
-		"model": "", "mobile": false, "bitness": identity.Metadata.Bitness,
+	return map[string]any{"userAgent": identity.UserAgent, "acceptLanguage": identity.AcceptLanguage, "platform": identity.Platform, "userAgentMetadata": identity.Metadata}
+}
+
+// scienceDisarmCalls clears the page-level overrides and stops attaching to
+// new workers.
+func scienceDisarmCalls() []cdpCall {
+	return []cdpCall{
+		{"Target.setAutoAttach", map[string]any{"autoAttach": false, "waitForDebuggerOnStart": false, "flatten": true}},
+		{"Emulation.setTimezoneOverride", map[string]any{"timezoneId": ""}},
+		{"Emulation.setLocaleOverride", map[string]any{}},
+		{"Emulation.setUserAgentOverride", map[string]any{"userAgent": ""}},
 	}
-	return map[string]any{"userAgent": identity.UserAgent, "acceptLanguage": identity.AcceptLanguage, "platform": identity.Platform, "userAgentMetadata": metadata}
 }
 
 // scienceBenignOverrideError: the locale override is renderer-process wide,

@@ -116,6 +116,43 @@ type scienceFront struct {
 	audit    *scienceAudit
 	state    scienceFrontState
 	signing  time.Time
+	// In-flight proxied requests (sockets and streams included) and the end
+	// of the last one: an idle front forgets the daemon credential.
+	active     int
+	lastActive time.Time
+}
+
+// scienceIdleDrop is how long an idle front keeps the daemon credential. The
+// session survives: the next request mints a new one.
+const scienceIdleDrop = 2 * time.Minute
+
+func (f *scienceFront) begin() {
+	f.mu.Lock()
+	f.active++
+	f.mu.Unlock()
+}
+
+func (f *scienceFront) end() {
+	f.mu.Lock()
+	f.active--
+	f.lastActive = f.now()
+	f.mu.Unlock()
+}
+
+// dropIdle forgets the daemon credential when nothing has used it for
+// scienceIdleDrop.
+func (f *scienceFront) dropIdle() bool {
+	f.mu.Lock()
+	upstream := f.upstream
+	idle := upstream != nil && f.active == 0 && f.now().Sub(f.lastActive) > scienceIdleDrop
+	if idle {
+		f.upstream = nil
+	}
+	f.mu.Unlock()
+	if idle {
+		upstream.close()
+	}
+	return idle
 }
 
 // scienceFrontState is what the pane may learn (status host_render fields).
@@ -462,6 +499,8 @@ func (f *scienceFront) upstreamFor() (*scienceUpstream, error) {
 }
 
 func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current scienceTicket) {
+	f.begin()
+	defer f.end()
 	body, code, err := readScienceBody(r, scienceBodyLimit)
 	if err != nil {
 		if code == 0 {

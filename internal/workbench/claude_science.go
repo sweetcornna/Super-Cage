@@ -412,6 +412,9 @@ func (s *Server) claudeScienceAction(w http.ResponseWriter, r *http.Request) {
 	case "ticket":
 		s.scienceTicketAction(w, r)
 		return
+	case "release":
+		s.scienceReleaseAction(w, r)
+		return
 	case "install", "update", "start", "stop", "open":
 	default:
 		http.NotFound(w, r)
@@ -426,6 +429,10 @@ func (s *Server) claudeScienceAction(w http.ResponseWriter, r *http.Request) {
 	if input.Fresh && action != "open" {
 		http.Error(w, "请求格式无效", http.StatusBadRequest)
 		return
+	}
+	if action == "stop" || action == "update" {
+		// The daemon goes away: so do the frame's session and credential.
+		s.resetScienceFront()
 	}
 	if state, refused := s.claudeScienceUnsupported(); refused {
 		http.Error(w, state.UnsupportedReason, http.StatusConflict)

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/webfront"
 )
 
 func withScienceHostOS(t *testing.T, goos string) {
@@ -109,6 +110,8 @@ var scienceRequestShapes = []requestShape{
 	{name: "phone link write", method: "POST", path: "/api/claude-science/nope"},
 	{name: "tenant gateway", method: "GET", path: "/api/settings", headers: map[string]string{"Sec-Fetch-Site": "same-origin", "X-Forwarded-For": "10.0.0.2"}},
 	{name: "static page", method: "GET", path: "/", headers: map[string]string{"Sec-Fetch-Site": "none"}},
+	{name: "page session renewal", method: "POST", path: "/api/session", headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, cookies: []string{}},
+	{name: "Go client bootstrap", method: "POST", path: "/api/launch", cookies: []string{}},
 }
 
 func shapeCodes(s *Server) map[string]int {
@@ -414,5 +417,159 @@ func TestScienceTicketRoute(t *testing.T) {
 	s.account.lock()
 	if w := ticket(true, host); w.Code != http.StatusLocked {
 		t.Fatalf("ticket while locked: %d", w.Code)
+	}
+}
+
+// liveScienceFront gives a running front a session and a credential, as
+// after a frame opened it.
+func liveScienceFront(t *testing.T, s *Server) (*scienceFront, *fakeScienceDaemon) {
+	t.Helper()
+	front := s.scienceFrontRunning()
+	daemon := newFakeScienceDaemon(t)
+	upstream := newScienceUpstream(tcpDialer{address: strings.TrimPrefix(daemon.server.URL, "http://")}, 47800, daemon.link)
+	if _, err := upstream.token(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	epoch, unlocked := s.account.accessFor(true, false)
+	if !unlocked {
+		t.Fatal("locked")
+	}
+	front.mu.Lock()
+	front.upstream, front.session, front.current = upstream, webfront.Secret(32), scienceTicket{epoch: epoch, identity: testScienceIdentity}
+	front.state.Session = true
+	front.mu.Unlock()
+	return front, daemon
+}
+
+func frontCleared(front *scienceFront) bool {
+	front.mu.Lock()
+	defer front.mu.Unlock()
+	return front.upstream == nil && front.session == ""
+}
+
+func TestScienceFrontDropsTheCredential(t *testing.T) {
+	old := scienceWatchInterval
+	scienceWatchInterval = 10 * time.Millisecond
+	t.Cleanup(func() { scienceWatchInterval = old })
+	start := func(t *testing.T) *Server {
+		s := scienceWorkload(t)
+		running := true
+		s.scienceHost.vmRunning = func() bool { return running }
+		s.preferences.ScienceHostRender = true
+		s.scienceLast.set(&claudeScienceState{Installed: true, Running: true, Ready: true, StartedAt: "1"})
+		s.syncScienceFront()
+		return s
+	}
+	t.Run("account lock", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		s.account.lock()
+		waitFor(t, 5*time.Second, "the reset", func() bool { return frontCleared(front) })
+		if !strings.Contains(front.snapshot().Refused, "锁定") {
+			t.Fatal(front.snapshot().Refused)
+		}
+	})
+	t.Run("environment stop", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		s.scienceHost.vmRunning = func() bool { return false }
+		waitFor(t, 5*time.Second, "the reset", func() bool { return frontCleared(front) })
+	})
+	t.Run("daemon restart", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		time.Sleep(50 * time.Millisecond) // the watchdog has seen started_at 1
+		if frontCleared(front) {
+			t.Fatal("reset without a reason")
+		}
+		s.scienceLast.set(&claudeScienceState{Installed: true, Running: true, Ready: true, StartedAt: "2"})
+		waitFor(t, 5*time.Second, "the reset", func() bool { return frontCleared(front) })
+	})
+	t.Run("daemon stopped", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		s.scienceLast.set(&claudeScienceState{Installed: true})
+		waitFor(t, 5*time.Second, "the reset", func() bool { return frontCleared(front) })
+	})
+	t.Run("stop and update actions", func(t *testing.T) {
+		for _, action := range []string{"stop", "update"} {
+			s := start(t)
+			front, _ := liveScienceFront(t, s)
+			// The job itself needs a real environment; the reset comes first.
+			(requestShape{method: "POST", path: "/api/claude-science/" + action, trusted: true}).send(s)
+			if !frontCleared(front) {
+				t.Fatalf("%s kept the credential", action)
+			}
+		}
+	})
+	t.Run("pane released", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true}).send(s); w.Code != http.StatusNoContent {
+			t.Fatalf("release: %d", w.Code)
+		}
+		if !frontCleared(front) {
+			t.Fatal("release kept the credential")
+		}
+	})
+	t.Run("idle", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		now := time.Now()
+		front.mu.Lock()
+		front.now = func() time.Time { return now.Add(scienceIdleDrop + time.Second) }
+		front.lastActive = now
+		front.mu.Unlock()
+		waitFor(t, 5*time.Second, "the idle drop", func() bool {
+			front.mu.Lock()
+			defer front.mu.Unlock()
+			return front.upstream == nil
+		})
+		front.mu.Lock()
+		session := front.session
+		front.mu.Unlock()
+		if session == "" {
+			t.Fatal("idle ended the session too")
+		}
+	})
+	t.Run("busy is not idle", func(t *testing.T) {
+		s := start(t)
+		front, _ := liveScienceFront(t, s)
+		front.begin()
+		now := time.Now()
+		front.mu.Lock()
+		front.now = func() time.Time { return now.Add(time.Hour) }
+		front.mu.Unlock()
+		time.Sleep(60 * time.Millisecond)
+		front.mu.Lock()
+		kept := front.upstream != nil
+		front.mu.Unlock()
+		front.end()
+		if !kept {
+			t.Fatal("an open socket lost its credential")
+		}
+	})
+}
+
+func TestScienceEntryKeepsTheSwitchLocal(t *testing.T) {
+	workload := scienceWorkload(t)
+	entry := scienceEntry(t, workload)
+	for _, path := range []string{"/api/claude-science/host-render", "/api/claude-science/ticket"} {
+		r := httptest.NewRequest("POST", entry.origin+path, strings.NewReader("{}"))
+		// No local environment is selected in this entry fixture: as for a
+		// remote host, the entry answers itself.
+		if !entry.scienceEntryRefuses(httptest.NewRecorder(), r) {
+			t.Fatalf("%s forwarded without a local selection", path)
+		}
+	}
+	for _, path := range []string{"/api/claude-science", "/api/claude-science/release", "/api/claude-science/open"} {
+		r := httptest.NewRequest("POST", entry.origin+path, strings.NewReader("{}"))
+		if entry.scienceEntryRefuses(httptest.NewRecorder(), r) {
+			t.Fatalf("%s refused", path)
+		}
+	}
+	// A workload never refuses here.
+	if workload.scienceEntryRefuses(httptest.NewRecorder(), httptest.NewRequest("POST", workload.origin+"/api/claude-science/ticket", nil)) {
+		t.Fatal("workload refused")
 	}
 }

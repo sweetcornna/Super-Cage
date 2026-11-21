@@ -468,7 +468,7 @@ func (u *scienceUpstream) exchange(ctx context.Context) (string, error) {
 	}
 	parsed, err := url.Parse(link)
 	nonce := ""
-	if err == nil {
+	if err == nil && parsed.Port() == strconv.Itoa(u.port) {
 		nonce = parsed.Query().Get("nonce")
 	}
 	if nonce == "" {

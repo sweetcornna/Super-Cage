@@ -149,6 +149,12 @@ Host other
 	if endpoint.Address != "127.0.0.1:60022" || endpoint.User != "me" || len(endpoint.Identities) != 1 || endpoint.Identities[0] != "/home/me/.lima/_config/user" || endpoint.Strict || endpoint.KnownHosts != "/dev/null" {
 		t.Fatalf("%+v", endpoint)
 	}
+	// limactl on Windows: quoted drive paths and NUL.
+	windows := []byte("Host lima-cage\r\n  IdentityFile \"C:\\Users\\me\\.lima\\_config\\user\"\r\n  StrictHostKeyChecking no\r\n  UserKnownHostsFile NUL\r\n  User me\r\n  Hostname 127.0.0.1\r\n  Port 50022\r\n")
+	endpoint, err = parseSSHConfig(windows, "lima-cage")
+	if err != nil || endpoint.Address != "127.0.0.1:50022" || endpoint.Identities[0] != `C:\Users\me\.lima\_config\user` || endpoint.KnownHosts != "NUL" || endpoint.Strict {
+		t.Fatalf("Windows config: %+v %v", endpoint, err)
+	}
 	if _, err = parseSSHConfig(config, "lima-missing"); err == nil {
 		t.Fatal("missing host accepted")
 	}

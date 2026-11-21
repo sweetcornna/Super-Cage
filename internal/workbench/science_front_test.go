@@ -177,6 +177,8 @@ func TestScienceProbeDecidesTheCookie(t *testing.T) {
 		"host platform in a worker": func(r []scienceProbeReport) { r[2].Platform = "Win32" },
 		"shared worker available":   func(r []scienceProbeReport) { r[0].SharedWorker = true },
 		"missing context":           func(r []scienceProbeReport) { r[3].Context = "main" },
+		"WebRTC candidates":         func(r []scienceProbeReport) { two := 2; r[0].RTC = &two },
+		"WebRTC unmeasured":         func(r []scienceProbeReport) { r[0].RTC = nil },
 	}
 	for name, change := range cases {
 		reports := goodProbeReports(testScienceIdentity)

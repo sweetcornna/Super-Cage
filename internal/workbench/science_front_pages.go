@@ -47,10 +47,27 @@ func scienceProbeJS() string {
 	source, _ := json.Marshal(scienceProbeReportJS + "postMessage(report(\"blob\"));\n")
 	return "\"use strict\";\n" + scienceProbeReportJS + `const status = document.getElementById("status");
 const reports = [report("main")];
+// The shell restricts WebRTC to the (dead) proxy: no candidate may appear.
+const rtc = (async () => {
+  if (typeof RTCPeerConnection !== "function") return -1;
+  const peer = new RTCPeerConnection({ iceServers: [] });
+  let count = 0;
+  peer.onicecandidate = (event) => { if (event.candidate && event.candidate.candidate) count++; };
+  peer.createDataChannel("probe");
+  await peer.setLocalDescription(await peer.createOffer());
+  await new Promise((resolve) => {
+    if (peer.iceGatheringState === "complete") resolve();
+    peer.onicegatheringstatechange = () => { if (peer.iceGatheringState === "complete") resolve(); };
+    setTimeout(resolve, 2000);
+  });
+  peer.close();
+  return count;
+})().catch(() => -2);
 let sent = false;
 const send = async () => {
   if (sent) return;
   sent = true;
+  reports[0].rtc = await rtc;
   try {
     const response = await fetch("/_cage/probe", {
       method: "POST", credentials: "same-origin", cache: "no-store", redirect: "error",

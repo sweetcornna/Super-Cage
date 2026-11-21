@@ -208,6 +208,10 @@ type scienceProbeReport struct {
 	Platform     string   `json:"platform"`
 	UAPlatform   *string  `json:"ua_platform"`
 	SharedWorker bool     `json:"shared_worker"`
+	// RTC (main context only) is the number of ICE candidates the page could
+	// gather: 0 when the shell's WebRTC restriction is in force, -1 when
+	// there is no RTCPeerConnection. Anything else fails the probe.
+	RTC *int `json:"rtc,omitempty"`
 }
 
 var scienceProbeContexts = []string{"main", "nested", "dedicated", "blob"}
@@ -250,7 +254,9 @@ func checkScienceProbe(guest scienceIdentity, reports []scienceProbeReport, now 
 		case report.UAPlatform != nil && *report.UAPlatform != guest.Metadata.Platform:
 			return label + "的 Client Hints 平台不是环境的"
 		case report.SharedWorker:
-			return label + "仍可创建共享 Worker，其时区与语言无法替换"
+			return label + "仍可创建共享后台线程，其时区与语言无法替换"
+		case name == "main" && (report.RTC == nil || (*report.RTC != 0 && *report.RTC != -1)):
+			return "页面仍能直接建立网络连接（WebRTC），本机渲染需要的网络限制没有生效"
 		}
 	}
 	return ""
