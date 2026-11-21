@@ -182,6 +182,20 @@ export class DownloadManager {
     });
   }
 
+  // Forgets finished records changed since a time, with their staging copies
+  // in the guest; saved files stay where they were saved.
+  forget(since = 0) {
+    let changed = false;
+    for (const [id, record] of this.records) {
+      if (!terminalStates.has(record.state) || !(Date.parse(record.updatedAt || 0) >= since)) continue;
+      this.records.delete(id);
+      try { unlinkSync(join(this.directory, "Downloads", id)); } catch {}
+      changed = true;
+    }
+    if (changed) { this.persist(); this.changed(); }
+    return changed;
+  }
+
   snapshot() {
     return [...this.records.values()].reverse().map(({ sourceReady, ...record }) => record);
   }
