@@ -74,6 +74,18 @@ func TestScienceDaemonContract(t *testing.T) {
 	if r := get("/api/projects", false); r.StatusCode != http.StatusUnauthorized && r.StatusCode != http.StatusForbidden {
 		t.Errorf("an API call without the bearer: %d (the fake answers 401)", r.StatusCode)
 	}
+	// The front reads a 401 as "the bearer was refused" and mints again, at
+	// most scienceMintCap times before ending the session (F10). A daemon
+	// that answers 401 to a valid bearer for another reason (a signed-out
+	// account, say) would end every session: run this both signed in and
+	// signed out.
+	for _, path := range []string{"/api/auth/status", "/api/projects"} {
+		if r := get(path, true); r.StatusCode == http.StatusUnauthorized {
+			t.Errorf("%s answers 401 to a valid bearer: the front would end the session (F10)", path)
+		} else {
+			t.Logf("%s with the bearer: %d", path, r.StatusCode)
+		}
+	}
 	// The document: HTML, a nonce-based CSP the front merges, the cookies
 	// the front holds for the page.
 	document := get("/", true)

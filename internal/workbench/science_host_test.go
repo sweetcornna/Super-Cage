@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -587,10 +588,12 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 	old := scienceWatchInterval
 	scienceWatchInterval = 10 * time.Millisecond
 	t.Cleanup(func() { scienceWatchInterval = old })
+	// stopped reads as the environment stopping (the watchdog reads it).
+	var stopped atomic.Bool
 	start := func(t *testing.T) *Server {
 		s := scienceWorkload(t)
-		running := true
-		s.scienceHost.vmRunning = func() bool { return running }
+		stopped.Store(false)
+		s.scienceHost.vmRunning = func() bool { return !stopped.Load() }
 		s.preferences.ScienceHostRender = true
 		s.scienceLast.set(&claudeScienceState{Installed: true, Running: true, Ready: true, StartedAt: "1"})
 		s.syncScienceFront()
@@ -608,7 +611,7 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 	t.Run("environment stop", func(t *testing.T) {
 		s := start(t)
 		front, _ := liveScienceFront(t, s)
-		s.scienceHost.vmRunning = func() bool { return false }
+		stopped.Store(true)
 		waitFor(t, 5*time.Second, "the reset", func() bool { return frontCleared(front) })
 	})
 	t.Run("daemon restart", func(t *testing.T) {

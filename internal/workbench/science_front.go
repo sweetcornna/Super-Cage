@@ -420,10 +420,7 @@ func (f *scienceFront) reset(reason string) {
 	f.upstream, f.session, f.current, f.audit, f.jar = nil, "", scienceTicket{}, nil, scienceJar{}
 	clear(f.issued)
 	clear(f.checking)
-	// Requests and sockets of the old generation end with it (F9).
-	f.cancel()
-	f.generation++
-	f.done, f.cancel = context.WithCancel(context.Background())
+	f.endGenerationLocked()
 	f.state.Session, f.state.Audit = false, scienceAuditDistinct{}
 	if reason != "" {
 		now := f.now()
@@ -433,6 +430,14 @@ func (f *scienceFront) reset(reason string) {
 	if upstream != nil {
 		upstream.close()
 	}
+}
+
+// endGenerationLocked ends the requests and sockets of the current
+// generation and starts the next (F9). f.mu is held.
+func (f *scienceFront) endGenerationLocked() {
+	f.cancel()
+	f.generation++
+	f.done, f.cancel = context.WithCancel(context.Background())
 }
 
 // resetGeneration resets only if no reset happened since generation.
@@ -1112,8 +1117,10 @@ func (f *scienceFront) enter(w http.ResponseWriter, r *http.Request, label strin
 		return
 	}
 	upstream := f.upstream
-	// A new entry ends the session of any earlier document.
+	// A new entry ends the session of any earlier document, with its
+	// requests and sockets.
 	f.session, f.current, f.audit, f.jar, f.upstream = "", scienceTicket{}, nil, scienceJar{}, nil
+	f.endGenerationLocked()
 	f.state.Session = false
 	clear(f.checking)
 	f.checking[label] = scienceProbeSession{scienceTicket: entry.scienceTicket, expires: f.now().Add(scienceProbeLife)}

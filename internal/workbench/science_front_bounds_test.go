@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -75,6 +77,47 @@ func TestScienceResetBeatsAnInFlightRequest(t *testing.T) {
 	}
 }
 
+// F9: a new entry ends the earlier session's generation as reset does: a
+// request of the earlier session that is already past its session check
+// gets no upstream.
+func TestScienceReEntryBeatsAnInFlightRequest(t *testing.T) {
+	env := newTestScienceFront(t)
+	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
+	var entered atomic.Int32
+	env.front.mu.Lock()
+	original := env.front.hooks.upstream
+	env.front.hooks.upstream = func() (*scienceUpstream, error) {
+		if entered.Add(1) == 1 {
+			// Another document enters between the request's session check
+			// and its upstream.
+			entry, _ := url.Parse(env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()}))
+			label := scienceLabelHost.FindStringSubmatch(entry.Host)[1]
+			request := httptest.NewRequest(http.MethodPost, "/_cage/enter", strings.NewReader("{}"))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			env.front.enter(recorder, request, label)
+			if recorder.Code != http.StatusNoContent {
+				t.Errorf("second entry: %d", recorder.Code)
+			}
+		}
+		return original()
+	}
+	env.front.mu.Unlock()
+	before := len(env.daemon.seen())
+	if r := env.do(t, client, "GET", "/api/auth/status", "", "", nil); r.StatusCode == http.StatusOK {
+		t.Fatal("forwarded after another entry")
+	}
+	for _, request := range env.daemon.seen()[before:] {
+		t.Errorf("the daemon saw %s %s after another entry", request.Method, request.Path)
+	}
+	env.front.mu.Lock()
+	upstream := env.front.upstream
+	env.front.mu.Unlock()
+	if upstream != nil {
+		t.Fatal("the earlier session's request made an upstream")
+	}
+}
+
 // F10: a daemon that refuses every credential costs a few exchanges, not one
 // per request, and then the session ends with a reason.
 func TestScienceRefusedCredentialEndsTheSession(t *testing.T) {
@@ -138,8 +181,12 @@ func TestScienceWatchdogSleepsWithoutASession(t *testing.T) {
 // bytes unchanged, and a host value in it is reported, not refused.
 func TestScienceSocketAuditStreams(t *testing.T) {
 	audit := newScienceAudit(testHostIdentity(), testScienceIdentity, time.Now())
-	payload := bytes.Repeat([]byte("a"), 16<<20)
-	copy(payload[8<<20-5:], "America/Los_Angeles")
+	size := 16 << 20
+	if scienceRaceDetector {
+		size = 2 << 20
+	}
+	payload := bytes.Repeat([]byte("a"), size)
+	copy(payload[size/2-5:], "America/Los_Angeles")
 	frame := maskedFrame(0x2, payload)
 	var hits atomic.Int32
 	var out countingWriter
@@ -156,14 +203,14 @@ func TestScienceSocketAuditStreams(t *testing.T) {
 	}
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
-	t.Logf("16 MiB frame: %d KiB allocated by the audit (provisional)", allocated>>10)
+	t.Logf("%d MiB frame: %d KiB allocated by the audit (provisional)", size>>20, allocated>>10)
 	if out.n != int64(len(frame)) || !bytes.Equal(out.head, frame[:len(out.head)]) {
 		t.Fatalf("forwarded %d of %d bytes", out.n, len(frame))
 	}
 	if hits.Load() != 1 {
 		t.Fatalf("hits %d", hits.Load())
 	}
-	if allocated > 1<<20 {
+	if allocated > 1<<20 && !scienceRaceDetector {
 		t.Fatalf("the audit allocated %d KiB for one frame", allocated>>10)
 	}
 }

@@ -366,6 +366,17 @@ func (s *scienceShell) run(actions []scienceAction) {
 			}
 		}
 	}
+	// The origins to clear are the ones framed when the page detach was
+	// produced: an attach that follows adds its own for the next one.
+	var origins map[string]bool
+	for _, action := range actions {
+		if action.Session == "" && action.Call.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"] == false {
+			s.mu.Lock()
+			origins, s.origins = s.origins, map[string]bool{}
+			s.mu.Unlock()
+			break
+		}
+	}
 	proceed := false
 	for _, action := range actions {
 		if action.End {
@@ -414,22 +425,14 @@ func (s *scienceShell) run(actions []scienceAction) {
 		}(session, bySession[session])
 	}
 	wg.Wait()
-	for _, action := range actions {
-		if action.Session == "" && action.Call.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"] == false {
-			s.mu.Lock()
-			origins := s.origins
-			s.origins = map[string]bool{}
-			s.mu.Unlock()
-			for origin := range origins {
-				for _, call := range scienceClearOriginCalls(origin, s.site) {
-					err := s.browser.call(s.page, call.Method, call.Params, nil)
-					if scienceShellTrace {
-						s.t.Logf("%s %s: %v", call.Method, origin, err)
-					}
-				}
-				s.cleared.Add(1)
+	for origin := range origins {
+		for _, call := range scienceClearOriginCalls(origin, s.site) {
+			err := s.browser.call(s.page, call.Method, call.Params, nil)
+			if scienceShellTrace {
+				s.t.Logf("%s %s: %v", call.Method, origin, err)
 			}
 		}
+		s.cleared.Add(1)
 	}
 	if proceed {
 		s.mu.Lock()
