@@ -62,9 +62,9 @@ type Facts struct {
 	InputIdle      time.Duration
 	InputIdleKnown bool
 	// Host is the host's power and display state; nil when unreadable.
-	Host *HostState
-	PublishedAt    string
-	Now            time.Time
+	Host        *HostState
+	PublishedAt string
+	Now         time.Time
 	// SilentUnavailable is non-empty when this installation cannot be
 	// updated unattended (no publisher to pin, system package, elevation).
 	SilentUnavailable string
