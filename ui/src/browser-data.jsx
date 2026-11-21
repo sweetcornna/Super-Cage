@@ -107,7 +107,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
     setPhase("clearing"); setError("");
     try {
       // A preset (history's 按时间清除…) is a one-off and leaves the saved defaults alone.
-      const value = await runJob({ mode: "clear", session, range: effectiveRange, types: chosen, keepEnabled, remember: !isPrivate && !preset }, setStep);
+      const value = await runJob({ mode: "clear", session, range: effectiveRange, types: chosen, ...(keepEnabled ? {} : { protect: "none" }), remember: !isPrivate && !preset }, setStep);
       setResult(value); setPhase("done");
     } catch (failure) { setError(failure.message); setPhase("edit"); }
   };

@@ -26,7 +26,7 @@ const settings = { defaults: { range: "day", types: ["history", "site", "cache"]
 const requests = [];
 // What internal/workbench/browser_data.go does before the guest sees a request,
 // including its refusal of fields it does not know.
-const fields = ["mode", "session", "range", "since", "types", "keepEnabled", "keep", "sites", "site", "key", "action", "query", "sort", "page", "before", "limit", "urls", "host", "start", "end", "id", "remember"];
+const fields = ["mode", "session", "range", "since", "types", "protect", "keep", "sites", "site", "key", "action", "query", "sort", "page", "before", "limit", "urls", "host", "start", "end", "id", "remember"];
 const settingsFields = ["action", "domain", "range", "types", "enabled", "trigger", "days"];
 const strict = (body, known) => { const extra = Object.keys(body || {}).filter(name => !known.includes(name)); if (extra.length) throw new Error("请求格式无效: " + extra.join(",")); };
 const dataRoute = body => {
@@ -34,7 +34,7 @@ const dataRoute = body => {
   const input = { ...body };
   if (input.range) { input.since = windows[input.range] ? Date.now() - windows[input.range] : 0; delete input.range; }
   if (input.mode === "clear") {
-    input.keep = settings.keep.map(entry => entry.domain); input.keepEnabled = body.keepEnabled !== false;
+    input.keep = settings.keep.map(entry => entry.domain); input.keepEnabled = body.protect !== "none"; delete input.protect;
     if (body.remember) settings.defaults = { range: body.range, types: body.types };
     delete input.remember;
   }

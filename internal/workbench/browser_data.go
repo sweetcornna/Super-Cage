@@ -44,28 +44,28 @@ var (
 )
 
 type browserDataInput struct {
-	Mode        string   `json:"mode"`
-	Session     string   `json:"session,omitempty"`
-	Range       string   `json:"range,omitempty"`
-	Since       int64    `json:"since,omitempty"`
-	Types       []string `json:"types,omitempty"`
-	KeepEnabled *bool    `json:"keepEnabled,omitempty"`
-	Keep        []string `json:"keep,omitempty"`
-	Sites       []string `json:"sites,omitempty"`
-	Site        string   `json:"site,omitempty"`
-	Key         string   `json:"key,omitempty"`
-	Action      string   `json:"action,omitempty"`
-	Query       string   `json:"query,omitempty"`
-	Sort        string   `json:"sort,omitempty"`
-	Page        int      `json:"page,omitempty"`
-	Before      int64    `json:"before,omitempty"`
-	Limit       int      `json:"limit,omitempty"`
-	URLs        []string `json:"urls,omitempty"`
-	Host        string   `json:"host,omitempty"`
-	Start       int64    `json:"start,omitempty"`
-	End         int64    `json:"end,omitempty"`
-	ID          string   `json:"id,omitempty"`
-	Remember    bool     `json:"remember,omitempty"`
+	Mode     string   `json:"mode"`
+	Session  string   `json:"session,omitempty"`
+	Range    string   `json:"range,omitempty"`
+	Since    int64    `json:"since,omitempty"`
+	Types    []string `json:"types,omitempty"`
+	Protect  string   `json:"protect,omitempty"`
+	Keep     []string `json:"keep,omitempty"`
+	Sites    []string `json:"sites,omitempty"`
+	Site     string   `json:"site,omitempty"`
+	Key      string   `json:"key,omitempty"`
+	Action   string   `json:"action,omitempty"`
+	Query    string   `json:"query,omitempty"`
+	Sort     string   `json:"sort,omitempty"`
+	Page     int      `json:"page,omitempty"`
+	Before   int64    `json:"before,omitempty"`
+	Limit    int      `json:"limit,omitempty"`
+	URLs     []string `json:"urls,omitempty"`
+	Host     string   `json:"host,omitempty"`
+	Start    int64    `json:"start,omitempty"`
+	End      int64    `json:"end,omitempty"`
+	ID       string   `json:"id,omitempty"`
+	Remember bool     `json:"remember,omitempty"`
 }
 
 type browserKeptSite struct {
@@ -198,6 +198,10 @@ func (in *browserDataInput) validate(now time.Time) error {
 	if in.Sort != "" && in.Sort != "size" && in.Sort != "recent" && in.Sort != "name" {
 		return invalid
 	}
+	// "none" clears the kept sites and the built-in pages too.
+	if in.Protect != "" && (in.Mode != "clear" || (in.Protect != "kept" && in.Protect != "none")) {
+		return invalid
+	}
 	if in.Range != "" {
 		window, ok := browserDataRanges[in.Range]
 		if !ok {
@@ -278,7 +282,7 @@ func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]a
 			keep = append(keep, entry.Domain)
 		}
 		body["since"], body["types"], body["keep"] = in.Since, in.Types, keep
-		body["keepEnabled"] = in.KeepEnabled == nil || *in.KeepEnabled
+		body["keepEnabled"] = in.Protect != "none"
 	case "clear-sites":
 		body["sites"] = in.Sites
 	case "job":

@@ -142,7 +142,7 @@ func TestBrowserDataForwardsOnlyWhatTheGuestNeeds(t *testing.T) {
 	if settings.Defaults.Range != "day" || strings.Join(settings.Defaults.Types, ",") != "history,site" {
 		t.Fatalf("defaults not remembered: %+v", settings.Defaults)
 	}
-	w = request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["site"],"keepEnabled":false,"session":"private"}`, true)
+	w = request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["site"],"protect":"none","session":"private"}`, true)
 	if w.Code != 200 || calls()[1].Body["keepEnabled"] != false || calls()[1].Body["since"].(float64) != 0 || calls()[1].Body["session"] != "private" {
 		t.Fatalf("unticked keep or private session lost: %d %+v", w.Code, calls()[1].Body)
 	}
@@ -363,11 +363,11 @@ func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
 		post("/api/browser/data", body)
 	}
 	// The dialog: a week, keep off, remembered; then a preset that is not.
-	if reply := post("/api/browser/data", `{"mode":"clear","session":"normal","range":"week","types":["history","site","cache","downloads"],"keepEnabled":false,"remember":true}`); reply["job"].(map[string]any)["id"] != jobID {
+	if reply := post("/api/browser/data", `{"mode":"clear","session":"normal","range":"week","types":["history","site","cache","downloads"],"protect":"none","remember":true}`); reply["job"].(map[string]any)["id"] != jobID {
 		t.Fatalf("clear reply: %v", reply)
 	}
-	post("/api/browser/data", `{"mode":"clear","session":"normal","range":"hour","types":["history"],"keepEnabled":true,"remember":false}`)
-	post("/api/browser/data", `{"mode":"clear","session":"private","range":"all","types":["site","cache"],"keepEnabled":true,"remember":false}`)
+	post("/api/browser/data", `{"mode":"clear","session":"normal","range":"hour","types":["history"],"remember":false}`)
+	post("/api/browser/data", `{"mode":"clear","session":"private","range":"all","types":["site","cache"],"remember":false}`)
 	post("/api/browser/data", `{"mode":"clear-sites","session":"normal","sites":["github.com","127.0.0.1"]}`)
 	job := post("/api/browser/data", `{"mode":"job","id":"`+jobID+`"}`)["job"].(map[string]any)
 	result := job["result"].(map[string]any)
@@ -432,5 +432,29 @@ func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
 		if _, ok := auto[field]; !ok {
 			t.Fatalf("auto lacks %s: %v", field, auto)
 		}
+	}
+}
+
+// Through the agent transport the browser-data routes are open, except a
+// reset and a clear that ignores the kept list: those need the person.
+func TestAgentBodyRulesKeepResetAndUnprotectedClearsForThePerson(t *testing.T) {
+	refusal := func(body string) *AgentError {
+		if refused := agentRouteRefusal("POST", "/api/browser/data"); refused != nil {
+			return refused
+		}
+		return agentBodyRefusal(agentBodyRulesFor("POST", "/api/browser/data"), []byte(body))
+	}
+	for _, body := range []string{`{"mode":"reset"}`, `{"Mode":"reset"}`, `{"mode":"clear","types":["site"],"protect":"none"}`, `{"mode":"clear","PROTECT":"none"}`} {
+		if refused := refusal(body); refused == nil || refused.Code != "native_transport_required" || refused.NextAction != "open_desktop" {
+			t.Errorf("%s reached the handler: %+v", body, refused)
+		}
+	}
+	for _, body := range []string{`{"mode":"capabilities"}`, `{"mode":"clear","types":["site","cache"],"range":"day"}`, `{"mode":"clear","types":["history"],"protect":"kept"}`, `{"mode":"clear-sites","sites":["example.com"]}`} {
+		if refused := refusal(body); refused != nil {
+			t.Errorf("%s refused: %+v", body, refused)
+		}
+	}
+	if refused := agentRouteRefusal("POST", "/api/browser/data-settings"); refused != nil {
+		t.Errorf("data-settings refused: %+v", refused)
 	}
 }
