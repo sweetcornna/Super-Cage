@@ -371,6 +371,11 @@ size. POST accepts "apply": true (save, then restart a running environment).
   fail and the environment will not start under 0.1.15. Before rolling back a desktop install: set the
   allocation to automatic in settings (or delete <profile>/resource-limits.json), then install 0.1.15.
 - The "chosen" key is ignored by 0.1.15.
+- The manual range depends on the machine's role, which follows DISPLAY/WAYLAND_DISPLAY: a value saved by
+  a headless cage serve (dedicated) can be above the desktop app's range on the same machine. A saved value
+  outside the current range is clamped at start, never refused (review 2, R2-9): Limits() clamps,
+  LimitsNotice() says so (the API's notice, the Lima start log, cage setup's stderr), and the file is not
+  rewritten (the other role still reads it). Choosing a value checks the range (Validate()).
 
 ### 7.6 Level C as built (supersedes section 4 where they differ)
 Built (declarative or fail-open), in guest-services.sh, guest-memory.sh, guest.go, resource-governor.py:
@@ -492,10 +497,28 @@ first). lima.yaml is rewritten at every start by whichever version starts.
 Guest, persisted: /etc/systemd/system/cage-browser.slice, cage-resource-governor.service (enabled),
 /usr/local/lib/cage-resource-governor.py, changed cage-browser.service, cage-editor.service and
 /usr/local/bin/cage-memory-start. 0.1.15's component update rewrites the three changed files; it does not
-know the slice or the governor, which then keeps protecting system.slice/user.slice and limiting an empty
-cage-browser.slice (harmless). To remove them: sudo systemctl disable --now cage-resource-governor.service
-(its stop resets the limits); sudo rm -f /etc/systemd/system/cage-resource-governor.service
-/etc/systemd/system/cage-browser.slice /usr/local/lib/cage-resource-governor.py; sudo systemctl daemon-reload.
+know the slice or the governor, which keeps running. That is not harmless (review 2, R2-9): without a host
+agent sending limits the governor applies its own plan, so it keeps the browser limited (about 3/4 of the
+guest) on cage-browser.slice and, on Ubuntu guests, on the browser user's slice user.slice/user-<uid>.slice
+where snap Chromium runs, and keeps protecting system.slice, user.slice and the session user's slice.
+Remove it in the guest:
+  1. sudo systemctl disable --now cage-resource-governor.service
+     Its stop (SIGTERM, then ExecStopPost --reset) sets MemoryHigh=infinity, MemoryMax=infinity and
+     MemoryLow=0 on cage-browser.slice, system.slice, user.slice, the unit's two accounts' user slices and
+     every user-<uid>.slice holding a runtime memory setting, deletes those runtime drop-ins
+     (/run/systemd/system.control/<unit>.d/50-MemoryHigh.conf, 50-MemoryMax.conf, 50-MemoryLow.conf) and
+     removes /run/cage-resources.
+  2. sudo rm -f /etc/systemd/system/cage-resource-governor.service /etc/systemd/system/cage-browser.slice
+     /usr/local/lib/cage-resource-governor.py; sudo systemctl daemon-reload
+  3. Check: B=$(systemctl show -P User cage-browser.service); S=$(systemctl show -P User cage-editor.service);
+     systemctl show cage-browser.slice system.slice user.slice user-$(id -u "$B").slice user-$(id -u "$S").slice
+     -p MemoryHigh -p MemoryMax -p MemoryLow (infinity, infinity, 0 everywhere);
+     ls /run/systemd/system.control (no 50-Memory*.conf left by the governor); ls -d /run/cage-resources
+     (absent).
+  A governor installed before this fix (84012c5 up to review 2) resets the slices it finds but leaves the
+  runtime drop-ins, which then say infinity/0 (the defaults) until the next boot; to remove them at once:
+  sudo rm -f /run/systemd/system.control/{cage-browser,system,user}.slice.d/50-Memory{High,Max,Low}.conf
+  /run/systemd/system.control/user-*.slice.d/50-Memory{High,Max,Low}.conf (or reboot the guest).
 Guest, runtime (gone at reboot): /run/cage-resources, /run/systemd/system.control/*.d drop-ins, zram size,
 vm.swappiness.
 
