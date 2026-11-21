@@ -95,11 +95,18 @@ func Run(configPath string, args []string, output io.Writer) int {
 	emit()
 	metadata, finished := context.WithTimeout(ctx, metadataTimeout)
 	defer finished()
-	c, err := findRelease(metadata, client, version.Version)
+	c, releases, err := findRelease(metadata, client, version.Version)
 	if err != nil {
 		return fail(err)
 	}
 	if c == nil {
+		// A newer release without a package this platform may install in
+		// place is a manual update, never "already current".
+		if newer := available(nil, releases, version.Version, runtime.GOOS, runtime.GOARCH); newer != nil {
+			state.Phase, state.LatestVersion, state.Message = "manual", newer.Version, newer.Reason
+			emit()
+			return 0
+		}
 		state.Phase, state.Message = "current", "已是当前更新通道的最新版本"
 		emit()
 		return 0
@@ -273,20 +280,55 @@ func limitedBody(resp *http.Response, limit int64) ([]byte, error) {
 	return b, nil
 }
 
-func findRelease(ctx context.Context, client *http.Client, current string) (*candidate, error) {
+func findRelease(ctx context.Context, client *http.Client, current string) (*candidate, []release, error) {
 	resp, err := request(ctx, client, releasesURL)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	b, err := limitedBody(resp, maxMetadata)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var releases []release
 	if json.Unmarshal(b, &releases) != nil {
-		return nil, errors.New("更新源返回了无效的版本信息")
+		return nil, nil, errors.New("更新源返回了无效的版本信息")
 	}
-	return catalog.Select(releases, current, runtime.GOOS, runtime.GOARCH)
+	c, err := catalog.Select(releases, current, runtime.GOOS, runtime.GOARCH)
+	return c, releases, err
+}
+
+// Available is what one release check learned, for callers inside the
+// workbench. Installable is true only for a release Select accepts here.
+type Available struct {
+	Version     string
+	PublishedAt string
+	Installable bool
+	Reason      string
+}
+
+// CheckLatest makes the same single request as "cage app-update check" and
+// downloads nothing. It returns nil when no newer release is on the channel.
+func CheckLatest(ctx context.Context, configPath string) (*Available, error) {
+	client := updateClient(configPath)
+	defer client.CloseIdleConnections()
+	ctx, cancel := context.WithTimeout(ctx, metadataTimeout)
+	defer cancel()
+	c, releases, err := findRelease(ctx, client, version.Version)
+	if err != nil {
+		return nil, err
+	}
+	return available(c, releases, version.Version, runtime.GOOS, runtime.GOARCH), nil
+}
+
+func available(c *candidate, releases []release, current, goos, goarch string) *Available {
+	if c != nil {
+		return &Available{Version: c.Version, PublishedAt: c.PublishedAt, Installable: true}
+	}
+	newer, err := catalog.Latest(releases, current, goos, goarch)
+	if err != nil || newer == nil {
+		return nil
+	}
+	return &Available{Version: newer.Version, PublishedAt: newer.PublishedAt, Reason: newer.Reason}
 }
 
 func releaseDigest(ctx context.Context, client *http.Client, c candidate) (string, error) {
