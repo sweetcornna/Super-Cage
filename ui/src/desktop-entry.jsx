@@ -4,6 +4,7 @@ import {
   mountPhoneSwitch,
 } from "./entry-layout.mjs";
 import "./entry-layout.css";
+import "./touch.css";
 import React, { lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { installDiagnostics } from "./diagnostics.mjs";
@@ -32,7 +33,7 @@ window.cageNativeAction = (command) => {
 };
 createRoot(document.getElementById("root")).render(
   <DiagnosticBoundary>
-    <IconHints />
+    <IconHints focusVisibleOnly={matchMedia("(hover: none)").matches} />
     <ClientRoot>
       <Suspense
         fallback={

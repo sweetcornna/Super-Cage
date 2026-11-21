@@ -12,6 +12,7 @@ import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createPhoneFixture } from "./phone-fixture.mjs";
+import { createDesktopFixture } from "./desktop-fixture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STATIC = {
@@ -114,6 +115,7 @@ export async function startMockServer({
   phoneFixture = false,
 } = {}) {
   const phoneApi = phoneFixture ? createPhoneFixture() : null;
+  const desktopApi = phoneFixture ? createDesktopFixture() : null;
   const state = {
     users: new Map(), // username -> { id, username, salt, hash }
     sessions: new Map(), // token -> { id, userId, revoked }
@@ -455,6 +457,8 @@ export async function startMockServer({
       });
       if (url.pathname === "/api/account") return json(res, 200, { exists: true, unlocked: true, username: "fixture" });
       if (url.pathname === "/api/environment/initialization") return json(res, 200, { required: false });
+      const desktopReply = desktopApi?.(req.method, url.pathname);
+      if (desktopReply) return json(res, 200, desktopReply);
       if (url.pathname === "/api/status") return json(res, 200, { job: { running: false }, ready: false, projects: [] });
       if (url.pathname === "/api/browser/tabs") return json(res, 200, { tabs: [] });
       if (url.pathname.startsWith("/api/")) return json(res, 200, {});

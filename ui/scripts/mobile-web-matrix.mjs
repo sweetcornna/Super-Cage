@@ -64,8 +64,12 @@ const wanted = (name) => !screenFilter || screenFilter.some((part) => name.inclu
 
 // ---- in-page checks -------------------------------------------------------------------------------------------
 // Runs inside a document (top level or the workspace frame). Returns a list of failure strings.
-function inspect({ insets, keyboard }) {
+function inspect({ insets: notch, keyboard, touch }) {
   const failures = [];
+  // A page draws under the notch and the home bar only when it asks to (viewport-fit=cover); otherwise the
+  // browser keeps it inside the safe area (the desktop workbench).
+  const cover = /viewport-fit\s*=\s*cover/.test(document.querySelector('meta[name="viewport"]')?.content || "");
+  const insets = cover ? notch : { top: 0, right: 0, bottom: 0, left: 0 };
   const vv = window.visualViewport;
   const viewport = { width: vv ? vv.width : innerWidth, height: vv ? vv.height : innerHeight };
   const root = document.documentElement;
@@ -94,7 +98,8 @@ function inspect({ insets, keyboard }) {
     return rect.bottom <= box.top + 1 || rect.top >= box.bottom - 1 || rect.right <= box.left + 1 || rect.left >= box.right - 1;
   });
   // A modal dialog makes the rest of the page inert: check only what is inside it.
-  const modal = [...document.querySelectorAll("dialog[open]")].find((dialog) => { try { return dialog.matches(":modal"); } catch { return false; } });
+  const modal = [...document.querySelectorAll("dialog[open]")].find((dialog) => { try { return dialog.matches(":modal"); } catch { return false; } }) ||
+    [...document.querySelectorAll('[role="dialog"][aria-modal="true"]')].find((dialog) => dialog.getBoundingClientRect().height > 0);
   const scope = modal || document;
   const interactive = [...scope.querySelectorAll("iframe, button, a[href], input:not([type=hidden]), textarea, select, summary, [role=button], [role=tab], [role=option], [role=menuitem], [tabindex]:not([tabindex='-1'])")]
     .filter((el) => visible(el) && !el.closest(".xterm") && !(el.tagName === "INPUT" && el.type === "file"));
@@ -161,6 +166,13 @@ function inspect({ insets, keyboard }) {
       if (node.scrollWidth > node.clientWidth + 1 && /(hidden|clip)/.test(s.overflowX + style.overflowX)) failures.push(`clipped text: ${describe(el)}`);
     }
   }
+  // Under a finger nothing may need hover: these desktop controls must be showing (touch.css).
+  if (touch) {
+    const hidden = (el) => { const s = getComputedStyle(el); return Number(s.opacity) === 0 || s.visibility === "hidden" || parseFloat(s.maxWidth) === 0; };
+    for (const el of document.querySelectorAll(".project-heading > .icon-button, .sidebar-tab.active .terminal-row-actions")) {
+      if (el.getBoundingClientRect().height && hidden(el)) failures.push(`hover-only control: ${describe(el)}`);
+    }
+  }
   if (keyboard) {
     const compose = document.querySelector(".compose textarea, .composer textarea, .key-bar");
     if (!compose) failures.push("keyboard: no composer or key bar");
@@ -194,11 +206,12 @@ async function record(page, sheet, screen, failures, frame) {
   void frame;
 }
 
-async function check(page, sheet, screen, { frame, keyboard = false, insets } = {}) {
+async function check(page, sheet, screen, { frame, keyboard = false, insets, touch = false, extra = [] } = {}) {
   if (!wanted(screen)) return;
   await sleep(250);
   const target = frame || page;
-  const failures = await target.evaluate(inspect, { insets, keyboard }).catch((error) => [`check failed: ${error.message}`]);
+  const failures = await target.evaluate(inspect, { insets, keyboard, touch }).catch((error) => [`check failed: ${error.message}`]);
+  failures.push(...extra);
   await record(page, sheet, screen, failures, frame);
 }
 
@@ -398,14 +411,94 @@ async function tabletScreens(device, variant, sheet) {
   const context = await newContext(device, variant);
   const page = await context.newPage();
   page.setDefaultTimeout(15000);
+  const errors = [];
+  page.on("pageerror", (error) => errors.push(error.message));
+  const opts = { insets: device.insets, touch: true };
   try {
     const post = await signIn(context, page);
     const { origin } = await enterWorkspace(page, post);
     await page.goto(origin + "/");
     await page.locator(".workbench-shell").waitFor();
     await sleep(800);
-    await check(page, sheet, "tablet workbench", { insets: device.insets });
+    // Upright tablets (to 1100 px) get the sidebar as a drawer over the panes (ui/src/sidebar-drawer.mjs).
+    const drawer = device.width <= 1100;
+    const sidebar = page.locator(".workspace-sidebar");
+    const drawerState = async () => {
+      if (!await sidebar.count()) return "closed";
+      return sidebar.evaluate((el) => getComputedStyle(el).position === "absolute" ? "drawer" : "docked");
+    };
+    const openDrawer = async () => {
+      if (await sidebar.count()) return;
+      await page.locator(".sidebar-expand").first().tap();
+      await sidebar.waitFor();
+    };
+    await check(page, sheet, "tablet workbench", opts);
+    const startState = await drawerState();
+    const expected = drawer ? "closed" : "docked";
+    if (startState !== expected) {
+      results.push({ sheet, screen: "tablet sidebar", failures: [`sidebar starts ${startState}, want ${expected}`] });
+      failed++;
+    }
+    if (drawer) {
+      await page.locator(".workbench-main .home-row").last().scrollIntoViewIfNeeded();
+      await openDrawer();
+      const state = await drawerState();
+      await check(page, sheet, "tablet drawer", { ...opts, extra: state === "drawer" ? [] : [`sidebar opened as ${state}`] });
+      // A tap on the dimmed panes (here over a recent session's row) closes the drawer and does nothing else.
+      await page.evaluate(() => {
+        window.matrixClicks = [];
+        document.addEventListener("click", (event) => { if (event.target.closest(".workbench-main")) window.matrixClicks.push(event.target.tagName); }, true);
+      });
+      const row = await page.locator(".workbench-main .home-row").last().boundingBox();
+      await page.touchscreen.tap(row.x + row.width - 40, row.y + row.height / 2);
+      await sleep(700);
+      const extra = [];
+      if (await sidebar.count()) extra.push("a tap outside left the drawer open");
+      const reached = await page.evaluate(() => window.matrixClicks);
+      if (reached.length) extra.push(`a tap outside reached the panes behind (${reached.join(", ")})`);
+      await check(page, sheet, "tablet drawer closed", { ...opts, extra });
+    }
+    // Open a terminal from the sidebar: the drawer closes behind the choice.
+    await openDrawer();
+    await page.getByRole("tab", { name: /整理发布说明/ }).first().scrollIntoViewIfNeeded();
+    await page.getByRole("tab", { name: /整理发布说明/ }).first().tap();
+    await sleep(600);
+    await check(page, sheet, "tablet terminal", { ...opts, extra: drawer && await sidebar.count() ? ["the drawer stayed open over the opened terminal"] : [] });
+    // Split by finger: drag a second terminal's row onto the right half of the panes.
+    if (engine === "chromium") {
+      await openDrawer();
+      await page.getByRole("tab", { name: /^bash/ }).first().scrollIntoViewIfNeeded();
+      const row = await page.getByRole("tab", { name: /^bash/ }).first().boundingBox();
+      const main = await page.locator(".workbench-main").boundingBox();
+      const cdp = await context.newCDPSession(page);
+      const touch = (type, x, y) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
+      const from = { x: row.x + row.width / 2, y: row.y + row.height / 2 };
+      const to = { x: main.x + main.width * 0.8, y: main.y + main.height / 2 };
+      await touch("touchStart", from.x, from.y);
+      for (let i = 1; i <= 12; i++) { await touch("touchMove", from.x + (to.x - from.x) * i / 12, from.y + (to.y - from.y) * i / 12); await sleep(16); }
+      await touch("touchEnd");
+      await sleep(800);
+      const split = await page.locator(".workspace-split").count();
+      await check(page, sheet, "tablet split (finger)", { ...opts, extra: split ? [] : ["dragging a terminal onto the right half by finger did not split the panes"] });
+    }
+    // A settings page and a dialog.
+    await openDrawer();
+    await page.locator(".workspace-sidebar").getByRole("button", { name: "设置", exact: true }).first().tap();
+    await sleep(800);
+    await check(page, sheet, "tablet settings", opts);
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(300);
+    await openDrawer();
+    await page.locator(".workspace-sidebar").getByRole("button", { name: "添加项目", exact: true }).first().tap();
+    await page.locator("dialog[open], [role=dialog]").first().waitFor();
+    await sleep(400);
+    await check(page, sheet, "tablet dialog", opts);
+  } catch (error) {
+    results.push({ sheet, screen: "tablet walk", failures: [`broke: ${error.message.split("\n")[0]}`] });
+    failed++;
+    console.log(`  ${sheet} / tablet walk broke: ${error.message.split("\n")[0]}`);
   } finally {
+    if (errors.length) { results.push({ sheet, screen: "page errors", failures: errors }); failed += errors.length; console.log(`  ${sheet} page errors: ${errors.join("; ")}`); }
     await context.close();
   }
 }

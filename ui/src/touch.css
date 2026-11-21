@@ -1,0 +1,81 @@
+/* The desktop workbench under a finger (a tablet, not a mouse or a trackpad): 44 px targets and no control
+ * that only appears on hover. Not in a layer, so it sits above the foundation layers (tokens.css), and it
+ * matches no mouse or trackpad window. The sidebar drawer for tablets held upright is sidebar-drawer.mjs. */
+@media (pointer: coarse) and (hover: none) {
+  :root {
+    --workbench-header-height: 52px;
+    --status-height: 44px;
+  }
+  .sidebar-link,
+  .sidebar-tab,
+  .sidebar-tab > :is(button[role="tab"], .sidebar-session),
+  .project-heading,
+  .sidebar-status,
+  .account-trigger,
+  .sidebar-project-folders button {
+    min-height: 44px;
+  }
+  .icon-button,
+  .terminal-row-actions > button,
+  .project-heading > .icon-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .status-bar button,
+  .project-disclosure,
+  .sidebar-session,
+  .text-button,
+  .quiet-button,
+  :root .settings-page .settings-sidebar nav button {
+    min-height: 44px;
+  }
+  /* Safari zooms into a field whose text is smaller than 16 px when it is focused. */
+  input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]),
+  textarea,
+  select {
+    font-size: 16px !important;
+  }
+
+  /* Shown without hover: the project's buttons, and the open row's own actions (a tap selects a row). */
+  .project-heading > .icon-button {
+    opacity: 1;
+  }
+  .sidebar-tab.active .terminal-row-actions {
+    max-width: none;
+    margin-right: 3px;
+    visibility: visible;
+    opacity: 1;
+    transform: none;
+  }
+  /* Other rows keep theirs folded: revealed on the touch that focuses a row, they would slide under the
+     finger before its tap lands. A keyboard still reveals them. */
+  .sidebar-tab:not(.active):not(:has(:focus-visible, [aria-expanded="true"])) .terminal-row-actions {
+    max-width: 0;
+    margin-right: 0;
+    visibility: hidden;
+    opacity: 0;
+  }
+  .sidebar-expand .sidebar-expand-logo {
+    display: none;
+  }
+  .sidebar-expand .sidebar-expand-icon {
+    display: block;
+  }
+
+  /* A long press on a tab is a drag or the tab's menu, not the system's link and text callout. */
+  .sidebar-tab,
+  .browser-tab {
+    -webkit-touch-callout: none;
+  }
+}
+
+/* Upright tablet: the sidebar is a drawer over the panes, with the panes dimmed behind it. */
+@media (pointer: coarse) and (hover: none) and (max-width: 1100px) {
+  .workspace-sidebar {
+    position: absolute;
+    z-index: 12;
+    inset: 0 auto 0 0;
+    width: min(var(--sidebar-width), calc(100vw - 88px));
+    box-shadow: var(--shadow-float), 0 0 0 100vmax rgb(0 0 0 / 0.28);
+  }
+}
