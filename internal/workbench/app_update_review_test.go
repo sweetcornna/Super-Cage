@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -29,7 +28,8 @@ func TestReviewAgentCannotQueueAppUpdate(t *testing.T) {
 	s := agentTestController(t)
 	for _, refused := range []string{
 		`{"action":"appUpdate","operation":"install","confirmed":["job"]}`,
-		`{"action":"appUpdate","operation":"status"}`,
+		`{"action":"appUpdate","operation":"download"}`,
+		`{"action":"appUpdate","operation":"cancel"}`,
 		`{"action":"workbenchReady"}`,
 		`{"action":"quitNow"}`,
 		`{"action":"clipboardRead"}`,
@@ -47,6 +47,10 @@ func TestReviewAgentCannotQueueAppUpdate(t *testing.T) {
 		`{"action":"accountDevice","operation":"status"}`,
 		`{"action":"accountDevice","operation":"unlock","kind":"biometric"}`,
 		`{"action":"clientPreferences","operation":"get"}`,
+		// Reading the update state and looking for a version never install
+		// anything (agent_access.go).
+		`{"action":"appUpdate","operation":"status"}`,
+		`{"action":"appUpdate","operation":"check"}`,
 	} {
 		input := json.RawMessage(`{"connection_id":"local","request":` + allowed + `}`)
 		if _, err := AgentCall(context.Background(), s.configPath, "native.submit", input); err != nil {
@@ -560,30 +564,5 @@ func TestManualTickAllocatesNothing(t *testing.T) {
 	ctx := context.Background()
 	if allocs := testing.AllocsPerRun(100, func() { f.s.appUpdateTick(ctx) }); allocs != 0 {
 		t.Fatalf("manual tick allocates %v", allocs)
-	}
-}
-
-// The window's consumer refuses what the server refuses.
-func TestAgentNativeListMatchesTheWindow(t *testing.T) {
-	data, err := os.ReadFile(filepath.Join("..", "..", "ui", "src", "agent-native.js"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	match := regexp.MustCompile(`(?s)export const agentNativeActionNames = Object\.freeze\(\[(.*?)\]\)`).FindSubmatch(data)
-	if match == nil {
-		t.Fatal("agentNativeActionNames missing from ui/src/agent-native.js")
-	}
-	var names []string
-	for _, quoted := range regexp.MustCompile(`"([A-Za-z]+)"`).FindAllSubmatch(match[1], -1) {
-		names = append(names, string(quoted[1]))
-	}
-	var want []string
-	for name := range agentNativeActions {
-		want = append(want, name)
-	}
-	sort.Strings(names)
-	sort.Strings(want)
-	if strings.Join(names, ",") != strings.Join(want, ",") {
-		t.Fatalf("window %v, server %v", names, want)
 	}
 }

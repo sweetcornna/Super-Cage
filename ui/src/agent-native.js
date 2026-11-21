@@ -15,27 +15,33 @@ export const agentClientPreferences = Object.freeze([
 
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
-// What an agent may ask this window to do. The server refuses everything
-// else before it is queued (internal/workbench/agent_native.go, whose test
-// keeps the two lists equal); the window checks again here. Application
-// updates and their launch confirmation, quitting, the host clipboard,
-// opening host files, sharing folders and keyboard capture are never on it.
-export const agentNativeActionNames = Object.freeze([
-  "clientPreferences", "appearance", "refreshSession", "reconnect",
-  "chooseFolder", "chooseGuestMedia", "importTheme", "exportTheme", "accountDevice",
-]);
+// What an agent may ask this window to do, per action: each entry names
+// request fields that must be equal, and {} accepts any request. Everything
+// else is refused. The server refuses the same requests before they are
+// queued (agentNativeAccess in internal/workbench/agent_access.go); its test
+// reads the JSON between these markers and keeps both tables equal.
+// BEGIN agentNativeAccess
+export const agentNativeAccess = Object.freeze({
+  "clientPreferences": [{}],
+  "appearance": [{}],
+  "refreshSession": [{}],
+  "reconnect": [{}],
+  "chooseFolder": [{}],
+  "chooseGuestMedia": [{}],
+  "chooseUploadFiles": [{}],
+  "uploadHostFiles": [{}],
+  "importTheme": [{}],
+  "exportTheme": [{}],
+  "exportDiagnostics": [{}],
+  "saveBrowserDownload": [{}],
+  "appUpdate": [{ "operation": "status" }, { "operation": "check" }],
+  "accountDevice": [{ "operation": "status" }, { "operation": "disable" }, { "operation": "enable", "kind": "biometric" }, { "operation": "unlock", "kind": "biometric" }]
+});
+// END agentNativeAccess
 
 export function agentNativeAllowed(request) {
-  if (!object(request) || !agentNativeActionNames.includes(request.action)) return false;
-  if (request.action !== "accountDevice") return true;
-  // Quick login: its state and turning it off are fine; a new key or an
-  // unlock must go through Touch ID, which the person does.
-  switch (request.operation) {
-    case "status": return true;
-    case "disable": return ["automatic", "biometric"].includes(request.kind);
-    case "enable": case "unlock": return request.kind === "biometric";
-    default: return false;
-  }
+  if (!object(request) || typeof request.action !== "string" || !Object.hasOwn(agentNativeAccess, request.action)) return false;
+  return agentNativeAccess[request.action].some(shape => Object.entries(shape).every(([field, value]) => request[field] === value));
 }
 function validPreference(key, raw) {
   if (raw === null) return true;

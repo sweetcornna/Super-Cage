@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
 import { agentClientPreferences, agentNativeAllowed, clientPreferences, createAgentNativeConsumer, executeAgentNative } from "./agent-native.js";
 
 const context = { mode: "remote", connection_id: "generation-a", instance_id: "server-one" };
@@ -207,32 +208,20 @@ test("independent desktop consumers retain distinct private window proofs", asyn
   assert.equal(registrations, 2); assert.equal(proofs.size, 2);
 });
 
-test("an agent never reaches the application update or anything off the list", async () => {
-  let calls = 0;
-  const deps = { storage: storage(), getContext: () => context, native: async () => { calls++; return true; } };
-  for (const request of [
-    { action: "appUpdate", operation: "install", confirmed: ["job"] },
-    { action: "appUpdate", operation: "status" },
-    { action: "workbenchReady" },
-    { action: "quitNow" },
-    { action: "clipboardRead" },
-    { action: "clipboardWrite", text: "rm -rf ~" },
-    { action: "browserDownloadAction", id: "x", operation: "open" },
-    { action: "shareLocalProject", connection_id: "c", mode: "write" },
-    { action: "remoteInput", operation: "activate", owner: "00000000-0000-0000-0000-000000000000" },
-    { action: "accountDevice", operation: "unlock", kind: "automatic" },
-    { action: "accountDevice", operation: "enable", kind: "automatic" },
-    { action: "frobnicate" },
-  ]) {
-    assert.equal(agentNativeAllowed(request), false, request.action);
-    await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request }, deps), /桌面窗口/);
+// The same cases run against the server's table (agent_access_test.go).
+const sharedCases = JSON.parse(readFileSync(new URL("./agent-native-cases.json", import.meta.url), "utf8"));
+
+test("the window runs only the native requests the shared table opens to agents", async () => {
+  assert.ok(sharedCases.length > 40);
+  for (const { request, allowed } of sharedCases) {
+    assert.equal(agentNativeAllowed(request), allowed, JSON.stringify(request));
+    const calls = [];
+    const deps = { storage: storage(), getContext: () => context, native: async (action, input) => { calls.push({ action, input }); return action === "refreshSession" ? { url: "http://localhost:17777/#t" } : true; } };
+    const run = executeAgentNative({ connection_id: context.connection_id, request }, deps);
+    if (allowed) await run.catch(() => {});
+    else {
+      await assert.rejects(run, /只能在桌面窗口中由用户进行|原生请求格式无效/, JSON.stringify(request));
+      assert.deepEqual(calls, [], `refused request reached the bridge: ${JSON.stringify(request)}`);
+    }
   }
-  assert.equal(calls, 0);
-  for (const request of [
-    { action: "accountDevice", operation: "status" },
-    { action: "accountDevice", operation: "unlock", kind: "biometric" },
-    { action: "accountDevice", operation: "disable", kind: "automatic" },
-    { action: "chooseFolder" },
-    { action: "appearance", mode: "light", background: "#ffffff" },
-  ]) assert.equal(agentNativeAllowed(request), true, request.action);
 });
