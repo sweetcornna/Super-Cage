@@ -109,20 +109,27 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	if len(launches.steps) != 1 {
 		t.Fatal(launches.steps)
 	}
-	argv := launches.steps[0]
-	line := strings.Join(argv, " ")
+	step := launches.steps[0]
+	if len(step) != 4 || step[0] != "/Applications/kitty.app/Contents/MacOS/kitty" || step[1] != "--single-instance" || step[2] != "/bin/sh" {
+		t.Fatal(step)
+	}
+	script, err := os.ReadFile(step[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := scriptCommand(t, step)
 	executable, _ := os.Executable()
-	if argv[0] != "/Applications/kitty.app/Contents/MacOS/kitty" || argv[1] != "--single-instance" || argv[2] != executable || argv[3] != "attach" {
+	if argv[0] != executable || argv[1] != "attach" {
 		t.Fatal(argv)
 	}
 	for _, secret := range []string{desktop.token, desktop.session, workload.token, workload.session} {
-		if strings.Contains(line, secret) {
+		if strings.Contains(strings.Join(step, " ")+string(script), secret) {
 			t.Fatal("the command line holds a secret")
 		}
 	}
 	// The command the window would run works: it reaches the terminal through
 	// the desktop's current connection.
-	cfg, err := attach.ParseArgs(argv[4:])
+	cfg, err := attach.ParseArgs(argv[2:])
 	if err != nil || cfg.ConfigPath != full || cfg.Target.Connection != generation || cfg.Terminal != session.id {
 		t.Fatal(cfg, err)
 	}
@@ -142,7 +149,7 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 		if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", body, generation); w.Code != 200 {
 			t.Fatal(body, w.Code, w.Body.String())
 		}
-		last := strings.Join(launches.steps[len(launches.steps)-1], " ")
+		last := strings.Join(scriptCommand(t, launches.steps[len(launches.steps)-1]), " ")
 		if !strings.HasSuffix(last, "--connection "+generation+" "+want) {
 			t.Fatal(last)
 		}
@@ -160,8 +167,51 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	resolved, _ := filepath.EvalSymlinks(dir)
-	slim := launches.steps[len(launches.steps)-1]
-	if slim[2] != filepath.Join(resolved, "cage-attach") || slim[3] != "--config" || strings.Join(slim[3:], " ") != strings.Join(argv[4:], " ") {
+	slim := scriptCommand(t, launches.steps[len(launches.steps)-1])
+	if slim[0] != filepath.Join(resolved, "cage-attach") || slim[1] != "--config" || strings.Join(slim[1:], " ") != strings.Join(argv[2:], " ") {
 		t.Fatal(slim)
 	}
+}
+
+// scriptCommand reads the command a launch step's one-shot script runs: the
+// line after the script removes itself, in /bin/sh quoting.
+func scriptCommand(t *testing.T, step []string) []string {
+	t.Helper()
+	data, err := os.ReadFile(step[len(step)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, rest, ok := strings.Cut(string(data), "rm -f -- \"$0\"\n")
+	line, _, _ := strings.Cut(rest, "\n")
+	if !ok || line == "" {
+		t.Fatalf("no command in %q", data)
+	}
+	var words []string
+	var word strings.Builder
+	quoted, inWord := false, false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\'' && !quoted:
+			quoted, inWord = true, true
+		case c == '\'' && quoted:
+			quoted = false
+		case c == '\\' && !quoted && i+1 < len(line):
+			i++
+			word.WriteByte(line[i])
+			inWord = true
+		case c == ' ' && !quoted:
+			if inWord {
+				words = append(words, word.String())
+				word.Reset()
+				inWord = false
+			}
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	if inWord {
+		words = append(words, word.String())
+	}
+	return words
 }
