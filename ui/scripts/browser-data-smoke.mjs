@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
+import { execFileSync } from "node:child_process";
 import { createWorkbench } from "./workbench-fixture.mjs";
 import { createDataController, startSites } from "./browser-data-fixture.mjs";
 
@@ -16,13 +17,20 @@ const output = process.env.BROWSER_DATA_SHOTS || new URL("../../docs/test-report
 await mkdir(output, { recursive: true });
 const results = { sites: count, checks: [], timings: {} };
 const check = (label, value) => { assert.ok(value, label); results.checks.push(label); };
+const began = Date.now(); results.sections = {};
+const mark = label => { results.sections[label] = Date.now() - began; };
 const { server, port } = await startSites();
 const c = await createDataController();
 const windows = { hour: 3_600_000, day: 86_400_000, week: 7 * 86_400_000, month: 28 * 86_400_000, all: 0 };
 const settings = { defaults: { range: "day", types: ["history", "site", "cache"] }, keep: [], auto: { enabled: false, trigger: "stop", days: 7, types: ["history", "site", "cache"], last: 0, result: "" } };
 const requests = [];
-// What internal/workbench/browser_data.go does before the guest sees a request.
+// What internal/workbench/browser_data.go does before the guest sees a request,
+// including its refusal of fields it does not know.
+const fields = ["mode", "session", "range", "since", "types", "keepEnabled", "keep", "sites", "site", "key", "action", "query", "sort", "page", "before", "limit", "urls", "host", "start", "end", "id", "remember"];
+const settingsFields = ["action", "domain", "range", "types", "enabled", "trigger", "days"];
+const strict = (body, known) => { const extra = Object.keys(body || {}).filter(name => !known.includes(name)); if (extra.length) throw new Error("请求格式无效: " + extra.join(",")); };
 const dataRoute = body => {
+  strict(body, fields);
   const input = { ...body };
   if (input.range) { input.since = windows[input.range] ? Date.now() - windows[input.range] : 0; delete input.range; }
   if (input.mode === "clear") {
@@ -33,6 +41,7 @@ const dataRoute = body => {
   return c.api("/data", input);
 };
 const settingsRoute = body => {
+  strict(body, settingsFields);
   if (body?.action === "keep-add" && !settings.keep.some(entry => entry.domain === body.domain)) settings.keep.push({ domain: body.domain, added: Date.now() });
   if (body?.action === "keep-remove") settings.keep = settings.keep.filter(entry => entry.domain !== body.domain);
   if (body?.action === "auto") Object.assign(settings.auto, { enabled: body.enabled, trigger: body.trigger, days: body.days, types: body.types });
@@ -40,6 +49,15 @@ const settingsRoute = body => {
 };
 // Controlled inputs change once the settings request answers.
 const setChecked = async (locator, value) => { await locator.click(); for (let i = 0; i < 100 && await locator.isChecked() !== value; i++) await delay(50); assert.equal(await locator.isChecked(), value); };
+// CPU seconds used so far by a process and everything it started (the
+// controller and its Chromium).
+const treeCPU = root => {
+  const rows = execFileSync("ps", ["-A", "-o", "pid=,ppid=,time="], { encoding: "utf8" }).trim().split("\n").map(line => line.trim().split(/\s+/));
+  const seconds = time => time.split(":").reduce((total, part) => total * 60 + Number(part.replace(/-.*/, "")), 0);
+  const tree = new Set([root]);
+  for (let grew = true; grew;) { grew = false; for (const [pid, ppid] of rows) if (tree.has(Number(ppid)) && !tree.has(Number(pid))) { tree.add(Number(pid)); grew = true; } }
+  return rows.filter(([pid]) => tree.has(Number(pid))).reduce((total, [, , time]) => total + seconds(time), 0);
+};
 const cookieNames = async () => new Set((await c.cdp(undefined, "Storage.getCookies", {})).cookies.map(cookie => cookie.domain.replace(/^\./, "") + "/" + cookie.name));
 let workbench;
 try {
@@ -52,6 +70,7 @@ try {
   for (let i = 0; i < count; i++) { await go(`http://s${i}.localhost:${port}/`); await c.evaluate(seedTab, `seed(${2000 + (i % 7) * 4000})`); }
   for (const url of [`http://kept.localhost:${port}/`, `http://app.kept.localhost:${port}/`]) { await go(url); await c.evaluate(seedTab, "seed(6000)"); }
   await go(`http://s1.localhost:${port}/`);
+  mark("seeded");
 
   workbench = await createWorkbench({ viewport: { width: 1440, height: 900 }, browserRequest: async (route, path, body) => {
     if (path === "/browser/resize") return route.fulfill({ json: { ok: true } });
@@ -59,7 +78,7 @@ try {
       if (path === "/browser/data") { requests.push({ at: Date.now(), mode: body.mode }); return route.fulfill({ json: await dataRoute(body) }); }
       if (path === "/browser/data-settings") return route.fulfill({ json: settingsRoute(body) });
       return route.fulfill({ json: await c.api(path.replace("/browser", ""), body ?? undefined) });
-    } catch (error) { return route.fulfill({ status: 409, contentType: "text/plain; charset=utf-8", body: error.message }); }
+    } catch (error) { return route.fulfill({ status: /请求格式无效/.test(error.message) ? 400 : 409, contentType: "text/plain; charset=utf-8", body: error.message }); }
   } });
   const { page, errors } = workbench;
   page.setDefaultTimeout(15000);
@@ -96,6 +115,7 @@ try {
   await page.keyboard.press("Escape");
   await dialog.waitFor({ state: "hidden" });
 
+  mark("dialog");
   // 2. The privacy section: kept sites, automatic cleaning.
   await page.evaluate(() => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy" } })));
   const privacy = page.getByRole("region", { name: "隐私与网站数据" });
@@ -113,6 +133,7 @@ try {
   await setChecked(privacy.getByRole("switch", { name: "自动清除浏览数据" }), false);
   check("automatic cleaning turns off", settings.auto.enabled === false);
 
+  mark("privacy");
   // 3. Sites: list, search, sort, multi-select clear.
   await privacy.getByRole("button", { name: /^网站数据/ }).click();
   const sites = page.getByRole("region", { name: "网站数据" });
@@ -129,8 +150,13 @@ try {
   await sites.getByRole("combobox", { name: "网站排序" }).click();
   await page.getByRole("option", { name: "按名称", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".bd-site-row .list-row-title")?.textContent.startsWith("kept.localhost"));
-  await sites.getByRole("checkbox", { name: "选择 s3.localhost" }).check();
-  await sites.getByRole("checkbox", { name: "选择 s4.localhost" }).check();
+  // A selection survives searching, so sites far down a long list can be picked.
+  const search = sites.getByRole("textbox", { name: "搜索网站" });
+  for (const site of ["s3.localhost", "s4.localhost"]) {
+    await search.fill(site);
+    await sites.getByRole("checkbox", { name: `选择 ${site}`, exact: true }).check();
+  }
+  await search.fill("");
   await sites.getByRole("button", { name: "清除所选网站数据" }).click();
   await sites.getByRole("button", { name: "确认清除", exact: true }).click();
   await sites.getByText(/已清除 2 个网站的数据/).waitFor();
@@ -138,7 +164,8 @@ try {
   check("selected sites lose their cookies, others keep theirs", !afterSites.has("s3.localhost/js") && !afterSites.has("s4.localhost/js") && afterSites.has("s5.localhost/js"));
 
   // 4. A site's cookies (the former cookie manager).
-  await sites.getByRole("button", { name: "s5.localhost 详情" }).click();
+  await search.fill("s5.localhost");
+  await sites.getByRole("button", { name: "s5.localhost 详情", exact: true }).click();
   const detail = page.getByRole("region", { name: "s5.localhost 的网站数据" });
   await detail.getByRole("list", { name: "Cookie 列表" }).waitFor();
   await detail.locator(".bd-cookie", { hasText: "js" }).getByRole("button", { name: "查看值" }).click();
@@ -151,6 +178,7 @@ try {
   await detail.getByRole("button", { name: "返回网站列表" }).click();
   await sites.getByRole("button", { name: "返回隐私与网站数据" }).click();
 
+  mark("sites");
   // 5. History: by day, search, delete one entry.
   await privacy.getByRole("button", { name: /^浏览记录/ }).click();
   const history = page.getByRole("region", { name: "浏览记录" });
@@ -173,16 +201,19 @@ try {
   await shot("reset-1440-light");
   await reset.getByRole("button", { name: "取消", exact: true }).click();
 
+  mark("history+reset");
   // 7. Idle with the settings page open: no requests, little main-thread work.
   const session = await page.context().newCDPSession(page);
   await session.send("Performance.enable");
   const before = (await session.send("Performance.getMetrics")).metrics.find(metric => metric.name === "TaskDuration").value;
-  const quietFrom = Date.now();
+  const quietFrom = Date.now(), controllerBefore = treeCPU(c.agent().pid);
   await delay(10_000);
+  results.timings.idleControllerCPUmsPer10s = Math.round((treeCPU(c.agent().pid) - controllerBefore) * 1000);
   const after = (await session.send("Performance.getMetrics")).metrics.find(metric => metric.name === "TaskDuration").value;
   results.timings.idleTaskMsPer10s = Math.round((after - before) * 1000);
   check("nothing polls while the settings page is open", !requests.some(request => request.at >= quietFrom));
 
+  mark("idle");
   // 8. The address bar's site menu clears one site.
   await page.getByRole("tab", { name: "s1.localhost", exact: true }).click();
   await page.getByRole("button", { name: "网站数据", exact: true }).click();
@@ -229,30 +260,30 @@ try {
   await shot("site-dialog-1440-light");
   await page.keyboard.press("Escape");
 
-  // Dark theme and the small window.
-  await page.emulateMedia({ colorScheme: "dark" });
-  await menu().click();
-  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
-  await dialog.waitFor(); await loaded();
-  await shot("clear-dialog-1440-dark");
-  await page.setViewportSize({ width: 1000, height: 700 });
-  await shot("clear-dialog-1000-dark");
-  await page.keyboard.press("Escape");
-  await page.evaluate(() => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy" } })));
-  await privacy.getByRole("button", { name: /^网站数据/ }).waitFor();
-  await shot("privacy-1000-dark");
-  await privacy.getByRole("button", { name: /^网站数据/ }).click();
-  await sites.locator(".bd-site-row").first().waitFor();
-  await shot("sites-1000-dark");
-  await page.emulateMedia({ colorScheme: "light" });
-  await shot("sites-1000-light");
-  await sites.getByRole("button", { name: "返回隐私与网站数据" }).click();
-  await shot("privacy-1000-light");
-  await page.setViewportSize({ width: 1440, height: 900 });
-  await page.emulateMedia({ colorScheme: "dark" });
-  await shot("privacy-1440-dark");
+  mark("menu+shortcut");
+  // The screenshot matrix: every view in the other theme and size combinations
+  // (light at 1440×900 was taken along the way).
+  for (const url of [`http://s7.localhost:${port}/`, `http://kept.localhost:${port}/`, `http://s1.localhost:${port}/`]) await go(url);
+  const shortcutKey = process.platform === "darwin" ? "Meta+Shift+Backspace" : "Control+Shift+Delete";
+  const openPrivacy = section => page.evaluate(view => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy", section: view } })), section);
+  const views = [
+    ["clear-dialog", async () => { await page.keyboard.press(shortcutKey); await dialog.waitFor(); await loaded(); }, () => page.keyboard.press("Escape")],
+    ["privacy", async () => { await openPrivacy(""); await privacy.getByRole("button", { name: /^网站数据/ }).waitFor(); }],
+    ["sites", async () => { await openPrivacy("sites"); await sites.locator(".bd-site-row").first().waitFor(); }],
+    ["site-detail", async () => { await sites.getByRole("button", { name: "kept.localhost 详情" }).click(); await page.getByRole("region", { name: "kept.localhost 的网站数据" }).getByRole("list", { name: "Cookie 列表" }).waitFor(); }],
+    ["history", async () => { await openPrivacy("history"); await history.locator(".bd-day").first().waitFor(); }],
+    ["reset", async () => { await openPrivacy(""); await privacy.getByRole("button", { name: "重置浏览器…" }).click(); await reset.waitFor(); }, () => reset.getByRole("button", { name: "取消", exact: true }).click()],
+    ["site-menu", async () => { await page.getByRole("tab", { name: "s1.localhost", exact: true }).click(); await page.getByRole("button", { name: "网站数据", exact: true }).click(); await popover.getByText(/个 Cookie/).waitFor(); }, () => page.keyboard.press("Escape")],
+    ["site-dialog", async () => { await menu().click(); await page.getByRole("menuitem", { name: "管理 Cookie", exact: true }).click(); await cookies.getByRole("list", { name: "Cookie 列表" }).waitFor(); }, () => page.keyboard.press("Escape")],
+  ];
+  for (const [scheme, width, height] of [["dark", 1440, 900], ["light", 1000, 700], ["dark", 1000, 700]]) {
+    await page.emulateMedia({ colorScheme: scheme });
+    await page.setViewportSize({ width, height });
+    for (const [name, open, close] of views) { await open(); await shot(`${name}-${width}-${scheme}`); await close?.(); }
+    check(`no horizontal overflow at ${width}×${height} ${scheme}`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)));
+  }
+  mark("matrix");
   check("no page errors", errors.length === 0);
-  check("no horizontal overflow", !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)));
   results.passed = true;
   await writeFile(output + "result.json", JSON.stringify(results, null, 2) + "\n");
   console.log(JSON.stringify(results, null, 1));

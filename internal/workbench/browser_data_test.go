@@ -314,3 +314,123 @@ func TestBrowserKeptDomain(t *testing.T) {
 		}
 	}
 }
+
+// The bodies browser-data.jsx sends, as it sends them, through the real
+// routes: what reaches the guest and what the UI reads back.
+func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
+	const jobID = "0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11"
+	key := strings.Repeat("ab", 32)
+	s, calls := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+		switch body["mode"] {
+		case "capabilities":
+			return 200, `{"available":true,"version":1,"ranges":true,"history":true,"incognito":true,"reset":true}`
+		case "clear", "clear-sites":
+			return 200, `{"job":{"id":"` + jobID + `","state":"running","step":0,"steps":4,"elapsed":0}}`
+		case "job":
+			return 200, `{"job":{"id":"` + jobID + `","state":"done","step":4,"steps":4,"elapsed":180,"result":{"cleared":["history","site"],"freedBytes":2048,"reloaded":1,"kept":["https://github.com"]}}}`
+		}
+		return 200, `{"ok":true}`
+	})
+	post := func(path, body string) map[string]any {
+		t.Helper()
+		w := request(s, "POST", path, s.origin, body, true)
+		if w.Code != 200 {
+			t.Fatalf("%s %s: %d %s", path, body, w.Code, w.Body.String())
+		}
+		var reply map[string]any
+		if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
+			t.Fatalf("%s %s: %v", path, body, err)
+		}
+		return reply
+	}
+	if reply := post("/api/browser/data", `{"mode":"capabilities"}`); reply["available"] != true {
+		t.Fatalf("capabilities: %v", reply)
+	}
+	for _, body := range []string{
+		`{"mode":"summary","session":"normal","range":"all"}`,
+		`{"mode":"summary","session":"private","range":"all"}`,
+		`{"mode":"sites","session":"normal","query":"","sort":"size","page":0}`,
+		`{"mode":"sites","session":"private","query":"gi","sort":"recent","page":2}`,
+		`{"mode":"site","session":"normal","site":"github.com","page":0,"query":"sess"}`,
+		`{"mode":"cookie","session":"normal","site":"github.com","key":"` + key + `","action":"value"}`,
+		`{"mode":"cookie","session":"private","site":"github.com","key":"` + key + `","action":"delete"}`,
+		`{"mode":"history","query":"","limit":100}`,
+		`{"mode":"history","query":"docs","before":1763700000000,"limit":100}`,
+		`{"mode":"history-delete","urls":["https://github.com/login"]}`,
+		`{"mode":"history-delete","host":"github.com"}`,
+		`{"mode":"history-delete","start":1763683200000,"end":1763769600000}`,
+	} {
+		post("/api/browser/data", body)
+	}
+	// The dialog: a week, keep off, remembered; then a preset that is not.
+	if reply := post("/api/browser/data", `{"mode":"clear","session":"normal","range":"week","types":["history","site","cache","downloads"],"keepEnabled":false,"remember":true}`); reply["job"].(map[string]any)["id"] != jobID {
+		t.Fatalf("clear reply: %v", reply)
+	}
+	post("/api/browser/data", `{"mode":"clear","session":"normal","range":"hour","types":["history"],"keepEnabled":true,"remember":false}`)
+	post("/api/browser/data", `{"mode":"clear","session":"private","range":"all","types":["site","cache"],"keepEnabled":true,"remember":false}`)
+	post("/api/browser/data", `{"mode":"clear-sites","session":"normal","sites":["github.com","127.0.0.1"]}`)
+	job := post("/api/browser/data", `{"mode":"job","id":"`+jobID+`"}`)["job"].(map[string]any)
+	result := job["result"].(map[string]any)
+	if job["state"] != "done" || job["steps"] != float64(4) || result["freedBytes"] != float64(2048) || len(result["kept"].([]any)) != 1 {
+		t.Fatalf("job reply: %v", job)
+	}
+	got := calls()
+	byMode := map[string][]map[string]any{}
+	for _, call := range got {
+		byMode[call.Body["mode"].(string)] = append(byMode[call.Body["mode"].(string)], call.Body)
+	}
+	if body := byMode["site"][0]; body["query"] != "sess" || body["session"] != "normal" {
+		t.Fatalf("site body: %v", body)
+	}
+	if body := byMode["sites"][1]; body["session"] != "private" || body["sort"] != "recent" || body["page"] != float64(2) {
+		t.Fatalf("sites body: %v", body)
+	}
+	if body := byMode["history"][1]; body["before"] != float64(1763700000000) || body["limit"] != float64(100) {
+		t.Fatalf("history body: %v", body)
+	}
+	clears := byMode["clear"]
+	if len(clears) != 3 || clears[0]["keepEnabled"] != false || clears[1]["keepEnabled"] != true || clears[2]["session"] != "private" || clears[2]["since"] != float64(0) {
+		t.Fatalf("clear bodies: %v", clears)
+	}
+	if since := int64(clears[0]["since"].(float64)); since > time.Now().Add(-7*24*time.Hour+time.Minute).UnixMilli() {
+		t.Fatalf("week not converted: %d", since)
+	}
+	settings := s.loadBrowserDataSettings()
+	if settings.Defaults.Range != "week" || len(settings.Defaults.Types) != 4 {
+		t.Fatalf("remembered defaults (the preset and the private clear must not change them): %+v", settings.Defaults)
+	}
+
+	// Settings: what the privacy section sends.
+	get := request(s, "GET", "/api/browser/data-settings", "", "", true)
+	if get.Code != 200 {
+		t.Fatalf("settings: %d", get.Code)
+	}
+	for _, body := range []string{
+		`{"action":"keep-add","domain":"https://www.kept.localhost:5238/login"}`,
+		`{"action":"keep-add","domain":"github.com"}`,
+		`{"action":"keep-remove","domain":"github.com"}`,
+		`{"action":"auto","enabled":true,"trigger":"days","days":7,"types":["history","site","cache"]}`,
+		`{"action":"auto","enabled":false,"trigger":"stop","days":7,"types":["history"]}`,
+	} {
+		post("/api/browser/data-settings", body)
+	}
+	settings = s.loadBrowserDataSettings()
+	if len(settings.Keep) != 1 || settings.Keep[0].Domain != "kept.localhost" || settings.Auto.Enabled || settings.Auto.Trigger != "stop" || len(settings.Auto.Types) != 1 {
+		t.Fatalf("settings after the privacy section: %+v", settings)
+	}
+	// The settings reply carries what the UI reads back.
+	var reply map[string]any
+	_ = json.Unmarshal(request(s, "GET", "/api/browser/data-settings", "", "", true).Body.Bytes(), &reply)
+	for _, field := range []string{"defaults", "keep", "auto"} {
+		if reply[field] == nil {
+			t.Fatalf("settings reply lacks %s: %v", field, reply)
+		}
+	}
+	auto := reply["auto"].(map[string]any)
+	// last and result are omitted until a first run; the UI reads them as optional.
+	for _, field := range []string{"enabled", "trigger", "days", "types"} {
+		if _, ok := auto[field]; !ok {
+			t.Fatalf("auto lacks %s: %v", field, auto)
+		}
+	}
+}

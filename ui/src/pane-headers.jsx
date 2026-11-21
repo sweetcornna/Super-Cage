@@ -185,7 +185,7 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
       </div>
       <form className="address-bar" onSubmit={event => { event.preventDefault(); onNavigate(address); }}>
         {/^https?:/.test(url) && !tab.login ? <button type="button" className="address-site" aria-label="网站数据" title="此网站的 Cookie 和数据" disabled={!ready}
-          onClick={event => openBrowserData({ view: "popover", tab, anchor: event.currentTarget })}>{tab.incognito ? <span className="browser-private-badge"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}</button>
+          onClick={event => openBrowserData({ view: "popover", tab, anchor: event.currentTarget, fallback: () => setCookiesOpen(true) })}>{tab.incognito ? <span className="browser-private-badge"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}</button>
           : tab.incognito ? <span className="browser-private-badge" title="关闭全部无痕标签后清理此会话"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}
         <input
           aria-label="网页地址或搜索"

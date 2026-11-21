@@ -19,19 +19,33 @@ const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const data = (input, signal) => api("/browser/data", input, undefined, {}, { signal });
 
 let capability = null;
-// Older servers (404) and guests (available:false) keep the earlier screens.
+// Older servers (404), older guests ("update"), other guest systems
+// ("platform") and a guest whose extension page is missing ("unavailable")
+// keep the earlier screens. Anything else (not ready, busy, no answer) is an
+// error to show and retry, not a reason to switch screens.
+const legacyReasons = ["server", "update", "platform", "unavailable"];
+const usesLegacy = value => Boolean(value && !value.available && legacyReasons.includes(value.reason));
 async function loadCapability() {
   if (capability && Date.now() - capability.at < 60_000) return capability.value;
   let value;
   try { value = await data({ mode: "capabilities" }); }
   catch (error) { value = { available: false, reason: error.status === 404 ? "server" : "error", message: error.message }; }
-  if (value.available || value.reason === "server" || value.reason === "platform") capability = { value, at: Date.now() };
+  if (value.reason !== "error") capability = { value, at: Date.now() };
   return value;
 }
 function useCapability() {
   const [value, setValue] = useState(capability && Date.now() - capability.at < 60_000 ? capability.value : null);
-  useEffect(() => { let live = true; loadCapability().then(next => { if (live) setValue(next); }); return () => { live = false; }; }, []);
-  return value;
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => { let live = true; loadCapability().then(next => { if (live) setValue(next); }); return () => { live = false; }; }, [attempt]);
+  return [value, () => { setValue(null); setAttempt(attempt + 1); }];
+}
+
+function Unavailable({ value, onRetry, onClose }) {
+  const body = <p className="error-message" role="alert">{value.message || "浏览器暂时没有响应。"}</p>;
+  if (!onClose) return <div className="bd-unavailable">{body}<button className="compact" onClick={onRetry}><RefreshCw size={14} />重试</button></div>;
+  return <Modal title="浏览数据暂时不可用" onClose={onClose} footer={<><button onClick={onClose}>关闭</button><button className="primary" onClick={onRetry}>重试</button></>}>
+    <div className="modal-body" data-browser-dialog>{body}</div>
+  </Modal>;
 }
 
 async function runJob(input, onProgress) {
@@ -92,7 +106,8 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
   const clear = async () => {
     setPhase("clearing"); setError("");
     try {
-      const value = await runJob({ mode: "clear", session, range: effectiveRange, types: chosen, keepEnabled, remember: !isPrivate }, setStep);
+      // A preset (history's 按时间清除…) is a one-off and leaves the saved defaults alone.
+      const value = await runJob({ mode: "clear", session, range: effectiveRange, types: chosen, keepEnabled, remember: !isPrivate && !preset }, setStep);
       setResult(value); setPhase("done");
     } catch (failure) { setError(failure.message); setPhase("edit"); }
   };
@@ -145,6 +160,9 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
   </Modal>;
 }
 
+const loopback = ["localhost", "127.0.0.1"];
+const loopbackWarning = "本机地址包含 Super Cage 内置页面，清除后文件编辑器用浏览器菜单的“恢复编辑器”重新进入，Claude Science 需要重新打开。";
+
 // ── One site's data: storage, cookies (the former cookie manager) ─────────
 function SiteDetail({ site, session = "normal", settings, onSettings, onBack, onCleared, compact = false }) {
   const [page, setPage] = useState(0), [query, setQuery] = useState(""), [revision, setRevision] = useState(0);
@@ -189,7 +207,7 @@ function SiteDetail({ site, session = "normal", settings, onSettings, onBack, on
       <button className="compact danger" disabled={busy || !detail} onClick={() => setConfirm(!confirm)}><Trash2 size={15} />清除此网站数据</button>
     </header>
     {confirm && <div className="bd-confirm" role="alert">
-      <span>清除 {site} 的全部 Cookie 和网站存储？{session === "private" ? "只影响无痕会话。" : ""}此网站需要重新登录，打开的网页会重新加载。{["localhost", "127.0.0.1"].includes(site) ? "本机地址包含 Super Cage 内置页面，清除后文件编辑器用“恢复编辑器”重新进入，Claude Science 需要重新打开。" : ""}</span>
+      <span>清除 {site} 的全部 Cookie 和网站存储？{session === "private" ? "只影响无痕会话。" : ""}此网站需要重新登录，打开的网页会重新加载。{loopback.includes(site) ? loopbackWarning : ""}</span>
       <button className="danger-fill compact" disabled={busy} onClick={clearSite}>确认清除</button>
       <button className="compact" disabled={busy} onClick={() => setConfirm(false)}>取消</button>
     </div>}
@@ -381,7 +399,9 @@ function AutoClean({ settings, onSettings }) {
   const [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const save = async next => {
     setBusy(true); setError("");
-    try { onSettings(await saveSettings({ action: "auto", ...auto, ...next })); }
+    // The host reads only these fields (and refuses unknown ones).
+    const value = { ...auto, ...next };
+    try { onSettings(await saveSettings({ action: "auto", enabled: value.enabled, trigger: value.trigger, days: value.days, types: value.types })); }
     catch (failure) { setError(failure.message); } finally { setBusy(false); }
   };
   const toggleType = id => { const types = auto.types.includes(id) ? auto.types.filter(item => item !== id) : [...auto.types, id]; if (types.length) void save({ types }); };
@@ -420,8 +440,8 @@ function ResetDialog({ onClose, onStarted }) {
     <div className="modal-body bd-reset" data-browser-dialog>
       <p>浏览器会以全新的资料重新启动，适合资料损坏、网页反复出错时使用。需要几秒钟，期间浏览器画面会断开。</p>
       <div className="bd-reset-lists">
-        <div><h4 className="section-label">会清除</h4><ul><li>所有网站的登录、Cookie 和网站存储</li><li>浏览记录、缓存和 Chromium 的下载记录</li><li>网站权限和 Chromium 内部设置</li><li>当前打开的网页和无痕会话</li></ul></div>
-        <div><h4 className="section-label">会保留</h4><ul><li>收藏夹和密码保险箱</li><li>通过 Super Cage 导入的扩展</li><li>新标签页地址、保持登录名单和自动清理设置</li><li>已下载的文件和下载面板</li></ul></div>
+        <div><h4 className="section-label">会清除</h4><ul><li>所有网站的登录、Cookie 和网站存储</li><li>浏览记录、缓存和 Chromium 的下载记录</li><li>网站权限和 Chromium 内部设置</li><li>在 Chromium 扩展页安装的扩展，以及各扩展自己的设置</li><li>当前打开的网页和无痕会话</li></ul></div>
+        <div><h4 className="section-label">会保留</h4><ul><li>收藏夹和密码保险箱</li><li>通过 Super Cage 导入的扩展（重新载入）</li><li>新标签页地址、保持登录名单和自动清理设置</li><li>已下载的文件和下载面板</li></ul></div>
       </div>
       <label className="check-line"><input type="checkbox" checked={understood} disabled={busy} onChange={event => setUnderstood(event.target.checked)} /><span>我了解所有网站都需要重新登录</span></label>
     </div>
@@ -430,7 +450,7 @@ function ResetDialog({ onClose, onStarted }) {
 
 // ── The settings section: 隐私与网站数据 ──────────────────────
 export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClose }) {
-  const available = useCapability();
+  const [available, retry] = useCapability();
   const [view, setView] = useState(() => takePendingPrivacyView());
   const [site, setSite] = useState(null);
   const [settings, setSettings] = useState(null);
@@ -444,6 +464,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   }, []);
   useEffect(() => { if (view === "kept") document.getElementById("bd-kept")?.scrollIntoView({ block: "start" }); }, [view, settings]);
   if (!available) return <p className="bd-loading">正在读取浏览器能力…</p>;
+  if (!available.available && !usesLegacy(available)) return <Unavailable value={available} onRetry={retry} />;
   if (!available.available) return <LegacyPrivacy tab={tab} tabs={tabs} onInternal={onInternal} onClose={onClose} reason={available.reason} />;
   if (site) return <SiteDetail site={site.site} session={site.session} settings={settings} onSettings={setSettings} onBack={() => setSite(null)} />;
   if (view === "sites") return <SiteList tabs={tabs} settings={settings} onSettings={setSettings} onOpen={(name, session) => setSite({ site: name, session })} onBack={() => setView("")} />;
@@ -514,14 +535,14 @@ function SitePopover({ tab, anchor, onClose }) {
         <p className="bd-popover-meta">{session === "private" ? "无痕会话 · " : ""}{detail ? `${formatCount(detail.total)} 个 Cookie · 网站存储 ${formatBytes(storage)}` : error ? "" : "正在读取…"}</p>
         {session === "normal" && settings && <label className="toggle-row bd-popover-keep"><span><strong>保持登录</strong><small>清除浏览数据时保留此网站</small></span>
           <input type="checkbox" role="switch" aria-label={`保持 ${site} 的登录`} checked={Boolean(kept)} onChange={async () => setSettings(await saveSettings({ action: kept ? "keep-remove" : "keep-add", domain: kept ? kept.domain : site }).catch(failure => { setError(failure.message); return settings; }))} /></label>}
-      </> : <p>清除 {site} 的 Cookie 和网站存储？{session === "private" ? "只影响无痕会话。" : ""}此网站需要重新登录，网页会重新加载。</p>}
+      </> : <p>清除 {site} 的 Cookie 和网站存储？{session === "private" ? "只影响无痕会话。" : ""}此网站需要重新登录，网页会重新加载。{loopback.includes(site) ? loopbackWarning : ""}</p>}
       {error && <p className="error-message" role="alert">{error}</p>}
     </div>
   </Modal>;
 }
 
 function SiteDialog({ tab, onClose }) {
-  const available = useCapability();
+  const [available] = useCapability();
   const site = siteOfURL(tab?.url), session = tab?.incognito ? "private" : "normal";
   const [settings, setSettings] = useState(null);
   useEffect(() => { loadSettings().then(setSettings); }, []);
@@ -535,14 +556,15 @@ function SiteDialog({ tab, onClose }) {
 
 // Opened by the launcher with a request: clear, site, popover or reset.
 export default function BrowserDataApp({ request, onClose, tabs = [], onInternal, onVault }) {
-  const available = useCapability();
+  const [available, retry] = useCapability();
   const tab = request.tab;
   useEffect(() => {
-    if (available && !available.available && request.view === "clear") { onClose(); onInternal?.("clear"); }
+    if (usesLegacy(available) && request.view === "clear") { onClose(); onInternal?.("clear"); }
     // The address bar's own cookie panel stays for servers and guests without browser data.
-    if (available && !available.available && request.fallback) { onClose(); request.fallback(); }
+    if (usesLegacy(available) && request.fallback) { onClose(); request.fallback(); }
     if (available?.available && (request.view === "site" || request.view === "popover") && !siteOfURL(tab?.url)) { onClose(); openBrowserData({ view: "privacy", section: "sites" }); }
   }, [available]);
+  if (available && !available.available && !usesLegacy(available)) return <Unavailable value={available} onRetry={retry} onClose={onClose} />;
   if (request.view === "site") return available && (siteOfURL(tab?.url) || !available.available) && !(request.fallback && !available.available) ? <SiteDialog tab={tab} onClose={onClose} /> : null;
   if (!available?.available) return null;
   if (request.view === "clear") return <ClearDialog tab={tab} tabs={tabs} preset={request.preset} onClose={onClose} onInternal={onInternal} onVault={onVault} />;

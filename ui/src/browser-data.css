@@ -40,6 +40,9 @@
 .bd-search input { flex: 1; width: 100%; min-width: 0; min-height: calc(var(--h-control) - 2px); padding: 0; border: 0; background: transparent; outline: 0; }
 .bd-search.compact { flex: 0 1 240px; }
 .bd-search.compact input { min-height: calc(var(--h-compact) - 2px); font-size: var(--fs-secondary); }
+.bd-unavailable { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.bd-unavailable .error-message { flex: 1 1 18em; margin: 0; }
+.bd-unavailable button { display: inline-flex; align-items: center; gap: 6px; }
 .bd-loading, .browser-settings-section .bd-loading { margin: 12px 0; color: var(--muted); font-size: var(--fs-secondary); }
 .bd-notice, .browser-settings-section .bd-notice { margin: 0 0 12px; color: var(--green); font-size: var(--fs-secondary); }
 .bd-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0 0 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line)); border-radius: var(--r-md); background: color-mix(in srgb, var(--error) 6%, var(--surface)); color: var(--ink); font-size: var(--fs-secondary); line-height: 1.55; }
