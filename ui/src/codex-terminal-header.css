@@ -14,12 +14,15 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* "正在打开 Codex…" where the TUI's first line will be (.terminal-view's padding). */
+/* "正在打开 Codex…" in the middle of the still empty pane, like the other
+   terminal waiting lines (.terminal-startup); the terminal stays live under it
+   and its cursor keeps the top-left corner. */
 .codex-opening {
   position: absolute;
-  top: 18px;
-  left: 20px;
+  inset: 0;
   z-index: 1;
+  display: grid;
+  place-items: center;
   margin: 0;
   color: var(--muted);
   font-size: var(--fs-caption);

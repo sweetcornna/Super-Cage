@@ -9,6 +9,10 @@
 .sidebar-tab .session-owner-chip { flex: none; margin-left: auto; min-height: 1.2857rem; padding: 0 7px; font-weight: 500; }
 .sidebar-tab .tab-pin + .session-owner-chip,
 .sidebar-tab .session-owner-chip + .session-activity { margin-left: 0; }
+/* While such a row shows its actions, the chip and the pin give way to the
+   title (the tooltip and the unpin action still say both); the live dot stays. */
+.sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) :is(.session-owner-chip, .tab-pin) { display: none; }
+.sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) .session-activity { margin-left: auto; }
 /* Home rows of Codex sessions (workbench-home.jsx). */
 .home-recent .home-owner { display: inline-flex; flex: none; align-items: center; gap: 8px; margin-right: 6px; }
 .home-recent .home-row-error { margin: -2px 16px 10px 44px; color: var(--error); font-size: var(--fs-caption); line-height: 1.5; overflow-wrap: anywhere; }

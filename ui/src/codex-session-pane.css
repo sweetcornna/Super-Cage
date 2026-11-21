@@ -104,6 +104,8 @@
   font-size: var(--fs-secondary);
 }
 .codex-session-auto {
+  /* .check-line's form spacing would lift it above the buttons beside it. */
+  margin: 0;
   color: var(--muted);
   font-size: var(--fs-secondary);
 }
