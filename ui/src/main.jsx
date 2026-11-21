@@ -109,7 +109,7 @@ function App() {
   }, []);
   const claudeProfiles = useClaudeAccounts();
   const codexProfiles = useCodexAccounts();
-  const [managementPage, setManagementPage] = useState("");
+  const [managementPage, setManagementPage] = useState(() => { try { return Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000 ? "claude-science" : ""; } catch { return ""; } }); // Claude Science reloaded the window once for its frame (claude-science.jsx)
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
   const [terminalChoice, setTerminalChoice] = useState(null);

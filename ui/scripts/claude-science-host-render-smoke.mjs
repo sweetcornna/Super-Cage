@@ -254,7 +254,7 @@ async function blockedByPolicy() {
     await row.click();
     await loaded;
     assert.ok(await page.evaluate(() => Number(sessionStorage.getItem("cage-science-frame-reload")) > 0), "reloaded once");
-    await row.click();
+    // The window comes back to the Science page by itself (main.jsx).
     await pane.getByText("窗口打开时本机渲染还没有就绪，重新载入窗口后生效。").waitFor({ timeout: 15000 });
     await pane.getByRole("button", { name: "重新载入窗口", exact: true }).waitFor();
     assert.equal(native.at(-1).op, "disarm");
@@ -271,4 +271,4 @@ for (const mode of ["light", "dark"]) {
 }
 await elsewhere();
 await blockedByPolicy();
-console.log(`PASS: switch off by default, restart asked without the network switches, ticket+arm+frame edge to edge, sign-in hands over to the browser pane, one re-ticket then fallback (remembered), refused probe, off from both switches, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; CSP refusal reloads once, then asks`);
+console.log(`PASS: switch off by default, restart asked without the network switches, ticket+arm+frame edge to edge, sign-in hands over to the browser pane, one re-ticket then fallback (remembered), refused probe, off from both switches, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; CSP refusal reloads once, comes back to the page, then asks`);
