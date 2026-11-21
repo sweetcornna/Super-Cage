@@ -23,7 +23,7 @@ func (s *Server) startMonitorTiming() *monitorTiming {
 	s.mu.Lock()
 	timing.verified = s.safety.VerifiedAt
 	if s.safety.Gate != nil {
-		timing.until = s.safety.Gate.Until
+		timing.until = s.safety.Gate.Deadline()
 	}
 	s.mu.Unlock()
 	return timing

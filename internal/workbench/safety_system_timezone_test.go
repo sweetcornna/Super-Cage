@@ -81,6 +81,41 @@ func TestLinuxTimezoneRejectsStaleSystemFile(t *testing.T) {
 	}
 }
 
+// A wrong state of the guest's settings files is an answer: the probe must
+// report it, not fail. A probe that fails gives no answer, which monitoring
+// retries within the lease (guest_reads.go) instead of closing at once.
+func TestLinuxProbeReportsGarbledTimezoneFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux probe uses POSIX TZ semantics; native Windows settings are tested separately")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 not installed")
+	}
+	directory := t.TempDir()
+	timezone := filepath.Join(directory, "timezone")
+	if err := os.WriteFile(timezone, []byte("Asia/\xff\xfeShanghai\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	script := strings.ReplaceAll(guestSafetyProbe, "/etc/timezone", filepath.ToSlash(timezone))
+	input, _ := json.Marshal(map[string]any{"stage": "environment", "timezone": "Etc/UTC"})
+	command := exec.Command(python, "-I", "-c", script, base64.StdEncoding.EncodeToString(input))
+	command.Env = append(os.Environ(), "TZ=Etc/UTC", "LANG=C", "LC_ALL=C")
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("the probe failed instead of reporting the file: %v", err)
+	}
+	var observation guestObservation
+	if err := json.Unmarshal(output, &observation); err != nil {
+		t.Fatal(err)
+	}
+	config := cage.DefaultConfig()
+	config.Timezone, config.Locale = "Etc/UTC", "C"
+	if guestSettingsMatch(observation, config) || !strings.Contains(linuxGuestSettingsMismatch(observation, config), "系统时区文件不一致") {
+		t.Fatalf("a garbled time zone file matched: %s", output)
+	}
+}
+
 // A single fixed-offset TZif v1 record keeps fixtures independent of host tzdata.
 func fixedOffsetTZif(offset int32) []byte {
 	data := make([]byte, 54)

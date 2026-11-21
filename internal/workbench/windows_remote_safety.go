@@ -36,31 +36,31 @@ func (s *Server) remoteWindowsObservation(ctx context.Context, input map[string]
 	var observation guestObservation
 	cfg, err := loadConfig(s.configPath)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	input["timezone"] = cfg.Timezone
 	cmd, err := guestos.WindowsRelayCommand(ctx, s.profile, "headless-safety")
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	data, err := json.Marshal(input)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	cmd.Stdin = bytes.NewReader(append(data, '\n'))
 	cmd.Stderr = io.Discard
 	var output bytes.Buffer
 	cmd.Stdout = &boundedWindowsStatusWriter{buffer: &output, remaining: 64 << 10}
 	if err = cmd.Run(); err != nil {
-		return observation, errors.New("Windows 云端沙箱观测未完成，外网保持关闭")
+		return observation, noAnswer(errors.New("Windows 云端沙箱观测未完成，外网保持关闭"))
 	}
 	observation, err = decodeWindowsObservation(output.Bytes())
 	if err != nil {
-		return observation, err
+		return observation, err // Classified by decodeWindowsObservation.
 	}
 	evidence := observation.Remote
 	if evidence == nil || !evidence.TokenVerified || !strings.HasPrefix(evidence.SandboxSID, "S-1-15-2-") || !strings.HasPrefix(evidence.Session, "headless-") {
-		return observation, errors.New("Windows 云端观测未确认实际 AppContainer 身份")
+		return observation, wrongAnswer(errors.New("Windows 云端观测未确认实际 AppContainer 身份"))
 	}
 	// This command reads all four account filters, all four package filters,
 	// the exact broker permit and loopback exception; it cannot install rules.
@@ -76,8 +76,22 @@ func (s *Server) remoteWindowsObservation(ctx context.Context, input map[string]
 		Loopback   bool   `json:"loopback_exemption"`
 		UDPFilters int    `json:"udp_bind_filters"`
 	}
-	if policy.Run() != nil || json.Unmarshal(output.Bytes(), &state) != nil || state.Version != 1 || state.Package != evidence.SandboxSID || state.Broker != "127.0.0.1:17897" || !state.Filter || !state.Loopback || state.UDPFilters != 2 {
-		return observation, errors.New("Windows 云端 WFP 策略与当前沙箱不匹配，外网保持关闭")
+	mismatch := errors.New("Windows 云端 WFP 策略与当前沙箱不匹配，外网保持关闭")
+	var exit *exec.ExitError
+	if err = policy.Run(); err != nil {
+		// The tool exits non-zero when it finds a filter missing or in
+		// conflict: that is its answer. A tool that could not start, or that
+		// the read's deadline stopped, gave none.
+		if errors.As(err, &exit) && ctx.Err() == nil {
+			return observation, wrongAnswer(mismatch)
+		}
+		return observation, noAnswer(fmt.Errorf("Windows 云端 WFP 策略未能读回，外网保持关闭: %w", err))
+	}
+	if json.Unmarshal(output.Bytes(), &state) != nil {
+		return observation, noAnswer(errors.New("Windows 云端 WFP 策略读回结果无效，外网保持关闭"))
+	}
+	if state.Version != 1 || state.Package != evidence.SandboxSID || state.Broker != "127.0.0.1:17897" || !state.Filter || !state.Loopback || state.UDPFilters != 2 {
+		return observation, wrongAnswer(mismatch)
 	}
 	evidence.PolicyVerified = true
 	return observation, nil

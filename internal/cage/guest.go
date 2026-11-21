@@ -97,6 +97,10 @@ Type=simple
 # probe user's, and the governor clamps every value it reads there.
 ExecStartPre=/usr/bin/install -d -o root -g root -m 0755 /run/cage-resources
 ExecStartPre=/usr/bin/install -d -o cage -g cage -m 0755 /run/cage-resources/in
+# The two accounts, rendered with the environment's own names like every
+# other account reference; the governor never guesses them.
+Environment=CAGE_SESSION_USER=cage
+Environment=CAGE_BROWSER_USER=cage-browser
 ExecStart=/usr/bin/python3 -I /usr/local/lib/cage-resource-governor.py
 ExecStopPost=/usr/bin/python3 -I /usr/local/lib/cage-resource-governor.py --reset
 OOMScoreAdjust=-900

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { getClientContext } from "./client-context.mjs";
+import { BrandMark } from "./brand";
 import "./about-settings.css";
 
 const repository = "https://github.com/sweetcornna/Super-Cage";
@@ -34,7 +35,7 @@ function CheckResult({ label, item, source, onError }) {
   return <section className="about-result" aria-label={label}>
     <h4>{label}</h4>
     {!item ? <p className="footnote">尚未检查</p> : <>
-      <p className={item.error ? "error-message" : "about-result-status"}>
+      <p className={item.error ? "error-message" : "about-result-status"} data-status={item.error ? undefined : item.status}>
         {item.error || (source ? sourceMessages : releaseMessages)[item.status]}
       </p>
       {item.retryAt && <p className="footnote">可于 {new Date(item.retryAt).toLocaleString()} 后重试</p>}
@@ -85,6 +86,7 @@ export function AboutSettings() {
   };
   return <section className="about-settings" aria-label="关于 Super Cage">
     <div className="section-title"><h3>关于</h3><p>Super Cage 的版本与更新信息</p></div>
+    <div className="about-hero"><BrandMark size={48} /><strong>Super Cage</strong></div>
     <dl className="about-build">
       <div><dt>软件版本</dt><dd>{loading ? "正在读取…" : build?.version || "未知"}</dd></div>
       <div><dt>构建提交</dt><dd>{build?.commit ? <code title={build.commit}>{build.commit.slice(0, 12)}</code> : loading ? "正在读取…" : "未记录"}</dd></div>

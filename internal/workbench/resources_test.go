@@ -70,6 +70,45 @@ func TestResourceAllocationSaveAndStartup(t *testing.T) {
 	check(18, 8)
 }
 
+// A value chosen while the machine counted as dedicated (a headless cage
+// serve) can be above the desktop app's range on the same machine: the
+// desktop starts with the range's end and says so, and nothing rewrites the
+// file the other role still reads.
+func TestSavedAllocationAboveTheDesktopRangeStartsClamped(t *testing.T) {
+	oldMem, oldCPU := host.MemGiB, host.CPUs
+	t.Cleanup(func() { host.MemGiB, host.CPUs = oldMem, oldCPU })
+	host.MemGiB = func() int { return 24 }
+	host.CPUs = func() int { return 10 }
+	t.Setenv("AGENT_VM_HOST_SHARE", "2")
+	t.Setenv("CAGE_MACHINE_ROLE", "dedicated")
+	s := testServer(t)
+	if w := request(s, "POST", "/api/environment/resources", s.origin, `{"allocation":{"automatic":false,"memory_gib":21,"cpus":9}}`, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	saved, _ := os.ReadFile(cage.ResourceAllocationPath(s.configPath))
+	t.Setenv("CAGE_MACHINE_ROLE", "desktop")
+	if m, c, err := cage.ConfiguredResourceLimits(s.configPath); err != nil || m != 18 || c != 8 {
+		t.Fatalf("desktop startup limits = %d/%d, %v", m, c, err)
+	}
+	w := request(s, "GET", "/api/environment/resources", "", "", true)
+	var status struct {
+		Memory int    `json:"memory_gib"`
+		CPUs   int    `json:"cpus"`
+		Error  string `json:"resource_error"`
+		Notice string `json:"notice"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil || status.Memory != 18 || status.CPUs != 8 || status.Error != "" || !strings.Contains(status.Notice, "环境按内存 18 GB、CPU 8 核启动") {
+		t.Fatal(w.Body.String(), err)
+	}
+	if after, _ := os.ReadFile(cage.ResourceAllocationPath(s.configPath)); string(after) != string(saved) {
+		t.Fatalf("the saved allocation was rewritten: %s", after)
+	}
+	// Choosing the same value on the desktop is still refused.
+	if w := request(s, "POST", "/api/environment/resources", s.origin, `{"allocation":{"automatic":false,"memory_gib":21,"cpus":9}}`, true); w.Code == 200 {
+		t.Fatal("accepted a new choice above the desktop range")
+	}
+}
+
 func TestResourceStatusTellsAnOldDefaultFromAChoice(t *testing.T) {
 	oldMem, oldCPU := host.MemGiB, host.CPUs
 	t.Cleanup(func() { host.MemGiB, host.CPUs = oldMem, oldCPU })

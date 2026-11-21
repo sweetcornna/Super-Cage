@@ -70,6 +70,9 @@ func (s *Server) resourceStatus(w http.ResponseWriter, r *http.Request) {
 		allocationError = err.Error()
 		memory, cpus = a.MemoryGiB, a.CPUs
 	}
+	// A saved value outside this machine's range starts clamped (the range
+	// follows the machine's role); the notice says what applies.
+	clampNotice := a.LimitsNotice()
 	// A Linux guest follows the machine (resource-allocation.md, level B);
 	// macOS guests answer above with the previous sizing.
 	maxMemory, maxCPUs := cage.ManualLimitRange()
@@ -113,6 +116,8 @@ func (s *Server) resourceStatus(w http.ResponseWriter, r *http.Request) {
 		reply["offer"] = map[string]any{"automatic": true, "memory_gib": automaticMemory, "cpus": automaticCPUs, "restart_required": running}
 	case automatic && restart && observation != nil && maximum != int64(memory)<<30:
 		reply["notice"] = fmt.Sprintf("自动分配已按这台机器重新计算为内存 %d GB、CPU %d 核，重启环境后生效。", memory, cpus)
+	case clampNotice != "":
+		reply["notice"] = clampNotice
 	}
 	if observation != nil && observation.Advice != nil {
 		reply["advice"] = observation.Advice
@@ -146,7 +151,7 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 		if !allocation.Automatic {
 			allocation.Chosen = cage.OriginUser
 		}
-		if _, _, err := s.resourceAllocationLimits(allocation); err != nil {
+		if err := s.validateResourceAllocation(allocation); err != nil {
 			requestError(w, err)
 			return
 		}

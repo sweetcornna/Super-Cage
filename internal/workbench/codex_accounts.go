@@ -91,6 +91,10 @@ type codexAccountManager struct {
 	// unrecorded is a pending login directory last seen holding a sign-in
 	// that cannot become an account, such as an API key login.
 	unrecorded string
+	// labels caches codexAccountLabels for the accounts file labelsFile
+	// described: lists poll every 250 ms.
+	labels     map[string]string
+	labelsFile os.FileInfo
 }
 
 func (s *Server) loadCodexAccounts() (codexAccountList, error) {

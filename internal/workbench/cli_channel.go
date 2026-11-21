@@ -658,18 +658,36 @@ func (s *Server) stopTerminalConversation(ctx context.Context, view mobileSessio
 	if err != nil {
 		return view, err
 	}
+	// The view was read from the guest for this request and shows turnID
+	// running. One Esc per turn: a repeated or concurrent Stop before the
+	// interrupt reaches the transcript sends none, since a second Esc on an
+	// idle composer would open "edit previous message".
+	escape := func(terminal *terminalSession) error {
+		s.account.mu.Lock()
+		defer s.account.mu.Unlock()
+		if !s.mobileAuthorized(ctx) {
+			return errMobileLocked
+		}
+		at := time.Now()
+		s.mobileCLI.mu.Lock()
+		claimed := s.mobileCLI.claimTerminalStopLocked(view.ID, turnID, at)
+		s.mobileCLI.mu.Unlock()
+		if !claimed {
+			return nil
+		}
+		err := terminal.enqueueInput(ctx, "\x1b")
+		if err != nil {
+			s.mobileCLI.mu.Lock()
+			s.mobileCLI.releaseTerminalStopLocked(view.ID, turnID, at)
+			s.mobileCLI.mu.Unlock()
+		}
+		return err
+	}
 	if record.codex() {
 		// A turn of the desktop's Codex TUI stops as it would at the keyboard:
 		// Esc interrupts it (and declines an open approval).
 		if terminal := s.terminals.boundCodex(record.ID); terminal != nil {
-			s.account.mu.Lock()
-			if !s.mobileAuthorized(ctx) {
-				s.account.mu.Unlock()
-				return view, errMobileLocked
-			}
-			err = terminal.enqueueInput(ctx, "\x1b")
-			s.account.mu.Unlock()
-			if err != nil {
+			if err := escape(terminal); err != nil {
 				return view, err
 			}
 			return s.terminalConversationView(ctx, view.ID)
@@ -683,14 +701,7 @@ func (s *Server) stopTerminalConversation(ctx context.Context, view mobileSessio
 	if terminal == nil {
 		return view, errors.New("请在电脑终端停止这次运行")
 	}
-	s.account.mu.Lock()
-	if !s.mobileAuthorized(ctx) {
-		s.account.mu.Unlock()
-		return view, errMobileLocked
-	}
-	err = terminal.enqueueInput(ctx, "\x1b")
-	s.account.mu.Unlock()
-	if err != nil {
+	if err := escape(terminal); err != nil {
 		return view, err
 	}
 	return s.terminalConversationAction(ctx, view.ID, map[string]any{"action": "stop"})

@@ -459,7 +459,7 @@ func (s *Server) windowsCapabilitiesLocked() map[string]any {
 			cfg, err := loadConfig(s.configPath)
 			now := time.Now()
 			network = ready && !s.networkPaused && !s.proxyNetworkLost && err == nil && gate.Configuration == cfg.Fingerprint() &&
-				gate.Mode == cage.GateOpen && !gate.Fault && gate.Until.After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
+				gate.Mode == cage.GateOpen && !gate.Fault && gate.Deadline().After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
 		}
 		unavailable := []string{"desktop", "editor", "projects", "audio"}
 		if !cli {
@@ -505,7 +505,7 @@ func (s *Server) windowsCapabilitiesLocked() map[string]any {
 	if available["phone-browser"] || available["phone-desktop"] {
 		cfg, err := loadConfig(s.configPath)
 		now := time.Now()
-		open := err == nil && gate != nil && gate.Configuration == cfg.Fingerprint() && gate.Mode == cage.GateOpen && gate.PolicyVerified && !gate.Fault && gate.Until.After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
+		open := err == nil && gate != nil && gate.Configuration == cfg.Fingerprint() && gate.Mode == cage.GateOpen && gate.PolicyVerified && !gate.Fault && gate.Deadline().After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
 		available["phone-browser"] = available["phone-browser"] && open
 		available["phone-desktop"] = available["phone-desktop"] && open
 	}

@@ -29,7 +29,11 @@ type terminalRequest struct {
 	sharedID        string
 	// codexSession: the client knows Codex sessions, so a Codex terminal from
 	// the menu becomes one.
-	codexSession   bool
+	codexSession bool
+	// codexProbed: the guest answered the Codex CLI probe completely just
+	// before the operation lock (warmCodexProbe), so the open's check under
+	// the lock may ask for it again: the guest answers from its cache.
+	codexProbed    bool
 	requestContext context.Context
 }
 

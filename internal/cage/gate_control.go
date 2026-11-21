@@ -240,6 +240,7 @@ func (c *GateClient) request(ctx context.Context, command *gateCommand) (GateSta
 		return state, err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.record.Token)
+	sent := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
 		return state, errors.New("无法连接 VM 外网络门槛控制器")
@@ -258,6 +259,7 @@ func (c *GateClient) request(ctx context.Context, command *gateCommand) (GateSta
 	if json.NewDecoder(io.LimitReader(resp.Body, 128<<10)).Decode(&state) != nil || state.RunID != c.record.RunID || state.Policy != SafetyPolicyVersion {
 		return GateStatus{}, errors.New("网络门槛状态不属于当前运行实例")
 	}
+	state.deadline = state.localDeadline(sent)
 	return state, nil
 }
 
