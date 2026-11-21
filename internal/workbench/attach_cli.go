@@ -196,6 +196,10 @@ type attacher struct {
 	started bool // the first stream was accepted
 }
 
+// attachStreamHook sees every stream an attach opens; tests use it to drop
+// one mid-output.
+var attachStreamHook func(*websocket.Conn)
+
 // The stream to the controller is a single WebSocket; these bound how long
 // a silent one is trusted, as the web terminal does (terminal-reconnect.mjs).
 var (
@@ -479,6 +483,9 @@ func (a *attacher) run(ctx context.Context, ws *websocket.Conn) attachExit {
 		a.sendMu.Lock()
 		a.ws = ws
 		a.sendMu.Unlock()
+		if attachStreamHook != nil {
+			attachStreamHook(ws)
+		}
 		a.sendSize()
 		frames := make(chan error, 1)
 		go func() { frames <- a.readStream(ws) }()
