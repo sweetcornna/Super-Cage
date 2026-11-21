@@ -81,6 +81,11 @@
   backdrop-filter: blur(8px);
   animation: appear var(--dur) var(--ease-out);
 }
+/* In the settings page the scroller keeps 72 px of padding below the column;
+   the bar sits on the window's bottom edge instead of floating above it. */
+.settings-page .settings-content .local-terminal-savebar {
+  bottom: -72px;
+}
 .local-terminal-savebar .save-note {
   margin-right: auto;
   color: var(--muted);

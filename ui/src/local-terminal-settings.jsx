@@ -8,7 +8,7 @@ import "./local-terminal-settings.css";
 
 // Settings → 本机终端应用 (this computer). Loaded lazily: detecting the
 // applications happens only while this section is open.
-export default function LocalTerminalSettings({ onSaved }) {
+export default function LocalTerminalSettings({ onSaved, onDirty }) {
   const [saved, setSaved] = useState(null);
   const [draft, setDraft] = useState(null);
   const [apps, setApps] = useState(null);
@@ -40,6 +40,8 @@ export default function LocalTerminalSettings({ onSaved }) {
   const gone = supported ? missingChoice(saved, apps) : "";
   const dirty = Boolean(saved && draft && settingsChanged(saved, draft));
   const loading = !error && (!saved || !apps);
+  useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
   const change = (key, value) => { setDraft(previous => ({ ...previous, [key]: value })); setDone(false); };
 
   const save = async () => {
