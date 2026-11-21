@@ -4,19 +4,20 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserData, builtInOrigins, cookieKey, siteOf, within } from "./browser-data.mjs";
-import { applyPendingReset, chromiumCacheBytes, diskCacheBytes, requestReset, seedPreferences } from "./browser-data-profile.mjs";
+import { applyPendingReset, cancelReset, chromiumCacheBytes, diskCacheBytes, requestReset, resetStatus, seedPreferences } from "./browser-data-profile.mjs";
 
 const cookie = (domain, name, extra = {}) => ({ name, value: name + "-secret", domain, path: "/", size: 10, secure: true, ...extra });
 
-function fixture({ cookies = [], privateCookies = [], history = {}, tabs = [], usage = {}, probe = true } = {}) {
+function fixture({ cookies = [], privateCookies = [], history = {}, tabs = [], usage = {}, probe = true, onEvaluate, downloads } = {}) {
   const calls = [];
   const cdp = async (method, params = {}, sessionId) => {
     calls.push({ method, params, sessionId });
     if (method === "Runtime.evaluate") {
       if (!probe) return { exceptionDetails: { exception: { description: "ReferenceError: cageBrowsingData is not defined" } } };
       const input = JSON.parse(params.expression.slice("cageBrowsingData(".length, -1));
+      if (onEvaluate) { const answer = await onEvaluate(input, sessionId); if (answer !== undefined) return answer; }
       const value = {
-        probe: { browsingData: true, history: true },
+        probe: probe === true ? { browsingData: true, history: true } : probe,
         remove: { ok: true },
         "history-count": { count: 3, more: false },
         "history-origins": { origins: history, complete: true },
@@ -39,7 +40,7 @@ function fixture({ cookies = [], privateCookies = [], history = {}, tabs = [], u
   const data = new BrowserData({
     cdp, control: async () => "control", session: async id => "session-" + id, tabs: () => tabs,
     active: () => tabs[0]?.targetId || "", privateContext: () => "private-context",
-    downloads: { snapshot: () => [{ state: "saved", updatedAt: new Date(5000).toISOString() }, { state: "downloading", updatedAt: new Date(6000).toISOString() }], forget: since => forgotten.push(since) },
+    downloads: downloads || { snapshot: () => [{ state: "saved", updatedAt: new Date(5000).toISOString() }, { state: "downloading", updatedAt: new Date(6000).toISOString() }], forget: since => { forgotten.push(since); return { removed: 1, kept: 0 }; } },
     profile: mkdtempSync(join(tmpdir(), "cage-browser-data-")), protectedOrigins: () => builtInOrigins(47800), sciencePort: () => 47800,
   });
   const evaluations = () => calls.filter(call => call.method === "Runtime.evaluate").map(call => JSON.parse(call.params.expression.slice("cageBrowsingData(".length, -1)));
@@ -219,11 +220,138 @@ test("a requested reset starts the next Chromium on a seeded fresh profile", asy
   writeFileSync(join(home, "profile", "Default", "Cookies"), "old");
   requestReset(home);
   const removed = [];
-  assert.equal(applyPendingReset(home, "zh-CN", path => removed.push(path)), true);
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path) }), true);
   assert.equal(existsSync(join(home, "profile", "Default", "Cookies")), false);
   assert.deepEqual(JSON.parse(readFileSync(join(home, "profile", "Default", "Preferences"), "utf8")), seedPreferences("zh-CN"));
   assert.equal(removed.length, 1);
   assert.ok(existsSync(join(removed[0], "Default", "Cookies")), "the old profile moved aside for background removal");
   assert.ok(!readdirSync(home).includes("browser-reset.json"));
   assert.equal(applyPendingReset(home, "zh-CN"), false, "the marker is consumed once");
+});
+
+// Review 3.
+const validOrigin = origin => { try { return new URL(origin).origin === origin; } catch { return false; } };
+
+test("finding 7: a page without chrome.browsingData or chrome.history asks for an update, never a retry", async () => {
+  for (const probe of [{ browsingData: false, history: true }, { browsingData: true, history: false }])
+    assert.deepEqual(await fixture({ probe }).data.request({ mode: "capabilities" }), { available: false, reason: "update" });
+});
+
+test("finding 2: IP and numeric hosts never get a www. origin; every origin handed to Chromium parses", async () => {
+  const { data, evaluations } = fixture({ cookies: [cookie("192.168.1.10", "sid")] });
+  const kept = await finish(data, await data.request({ mode: "clear", since: 0, types: ["site", "cache"], keep: ["192.168.1.10", "127.0.0.1", "10.0.0.1", "1.2.3", "foo.123", "github.com"] }));
+  assert.equal(kept.state, "done");
+  const remove = evaluations().find(input => input.op === "remove");
+  assert.deepEqual(remove.excludeOrigins.filter(origin => !validOrigin(origin)), []);
+  assert.ok(remove.excludeOrigins.includes("https://www.github.com") && remove.excludeOrigins.includes("http://192.168.1.10") && remove.excludeOrigins.includes("http://10.0.0.1"));
+  assert.ok(kept.result.skippedOrigins > 0, "invalid kept hosts are counted, not sent");
+  const sites = await finish(data, await data.request({ mode: "clear-sites", sites: ["127.0.0.1", "192.168.1.10", "foo.123"] }));
+  assert.equal(sites.state, "done");
+  const siteRemove = evaluations().filter(input => input.op === "remove").at(-1);
+  assert.deepEqual(siteRemove.origins.filter(origin => !validOrigin(origin)), []);
+  assert.ok(siteRemove.origins.includes("http://127.0.0.1") && siteRemove.origins.includes("https://192.168.1.10"));
+  const before = evaluations().length;
+  const onlyInvalid = await finish(data, await data.request({ mode: "clear-sites", sites: ["foo.123"] }));
+  assert.equal(onlyInvalid.state, "done");
+  assert.equal(evaluations().slice(before).filter(input => input.op === "remove").length, 0, "an empty origin list never reaches browsingData.remove, which would clear every site");
+  assert.ok(onlyInvalid.result.skippedOrigins > 0);
+});
+
+test("finding 1: clearing download records keeps unsaved downloads and says so", async () => {
+  const at = new Date(5000).toISOString();
+  const snapshot = () => [{ state: "saved", updatedAt: at }, { state: "failed", retryable: true, updatedAt: at }, { state: "failed", retryable: false, updatedAt: at }, { state: "canceled", updatedAt: at }];
+  const { data } = fixture({ downloads: { snapshot, forget: () => ({ removed: 3, kept: 1 }) } });
+  const summary = await data.request({ mode: "summary", since: 0 });
+  assert.deepEqual(summary.downloads, { count: 3, unsaved: 1 });
+  const job = await finish(data, await data.request({ mode: "clear", since: 0, types: ["downloads"] }));
+  assert.equal(job.result.keptDownloads, 1);
+});
+
+test("finding 8: a clear asked not to reload leaves the pages alone", async () => {
+  const tabs = [{ targetId: "web", url: "https://example.com/" }];
+  const { data, calls } = fixture({ tabs });
+  const job = await finish(data, await data.request({ mode: "clear", since: 0, types: ["site"], reload: false }));
+  assert.equal(job.state, "done");
+  assert.equal(calls.filter(call => call.method === "Page.reload").length, 0);
+  assert.equal(job.result.reloaded, 0);
+});
+
+test("finding 12: a destructive call that timed out is never sent twice; reads retry once", async () => {
+  let removes = 0, pages = 0;
+  const { data } = fixture({ onEvaluate: input => {
+    if (input.op === "remove" && ++removes === 1) throw new Error("Browser command timed out: Runtime.evaluate");
+    if (input.op === "history-page" && ++pages === 1) throw new Error("Browser command timed out: Runtime.evaluate");
+  } });
+  const job = await finish(data, await data.request({ mode: "clear", since: 0, types: ["history"] }));
+  assert.equal(job.state, "failed");
+  assert.equal(removes, 1);
+  const page = await data.request({ mode: "history" });
+  assert.equal(pages, 2);
+  assert.ok(page.items.length > 0);
+  let deletes = 0;
+  const second = fixture({ onEvaluate: input => { if (input.op === "history-delete-host" && ++deletes === 1) throw new Error("Browser command timed out: Runtime.evaluate"); } });
+  await assert.rejects(second.data.request({ mode: "history-delete", host: "example.com" }));
+  assert.equal(deletes, 1);
+});
+
+test("finding 12: history entries are bounded and a long address is fetched whole only to open it", async () => {
+  const long = "https://example.com/?" + "q".repeat(5000);
+  const { data } = fixture({ onEvaluate: input => {
+    if (input.op === "history-page") return { result: { value: { items: [{ url: long.slice(0, 2048), truncated: true, id: "7", title: "t", time: 5, visits: 1 }], more: false } } };
+    if (input.op === "history-url") return { result: { value: { url: input.id === "7" ? long : "" } } };
+  } });
+  const page = await data.request({ mode: "history" });
+  assert.equal(page.items[0].truncated, true);
+  assert.ok(page.items[0].url.length <= 2048);
+  assert.equal((await data.request({ mode: "history-url", id: "7", time: 5 })).url, long);
+  await assert.rejects(data.request({ mode: "history-url", id: "8", time: 5 }), /记录/);
+});
+
+test("finding 12: a private cache-only clear reports nothing freed it cannot measure", async () => {
+  const tabs = [{ targetId: "p1", url: "https://example.com/", incognito: true, browserContextId: "private-context" }];
+  const { data } = fixture({ tabs, usage: { "https://example.com": 5000 } });
+  const job = await finish(data, await data.request({ mode: "clear", session: "private", types: ["cache"] }));
+  assert.equal(job.result.freedBytes, 0);
+});
+
+test("finding 10: a reset marker carries its id and expires; the outcome is written for the host", () => {
+  const home = mkdtempSync(join(tmpdir(), "cage-browser-reset-"));
+  mkdirSync(join(home, "profile", "Default"), { recursive: true });
+  writeFileSync(join(home, "profile", "Default", "Cookies"), "old");
+  // A marker older than ten minutes is dropped, the profile untouched.
+  requestReset(home, "r-old", Date.now() - 11 * 60_000);
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: () => {} }), false);
+  assert.ok(existsSync(join(home, "profile", "Default", "Cookies")));
+  assert.ok(!existsSync(join(home, "browser-reset.json")));
+  assert.deepEqual(resetStatus(home, "r-old"), { state: "expired" });
+  // The host gave up: the marker goes before the next start.
+  requestReset(home, "r-cancel");
+  cancelReset(home, "r-cancel");
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: () => {} }), false);
+  // A rename that fails keeps the old profile and says so.
+  requestReset(home, "r-rename");
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: () => {}, rename: () => { throw Object.assign(new Error("busy"), { code: "EBUSY" }); } }), false);
+  assert.ok(existsSync(join(home, "profile", "Default", "Cookies")));
+  assert.equal(resetStatus(home, "r-rename").state, "failed");
+  // Seeding that fails after the rename moves the old profile back.
+  requestReset(home, "r-seed");
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: () => {}, seed: () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); } }), false);
+  assert.ok(existsSync(join(home, "profile", "Default", "Cookies")), "the old profile is back in place");
+  assert.equal(resetStatus(home, "r-seed").state, "failed");
+  assert.deepEqual(readdirSync(home).filter(name => name.startsWith("profile.reset-")), []);
+  // Success, and the id of another request is unknown.
+  requestReset(home, "r-ok");
+  const removed = [];
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path) }), true);
+  assert.deepEqual(resetStatus(home, "r-ok"), { state: "done" });
+  assert.deepEqual(resetStatus(home, "r-other"), { state: "unknown" });
+});
+
+test("finding 10: a leftover old profile is removed at the next start", () => {
+  const home = mkdtempSync(join(tmpdir(), "cage-browser-reset-"));
+  mkdirSync(join(home, "profile.reset-1700000000000", "Default"), { recursive: true });
+  mkdirSync(join(home, "profile", "Default"), { recursive: true });
+  const removed = [];
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path) }), false);
+  assert.deepEqual(removed, [join(home, "profile.reset-1700000000000")]);
 });

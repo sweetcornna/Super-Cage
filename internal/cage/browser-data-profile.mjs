@@ -1,7 +1,7 @@
 // Start-up side of browser data management, imported by the controller
 // before it launches Chromium: the disk-cache bound and a requested reset.
 // Synchronous and small; the rest of browser data loads on first use.
-import { existsSync, mkdirSync, renameSync, statfsSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statfsSync, writeFileSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -35,9 +35,39 @@ export function diskCacheBytes(path, statfs = statfsSync) {
 }
 
 export const resetMarker = home => join(home, "browser-reset.json");
+const resetResult = home => join(home, "browser-reset-result.json");
+// A marker the controller did not act on soon after the request (Chromium
+// never exited, the host gave up) must not wipe the profile days later.
+const markerLifetime = 10 * 60_000;
 
-export function requestReset(home) {
-  writeFileSync(resetMarker(home), JSON.stringify({ requested: new Date().toISOString() }), { mode: 0o600 });
+// The host names each request, so it can ask how that one ended.
+export function requestReset(home, id = "", requested = Date.now()) {
+  writeFileSync(resetMarker(home), JSON.stringify({ id, requested }), { mode: 0o600 });
+}
+
+const readJSON = path => { try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; } };
+
+// The host gave up waiting: the reset it reported as not done must not happen
+// at a later start.
+export function cancelReset(home, id) {
+  const marker = readJSON(resetMarker(home));
+  if (marker && (!id || marker.id === id)) rmSync(resetMarker(home), { force: true });
+}
+
+// How the request with this id ended, as written at the controller's start:
+// done, failed (the old profile is still in use), expired or unknown.
+export function resetStatus(home, id) {
+  const result = readJSON(resetResult(home));
+  return result && result.id === id && ["done", "failed", "expired"].includes(result.state) ? { state: result.state } : { state: "unknown" };
+}
+
+function writeResult(home, id, state) {
+  try { writeFileSync(resetResult(home), JSON.stringify({ id, state, at: Date.now() }), { mode: 0o600 }); } catch {}
+}
+
+function seedProfile(profile, language) {
+  mkdirSync(join(profile, "Default"), { recursive: true, mode: 0o700 });
+  writeFileSync(join(profile, "Default", "Preferences"), JSON.stringify(seedPreferences(language)), { mode: 0o600 });
 }
 
 // The preferences guest-start.sh seeds into a profile; a fresh profile gets
@@ -52,22 +82,45 @@ export function seedPreferences(language) {
 }
 
 // Runs before Chromium starts. The old profile is moved aside at once and
-// removed in the background; favourites, the vault and Cage settings live on
-// the host, imported extensions and the download list outside the profile.
-export function applyPendingReset(home, language, removeLater = path => rm(path, { recursive: true, force: true })) {
+// removed in the background while Chromium starts; favourites, the vault and
+// Cage settings live on the host, imported extensions and the download list
+// outside the profile. A rename or seeding that fails leaves the old profile
+// in place and says so in the result the host reads. Old profiles a previous
+// start did not finish removing are removed now.
+export function applyPendingReset(home, language, { removeLater = path => rm(path, { recursive: true, force: true }), rename = renameSync, seed = seedProfile, now = Date.now } = {}) {
+  let names = [];
+  try { names = readdirSync(home); } catch {}
+  for (const name of names) if (/^profile\.reset-\d+$/.test(name)) void Promise.resolve(removeLater(join(home, name))).catch(() => {});
   const marker = resetMarker(home);
   if (!existsSync(marker)) return false;
+  const request = readJSON(marker) || {};
+  const id = typeof request.id === "string" ? request.id.slice(0, 64) : "";
+  const requested = Number(request.requested) || Date.parse(request.requested) || 0;
   const profile = join(home, "profile");
+  let aside = "";
   try {
-    if (existsSync(profile)) {
-      const aside = join(home, "profile.reset-" + Date.now());
-      renameSync(profile, aside);
-      void Promise.resolve(removeLater(aside)).catch(() => {});
+    if (!(now() - requested <= markerLifetime && requested <= now() + 60_000)) {
+      writeResult(home, id, "expired");
+      return false;
     }
-    mkdirSync(join(profile, "Default"), { recursive: true, mode: 0o700 });
-    writeFileSync(join(profile, "Default", "Preferences"), JSON.stringify(seedPreferences(language)), { mode: 0o600 });
+    try {
+      if (existsSync(profile)) {
+        const target = join(home, "profile.reset-" + now());
+        rename(profile, target);
+        aside = target;
+      }
+      seed(profile, language);
+    } catch {
+      if (aside) {
+        try { rmSync(profile, { recursive: true, force: true }); rename(aside, profile); aside = ""; } catch {}
+      }
+      // Still on the old profile unless it could not be put back.
+      if (!aside) { writeResult(home, id, "failed"); return false; }
+    }
   } finally {
     rmSync(marker, { force: true });
   }
+  if (aside) void Promise.resolve(removeLater(aside)).catch(() => {});
+  writeResult(home, id, "done");
   return true;
 }

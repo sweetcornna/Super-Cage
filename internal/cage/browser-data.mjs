@@ -8,6 +8,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
+import { storageOrigins } from "./browser-data-storage.mjs";
 import { publicScienceURL, readScienceConfig } from "./browser-science.mjs";
 
 // Loopback origins the workbench itself relies on: the file editor
@@ -61,6 +62,16 @@ export const within = (host, domain) => host === domain || host.endsWith("." + d
 const cookieHost = cookie => cookie.domain.replace(/^\./, "");
 const originHost = origin => { try { return new URL(origin).hostname.replace(/^\[|\]$/g, ""); } catch { return ""; } };
 const webOrigin = value => { try { const url = new URL(value); return ["http:", "https:"].includes(url.protocol) ? url.origin : ""; } catch { return ""; } };
+// Chromium refuses a whole removal for one origin it cannot parse, such as
+// "https://www.192.168.1.10" (review 3, finding 2): "www." is added only to a
+// name whose last label has a letter, and every list is checked before use.
+const validOrigin = origin => webOrigin(origin) === origin;
+const originsOf = host => ["https://" + host, "http://" + host, ...(/[a-z]/.test(host.split(".").at(-1)) ? ["https://www." + host] : [])];
+// Operations that change data are sent at most once: after a timeout it is
+// unknown whether Chromium ran them. Only a call that never reached the page
+// is sent again.
+const destructive = new Set(["remove", "history-delete-urls", "history-delete-entries", "history-delete-range", "history-delete-host"]);
+const unreached = error => /Session with given id not found|No target with given id/i.test(error?.message || "");
 
 // A bounded, cancellable size of a profile directory. Symbolic links are not
 // followed; a directory that disappears while it is walked counts as empty.
@@ -102,7 +113,10 @@ export class BrowserData {
       expression: `cageBrowsingData(${JSON.stringify({ op, ...input })})`, awaitPromise: true, returnByValue: true,
     }, await this.control(repair), timeout);
     let response;
-    try { response = await call(false); } catch { response = await call(true); }
+    try { response = await call(false); } catch (error) {
+      if (destructive.has(op) && !unreached(error)) throw new Error("浏览器没有按时完成，可能已部分清除。请稍后重新打开查看");
+      response = await call(true);
+    }
     const text = response.exceptionDetails?.exception?.description || response.exceptionDetails?.text || "";
     if (/not defined/.test(text)) throw Object.assign(new Error("浏览器组件不支持管理浏览数据，请更新环境组件"), { unsupported: true });
     if (response.exceptionDetails) throw new Error("浏览数据操作未完成，请重试");
@@ -112,7 +126,9 @@ export class BrowserData {
   async capabilities() {
     try {
       const probe = await this.extension("probe", {}, 5000);
-      return { available: probe.browsingData && probe.history, version: 1, ranges: true, history: probe.history, incognito: true, reset: true };
+      // A page without either permission does not become usable by retrying.
+      if (!probe?.browsingData || !probe?.history) return { available: false, reason: "update" };
+      return { available: true, version: 1, ranges: true, history: true, incognito: true, reset: true };
     } catch (error) {
       return { available: false, reason: error.unsupported ? "update" : "unavailable" };
     }
@@ -157,7 +173,9 @@ export class BrowserData {
   }
 
   // Every origin this session is known to have touched: open tabs, cookie
-  // hosts, recent history and the profile's IndexedDB directories.
+  // hosts, recent history and, in the regular profile, every origin that
+  // holds storage there (browser-data-storage.mjs). storageError says the
+  // profile could not be read, so origins may be missing.
   async origins(scope) {
     const origins = new Map();
     const add = (origin, last = 0, visits = 0) => {
@@ -170,19 +188,16 @@ export class BrowserData {
     const cookies = await this.cookies(scope);
     // A cookie names a host, not a scheme or a port: both schemes are probed.
     for (const host of new Set(cookies.map(cookieHost))) { add("https://" + host); add("http://" + host); }
-    let historyComplete = true;
+    let historyComplete = true, storageError = null;
     if (!scope.private) {
       const history = await this.extension("history-origins");
       historyComplete = history.complete;
       for (const [origin, entry] of Object.entries(history.origins)) add(origin, entry.last, entry.visits);
       try {
-        for (const name of await readdir(join(this.profile, "Default", "IndexedDB"))) {
-          const match = /^(https?)_(.+)_(\d+)\.indexeddb\.leveldb$/.exec(name);
-          if (match) add(`${match[1]}://${match[2]}${(match[1] === "https" && match[3] === "443") || (match[1] === "http" && match[3] === "80") ? "" : ":" + match[3]}`);
-        }
-      } catch {}
+        for (const origin of await storageOrigins(join(this.profile, "Default"))) add(origin);
+      } catch (error) { storageError = error; }
     }
-    return { origins, cookies, historyComplete };
+    return { origins, cookies, historyComplete, storageError };
   }
 
   async usage(scope, origins) {
@@ -280,8 +295,12 @@ export class BrowserData {
     return sizes.reduce((sum, size) => sum + size, 0);
   }
 
+  // The records a clear removes, and those it keeps: a download whose save
+  // failed stays with its file so it can be retried (browser-downloads.mjs).
   downloadRecords(since) {
-    return this.downloads.snapshot().filter(item => ["saved", "failed", "canceled"].includes(item.state) && Date.parse(item.updatedAt || 0) >= since);
+    const records = this.downloads.snapshot().filter(item => ["saved", "failed", "canceled"].includes(item.state) && Date.parse(item.updatedAt || 0) >= since);
+    const unsaved = records.filter(item => item.state === "failed" && item.retryable).length;
+    return { count: records.length - unsaved, unsaved };
   }
 
   async summary({ session = "normal", since = 0 }) {
@@ -300,7 +319,7 @@ export class BrowserData {
       history: { count: history.count, more: history.more },
       sites: { count: index.sites.length, bytes: storage },
       cache: { bytes: cache },
-      downloads: { count: this.downloadRecords(since).length },
+      downloads: this.downloadRecords(since),
       protected: this.protectedOrigins(),
     };
   }
@@ -313,7 +332,7 @@ export class BrowserData {
     const kept = new Set(builtIn ? this.protectedOrigins().map(item => item.origin) : []);
     for (const domain of keep) {
       for (const origin of known) if (within(originHost(origin), domain)) kept.add(origin);
-      for (const prefix of ["https://", "http://", "https://www."]) kept.add(prefix + domain);
+      for (const origin of originsOf(domain)) kept.add(origin);
     }
     for (const origin of remembered) if (webOrigin(origin) === origin) kept.add(origin);
     return [...kept];
@@ -335,44 +354,52 @@ export class BrowserData {
     return { ...job, elapsed: (finished || this.now()) - started };
   }
 
-  clear({ session = "normal", since = 0, types = [], keep = [], keepOrigins = [], keepEnabled = true }) {
+  // reload: false leaves the pages alone (automatic cleaning at stop: a page
+  // reloaded then only stores new data before Chromium shuts down).
+  clear({ session = "normal", since = 0, types = [], keep = [], keepOrigins = [], keepEnabled = true, reload = true }) {
     const wanted = categories.filter(type => types.includes(type));
     if (!wanted.length) throw new Error("请选择要清除的内容");
     return this.start(async step => {
       const scope = await this.scope(session);
       if (!scope) return { cleared: [], freedBytes: 0, reloaded: 0, kept: [] };
-      if (scope.private) return this.clearPrivate(scope, wanted, step);
+      if (scope.private) return this.clearPrivate(scope, wanted, step, reload);
       step(1);
       const measured = [...(wanted.includes("site") ? storageDirectories : []), ...(wanted.includes("cache") ? cacheDirectories : [])];
       const before = await this.disk(measured);
-      let kept = [], keptHere = [];
+      let kept = [], keptHere = [], skippedOrigins = 0, keptDownloads = 0;
       if (wanted.includes("site") || wanted.includes("cache")) {
-        const { origins } = keepEnabled ? await this.origins(scope) : { origins: new Map() };
-        kept = keepEnabled ? this.keptOrigins([...origins.keys()], keep, keepOrigins) : [];
+        const { origins, storageError } = keepEnabled ? await this.origins(scope) : { origins: new Map() };
+        // Without the profile's own list a kept domain's subdomains could lose
+        // their sign-in: nothing is deleted (the HTTP cache holds no sign-in).
+        if (storageError && wanted.includes("site") && keep.length)
+          throw new Error("读不出浏览器里各网站保存的数据，为免清掉保持登录的网站，这次没有清除任何内容。请重试");
+        const listed = keepEnabled ? this.keptOrigins([...origins.keys()], keep, keepOrigins) : [];
+        kept = listed.filter(validOrigin);
+        skippedOrigins = listed.length - kept.length;
         keptHere = kept.filter(origin => origins.has(origin));
         step(2);
         const remove = { ...(wanted.includes("site") ? siteTypes : {}), ...(wanted.includes("cache") ? { cache: true } : {}) };
-        await this.extension("remove", { since, ...(kept.length ? { excludeOrigins: kept } : {}), types: remove }, 60_000);
+        skippedOrigins += (await this.extension("remove", { since, ...(kept.length ? { excludeOrigins: kept } : {}), types: remove }, 60_000))?.skipped || 0;
       }
       step(3);
       if (wanted.includes("history")) await this.extension("remove", { since, types: { history: true } }, 60_000);
       if (wanted.includes("downloads")) {
         await this.extension("remove", { since, types: { downloads: true } }, 30_000);
-        this.downloads.forget?.(since);
+        keptDownloads = this.downloads.forget?.(since)?.kept || 0;
       }
       step(4);
       const after = await this.disk(measured);
       let reloaded = 0;
-      if (wanted.includes("site")) {
+      if (wanted.includes("site") && reload !== false) {
         const keptSet = new Set(kept);
         const ids = this.tabsOf(scope).filter(tab => webOrigin(tab.url) && !keptSet.has(webOrigin(tab.url))).map(tab => tab.targetId);
         reloaded = await this.reload(ids);
       }
-      return { cleared: wanted, freedBytes: Math.max(0, before - after), reloaded, kept: keptHere };
+      return { cleared: wanted, freedBytes: Math.max(0, before - after), reloaded, kept: keptHere, keptDownloads, skippedOrigins };
     }, 4);
   }
 
-  async clearPrivate(scope, wanted, step) {
+  async clearPrivate(scope, wanted, step, reload = true) {
     step(1);
     const { origins } = await this.origins(scope);
     const before = (await this.usage(scope, [...origins.keys()])).reduce((sum, bytes) => sum + bytes, 0);
@@ -384,8 +411,9 @@ export class BrowserData {
     step(3);
     if (wanted.includes("cache")) await this.cdp("Network.clearBrowserCache", {}, scope.sessionId).catch(() => {});
     step(4);
-    const reloaded = wanted.includes("site") ? await this.reload(this.tabsOf(scope).filter(tab => webOrigin(tab.url)).map(tab => tab.targetId)) : 0;
-    return { cleared: wanted.filter(type => type === "site" || type === "cache"), freedBytes: before, reloaded, kept: [] };
+    const reloaded = wanted.includes("site") && reload !== false ? await this.reload(this.tabsOf(scope).filter(tab => webOrigin(tab.url)).map(tab => tab.targetId)) : 0;
+    // Only site storage is measured here; the private cache has no size to read.
+    return { cleared: wanted.filter(type => type === "site" || type === "cache"), freedBytes: wanted.includes("site") ? before : 0, reloaded, kept: [] };
   }
 
   clearSites({ session = "normal", sites = [] }) {
@@ -397,9 +425,11 @@ export class BrowserData {
       const index = await this.siteIndex(session);
       const wanted = new Set(sites);
       const origins = new Set();
-      for (const site of sites) for (const prefix of ["https://", "http://", "https://www."]) origins.add(prefix + site);
+      for (const site of sites) for (const origin of originsOf(site)) origins.add(origin);
       for (const item of index.sites) if (wanted.has(item.site)) item.origins.forEach(origin => origins.add(origin));
-      const list = [...origins];
+      const list = [...origins].filter(validOrigin);
+      const skippedOrigins = origins.size - list.length;
+      if (!list.length) return { cleared: [], sites: sites.length, freedBytes: 0, reloaded: 0, skippedOrigins };
       const before = (await this.usage(scope, list)).reduce((sum, bytes) => sum + bytes, 0);
       const cookies = (await this.cookies(scope)).filter(cookie => wanted.has(siteOf(cookieHost(cookie))));
       const cookieBytes = cookies.reduce((sum, cookie) => sum + (cookie.size || 0), 0);
@@ -415,10 +445,12 @@ export class BrowserData {
       step(3);
       const ids = this.tabsOf(scope).filter(tab => wanted.has(siteOf(originHost(webOrigin(tab.url))))).map(tab => tab.targetId);
       const reloaded = await this.reload(ids);
-      return { cleared: ["site"], sites: sites.length, freedBytes: before + cookieBytes, reloaded };
+      return { cleared: ["site"], sites: sites.length, freedBytes: before + cookieBytes, reloaded, skippedOrigins };
     }, 3);
   }
 
+  // Entries are bounded by the page (data.js): a long address arrives cut
+  // with truncated set, and historyURL fetches it whole to open it.
   async history({ query = "", before = 0, limit = 100 }) {
     const end = before || this.now() + 60_000;
     limit = Math.max(1, Math.min(100, limit));
@@ -430,9 +462,17 @@ export class BrowserData {
     return { items, next: page.items.length > limit ? items.at(-1).time : 0 };
   }
 
-  async historyDelete({ urls, host, start, end }) {
+  async historyURL({ id, time }) {
+    const { url } = await this.extension("history-url", { id: String(id), time: Number(time) || 0 });
+    if (!url) throw new Error("这条记录已不存在，请刷新列表");
+    if (url.length > 512 * 1024) throw new Error("网址过长，无法打开");
+    return { url: publicScienceURL(url, this.sciencePort()) };
+  }
+
+  async historyDelete({ urls, entries, host, start, end }) {
     let result;
     if (urls) result = await this.extension("history-delete-urls", { urls });
+    else if (entries) result = await this.extension("history-delete-entries", { entries: entries.map(entry => ({ id: String(entry.id), time: Number(entry.time) || 0 })) }, 60_000);
     else if (host) result = await this.extension("history-delete-host", { host }, 60_000);
     else result = await this.extension("history-delete-range", { start, end }, 60_000);
     this.memo = null;
@@ -450,6 +490,7 @@ export class BrowserData {
     if (mode === "site") return this.site(input);
     if (mode === "cookie") return this.cookie(input);
     if (mode === "history") return this.history(input);
+    if (mode === "history-url") return this.historyURL(input);
     if (mode === "history-delete") return this.historyDelete(input);
     throw new Error("浏览数据操作无效");
   }
