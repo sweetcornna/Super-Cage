@@ -5,7 +5,7 @@ import { getClientContext } from "./client-context.mjs";
 import { Drawing } from "./drawings";
 import { SafetyMessage } from "./safety-message";
 import { useWindowVisibility } from "./window-visibility";
-import { hostFrameStatus, hostRenderGuide, hostRenderView, scienceView } from "./claude-science-state.mjs";
+import { hostFrameStatus, hostRenderGuide, hostRenderHere, hostRenderView, scienceView } from "./claude-science-state.mjs";
 import "./claude-science.css";
 
 // Claude Science (internal/workbench/claude_science.go): install, start, stop
@@ -19,12 +19,18 @@ const confirmations = {
 const icons = { install: Download, start: Play, open: ExternalLink, stop: Power, update: RefreshCw, refresh: RotateCcw };
 
 // Host rendering (science_host.go, desktop/windows/ScienceFrame.cs). The
-// window's bridge answers scienceFrame with op:
-//   prepare -> {backstop}: drops any earlier identity; backstop says the
-//              WebView runs with the network switches the frame needs.
-//   arm {url} -> true: the guest's identity on the whole WebView, and frame
-//              navigation allowed to that front only.
-//   disarm -> true; restart -> true: the WebView again, with the switches.
+// window's bridge answers scienceFrame with op (contract 2):
+//   capabilities -> {contract}: an older window has no such op (F8).
+//   prepare -> {backstop, proxy}: drops any earlier identity; backstop says
+//              the WebView runs with the network switches the frame needs,
+//              proxy is "verified" when the window proved in this WebView
+//              that the proxy switch is in force (F5).
+//   attach {url} -> true: the guest's identity for the frame's own targets
+//              (its workers and frames) and frame navigation allowed to
+//              that session's origin only. The workbench keeps the host's.
+//   detach -> true: no identity for new frames; the window stops watching
+//              once the frame's targets are gone.
+//   restart -> true: the WebView again, with the switches.
 const frameMessages = {
   restart: "本机渲染已开启，需要重新载入窗口一次才能生效。",
   reload: "窗口打开时本机渲染还没有就绪，重新载入窗口后生效。",
@@ -32,7 +38,9 @@ const frameMessages = {
   dropped: "与本机渲染页面的连接已结束，已改用隔离浏览器。",
 };
 const frameFixes = { restart: "重新载入窗口", reload: "重新载入窗口", browser: "重试本机渲染", retry: "重试本机渲染" };
-const frameSandbox = "allow-scripts allow-same-origin allow-forms allow-modals";
+// No allow-modals: alert() does nothing and confirm()/prompt() answer
+// false/null in the frame, since the window shows no dialogs for it.
+const frameSandbox = "allow-scripts allow-same-origin allow-forms";
 const hostMeasure = () => ({
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
   offset: new Date().getTimezoneOffset(),
@@ -41,7 +49,11 @@ const hostMeasure = () => ({
 // Why the frame gave way, kept across visits to the pane until the switch
 // changes or the window reloads, so a refused probe is not retried on every
 // visit.
-const remembered = { fallback: null, release: Promise.resolve() };
+const remembered = { fallback: null, release: Promise.resolve(), contract: null };
+// F8: the bridge's frame contract, asked once per document and only where
+// the switch could show.
+const bridgeContract = () => remembered.contract ??= native("scienceFrame", { op: "capabilities" })
+  .then((reply) => Number(reply?.contract) || 0, () => 0);
 // One automatic reload when the window's document predates the front (its
 // frame-src cannot change); a second refusal asks instead.
 const reloadKey = "cage-science-frame-reload";
@@ -75,7 +87,7 @@ function HostRenderSwitch({ toggle, pending, onChange }) {
 
 // ScienceFrame is mounted only while hostRenderView says so; unmounting drops
 // the window's overrides and the front's session.
-function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
+function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
   const [url, setURL] = useState("");
   const [phase, setPhase] = useState("preparing");
   const [render, setRender] = useState(data.host_render);
@@ -98,10 +110,11 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
       const prepared = await native("scienceFrame", { op: "prepare" });
       if (disposed.current) return;
       if (!prepared?.backstop) throw new FrameFallback(frameMessages.restart, "restart");
-      const ticket = await api("/claude-science/ticket", { host: hostMeasure() });
+      // The server refuses a ticket without the window's proxy proof.
+      const ticket = await api("/claude-science/ticket", { host: hostMeasure(), proxy: String(prepared.proxy || ""), contract });
       if (disposed.current) return;
-      await native("scienceFrame", { op: "arm", url: ticket.url });
-      if (disposed.current) { void native("scienceFrame", { op: "disarm" }).catch(() => {}); return; }
+      await native("scienceFrame", { op: "attach", url: ticket.url });
+      if (disposed.current) { void native("scienceFrame", { op: "detach" }).catch(() => {}); return; }
       move("loading");
       setURL(ticket.url);
     } catch (error) {
@@ -117,7 +130,7 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
     return () => {
       window.removeEventListener("cage-science-frame", ended);
       disposed.current = true;
-      void native("scienceFrame", { op: "disarm" }).catch(() => {});
+      void native("scienceFrame", { op: "detach" }).catch(() => {});
       remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
     };
   }, []);
@@ -206,6 +219,16 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
   const setFallback = (value) => { remembered.fallback = value; setFallbackState(value); };
   const [hostPending, setHostPending] = useState(false);
   const [hostNotice, setHostNotice] = useState("");
+  const [signInWaiting, setSignInWaiting] = useState(null);
+  const [contract, setContract] = useState(null);
+  const lastSignIn = useRef(0);
+  const probeHere = Boolean(data?.host_render?.available) && hostRenderHere(getClientContext(), nativeAvailable());
+  useEffect(() => {
+    if (!probeHere) return;
+    let live = true;
+    void bridgeContract().then((value) => { if (live) setContract(value); });
+    return () => { live = false; };
+  }, [probeHere]);
   const mounted = useRef(true);
   const request = useRef(null);
   const revision = useRef(0);
@@ -300,7 +323,7 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
     setHostPending(true);
     setActionError("");
     try {
-      await api("/claude-science/host-render", { enabled });
+      await api("/claude-science/host-render", enabled ? { enabled, contract } : { enabled });
       revision.current++;
       request.current = null;
       await refresh();
@@ -322,9 +345,21 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
     // The probe's refusal says the isolated browser opens: it does.
     if (fix === "browser") void open();
   };
-  const frameSignIn = (event) => {
+  const showSignIn = (event) => {
+    setSignInWaiting(null);
     if (event.tab) onOpen({ id: event.tab.id, kind: event.tab.kind, title: event.tab.title });
     else if (event.error) setHostNotice(event.error);
+  };
+  // The guest page can ask for a sign-in at any time: the window's focus
+  // moves to it at most once per user action (a click or key in the frame
+  // activates the window too); otherwise the pane asks.
+  const frameSignIn = (event) => {
+    if (navigator.userActivation?.isActive && Date.now() - lastSignIn.current > 5000) {
+      lastSignIn.current = Date.now();
+      showSignIn(event);
+      return;
+    }
+    if (mounted.current) setSignInWaiting(event);
   };
   const fixFrame = () => {
     if (fallback?.fix === "restart") void native("scienceFrame", { op: "restart" }).catch((e) => setActionError(e.message));
@@ -335,7 +370,7 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
   const details = status.job?.log ? onDetails : undefined;
   const view = scienceView({ data, error: readError, actionError, job: status.job, running, ready: Boolean(status.ready), pending });
   const scienceJob = Boolean(data?.operation) || (status.job?.running && String(status.job.kind || "").startsWith("claude-science")) || ["install", "update", "start", "stop"].includes(pending);
-  const host = hostRenderView({ data, client: getClientContext(), bridge: nativeAvailable(), running, locked: readError?.status === 423, busy: scienceJob, fallback: fallback?.reason || "" });
+  const host = hostRenderView({ data, client: getClientContext(), bridge: nativeAvailable(), contract, running, locked: readError?.status === 423, busy: scienceJob, fallback: fallback?.reason || "" });
   const button = (item, className) => {
     const Icon = icons[item.action];
     return (
@@ -357,7 +392,13 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
         {(actionError || hostNotice) && (
           <div className="science-notice" data-tone="error" role="alert"><span><SafetyMessage message={actionError || hostNotice} /></span></div>
         )}
-        <ScienceFrame key={getClientContext().connection_id} data={data} onFallback={frameFallback} onSignIn={frameSignIn} toolbar={<>
+        {signInWaiting && (
+          <div className="science-notice" data-tone="warn" role="status">
+            <span>Claude Science 页面请求登录，登录在隔离浏览器中完成。</span>
+            <button className="quiet-button" onClick={() => showSignIn(signInWaiting)}>去登录</button>
+          </div>
+        )}
+        <ScienceFrame key={getClientContext().connection_id} data={data} contract={contract} onFallback={frameFallback} onSignIn={frameSignIn} toolbar={<>
           {data.signed_in !== true && tool("登录", LogIn, () => void open(true))}
           {tool("在隔离浏览器中打开", ExternalLink, () => void open())}
           {tool("停止", Power, () => void act({ action: "stop", confirm: true }))}

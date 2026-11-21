@@ -54,12 +54,17 @@ test("host rendering: switch, ticket and release follow the server", () => {
   assert.match(refused.body, /Windows/);
   state.claudeScience = "running-host-render-available";
   assert.equal(call(state, "POST", "/claude-science/host-render", {}).status, 400);
-  assert.equal(call(state, "POST", "/claude-science/ticket", { host: {} }).status, 409, "no ticket while off");
-  assert.equal(call(state, "POST", "/claude-science/host-render", { enabled: true }).json.enabled, true);
+  assert.equal(call(state, "POST", "/claude-science/ticket", { host: {}, proxy: "verified", contract: 2 }).status, 409, "no ticket while off");
+  // A window without the frame contract (F8) is told to update.
+  assert.match(call(state, "POST", "/claude-science/host-render", { enabled: true }).body, /请更新 Windows 应用/);
+  assert.equal(call(state, "POST", "/claude-science/host-render", { enabled: true, contract: 2 }).json.enabled, true);
   assert.equal(call(state, "GET", "/claude-science").json.host_render.running, true);
   assert.equal(call(state, "POST", "/claude-science/ticket", {}).status, 400);
-  const ticket = call(state, "POST", "/claude-science/ticket", { host: { timezone: "Asia/Shanghai", offset: -480, languages: ["zh-CN"] } }).json;
-  assert.match(ticket.url, /^http:\/\/localhost:17840\/_cage\/enter#[0-9]{64}$/);
+  const host = { timezone: "Asia/Shanghai", offset: -480, languages: ["zh-CN"] };
+  assert.match(call(state, "POST", "/claude-science/ticket", { host, proxy: "verified" }).body, /请更新 Windows 应用/);
+  assert.match(call(state, "POST", "/claude-science/ticket", { host, proxy: "failed", contract: 2 }).body, /代理/);
+  const ticket = call(state, "POST", "/claude-science/ticket", { host, proxy: "verified", contract: 2 }).json;
+  assert.match(ticket.url, /^http:\/\/[0-9a-f]{32}\.localhost:17840\/_cage\/enter$/);
   assert.equal(call(state, "POST", "/claude-science/release", {}).status, 204);
   assert.equal(call(state, "POST", "/claude-science/host-render", { enabled: false }).json.enabled, false);
 });

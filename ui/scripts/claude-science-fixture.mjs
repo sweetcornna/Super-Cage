@@ -47,23 +47,33 @@ export function claudeScienceRoute(route, request, path, body, state) {
 
 // Host rendering (science_host.go): the switch moves between the two
 // host-render fixtures; state.hostRender overlays the front's live fields
-// (session, refused, signin…) on GET; the ticket's URL (state.frameOrigin)
-// is served by the smoke itself.
+// (session, refused, signin…) on GET; the ticket's URL (a label origin on
+// state.framePort) is served by the smoke itself. Like the server, enabling
+// and tickets need the bridge's frame contract, and tickets the window's
+// proxy proof.
+const frameContract = 2;
+const updateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
+const proxyUnproven = "窗口没能证明它的代理开关已生效（本机渲染需要它挡住页面的外部连接），本机渲染未打开。请重新载入窗口后重试。";
+const refuse = (route, status, body) => route.fulfill({ status, contentType: "text/plain; charset=utf-8", body });
 function hostRenderRoute(route, action, body, state, fixture) {
   const render = fixture.body?.host_render;
   if (action === "release") return route.fulfill({ status: 204, body: "" });
   if (!render || fixture.status !== 200) return route.fulfill({ status: 409, contentType: "text/plain; charset=utf-8", body: "本机渲染尚未开启。" });
   if (action === "host-render") {
-    if (typeof body?.enabled !== "boolean" || Object.keys(body).length !== 1) return route.fulfill({ status: 400, contentType: "text/plain; charset=utf-8", body: "请求格式无效" });
-    if (body.enabled && !render.available) return route.fulfill({ status: 409, contentType: "text/plain; charset=utf-8", body: render.unavailable_reason });
+    if (typeof body?.enabled !== "boolean" || Object.keys(body).some((key) => key !== "enabled" && key !== "contract")) return refuse(route, 400, "请求格式无效");
+    if (body.enabled && !render.available) return refuse(route, 409, render.unavailable_reason);
+    if (body.enabled && !(body.contract >= frameContract)) return refuse(route, 409, updateWindows);
     state.claudeScience = body.enabled ? "running-host-render" : "running-host-render-available";
     state.hostRender = {};
     return route.fulfill({ json: claudeScienceFixtures[state.claudeScience].body.host_render });
   }
   const host = body?.host;
-  if (!host || typeof host !== "object" || Object.keys(body).length !== 1) return route.fulfill({ status: 400, contentType: "text/plain; charset=utf-8", body: "请求格式无效" });
-  if (!render.enabled || !render.running) return route.fulfill({ status: 409, contentType: "text/plain; charset=utf-8", body: "本机渲染尚未开启。" });
+  if (!host || typeof host !== "object" || Object.keys(body).some((key) => !["host", "proxy", "contract"].includes(key))) return refuse(route, 400, "请求格式无效");
+  if (!(body.contract >= frameContract)) return refuse(route, 409, updateWindows);
+  if (body.proxy !== "verified") return refuse(route, 409, proxyUnproven);
+  if (!render.enabled || !render.running) return refuse(route, 409, "本机渲染尚未开启。");
   state.tickets = (state.tickets || 0) + 1;
   state.hostRender = { ...state.hostRender, session: false, refused: undefined, refused_at: undefined };
-  return route.fulfill({ json: { url: (state.frameOrigin || "http://localhost:17840") + "/_cage/enter#" + String(state.tickets).padStart(64, "0") } });
+  const label = state.tickets.toString(16).padStart(32, "0");
+  return route.fulfill({ json: { url: `http://${label}.localhost:${state.framePort || 17840}/_cage/enter` } });
 }

@@ -426,6 +426,16 @@ func (s *Server) scienceFrameSources(r *http.Request) string {
 	return strings.Join(sources, " ")
 }
 
+// scienceBridgeContract is the scienceFrame bridge version this server's
+// pane needs (claude-science-state.mjs hostRenderContract; the window's
+// ScienceFrame.Contract): 2 scopes the identity to the frame's targets.
+const scienceBridgeContract = 2
+
+const (
+	scienceReasonUpdateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。"
+	scienceReasonProxyUnproven = "窗口没能证明它的代理开关已生效（本机渲染需要它挡住页面的外部连接），本机渲染未打开。请重新载入窗口后重试。"
+)
+
 // scienceFromWindow: a script request of the workbench document itself
 // (fetch metadata, which browsers always send to loopback). The agent
 // transport's client, the phone link and other programs send none; a local
@@ -475,7 +485,8 @@ func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	var input struct {
-		Enabled *bool `json:"enabled"`
+		Enabled  *bool `json:"enabled"`
+		Contract int   `json:"contract"`
 	}
 	if !readJSON(w, r, &input) {
 		return
@@ -487,6 +498,12 @@ func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request)
 	if *input.Enabled {
 		if code, reason := s.scienceHostAvailability(r); code != "" {
 			http.Error(w, reason, http.StatusConflict)
+			return
+		}
+		// F8: a window whose bridge predates the frame contract would put
+		// the guest's identity on the whole workbench.
+		if input.Contract < scienceBridgeContract {
+			http.Error(w, scienceReasonUpdateWindows, http.StatusConflict)
 			return
 		}
 	}
@@ -521,13 +538,25 @@ func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Host scienceHostIdentity `json:"host"`
+		Host     scienceHostIdentity `json:"host"`
+		Proxy    string              `json:"proxy"`
+		Contract int                 `json:"contract"`
 	}
 	if !readJSON(w, r, &input) {
 		return
 	}
 	if !input.Host.valid() {
 		http.Error(w, "请求格式无效", http.StatusBadRequest)
+		return
+	}
+	if input.Contract < scienceBridgeContract {
+		http.Error(w, scienceReasonUpdateWindows, http.StatusConflict)
+		return
+	}
+	// F5: the shell proved, in this WebView, that a request to an address
+	// nobody can serve ends at the switched proxy (ScienceFrame.ProxyCheck).
+	if input.Proxy != "verified" {
+		http.Error(w, scienceReasonProxyUnproven, http.StatusConflict)
 		return
 	}
 	if code, reason := s.scienceHostAvailability(r); code != "" {

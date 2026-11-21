@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,21 +29,33 @@ import (
 //   - detach: auto-attach stays on until the last guest (and paused) target
 //     has detached, since turning it off drops every override and lets
 //     paused targets run.
+//   - navigate (the window's top document is about to navigate): while a
+//     guest target is attached the navigation is held, the window removes
+//     the frame, and the navigation goes only once the targets are gone and
+//     auto-attach is off. Letting it commit first leaves the old frame's
+//     document running for a moment after its overrides were dropped
+//     (TestScienceBrowserFrameNeverSeesTheHost/top-level navigation). If
+//     the targets do not go in time the navigation is dropped and the frame
+//     ends: fail closed. Arming while a navigation is held is refused.
 type scienceFramePolicy struct {
-	identity  *scienceIdentity
-	attached  bool
-	detaching bool
-	guests    map[string]scienceIdentity
-	held      map[string]bool
-	failed    map[string]bool
+	identity   *scienceIdentity
+	attached   bool
+	detaching  bool
+	navigating bool
+	guests     map[string]scienceIdentity
+	held       map[string]bool
+	failed     map[string]bool
 }
 
 // scienceAction is one thing the window does: a call on a session ("" is
-// the page) or ending the frame.
+// the page), ending the frame, removing the frame element before a held
+// navigation, or letting the held navigation go.
 type scienceAction struct {
 	Session string
 	Call    cdpCall
 	End     bool
+	Remove  bool
+	Proceed bool
 }
 
 func newScienceFramePolicy() *scienceFramePolicy {
@@ -60,6 +71,9 @@ func scienceActionsOn(session string, calls []cdpCall) []scienceAction {
 }
 
 func (p *scienceFramePolicy) arm(identity scienceIdentity) []scienceAction {
+	if p.navigating {
+		return []scienceAction{{End: true}}
+	}
 	p.identity, p.detaching = &identity, false
 	var actions []scienceAction
 	if !p.attached {
@@ -88,7 +102,31 @@ func (p *scienceFramePolicy) maybeDetach() []scienceAction {
 		return nil
 	}
 	p.attached, p.detaching = false, false
-	return scienceActionsOn("", sciencePageDetachCalls())
+	actions := scienceActionsOn("", sciencePageDetachCalls())
+	if p.navigating {
+		p.navigating = false
+		actions = append(actions, scienceAction{Proceed: true})
+	}
+	return actions
+}
+
+func (p *scienceFramePolicy) navigate() []scienceAction {
+	actions := p.detach()
+	if !p.attached {
+		return append(actions, scienceAction{Proceed: true})
+	}
+	p.navigating = true
+	return append(actions, scienceAction{Remove: true})
+}
+
+// navigateTimedOut: the frame's targets outlived the wait (the shell waits
+// scienceNavigateWait).
+func (p *scienceFramePolicy) navigateTimedOut() []scienceAction {
+	if !p.navigating {
+		return nil
+	}
+	p.navigating = false
+	return []scienceAction{{End: true}}
 }
 
 func (p *scienceFramePolicy) attachedTarget(parent, session, kind string) []scienceAction {
@@ -155,6 +193,10 @@ func short(session string) string {
 	return session
 }
 
+// scienceNavigateWait is how long a held navigation waits for the frame's
+// targets (ScienceFrameHost.cs waits as long).
+var scienceNavigateWait = 5 * time.Second
+
 // scienceSettleAfter is how long a target whose call failed may take to
 // detach before the window ends the frame (the shell waits as long).
 var scienceSettleAfter = time.Second
@@ -172,6 +214,9 @@ type scienceShell struct {
 	events  chan cdpMessage
 	endings atomic.Int32
 	failed  atomic.Int32
+	// The held top-level navigation and whether it went.
+	target    string
+	navigated atomic.Int32
 }
 
 // scienceFrameSandbox is the pane's sandbox attribute (claude-science.jsx).
@@ -244,9 +289,18 @@ func (s *scienceShell) run(actions []scienceAction) {
 			}
 		}
 	}
+	proceed := false
 	for _, action := range actions {
 		if action.End {
 			s.end()
+			continue
+		}
+		if action.Remove {
+			_ = s.browser.call(s.page, "Runtime.evaluate", map[string]any{"expression": "document.getElementById('science')?.remove(); true"}, nil)
+			continue
+		}
+		if action.Proceed {
+			proceed = true
 			continue
 		}
 		if _, ok := bySession[action.Session]; !ok {
@@ -283,6 +337,13 @@ func (s *scienceShell) run(actions []scienceAction) {
 		}(session, bySession[session])
 	}
 	wg.Wait()
+	if proceed {
+		s.mu.Lock()
+		target := s.target
+		s.mu.Unlock()
+		_ = s.browser.call(s.page, "Page.navigate", map[string]any{"url": target}, nil)
+		s.navigated.Add(1)
+	}
 }
 
 // end is the shell telling the pane: the pane removes its frame and lets
@@ -362,19 +423,19 @@ func (s *scienceShell) reticket(t *testing.T, url string) {
 // then lets the navigation go (MainWindow.cs cancels and re-issues it).
 func (s *scienceShell) navigateTop(t *testing.T, url string) {
 	t.Helper()
-	s.eval(t, "document.getElementById('science')?.remove(); true")
-	waitFor(t, 5*time.Second, "the frame's targets to go", func() bool { return !s.hasGuests() })
-	s.detach()
-	if err := s.browser.call(s.page, "Page.navigate", map[string]any{"url": url}, nil); err != nil && !strings.Contains(err.Error(), "no reply") {
-		t.Fatal(err)
-	}
-}
-
-// hasGuests reports guest (or paused) targets still attached.
-func (s *scienceShell) hasGuests() bool {
+	before := s.navigated.Load()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.policy.guests) > 0 || len(s.policy.held) > 0
+	s.target = url
+	actions := s.policy.navigate()
+	s.mu.Unlock()
+	time.AfterFunc(scienceNavigateWait, func() {
+		s.mu.Lock()
+		timedOut := s.policy.navigateTimedOut()
+		s.mu.Unlock()
+		s.run(timedOut)
+	})
+	s.run(actions)
+	waitFor(t, scienceNavigateWait+time.Second, "the held navigation to go", func() bool { return s.navigated.Load() > before })
 }
 
 // ended counts the frames the shell told the pane to end.

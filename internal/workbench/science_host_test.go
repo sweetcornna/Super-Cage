@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -233,8 +234,8 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	if w := (requestShape{method: "POST", path: "/api/claude-science/host-render", headers: windowFetch}).send(workload); w.Code != http.StatusBadRequest {
 		t.Fatalf("empty body: %d", w.Code)
 	}
-	on := func(s *Server, enabled bool, trusted bool) *httptest.ResponseRecorder {
-		r := httptest.NewRequest("POST", s.origin+"/api/claude-science/host-render", strings.NewReader(fmt.Sprintf(`{"enabled":%v}`, enabled)))
+	post := func(s *Server, body string, trusted bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", s.origin+"/api/claude-science/host-render", strings.NewReader(body))
 		r.Header.Set("Origin", s.origin)
 		r.Header.Set("Content-Type", "application/json")
 		for name, value := range windowFetch {
@@ -248,8 +249,21 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 		s.handler().ServeHTTP(w, r)
 		return w
 	}
+	// The pane sends the contract its window's bridge answered (F8);
+	// turning it off needs none.
+	on := func(s *Server, enabled bool, trusted bool) *httptest.ResponseRecorder {
+		if enabled {
+			return post(s, fmt.Sprintf(`{"enabled":true,"contract":%d}`, scienceBridgeContract), trusted)
+		}
+		return post(s, `{"enabled":false}`, trusted)
+	}
 	if w := on(workload, true, false); w.Code != http.StatusConflict || workload.scienceFrontRunning() != nil {
 		t.Fatalf("enabled without the window: %d", w.Code)
+	}
+	for _, body := range []string{`{"enabled":true}`, fmt.Sprintf(`{"enabled":true,"contract":%d}`, scienceBridgeContract-1)} {
+		if w := post(workload, body, true); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "请更新 Windows 应用") || workload.scienceFrontRunning() != nil {
+			t.Fatalf("enabled for a window without the frame contract (%s): %d %s", body, w.Code, w.Body)
+		}
 	}
 	// The agent transport's client: the window's proof, no fetch metadata.
 	agent := httptest.NewRequest("POST", workload.origin+"/api/claude-science/host-render", strings.NewReader(`{"enabled":true}`))
@@ -363,6 +377,71 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	}
 }
 
+// The window's requests reach the workload through the desktop entry: the
+// hop must carry the fetch metadata scienceFromWindow reads, and the agent
+// transport's shape must still be refused at the workload.
+func TestScienceWindowGateThroughTheEntryHop(t *testing.T) {
+	for _, env := range []string{"LOCALAPPDATA", "XDG_CONFIG_HOME", "HOME"} {
+		t.Setenv(env, t.TempDir())
+	}
+	workload := scienceWorkload(t)
+	var err error
+	workload.account, err = loadLocalAccount(workload.profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = workload.account.trustedLogin("create", "", filepath.Join(t.TempDir(), "trusted-local")); err != nil {
+		t.Fatal(err)
+	}
+	workload.instanceID = randomToken()
+	server := httptest.NewUnstartedServer(workload.handler())
+	port := server.Listener.Addr().(*net.TCPAddr).Port
+	workload.origin = "http://localhost:" + strconv.Itoa(port)
+	server.Start()
+	defer server.Close()
+	if err = writePrivate(filepath.Join(workload.profile, "control.json"), controlFile{Port: port, PID: os.Getpid(), Token: workload.token}); err != nil {
+		t.Fatal(err)
+	}
+	c, err := openController(workload.profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.close()
+	life := t.Context()
+	bootstrap, cancel := context.WithTimeout(life, 5*time.Second)
+	defer cancel()
+	local := &desktopLocal{profile: workload.profile}
+	session, err := local.localSession(life, bootstrap, c, desktopLocalReply{Identity: workload.identity, InstanceID: workload.instanceID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+	entry := testServer(t)
+	entry.desktopEntry = true
+	entry.remote = newDesktopGateway(entry.profile, local)
+	d := entry.remote.desktop
+	d.active = &desktopTarget{id: d.generation, mode: "local", ctx: life, session: session}
+	send := func(headers map[string]string) int {
+		r := httptest.NewRequest("POST", entry.origin+"/api/claude-science/release", strings.NewReader("{}"))
+		r.Header.Set("Origin", entry.origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.Header.Set(connectionHeader, d.generation)
+		for name, value := range headers {
+			r.Header.Set(name, value)
+		}
+		r.AddCookie(&http.Cookie{Name: entry.cookieName(), Value: entry.session})
+		w := httptest.NewRecorder()
+		entry.handler().ServeHTTP(w, r)
+		return w.Code
+	}
+	if code := send(windowFetch); code != http.StatusNoContent {
+		t.Fatalf("the window's release through the entry: %d", code)
+	}
+	if code := send(nil); code != http.StatusForbidden {
+		t.Fatalf("the agent transport's release through the entry: %d", code)
+	}
+}
+
 func TestScienceTicketRoute(t *testing.T) {
 	s := scienceWorkload(t)
 	s.preferences.ScienceHostRender = true
@@ -403,7 +482,7 @@ func TestScienceTicketRoute(t *testing.T) {
 		s.handler().ServeHTTP(w, r)
 		return w
 	}
-	host := `{"host":{"timezone":"America/Los_Angeles","offset":480,"languages":["fr-FR","fr"]}}`
+	host := fmt.Sprintf(`{"host":{"timezone":"America/Los_Angeles","offset":480,"languages":["fr-FR","fr"]},"proxy":"verified","contract":%d}`, scienceBridgeContract)
 	if w := ticket(true, host); w.Code != http.StatusConflict {
 		t.Fatalf("ticket before the daemon runs: %d", w.Code)
 	}
@@ -417,6 +496,20 @@ func TestScienceTicketRoute(t *testing.T) {
 		t.Fatalf("ticket for the agent transport: %d", w.Code)
 	}
 	window = true
+	// A window without the frame contract (F8), or whose proxy switch the
+	// shell could not prove (F5), gets no ticket.
+	for body, words := range map[string]string{
+		`{"host":{"timezone":"America/Los_Angeles","offset":480,"languages":["fr-FR"]},"proxy":"verified"}`:                                                 "请更新 Windows 应用",
+		fmt.Sprintf(`{"host":{"timezone":"America/Los_Angeles","offset":480,"languages":["fr-FR"]},"proxy":"failed","contract":%d}`, scienceBridgeContract): "代理",
+		fmt.Sprintf(`{"host":{"timezone":"America/Los_Angeles","offset":480,"languages":["fr-FR"]},"contract":%d}`, scienceBridgeContract):                  "代理",
+	} {
+		if w := ticket(true, body); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), words) {
+			t.Fatalf("ticket for %s: %d %s", body, w.Code, w.Body)
+		}
+	}
+	if audits != 0 {
+		t.Fatalf("the guest was read for a refused ticket: %d", audits)
+	}
 	if w := ticket(true, `{"host":{"timezone":"../x"}}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("invalid host identity: %d", w.Code)
 	}

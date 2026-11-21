@@ -105,6 +105,7 @@
       "params": {}
     }
   ],
+  "navigate_wait_ms": 5000,
   "page_attach": [
     {
       "method": "Target.setAutoAttach",
@@ -556,6 +557,146 @@
           "do": "detached",
           "session": "F",
           "expect": []
+        }
+      ]
+    },
+    {
+      "name": "a top-level navigation waits until the frame's targets are gone",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W",
+          "type": "worker",
+          "expect": [
+            "W Emulation.setUserAgentOverride",
+            "W Runtime.evaluate",
+            "W Target.setAutoAttach",
+            "W Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "navigate",
+          "expect": [
+            "remove"
+          ]
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "end"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach",
+            "proceed"
+          ]
+        },
+        {
+          "do": "navigate",
+          "expect": [
+            "proceed"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a navigation without a frame goes at once",
+      "steps": [
+        {
+          "do": "navigate",
+          "expect": [
+            "proceed"
+          ]
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "navigate",
+          "expect": [
+            "page Target.setAutoAttach",
+            "proceed"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a navigation whose frame does not go in time is dropped",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "navigate",
+          "expect": [
+            "remove"
+          ]
+        },
+        {
+          "do": "navigate_timeout",
+          "expect": [
+            "end"
+          ]
+        },
+        {
+          "do": "navigate_timeout",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
         }
       ]
     }

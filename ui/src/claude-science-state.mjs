@@ -245,6 +245,11 @@ export function scienceView({ data = null, error = null, actionError = "", job =
 // time zone, language and browser identity. Off by default.
 export const hostRenderLabel = "本机渲染（实验性）";
 export const hostRenderExplanation = "在这个窗口中直接显示 Claude Science，页面看到的仍是环境的时区、语言和浏览器标识。";
+// The scienceFrame bridge version this pane needs (science_host.go
+// scienceBridgeContract): 2 gives the guest's identity to the frame's own
+// targets only. The window answers op "capabilities".
+export const hostRenderContract = 2;
+export const hostRenderUpdateNotice = "请更新 Windows 应用后再使用本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
 export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性";
 
 /**
@@ -253,20 +258,32 @@ export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/m
  * @param {object|null} input.data       last GET /api/claude-science body (host_render inside)
  * @param {object} [input.client]        client context (desktop_gateway, mode, client_platform)
  * @param {boolean} input.bridge         the window's native bridge is present
+ * @param {?number} input.contract       what the bridge's scienceFrame
+ *                                       capabilities op answered (null: not
+ *                                       yet; 0: no such op)
  * @param {boolean} input.running        the environment runs
  * @param {boolean} input.locked         the last read answered 423
  * @param {boolean} input.busy           a Claude Science job runs or is pending
  * @param {string} [input.fallback]      why this pane went back to the browser pane
  */
-export function hostRenderView({ data = null, client = {}, bridge = false, running = false, locked = false, busy = false, fallback = "" }) {
+// hostRenderHere: the Windows window on this computer's environment, the
+// only place the switch can show (and the bridge is asked for its contract).
+export const hostRenderHere = (client = {}, bridge = false) =>
+  Boolean(client.desktop_gateway) && client.mode === "local" && client.client_platform === "windows" && Boolean(bridge);
+
+export function hostRenderView({ data = null, client = {}, bridge = false, contract = 0, running = false, locked = false, busy = false, fallback = "" }) {
   const view = { toggle: null, frame: false, fallback: "", notice: "" };
   const render = data?.host_render;
   if (!render || !data.installed) return view;
-  const here = Boolean(client.desktop_gateway) && client.mode === "local" && client.client_platform === "windows" && bridge;
+  const here = hostRenderHere(client, bridge);
   // Only where it can be used: elsewhere (macOS, Linux, a browser, the
   // phone, a remote host) the pane stays as it was and the server refuses
   // the switch anyway.
-  if (!render.available || !here) return view;
+  if (!render.available || !here || contract === null) return view;
+  // F8: a window whose bridge predates the frame contract is not offered
+  // the switch; one that is already on stays so it can be turned off.
+  const capable = Number(contract) >= hostRenderContract;
+  if (!capable && !render.enabled) return view;
   view.toggle = {
     label: hostRenderLabel,
     checked: Boolean(render.enabled),
@@ -274,6 +291,10 @@ export function hostRenderView({ data = null, client = {}, bridge = false, runni
     explanation: hostRenderExplanation,
   };
   if (render.error) view.notice = render.error;
+  if (!capable) {
+    view.notice = hostRenderUpdateNotice;
+    return view;
+  }
   const daemonReady = Boolean(data.installed && data.running && data.ready);
   view.frame = Boolean(render.enabled && render.running) && running && !locked && !busy && daemonReady && !fallback;
   if (render.enabled && fallback) view.fallback = fallback;

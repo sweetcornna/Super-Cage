@@ -20,15 +20,16 @@ import (
 func TestScienceCDPGolden(t *testing.T) {
 	control, _ := json.Marshal(controlFile{Port: 17777, SciencePort: 17840, ScienceIdentity: &testScienceIdentity})
 	golden := map[string]any{
-		"contract":    scienceBridgeContract,
-		"control":     json.RawMessage(control),
-		"page_attach": sciencePageAttachCalls(),
-		"page_detach": sciencePageDetachCalls(),
-		"frame":       scienceFrameCalls(testScienceIdentity),
-		"worker":      scienceWorkerCalls(testScienceIdentity),
-		"resume":      scienceResumeCalls(),
-		"settle_ms":   2000,
-		"scenarios":   scienceScenarios(),
+		"contract":         scienceBridgeContract,
+		"control":          json.RawMessage(control),
+		"page_attach":      sciencePageAttachCalls(),
+		"page_detach":      sciencePageDetachCalls(),
+		"frame":            scienceFrameCalls(testScienceIdentity),
+		"worker":           scienceWorkerCalls(testScienceIdentity),
+		"resume":           scienceResumeCalls(),
+		"settle_ms":        2000,
+		"navigate_wait_ms": 5000,
+		"scenarios":        scienceScenarios(),
 		// The shell's switches; the browser tests replace port 9 (nothing
 		// listens) with a recording proxy.
 		"backstop": scienceBackstopArgs(9),
@@ -52,10 +53,6 @@ func TestScienceCDPGolden(t *testing.T) {
 		t.Fatalf("testdata/science-cdp.json is stale; run with CAGE_UPDATE_GOLDEN=1\n%s", want)
 	}
 }
-
-// scienceBridgeContract is the scienceFrame bridge version the pane needs
-// (claude-science-state.mjs hostRenderContract).
-const scienceBridgeContract = 2
 
 type scienceScenarioStep struct {
 	Do      string   `json:"do"`
@@ -155,6 +152,29 @@ func scienceScenarios() []scienceScenario {
 			{Do: "arm", Expect: scienceExpect("G", frame)},
 			{Do: "detached", Session: "F", Expect: none},
 		}},
+		{"a top-level navigation waits until the frame's targets are gone", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
+			{Do: "navigate", Expect: []string{"remove"}},
+			{Do: "arm", Expect: end},
+			{Do: "detached", Session: "W", Expect: none},
+			{Do: "detached", Session: "F", Expect: append(detach, "proceed")},
+			{Do: "navigate", Expect: []string{"proceed"}},
+		}},
+		{"a navigation without a frame goes at once", []scienceScenarioStep{
+			{Do: "navigate", Expect: []string{"proceed"}},
+			{Do: "arm", Expect: attach},
+			{Do: "navigate", Expect: append(detach, "proceed")},
+		}},
+		{"a navigation whose frame does not go in time is dropped", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "navigate", Expect: []string{"remove"}},
+			{Do: "navigate_timeout", Expect: end},
+			{Do: "navigate_timeout", Expect: none},
+			{Do: "detached", Session: "F", Expect: detach},
+		}},
 	}
 }
 
@@ -178,13 +198,24 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 				actions = policy.settle(step.Session)
 			case "detached":
 				actions = policy.detachedTarget(step.Session)
+			case "navigate":
+				actions = policy.navigate()
+			case "navigate_timeout":
+				actions = policy.navigateTimedOut()
 			default:
 				t.Fatalf("%s: step %d: unknown %q", scenario.Name, i, step.Do)
 			}
 			got := []string{}
 			for _, action := range actions {
-				if action.End {
+				switch {
+				case action.End:
 					got = append(got, "end")
+					continue
+				case action.Remove:
+					got = append(got, "remove")
+					continue
+				case action.Proceed:
+					got = append(got, "proceed")
 					continue
 				}
 				got = append(got, scienceExpect(action.Session, []cdpCall{action.Call})...)

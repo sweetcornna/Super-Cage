@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { formatMB, hostFrameStatus, hostRenderExplanation, hostRenderView, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
+import { formatMB, hostFrameStatus, hostRenderContract, hostRenderExplanation, hostRenderUpdateNotice, hostRenderView, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
 
 const fixtures = createRequire(import.meta.url)("../scripts/claude-science-fixtures.json");
 const body = (name) => fixtures[name].body;
@@ -213,7 +213,7 @@ test("disk sizes read as GB or MB", () => {
 });
 
 const windowsWindow = { desktop_gateway: true, mode: "local", client_platform: "windows" };
-const render = (name, extra = {}) => hostRenderView({ data: body(name), client: windowsWindow, bridge: true, running: true, ...extra });
+const render = (name, extra = {}) => hostRenderView({ data: body(name), client: windowsWindow, bridge: true, contract: hostRenderContract, running: true, ...extra });
 
 test("host rendering: off by default, a quiet switch where it can be used", () => {
   for (const name of ["running-signed-in", "stopped", "not-installed"]) {
@@ -224,7 +224,7 @@ test("host rendering: off by default, a quiet switch where it can be used", () =
   assert.deepEqual(available.toggle, { label: "本机渲染（实验性）", checked: false, disabled: false, explanation: hostRenderExplanation });
   // macOS, Linux, a browser, the phone, a remote host: nothing to switch on.
   for (const client of [{ ...windowsWindow, client_platform: "darwin" }, { ...windowsWindow, mode: "remote" }, { mode: "local", client_platform: "windows" }]) {
-    assert.equal(hostRenderView({ data: body("running-host-render-available"), client, bridge: true, running: true }).toggle, null);
+    assert.equal(hostRenderView({ data: body("running-host-render-available"), client, bridge: true, contract: hostRenderContract, running: true }).toggle, null);
   }
   assert.equal(render("running-host-render-available", { bridge: false }).toggle, null);
   assert.equal(render("running-host-render-elsewhere").toggle, null);
@@ -237,13 +237,30 @@ test("host rendering: the frame only while everything holds", () => {
     assert.equal(render("running-host-render", extra).frame, false, why);
   }
   const stopped = { ...body("running-host-render"), running: false, ready: false };
-  assert.equal(hostRenderView({ data: stopped, client: windowsWindow, bridge: true, running: true }).frame, false, "daemon stopped");
+  assert.equal(hostRenderView({ data: stopped, client: windowsWindow, bridge: true, contract: hostRenderContract, running: true }).frame, false, "daemon stopped");
   // On but not usable here (the server refuses the switch from here too):
   // the pane stays as it was.
   for (const client of [{ ...windowsWindow, mode: "remote" }, { ...windowsWindow, client_platform: "linux" }, { mode: "local", client_platform: "windows" }]) {
     assert.deepEqual(render("running-host-render", { client }), { toggle: null, frame: false, fallback: "", notice: "" });
   }
   assert.equal(render("running-host-render", { fallback: "身份核对未通过" }).fallback, "身份核对未通过");
+});
+
+test("host rendering: offered only to a window whose bridge has the frame contract (F8)", () => {
+  assert.equal(hostRenderContract, 2);
+  // null: the probe has not answered; 0: the bridge has no scienceFrame
+  // capabilities op (an older window); 1: overrides on the whole WebView.
+  for (const contract of [null, 0, 1]) {
+    assert.equal(render("running-host-render-available", { contract }).toggle, null, String(contract));
+    assert.equal(render("running-host-render", { contract }).frame, false, String(contract));
+  }
+  assert.equal(hostRenderView({ data: body("running-host-render-available"), client: windowsWindow, bridge: true, running: true }).toggle, null, "no contract given");
+  // Already on (set from a newer window): the switch stays so it can be
+  // turned off, and says why there is no frame.
+  const older = render("running-host-render", { contract: 1 });
+  assert.equal(older.toggle?.checked, true);
+  assert.equal(older.notice, hostRenderUpdateNotice);
+  assert.deepEqual(render("running-host-render", { contract: null }), { toggle: null, frame: false, fallback: "", notice: "" });
 });
 
 test("host rendering: the toolbar says what the frame is doing", () => {
