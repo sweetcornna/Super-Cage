@@ -99,7 +99,11 @@
 .claude-account-order { max-height: 12rem; margin-top: 12px; overflow: auto; border-top: 1px solid var(--line); }
 .claude-account-order > div { display: flex; gap: 8px; align-items: center; min-height: var(--h-control); border-bottom: 1px solid var(--line); font-size: var(--fs-secondary); }
 .claude-account-order span { flex: 1; overflow-wrap: anywhere; }
-.claude-account-order button { min-height: var(--h-compact); padding: 0 10px; font-size: var(--fs-caption); }
+/* Reordering is a quiet ghost action on each row; the first row's is disabled. */
+.claude-account-order button { min-height: 28px; padding: 0 10px; border-color: transparent; background: transparent; color: var(--muted); font-size: var(--fs-caption); }
+.claude-account-order button:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
+.claude-account-order button:disabled { color: var(--faint); }
+.claude-account-order > div { padding-left: 2px; }
 
 .claude-profiles .account-error, .claude-profile-note { margin: 6px 0 0; font-size: var(--fs-secondary); line-height: 1.6; }
 .claude-profiles .account-error {
