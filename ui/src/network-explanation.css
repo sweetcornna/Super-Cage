@@ -1,0 +1,112 @@
+/* The gate explanation (network-explanation.jsx): the status bar popover
+   and the compact block in the home card. Calm by default; only
+   check_required uses the error colour. */
+.network-explanation {
+  display: grid;
+  gap: 8px;
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  line-height: 1.55;
+}
+.network-explanation :is(p, ul) {
+  margin: 0;
+}
+.network-explanation-title {
+  font-family: var(--font-serif);
+  font-size: var(--fs-lead);
+  font-weight: 500;
+  letter-spacing: var(--track-cjk);
+  line-height: var(--lh-title);
+}
+.network-explanation.tone-alarm .network-explanation-title {
+  color: var(--error);
+}
+.network-explanation-next,
+.network-explanation-advice {
+  color: var(--muted);
+}
+.network-countdown {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.network-explanation-advice {
+  display: grid;
+  gap: 4px;
+  padding-left: 1.2em;
+}
+.network-explanation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin-top: 4px;
+}
+.network-explanation-actions > button:not(.text-button) {
+  min-height: var(--h-compact);
+  padding: 0 12px;
+  font-size: var(--fs-secondary);
+}
+.network-explanation-error {
+  color: var(--error);
+}
+.network-explanation.compact {
+  padding: 12px 16px;
+  border-radius: var(--r-md);
+  background: var(--soft);
+}
+.network-explanation.compact.tone-alarm {
+  box-shadow: inset 3px 0 0 var(--error);
+}
+.network-popover {
+  position: fixed;
+  z-index: 40;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+  animation: appear var(--dur) var(--ease-out);
+}
+.network-popover:focus {
+  outline: none;
+}
+.network-popover:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.network-tone-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+.network-tone-dot.tone-alarm {
+  background: var(--error);
+}
+.status-dot.network-quiet,
+.status-dot.network-warn {
+  background: var(--amber);
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .network-popover {
+    animation: none;
+  }
+}
+/* What is short of memory (explanation.memory_cause), before the title. */
+.network-explanation-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.network-memory-icon {
+  flex: none;
+  color: var(--amber);
+}
+/* "打开计算资源设置" after advice about the memory setting. */
+.network-advice-link {
+  padding: 0;
+  font-size: inherit;
+  white-space: nowrap;
+}

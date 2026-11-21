@@ -12,7 +12,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { api, writeClipboard } from "./api";
-import { Modal } from "./views";
+import { Modal } from "./modal";
 import { DeviceChecks } from "./device-checks";
 import { networkState, reportForSharing } from "./safety-state.mjs";
 

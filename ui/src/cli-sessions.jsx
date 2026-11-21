@@ -1,7 +1,10 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { Folder, ListFilter, RefreshCw, Search, Trash2 } from "lucide-react";
 import { api } from "./api";
 import { InlineSelect } from "./inline-select";
+import { ProviderMark } from "./provider-mark";
+import { createSessionList } from "./session-list.mjs";
+import { isCodexSession, purgeCopy, selectionProvider, sessionListPath } from "./session-provider.mjs";
 import "./cli-sessions.css";
 
 export const desktopSessionRequest = (path, options = {}) => api("/cli" + path, options.body);
@@ -21,38 +24,37 @@ function ArchiveSelection({ items, selected, onToggle, disabled, label, children
   </label>;
 }
 
+// The window's session list (session-list.mjs): a stable store whose held
+// request runs while the environment is ready and the window shows, and stops
+// after the window has been hidden for a while. The hook does not subscribe:
+// views that show the list use useSessionSnapshot or <SessionListView>, so a
+// changed list re-renders only them (audit UI-4).
+const HIDDEN_STOP_MS = 30000;
+const listRequest = (path, { signal }) => api(path.replace(/^\/api/, ""), undefined, undefined, {}, { signal, empty: true });
+
 export function useCLISessions(enabled, visible) {
-  const [sessions, setSessions] = useState([]);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const refresh = () => { setLoading(true); setRevision(value => value + 1); };
+  const [store] = useState(() => createSessionList({ request: listRequest }));
   useEffect(() => {
+    const refresh = () => store.refresh();
     window.addEventListener("cage-cli-sessions-changed", refresh);
-    return () => window.removeEventListener("cage-cli-sessions-changed", refresh);
-  }, []);
+    return () => { window.removeEventListener("cage-cli-sessions-changed", refresh); store.stop(); };
+  }, [store]);
   useEffect(() => {
-    if (!enabled || !visible) { setLoading(false); return; }
-    let live = true, timer;
-    const load = async () => {
-      setLoading(true);
-      try {
-        const result = await desktopSessionRequest("/sessions");
-        if (!live) return;
-        setSessions((result.sessions || []).map(session => result.notice ? { ...session, active: false, running: false } : session));
-        setError(result.notice || "");
-      } catch (error) {
-        if (live) {
-          setError(error.message);
-          setSessions(previous => previous.map(session => ({ ...session, active: false, running: false })));
-        }
-      } finally { if (live) setLoading(false); }
-      if (live) timer = setTimeout(load, 5000);
-    };
-    void load();
-    return () => { live = false; clearTimeout(timer); };
-  }, [enabled, visible, revision]);
-  return { sessions, error, loading, refresh };
+    if (!enabled) { store.stop(); return; }
+    if (visible) { store.start(); return; }
+    const timer = setTimeout(() => store.stop(), HIDDEN_STOP_MS);
+    return () => clearTimeout(timer);
+  }, [store, enabled, visible]);
+  return store;
+}
+
+// select must return a value held by the snapshot (not a new object).
+export function useSessionSnapshot(store, select = (snapshot) => snapshot) {
+  return useSyncExternalStore(store.subscribe, () => select(store.getSnapshot()));
+}
+
+export function SessionListView({ store, children }) {
+  return children(useSessionSnapshot(store));
 }
 
 export function ArchivedSessions({ request = desktopSessionRequest, ready, onRestored, empty }) {
@@ -73,7 +75,10 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
     let live = true, timer;
     const load = async () => {
       try {
-        const result = await request("/sessions?archived=true");
+        // The desktop asks for Codex rows; the phone lists both already, and an
+        // older phone link may refuse parameters it does not know.
+        const result = await request(request === desktopSessionRequest
+          ? sessionListPath({ archived: true }).replace(/^\/api\/cli/, "") : "/sessions?archived=true");
         if (live) {
           const list = result.sessions || [];
           setSessions(list); setReadError(result.notice || "");
@@ -165,7 +170,7 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
     {progress && <p role="status" className="archive-note">正在处理 {progress.done} / {progress.total} 个会话…</p>}
     {resultMessage && <p role="status" className="archive-note">{resultMessage}</p>}
     {bulkConfirm && <div className="archive-confirm" role="group" aria-label="确认批量永久删除会话">
-      <p>永久删除所选的 {bulkConfirm.length} 个会话及其 Claude Code 原始对话和子代理记录？此操作无法撤销。</p>
+      <p>{purgeCopy(selectionProvider(bulkConfirm), "", bulkConfirm.length, true)}</p>
       <div className="archived-session-actions"><button className="archive-button" disabled={busy} onClick={() => setBulkConfirm(null)}>取消</button>
         <button className="archive-button archive-delete" disabled={busy || !ready} onClick={() => change(bulkConfirm, "purge")}>永久删除所选会话</button></div>
     </div>}
@@ -184,7 +189,7 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
         return <article className="archived-session" key={session.id}>
           <div className="archived-session-row">
             <ArchiveSelection items={[session]} selected={selected} onToggle={toggleSelection} disabled={busy} label={`选择会话 ${session.title || "新会话"}`} />
-            <div className="archived-session-title"><h4>{session.title || "新会话"}</h4>
+            <div className="archived-session-title"><h4>{isCodexSession(session) && <ProviderMark provider="codex" size={14} className="archived-provider" />}{session.title || "新会话"}</h4>
               {!Number.isNaN(date.valueOf()) && <time dateTime={session.updated_at}>{archiveDate.format(date)}</time>}
             </div>
             <div className="archived-session-actions">
@@ -196,13 +201,13 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
           </div>
           {session.deleting && <p className="archive-note">永久删除尚未完成，连接恢复后可重试。</p>}
           {confirming === session.id && <div className="archive-confirm" role="group" aria-label="确认永久删除会话">
-            <p>永久删除“{session.title || "新会话"}”及其 Claude Code 原始对话和子代理记录？此操作无法撤销。</p>
+            <p>{purgeCopy(isCodexSession(session) ? "codex" : "", session.title)}</p>
             <div className="archived-session-actions"><button className="archive-button" disabled={busy} onClick={() => setConfirming("")}>取消</button>
               <button className="archive-button archive-delete" disabled={busy || !ready} onClick={() => change([session], "purge")}>永久删除</button></div>
           </div>}
         </article>;
       })}</div>
     </section>)}
-    {!ready && <p className="archive-note">启动主机环境后可以永久删除 Claude Code 原始记录。</p>}
+    {!ready && <p className="archive-note">启动主机环境后可以永久删除会话的原始记录。</p>}
   </section>;
 }

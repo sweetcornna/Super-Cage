@@ -15,7 +15,8 @@ const sessions = titles.map((title, index) => ({
 }));
 const evidence = [];
 try {
-  await page.route("**/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
+  // The desktop list asks with ?providers=claude,codex (and later after/wait): match the path.
+  await page.route(url => url.pathname === "/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
   state.status.ready = state.status.vm_running = true;
   state.terminals = [{ id: "layout-live", workspace, title: "已打开的会话" }];
   const project = page.getByRole("region", { name: "项目 .claude-cage-workspace", exact: true });

@@ -44,6 +44,9 @@ export default defineConfig({
       // defaults, spelled out here so they cannot drift). verify-build.mjs
       // rejects a build that breaks this.
       output: {
+        // Lucide icons in one chunk: split per lazy view they made ~30 files
+        // of a few hundred bytes each on the first paint.
+        codeSplitting: { groups: [{ name: "icons", test: /node_modules[\\/]lucide-react[\\/]/ }] },
         entryFileNames: "assets/[name]-[hash:8].js",
         chunkFileNames: "assets/[name]-[hash:8].js",
         assetFileNames: "assets/[name]-[hash:8][extname]",

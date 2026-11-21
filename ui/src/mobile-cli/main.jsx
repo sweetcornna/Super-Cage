@@ -22,7 +22,13 @@ import "./mobile.css";
 import "./super.css";
 import { IconHints } from "../icon-hints.jsx";
 import { edgeSwipe, openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
+import { afterOutcome, HOLD_SECONDS, initialPoll, MIN_SPACING_MS, pollQuery, requestDeadline, requestDeadlineMs } from "../session-poll.mjs";
+import { keepSame } from "../poll-state.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
+
+// Whether the server holds session reads (its list answers carry
+// "revision"); a transcript read sends wait only then.
+const sessionHold = { supported: false };
 
 const labels = {
 	queued: "消息已送达",
@@ -147,23 +153,56 @@ function App() {
   useEffect(() => {
     if (!visible) return;
     const controller = new AbortController();
-    const options = { signal: controller.signal };
     const expectedAccess = accessGeneration.current;
     let timer;
+    // The session list is held by the server while it is unchanged
+    // (after=<revision>&wait=25, ../session-poll.mjs); an older server, or a
+    // link that refuses the held form, keeps the 5 s polling.
+    let poll = initialPoll();
+    // The projects keep their 5 s cadence: a held list can answer every
+    // second during a turn, or not for 25 s.
+    let projects = null, projectsAt = 0;
     const load = async () => {
       const expectedCatalog = catalogGeneration.current;
+      const { after, wait } = pollQuery(poll);
+      const started = Date.now();
+      // A list that never answers is dropped and asked again (with backoff).
+      const deadline = requestDeadline(controller.signal, requestDeadlineMs(wait));
+      const timed = { signal: deadline.signal };
+      let outcome;
       try {
-        const [info, list] = await Promise.all([request("/projects", options), request("/sessions", options)]);
+        const fresh = !projects || started - projectsAt >= 5000;
+        const [info, list] = await Promise.all([fresh ? request("/projects", timed) : projects,
+          request("/sessions" + (after ? "?after=" + encodeURIComponent(after) + (wait ? "&wait=" + wait : "") : ""), timed)]);
         if (controller.signal.aborted || expectedAccess !== accessGeneration.current || expectedCatalog !== catalogGeneration.current) return;
-        for (const session of list.sessions || []) archivedSessions.current.delete(session.id);
-        setCatalog({ ...info, sessions: (list.sessions || []).map(session => list.notice ? {...session, active:false} : session) }); setGate(""); setError(list.notice || "");
+        if (fresh) { projects = info; projectsAt = started; }
+        if (list) {
+          for (const session of list.sessions || []) archivedSessions.current.delete(session.id);
+          sessionHold.supported = Boolean(list.revision);
+          setCatalog({ ...info, sessions: (list.sessions || []).map(session => list.notice ? {...session, active:false} : session) }); setGate(""); setError(list.notice || "");
+          outcome = { status: 200, revision: list.revision };
+        } else {
+          // Unchanged: keep the rows; the projects may still have moved.
+          setCatalog(previous => previous ? keepSame(previous, { ...info, sessions: previous.sessions }) : previous); setGate("");
+          outcome = { status: 204 };
+        }
       } catch (error) {
         if (controller.signal.aborted) return;
         if (accessDenied(error)) { restricted(error); return; }
-        setError(error.message);
-        setCatalog(previous => previous && ({...previous, sessions:previous.sessions.map(session => ({...session, active:false}))}));
+        if (wait && (error.status === 400 || error.status === 404)) {
+          sessionHold.supported = false;
+          outcome = { status: error.status };
+        } else {
+          setError(deadline.expired() ? "会话列表暂时没有回应，正在重试" : error.message);
+          setCatalog(previous => previous && ({...previous, sessions:previous.sessions.map(session => ({...session, active:false}))}));
+          outcome = { error: true };
+        }
+      } finally {
+        deadline.done();
       }
-      if (!controller.signal.aborted && (drawer || current.tool !== "code" || !current.session)) timer = setTimeout(load, 5000);
+      const step = afterOutcome(poll, outcome, { started, ended: Date.now(), wait, interval: 5000 });
+      poll = step.poll;
+      if (!controller.signal.aborted && (drawer || current.tool !== "code" || !current.session)) timer = setTimeout(load, step.delay);
     };
     void load();
     return () => { clearTimeout(timer); controller.abort(); };
@@ -381,6 +420,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const [approvalFeedback, setApprovalFeedback] = useState(null);
   const checkApproval = useRef(null);
   const readFailures = useRef(0);
+  const holdRefused = useRef(false);
   const live = useRef(true);
   const latest = useRef(null);
   const submission = useRef(drafts.get(id)?.pending || null);
@@ -415,10 +455,17 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const fetchSession = useCallback(async (signal, incremental) => {
     const checking = checkApproval.current;
     const generation = latest.current?.generation;
-    const after = incremental && !checking && latest.current ? "?after=" + encodeURIComponent(latest.current.revision)
-      + (generation ? "&epoch=" + encodeURIComponent(generation) : "") : "";
+    const incrementalRead = incremental && !checking && latest.current;
+    // Held while unchanged (wait=25) on a server that holds reads; the
+    // 1 s / 4 s polling otherwise, and after a 400/404 to the held form.
+    const wait = incrementalRead && sessionHold.supported && !holdRefused.current ? HOLD_SECONDS : 0;
+    const after = incrementalRead ? "?after=" + encodeURIComponent(latest.current.revision)
+      + (generation ? "&epoch=" + encodeURIComponent(generation) : "") + (wait ? "&wait=" + wait : "") : "";
+    const started = Date.now();
+    // A read that never answers is dropped and retried like a lost connection.
+    const deadline = requestDeadline(signal, requestDeadlineMs(wait));
     try {
-      const snapshot = await request(sessionPath(id) + after, { signal });
+      const snapshot = await request(sessionPath(id) + after, { signal: deadline.signal });
       if (signal.aborted || !live.current) return;
       if (snapshot) accept(snapshot, generation);
       if (snapshot && checking && checkApproval.current === checking && latest.current?.turns?.at(-1)?.approval?.id === checking.id) {
@@ -427,9 +474,16 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       }
       setReadError("");
       readFailures.current = 0; setReadProgress("");
-      return active(latest.current?.turns?.at(-1)?.status) ? 1000 : 4000;
+      const interval = active(latest.current?.turns?.at(-1)?.status) ? 1000 : 4000;
+      if (!wait) return interval;
+      const elapsed = Date.now() - started;
+      // A 204 well before the wait elapsed was not held: the usual interval.
+      if (!snapshot && elapsed < wait * 1000 - MIN_SPACING_MS) return interval;
+      return Math.max(0, MIN_SPACING_MS - elapsed);
     } catch (error) {
       if (signal.aborted || !live.current) return;
+      // Refused (or the session is gone): ask again without the wait, which also tells the two apart.
+      if (wait && (error.status === 400 || error.status === 404)) { holdRefused.current = true; return Math.max(0, MIN_SPACING_MS - (Date.now() - started)); }
       if (accessDenied(error)) onDenied(error); else if (error.status === 404 || error.status === 410) onMissing();
       else if (retryableSessionError(error) && ++readFailures.current <= sessionRetryLimit) {
         setReadError(""); setReadProgress(`${sessionFailureMessage(error)} 正在自动重连（${readFailures.current}/${sessionRetryLimit}）…`);
@@ -439,6 +493,8 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
         setReadError(sessionFailureMessage(error) + (retryableSessionError(error) ? " 已自动重连5次，仍未恢复。可以稍后再次连接。" : ""));
       }
       return null;
+    } finally {
+      deadline.done();
     }
   }, [id, accept, onDenied, onMissing]);
   useEffect(() => {
