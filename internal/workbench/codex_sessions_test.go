@@ -879,18 +879,7 @@ func TestCodexStopSendsOneEscPerRunningTurn(t *testing.T) {
 		body, _ := json.Marshal(map[string]string{"request_id": id})
 		return request(s, "POST", "/api/mobile/cli/sessions/"+row.ID+"/stop", s.origin, string(body), true)
 	}
-	escapes := func(mark string) int {
-		t.Helper()
-		if err := terminal.enqueueInput(context.Background(), terminalInputLine(mark)); err != nil {
-			t.Fatal(err)
-		}
-		echoed := regexp.MustCompile("child:([^\r\n]*)" + mark + "\r?\n")
-		text := ""
-		for !echoed.MatchString(text) {
-			text += readTerminalUntil(t, view, "\n")
-		}
-		return strings.Count(echoed.FindStringSubmatch(text)[1], "\x1b")
-	}
+	escapes := func(mark string) int { return terminalEscapes(t, terminal, view, mark) }
 	var wg sync.WaitGroup
 	codes := make(chan int, 6)
 	for range 6 {
@@ -931,6 +920,95 @@ func TestCodexStopSendsOneEscPerRunningTurn(t *testing.T) {
 	}
 	if n := escapes("third"); n != 0 {
 		t.Fatalf("%d Esc for a turn that is not running", n)
+	}
+}
+
+// terminalEscapes counts the Esc keys typed into an echo test terminal since
+// the last line, by ending the line with mark.
+func terminalEscapes(t *testing.T, terminal *terminalSession, view *terminalSubscription, mark string) int {
+	t.Helper()
+	if err := terminal.enqueueInput(context.Background(), terminalInputLine(mark)); err != nil {
+		t.Fatal(err)
+	}
+	echoed := regexp.MustCompile("child:([^\r\n]*)" + mark + "\r?\n")
+	text := ""
+	for !echoed.MatchString(text) {
+		text += readTerminalUntil(t, view, "\n")
+	}
+	return strings.Count(echoed.FindStringSubmatch(text)[1], "\x1b")
+}
+
+// The phone's Stop on a desktop Claude Code terminal follows the same rule:
+// one Esc per running turn however many Stops arrive, and each still asks
+// the guest to stop the turn.
+func TestClaudeTerminalStopSendsOneEscPerRunningTurn(t *testing.T) {
+	s, id, project := metadataFixture(t)
+	home := t.TempDir()
+	mobileTestSSH(t, s, home, []string{"HOME=" + home, "PATH=/usr/bin:/bin:/usr/local/bin"})
+	helper := filepath.Join(home, ".local/share/cage/cli-channel-code", fmt.Sprintf("%x.py", sha256.Sum256([]byte(cliChannelHelper+cliResumePrompt+claudeAccountResumePrompt))))
+	if err := os.MkdirAll(filepath.Dir(helper), 0700); err != nil {
+		t.Fatal(err)
+	}
+	code := "import json,os,sys\nrequest=json.load(sys.stdin)\nopen(os.path.join(os.environ['HOME'],'calls.jsonl'),'a').write(json.dumps({'mode':sys.argv[1],'request':request})+'\\n')\n" +
+		"print(json.dumps({'ok':True} if sys.argv[1]=='rpc' else {}))\n"
+	if err := os.WriteFile(helper, []byte(code), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.terminals.close)
+	terminal, err := s.terminals.startSession(terminalChildCommand("echo"), project, "claude", claudeSelection{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.mobileCLI.mu.Lock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	if err == nil {
+		record.Terminal, record.Connection, record.GuestWorkspace, record.TerminalID = true, uuid.NewString(), guestPath(project), terminal.id
+		err = writePrivate(mobileRecordPath(s.profile, id), record)
+	}
+	s.mobileCLI.mu.Unlock()
+	if err != nil || record.codex() {
+		t.Fatal(err, record.codex())
+	}
+	view := terminal.subscribe()
+	defer view.Close()
+	readTerminalUntil(t, view, "terminal-ready")
+	epoch, ok := s.account.access()
+	if !ok {
+		t.Fatal("missing unlock epoch")
+	}
+	ctx := context.WithValue(context.Background(), accountEpochKey{}, epoch)
+	turn := uuid.NewString()
+	running := mobileSession{mobileSummary: mobileSummary{ID: id}, Turns: []mobileTurn{{ID: turn, Prompt: "长任务", Status: "running"}}}
+	var wg sync.WaitGroup
+	errs := make(chan error, 6)
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.stopTerminalConversation(ctx, running, turn)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		// Concurrent stop actions may find the operation lock taken.
+		if err != nil && !errors.Is(err, errTerminalBusy) {
+			t.Fatal(err)
+		}
+	}
+	if n := terminalEscapes(t, terminal, view, "first"); n != 1 {
+		t.Fatalf("%d Esc for one running Claude turn", n)
+	}
+	data, _ := os.ReadFile(filepath.Join(home, "calls.jsonl"))
+	if !strings.Contains(string(data), `"action": "stop"`) {
+		t.Fatalf("the guest was not asked to stop: %s", data)
+	}
+	if _, err := s.stopTerminalConversation(ctx, mobileSession{mobileSummary: mobileSummary{ID: id}, Turns: []mobileTurn{{ID: turn, Status: "completed"}}}, turn); err == nil || !strings.Contains(err.Error(), "本轮运行状态已变化") {
+		t.Fatal("finished turn", err)
+	}
+	if n := terminalEscapes(t, terminal, view, "second"); n != 0 {
+		t.Fatalf("%d Esc for a finished Claude turn", n)
 	}
 }
 
