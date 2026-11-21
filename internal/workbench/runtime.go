@@ -489,6 +489,7 @@ func (s *Server) closeGuestSessions() {
 }
 
 func (s *Server) startEnvironment(syncTimezone bool) error {
+	s.entryGuestStarting()
 	s.desktopViews.reset()
 	s.browserViews.reset()
 	s.closeGuestSessions()
@@ -728,6 +729,7 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.guestUpdateError = ""
 	s.safety.Error = ""
 	s.mu.Unlock()
+	s.entryEnvironmentStopped()
 	s.terminals.closeAll()
 	s.mobileCLI.stopAll()
 	s.closeProjectShares()

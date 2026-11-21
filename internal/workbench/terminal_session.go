@@ -50,6 +50,11 @@ type terminalSession struct {
 	stopping              chan struct{}
 	closeOnce             sync.Once
 	cliStartupDone        chan struct{}
+	// origin is "ssh" for a terminal the local SSH entry opened, with the
+	// device's name; kept is the owner's "保留", which keeps it past the
+	// connection.
+	origin, originDevice string
+	kept                 bool
 }
 
 func (t *terminalSession) ownsConversation() bool {
@@ -101,6 +106,9 @@ func (t *terminalSession) summary() map[string]any {
 	// Claude startup veil and account header.
 	if t.kind == "codex" && t.sharedID != "" {
 		summary["cli_session_provider"] = codexProvider
+	}
+	if t.origin != "" {
+		summary["origin"] = map[string]any{"kind": t.origin, "device": t.originDevice, "kept": t.kept}
 	}
 	return summary
 }

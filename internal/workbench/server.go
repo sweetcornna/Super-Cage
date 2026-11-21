@@ -139,6 +139,7 @@ type Server struct {
 	closeOnce                                        sync.Once
 	closeErr                                         error
 	controlPublished                                 bool
+	entry                                            entryService
 }
 
 func randomToken() string {
@@ -515,6 +516,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/login-link", s.terminalLoginLink)
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
+	s.entryRoutes(mux)
 	web, _ := fs.Sub(assets, "web")
 	mux.Handle("GET /", newStaticHandler(web))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

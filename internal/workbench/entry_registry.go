@@ -1,0 +1,139 @@
+package workbench
+
+import (
+	"context"
+	"net/http"
+	"sync"
+	"sync/atomic"
+)
+
+// entryRefusal is why the entry refuses a dial or cut a connection, in the
+// owner's words. cage entry proxy prints Message on stderr and exits 255.
+type entryRefusal struct {
+	Status  int    `json:"-"`
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (e *entryRefusal) Error() string { return e.Message }
+
+var (
+	errEntryLocalOnly   = &entryRefusal{http.StatusForbidden, "local_only", "本机终端只能在这台电脑上开启和连接"}
+	errEntryOff         = &entryRefusal{http.StatusConflict, "off", "本机终端未在这个环境里开启"}
+	errEntryUnknown     = &entryRefusal{http.StatusForbidden, "device_unknown", "这台电脑还没有加入这个环境的本机终端：在 Super Cage 里重新开启"}
+	errEntryRevoked     = &entryRefusal{http.StatusForbidden, "device_revoked", "这台电脑的钥匙已撤销：在 Super Cage 里重新开启本机终端即可生成新钥匙"}
+	errEntryLocked      = &entryRefusal{http.StatusLocked, "locked", "Super Cage 已锁定：先在 Super Cage 里解锁"}
+	errEntryUnsupported = &entryRefusal{http.StatusConflict, "unsupported", "这个环境暂不支持本机终端"}
+	errEntryStopped     = &entryRefusal{http.StatusConflict, "stopped", "环境已停止：先在 Super Cage 里启动环境"}
+	errEntryStarting    = &entryRefusal{http.StatusConflict, "starting", "环境正在启动或停止：稍后再连接"}
+	errEntryPaused      = &entryRefusal{http.StatusConflict, "paused", "网络已暂停：本机终端会在恢复网络后重新可用"}
+	errEntryClosing     = &entryRefusal{http.StatusServiceUnavailable, "closing", "Super Cage 正在退出"}
+)
+
+// entryConn is one live connection of the entry: one WebSocket carrying one
+// SSH connection. Cancelling its context ends everything it started.
+type entryConn struct {
+	device string
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+	// What the connection runs now, for the status line.
+	shells, execs, sftps atomic.Int32
+	channels             atomic.Int32
+	// refused counts each request or channel type the endpoint refused, so
+	// tests can tell "the client never asked" from "asked and refused".
+	refusedMu sync.Mutex
+	refused   map[string]int
+}
+
+func (c *entryConn) refuse(kind string) {
+	c.refusedMu.Lock()
+	defer c.refusedMu.Unlock()
+	if c.refused == nil {
+		c.refused = map[string]int{}
+	}
+	c.refused[kind]++
+}
+
+func (c *entryConn) refusals() map[string]int {
+	c.refusedMu.Lock()
+	defer c.refusedMu.Unlock()
+	out := make(map[string]int, len(c.refused))
+	for k, v := range c.refused {
+		out[k] = v
+	}
+	return out
+}
+
+// entryRegistry holds every live connection of this environment's entry.
+// cut only cancels contexts: it takes no other lock and does no I/O, so it
+// may run where the caller holds s.mu (the network pause path does).
+type entryRegistry struct {
+	mu    sync.Mutex
+	conns map[*entryConn]struct{}
+	// observe, when set, sees every connection that ends (tests).
+	observe func(*entryConn)
+}
+
+func (r *entryRegistry) add(c *entryConn) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.conns == nil {
+		r.conns = map[*entryConn]struct{}{}
+	}
+	r.conns[c] = struct{}{}
+}
+
+func (r *entryRegistry) remove(c *entryConn) {
+	r.mu.Lock()
+	_, present := r.conns[c]
+	delete(r.conns, c)
+	observe := r.observe
+	r.mu.Unlock()
+	if present && observe != nil {
+		observe(c)
+	}
+}
+
+// cut cancels the connections match selects (all when match is nil) with
+// the reason the next dial will be refused for.
+func (r *entryRegistry) cut(match func(*entryConn) bool, cause *entryRefusal) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for c := range r.conns {
+		if match == nil || match(c) {
+			c.cancel(cause)
+			n++
+		}
+	}
+	return n
+}
+
+func (r *entryRegistry) cutAll(cause *entryRefusal) int { return r.cut(nil, cause) }
+
+func (r *entryRegistry) cutDevice(device string, cause *entryRefusal) int {
+	return r.cut(func(c *entryConn) bool { return c.device == device }, cause)
+}
+
+type entryConnections struct {
+	Total int `json:"total"`
+	Shell int `json:"shell"`
+	Exec  int `json:"exec"`
+	SFTP  int `json:"sftp"`
+}
+
+func (r *entryRegistry) counts() entryConnections {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out entryConnections
+	for c := range r.conns {
+		if c.ctx.Err() != nil {
+			continue
+		}
+		out.Total++
+		out.Shell += int(c.shells.Load())
+		out.Exec += int(c.execs.Load())
+		out.SFTP += int(c.sftps.Load())
+	}
+	return out
+}
