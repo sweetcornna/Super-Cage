@@ -163,6 +163,45 @@ type mobileCLIStore struct {
 	codexOwner map[string]string
 	codexCLI   *codexCLICaps // the guest CLI's support, from the latest probe
 	generation string
+	// escSent is the turn each terminal conversation last got a Stop's Esc
+	// for, and when (claimTerminalStopLocked).
+	escSent map[string]terminalStop
+}
+
+type terminalStop struct {
+	turn string
+	at   time.Time
+}
+
+// terminalStopRepeat is how long a repeated Stop for one terminal turn sends
+// no second Esc: the first one's interrupt takes a moment to reach the
+// transcript, during which the turn still reads as running, and a second Esc
+// on an idle Codex or Claude Code composer opens "edit previous message".
+var terminalStopRepeat = 5 * time.Second
+
+// claimTerminalStopLocked reports whether a Stop of turn in session id may
+// send Esc now, and records it when it may.
+func (m *mobileCLIStore) claimTerminalStopLocked(id, turn string, now time.Time) bool {
+	for key, sent := range m.escSent {
+		if now.Sub(sent.at) >= terminalStopRepeat {
+			delete(m.escSent, key)
+		}
+	}
+	if sent, ok := m.escSent[id]; ok && sent.turn == turn {
+		return false
+	}
+	if m.escSent == nil {
+		m.escSent = map[string]terminalStop{}
+	}
+	m.escSent[id] = terminalStop{turn: turn, at: now}
+	return true
+}
+
+// releaseTerminalStopLocked forgets a claim whose Esc was not sent.
+func (m *mobileCLIStore) releaseTerminalStopLocked(id, turn string, at time.Time) {
+	if sent, ok := m.escSent[id]; ok && sent == (terminalStop{turn: turn, at: at}) {
+		delete(m.escSent, id)
+	}
 }
 
 func (m *mobileCLIStore) epochLocked() string {

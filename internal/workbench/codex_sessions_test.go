@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -841,6 +842,86 @@ func TestCodexStopReachesTheTurnsOwner(t *testing.T) {
 			t.Fatalf("Esc did not reach the terminal: %q", history)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// The phone's Stop on the desktop's Codex sends one Esc per running turn:
+// repeated and concurrent Stops before the interrupt reaches the transcript
+// (the turn still reads as running) send none, since a second Esc on an idle
+// composer opens "edit previous message". A turn that is not running gets
+// the existing answer and no Esc.
+func TestCodexStopSendsOneEscPerRunningTurn(t *testing.T) {
+	s, project, guest := newCodexFixture(t)
+	t.Cleanup(s.terminals.close)
+	row := listedCodexSession(t, s, guest, project, "停止一次")
+	record, _ := s.mobileCLI.record(s.profile, row.ID)
+	if err := s.codexConnection(record); err != nil {
+		t.Fatal(err)
+	}
+	turn := uuid.NewString()
+	running := map[string]any{"thread_id": record.CLIID, "account": "default", "workspace": guestPath(project), "running": true, "active": true,
+		"can_send": false, "owner": "desktop", "turns": []any{map[string]any{"id": turn, "prompt": "长任务", "text": "", "status": "running"}}}
+	guest.reply("view", running)
+	terminal := boundCodexTerminal(t, s, project, row.ID)
+	view := terminal.subscribe()
+	defer view.Close()
+	readTerminalUntil(t, view, "terminal-ready")
+	stop := func(id string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{"request_id": id})
+		return request(s, "POST", "/api/mobile/cli/sessions/"+row.ID+"/stop", s.origin, string(body), true)
+	}
+	escapes := func(mark string) int {
+		t.Helper()
+		if err := terminal.enqueueInput(context.Background(), terminalInputLine(mark)); err != nil {
+			t.Fatal(err)
+		}
+		echoed := regexp.MustCompile("child:([^\r\n]*)" + mark + "\r?\n")
+		text := ""
+		for !echoed.MatchString(text) {
+			text += readTerminalUntil(t, view, "\n")
+		}
+		return strings.Count(echoed.FindStringSubmatch(text)[1], "\x1b")
+	}
+	var wg sync.WaitGroup
+	codes := make(chan int, 6)
+	for range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codes <- stop(turn).Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != 200 {
+			t.Fatal("stop", code)
+		}
+	}
+	if n := escapes("first"); n != 1 {
+		t.Fatalf("%d Esc for one running turn", n)
+	}
+	// After the repeat window the turn still reads as running: the first Esc
+	// did not stop it, so Stop sends one again.
+	old := terminalStopRepeat
+	terminalStopRepeat = 0
+	defer func() { terminalStopRepeat = old }()
+	if w := stop(turn); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if n := escapes("second"); n != 1 {
+		t.Fatalf("%d Esc after the repeat window", n)
+	}
+	// A finished turn, or another one: the existing answer and no Esc.
+	running["turns"] = []any{map[string]any{"id": turn, "prompt": "长任务", "text": "好了", "status": "completed"}}
+	guest.reply("view", running)
+	for _, id := range []string{turn, uuid.NewString()} {
+		if w := stop(id); w.Code != 409 || !strings.Contains(w.Body.String(), "本轮运行状态已变化") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	}
+	if n := escapes("third"); n != 0 {
+		t.Fatalf("%d Esc for a turn that is not running", n)
 	}
 }
 
