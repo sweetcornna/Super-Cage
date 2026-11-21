@@ -14,6 +14,35 @@ export const agentClientPreferences = Object.freeze([
 ]);
 
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+// What an agent may ask this window to do, per action: each entry names
+// request fields that must be equal, and {} accepts any request. Everything
+// else is refused. The server refuses the same requests before they are
+// queued (agentNativeAccess in internal/workbench/agent_access.go); its test
+// reads the JSON between these markers and keeps both tables equal.
+// BEGIN agentNativeAccess
+export const agentNativeAccess = Object.freeze({
+  "clientPreferences": [{}],
+  "appearance": [{}],
+  "refreshSession": [{}],
+  "reconnect": [{}],
+  "chooseFolder": [{}],
+  "chooseGuestMedia": [{}],
+  "chooseUploadFiles": [{}],
+  "uploadHostFiles": [{}],
+  "importTheme": [{}],
+  "exportTheme": [{}],
+  "exportDiagnostics": [{}],
+  "saveBrowserDownload": [{}],
+  "appUpdate": [{ "operation": "status" }, { "operation": "check" }],
+  "accountDevice": [{ "operation": "status" }, { "operation": "disable" }, { "operation": "enable", "kind": "biometric" }, { "operation": "unlock", "kind": "biometric" }]
+});
+// END agentNativeAccess
+
+export function agentNativeAllowed(request) {
+  if (!object(request) || typeof request.action !== "string" || !Object.hasOwn(agentNativeAccess, request.action)) return false;
+  return agentNativeAccess[request.action].some(shape => Object.entries(shape).every(([field, value]) => request[field] === value));
+}
 function validPreference(key, raw) {
   if (raw === null) return true;
   if (typeof raw !== "string") return false;
@@ -82,6 +111,7 @@ export async function executeAgentNative(item, { native, getContext, storage }) 
   if (!item.connection_id || item.connection_id !== context.connection_id) throw connectionChanged();
   const request = item.request;
   if (!object(request) || typeof request.action !== "string") throw new Error("原生请求格式无效。");
+  if (!agentNativeAllowed(request)) throw new Error("这个原生操作只能在桌面窗口中由用户进行。");
   let result;
   if (request.action === "clientPreferences") result = clientPreferences(request, context, storage);
   else {

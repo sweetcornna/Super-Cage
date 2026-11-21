@@ -256,15 +256,21 @@ cage agent routes --scope desktop
 cage agent call settings.get --scope selected --connection 当前连接代次
 ```
 
-`capabilities` 离线返回命名操作与实际输入类型。`routes` 在线读取当前监听器真正注册的路由，新增界面 API 会自动进入清单；平台与环境状态仍决定某路由当前是否可用。带 `{id}` / `{action}` 的模式需要替换为实际值。
+`capabilities` 离线返回命名操作与实际输入类型，`access` 字段列出哪些路由和原生 action 仅限桌面窗口及原因。`routes` 在线读取当前监听器真正注册的路由，新增界面 API 会自动进入清单；`cage agent request GET "/api/agent/routes?access=1"` 另外给出每条路由对 Agent 是开放、仅限窗口还是部分开放。平台与环境状态仍决定某路由当前是否可用。带 `{id}` / `{action}` 的模式需要替换为实际值。
+
+### 仅限桌面窗口
+
+Agent 可以驱动工作台本身。凡是在工作台之外、不经用户直接作用于这台电脑的操作，只在桌面窗口由用户进行：安装或替换 Super Cage，启动本机应用（默认浏览器、屏幕共享、用本机应用打开文件、本机终端应用），读写本机剪贴板，读取本机浏览器的配置与扩展文件，改变桌面窗口信任的内容（记住登录、无需用户即可解锁的设备密钥、账户恢复密钥、让云端访问本机文件夹），以及窗口自身的传输（会话、启动票据、原生队列的认领与回执）。SSH 入口的 `/api/entry/`、`/api/client/entry/` 也属于此类。
+
+GET、HEAD 默认可读，分发窗口专用凭据的读取除外（例如升级确认清单、本机应用列表）。其他方法只开放已分类的路由：仅限窗口的返回 `native_transport_required`，未分类的返回 `route_not_open`，两者都不会发出请求。少数路由按请求体区分：`/api/macos/login`、`/api/macos/first-setup`、`/api/macos/maintenance` 的 `show-password` 会返回客机登录密码，仅限桌面窗口；这类路由的请求体必须是可解析的 JSON 对象，否则不发送。原生 action 同样默认拒绝，只有 `access.native` 列出的请求会排队，桌面窗口执行前再核对一次。
 
 ### 配置能力对照
 
 | 用户可操作内容 | Agent 的相同入口 |
 | --- | --- |
 | 名称、头像、密码、锁定、退出 | account.profile：username/avatar；account.password：old_password/password/confirm_password；account.lock/logout/suspend。 |
-| 本机信任、记住登录、设置密码保护 | desktop 范围 client.trusted-login：action 为 create/resume/enable/disable/protect，按同一规则提供 password、connection_id。 |
-| Touch ID 与快捷登录 | native.submit 提交 accountDevice，operation 为 status/enable/disable/unlock，kind 为 automatic/biometric；设备密钥由原生安全存储管理。Windows/Linux 不支持的操作与用户界面返回相同限制。 |
+| 本机信任、记住登录、设置密码保护 | 仅限桌面窗口：它改变桌面窗口信任的内容。client.trusted-login 返回 native_transport_required。 |
+| Touch ID 与快捷登录 | native.submit 提交 accountDevice：status，disable（automatic/biometric），以及 kind 为 biometric 的 enable/unlock，由用户完成 Touch ID。kind 为 automatic 的 enable/unlock 不需要用户即可解锁，仅限桌面窗口。设备密钥由原生安全存储管理；Windows/Linux 不支持的操作与用户界面返回相同限制。 |
 | 外观、字体、配色、自定义主题 | appearance.get/set 读写完整对象，appearance.codex 读取本机 Codex 外观导入；读取后保留未修改字段。 |
 | 出口位置检测、测速、连接和日志 | settings.probe 输入完整设置草稿；proxy.delay 输入 node_id；proxy.connections/logs。dry_run 仅静态校验。 |
 | 尚未开始安装时重选系统 | guest.reselect 输入 guest.options.pending.id，仍由原安装状态约束。 |
@@ -278,7 +284,7 @@ cage agent call settings.get --scope selected --connection 当前连接代次
 | 客机首次设置、登录与授权窗口 | request 访问 /api/macos/first-setup、/api/macos/login、当前构建提供的 /api/macos/maintenance、/api/macos/project-approval；会话、截图和键鼠动作与界面一致。 |
 | SSH 主机与部署、指纹核对、连接与切换 | desktop 范围 client.hosts、client.hosts.create、client.candidate/commit/cancel/disconnect/local-stop；更新/删除主机使用 PUT/DELETE /api/client/hosts/主机ID。保留同一连接代次、候选、指纹和本机任务去留规则。 |
 | 已归档会话、名称、固定、账户切换 | request 访问 /api/cli/sessions 和 /api/cli/sessions/会话ID/{metadata,account,archive,restore,purge,open}。 |
-| 文件选择、主题导入导出、App 更新 | native.submit 调现有 chooseFolder、chooseGuestMedia、importTheme、exportTheme、appUpdate 等原生 action。系统选择器和签名检查照常执行。 |
+| 文件选择、主题导入导出、诊断导出、App 更新状态 | native.submit 调 chooseFolder、chooseGuestMedia、chooseUploadFiles、uploadHostFiles、importTheme、exportTheme、exportDiagnostics、saveBrowserDownload；系统选择器照常由用户确认。App 更新只开放 appUpdate 的 status 与 check，下载、安装和取消在桌面窗口中进行。 |
 
 ### 通用请求与文件
 

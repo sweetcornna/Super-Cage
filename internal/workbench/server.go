@@ -345,6 +345,11 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 func (s *Server) handler() http.Handler {
 	mux := newDiscoverableMux()
 	mux.HandleFunc("GET /api/agent/routes", func(w http.ResponseWriter, r *http.Request) {
+		// ?access=1 adds what each route allows an agent and why.
+		if r.URL.Query().Get("access") != "" {
+			jsonReply(w, agentRoutesWithAccess(mux.routes()))
+			return
+		}
 		jsonReply(w, mux.routes())
 	})
 	s.agentRoutes(mux)
