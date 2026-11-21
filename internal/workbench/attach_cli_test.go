@@ -702,25 +702,27 @@ func TestAttachUploadsDroppedImagesOnly(t *testing.T) {
 		t.Fatalf("%d uploads", len(uploads))
 	}
 	mu.Unlock()
-	// The per-computer switch turns even images off.
-	a.cancel()
-	a.exit(5 * time.Second)
-	if err := os.WriteFile(filepath.Join(filepath.Dir(s.configPath), "local-terminal.json"), []byte("{\"image_upload\":false}"), 0o600); err != nil {
+	// The per-computer switch turns even images off, from the next paste on:
+	// it is read for each paste.
+	settings := filepath.Join(filepath.Dir(s.configPath), "local-terminal.json")
+	if err := os.WriteFile(settings, []byte("{\"image_upload\":false}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	b := startAttach(t, attachTo(s, session.id))
-	b.waitFor("ready", 1)
-	b.typeText("\x1b[200~" + photo + "\x1b[201~")
-	b.waitFor(strconv.Quote("\x1b[200~"+photo+"\x1b[201~"), 1)
+	paste(photo)
+	a.waitFor(strconv.Quote("\x1b[200~"+photo+"\x1b[201~"), 1)
 	mu.Lock()
-	defer mu.Unlock()
 	if len(uploads) != 2 {
 		t.Fatal("uploaded with the switch off")
 	}
+	mu.Unlock()
+	if err := os.WriteFile(settings, []byte("{\"image_upload\":true}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	paste(photo + " ")
+	a.waitFor("image-3.png", 1)
 }
 
 func TestAttachDroppedPathParsing(t *testing.T) {
-	home, _ := os.UserHomeDir()
 	for _, row := range []struct {
 		in   string
 		want []string
@@ -728,12 +730,15 @@ func TestAttachDroppedPathParsing(t *testing.T) {
 		{"/a/b.png", []string{"/a/b.png"}},
 		{"/a/My\\ File.png /c/d.jpg ", []string{"/a/My File.png", "/c/d.jpg"}},
 		{"'/a/it'\\''s.png'", []string{"/a/it's.png"}},
-		{"\"/a/x \\\"y\\\".png\"", []string{"/a/x \"y\".png"}},
-		{"file:///a/b%20c.png", []string{"/a/b c.png"}},
-		{"~/Desktop/a.png", []string{filepath.Join(home, "Desktop/a.png")}},
+		// Typed or copied forms no application uses for a drop never upload.
+		{"\"/a/x \\\"y\\\".png\"", nil},
+		{"file:///a/b%20c.png", nil},
+		{"~/Desktop/a.png", nil},
 		{"/a/b.png\n/c.png", []string{"/a/b.png", "/c.png"}},
 		{"relative.png", nil},
-		{"/a/b.png and", nil},
+		// One unescaped path, as kitty and Alacritty insert it: the file
+		// decides, and none is named that.
+		{"/a/b.png and", []string{"/a/b.png and"}},
 		{"", nil},
 		{"file://host/a.png", nil},
 		{"'/unterminated", nil},

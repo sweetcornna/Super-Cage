@@ -10,13 +10,15 @@ import (
 	_ "image/jpeg"
 	"image/png"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	_ "golang.org/x/image/webp"
+
+	"github.com/sylvinus/agent-vm/internal/localterm"
 )
 
 // Most terminal applications paste a dropped file as its local path, which
@@ -25,8 +27,10 @@ import (
 // it uploads the image and pastes the environment's path instead. Only
 // images the web terminal accepts qualify (PNG, JPEG, WebP, GIF, at most
 // 20 MB and 40 megapixels, decided by decoding the content), and only when a
-// bracketed paste holds nothing but such paths. Anything else, a key file's
-// path for instance, is pasted unchanged and never read beyond its header.
+// bracketed paste holds nothing but absolute paths in a form an application
+// inserts for a drop (DroppedPaths). Typed text never uploads. Anything
+// else, a key file's path for instance, is pasted unchanged and never read
+// beyond its header.
 
 const (
 	attachPasteStart = "\x1b[200~"
@@ -108,16 +112,18 @@ func (p *attachPaste) flush() error {
 
 func (p *attachPaste) deliver(ctx context.Context, paste []byte) error {
 	content := string(paste[len(attachPasteStart) : len(paste)-len(attachPasteEnd)])
-	if !p.a.settings.ImageUpload {
-		return p.a.sendInput(paste)
-	}
 	paths, ok := DroppedPaths(content)
 	if !ok {
 		return p.a.sendInput(paste)
 	}
+	// The switch is read for each paste: turning it off in Super Cage
+	// applies to windows already open.
+	if settings, _ := localterm.LoadSettings(filepath.Dir(p.a.cfg.ConfigPath)); !settings.ImageUpload {
+		return p.a.sendInput(paste)
+	}
 	images := make([][]byte, 0, len(paths))
 	for _, path := range paths {
-		data, err := attachImageFile(path)
+		data, err := readImage(path)
 		if err != nil {
 			return p.a.sendInput(paste) // not an image: an ordinary paste
 		}
@@ -146,11 +152,28 @@ func attachShellPaths(paths []string) string {
 	return strings.Join(quoted, " ") + " "
 }
 
-// DroppedPaths reads a paste as the paths terminal applications insert
-// for dropped files: separated by spaces or new lines, with backslash
-// escapes, single or double quotes, or as file:// URLs. ok is false unless
-// every word is an absolute path.
+// DroppedPaths reads a paste as the paths a terminal application inserts
+// for files dropped on it, in the forms those applications use on macOS
+// (paste_test.go has one row per application, with its source):
+//
+//   - backslash escapes, joined by spaces, perhaps a trailing space:
+//     Terminal, iTerm2, Ghostty, WezTerm (quote_dropped_files = SpacesOnly);
+//   - shlex quoting ('...', with '"'"' for a quote), joined by spaces:
+//     kitty at a shell prompt;
+//   - unescaped, one path per line, or one path and a trailing space:
+//     kitty elsewhere, Alacritty (one paste per file).
+//
+// ok is false unless every path is absolute. No application inserts ~/ or
+// a file:// URL for a drop, or uses double quotes on macOS: a paste holding
+// them was typed or copied, and nothing is read.
 func DroppedPaths(text string) (paths []string, ok bool) {
+	if paths, ok = escapedPaths(text); ok {
+		return paths, true
+	}
+	return literalPaths(text)
+}
+
+func escapedPaths(text string) (paths []string, ok bool) {
 	var word strings.Builder
 	inWord := false
 	end := func() bool {
@@ -169,12 +192,12 @@ func DroppedPaths(text string) (paths []string, ok bool) {
 	for i := 0; i < len(text); i++ {
 		c := text[i]
 		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case c == ' ' || c == '\n':
 			if !end() {
 				return nil, false
 			}
 		case c == '\\':
-			if i+1 == len(text) {
+			if i+1 == len(text) || text[i+1] < 0x20 || text[i+1] == 0x7f {
 				return nil, false
 			}
 			i++
@@ -182,23 +205,19 @@ func DroppedPaths(text string) (paths []string, ok bool) {
 			inWord = true
 		case c == '\'':
 			j := strings.IndexByte(text[i+1:], '\'')
-			if j < 0 {
+			if j < 0 || strings.ContainsFunc(text[i+1:i+1+j], unicode.IsControl) {
 				return nil, false
 			}
 			word.WriteString(text[i+1 : i+1+j])
 			i += j + 1
 			inWord = true
 		case c == '"':
-			i++
-			for ; i < len(text) && text[i] != '"'; i++ {
-				if text[i] == '\\' && i+1 < len(text) && strings.IndexByte("\"\\$`", text[i+1]) >= 0 {
-					i++
-				}
-				word.WriteByte(text[i])
-			}
-			if i == len(text) {
+			// Only shlex's way to write a quote inside quotes: "'".
+			if !strings.HasPrefix(text[i:], "\"'\"") {
 				return nil, false
 			}
+			word.WriteByte('\'')
+			i += 2
 			inWord = true
 		case c < 0x20 || c == 0x7f:
 			return nil, false
@@ -213,40 +232,84 @@ func DroppedPaths(text string) (paths []string, ok bool) {
 	return paths, true
 }
 
+// literalPaths reads unescaped paths: one per line, or one followed by the
+// space Alacritty adds.
+func literalPaths(text string) (paths []string, ok bool) {
+	text = strings.TrimSuffix(text, " ")
+	for _, line := range strings.Split(text, "\n") {
+		path, valid := attachLocalPath(line)
+		if !valid || strings.ContainsFunc(line, unicode.IsControl) || len(paths) == attachPastePaths {
+			return nil, false
+		}
+		paths = append(paths, path)
+	}
+	return paths, len(paths) > 0
+}
+
 func attachLocalPath(word string) (string, bool) {
-	if strings.HasPrefix(word, "file://") {
-		u, err := url.Parse(word)
-		if err != nil || u.Host != "" && u.Host != "localhost" || u.RawQuery != "" || u.Fragment != "" {
-			return "", false
-		}
-		word = u.Path
-	}
-	if strings.HasPrefix(word, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", false
-		}
-		word = filepath.Join(home, word[2:])
-	}
 	if !filepath.IsAbs(word) {
 		return "", false
 	}
 	return filepath.Clean(word), true
 }
 
-// attachImageFile reads an image the web terminal would accept and returns
-// it as PNG, which is what the workbench takes. The size is checked before
-// anything is read, and the content decides, not the name.
-func attachImageFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > MaxImageBytes {
-		return nil, errors.New("not an image file")
+// imageReadTimeout bounds reading one dropped file, so a stalled network
+// volume cannot hold up the window.
+var imageReadTimeout = 5 * time.Second
+
+// loadImage is attachImageFile; tests replace it.
+var loadImage = attachImageFile
+
+// readImage reads one dropped image off the input loop and gives up at the
+// deadline. A decoder that panics on a crafted file makes it unreadable,
+// not the attach dead.
+func readImage(path string) ([]byte, error) {
+	type result struct {
+		data []byte
+		err  error
 	}
-	file, err := os.Open(path)
+	done := make(chan result, 1)
+	go func() {
+		defer func() {
+			if recover() != nil {
+				done <- result{nil, errNotImage}
+			}
+		}()
+		data, err := loadImage(path)
+		done <- result{data, err}
+	}()
+	timer := time.NewTimer(imageReadTimeout)
+	defer timer.Stop()
+	select {
+	case r := <-done:
+		return r.data, r.err
+	case <-timer.C:
+		return nil, errors.New("reading the file took too long")
+	}
+}
+
+var errNotImage = errors.New("not an accepted image file")
+
+// attachImageFile reads an image the web terminal would accept and returns
+// it as PNG, which is what the workbench takes. Only a regular file is
+// read, not through a symbolic link, never a FIFO or device (opened without
+// blocking); its size is checked before anything is read and again on the
+// file actually opened, and the content decides, not the name.
+func attachImageFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() == 0 || info.Size() > MaxImageBytes {
+		return nil, errNotImage
+	}
+	f, err := openNoFollow(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(info, opened) || opened.Size() == 0 || opened.Size() > MaxImageBytes {
+		return nil, errNotImage
+	}
+	file := io.NewSectionReader(f, 0, MaxImageBytes+1)
 	config, format, err := image.DecodeConfig(file)
 	if err != nil || config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > 40_000_000 {
 		return nil, errors.New("not an accepted image")
@@ -258,7 +321,7 @@ func attachImageFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	if format == "png" {
-		data, err := io.ReadAll(io.LimitReader(file, MaxImageBytes+1))
+		data, err := io.ReadAll(file)
 		if err != nil || len(data) > MaxImageBytes {
 			return nil, errors.New("image too large")
 		}

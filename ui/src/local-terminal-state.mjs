@@ -31,7 +31,7 @@ export const SWITCHES = Object.freeze([
   {
     key: "image_upload",
     title: "上传拖入的图片",
-    help: "把图片拖入或粘贴到本机终端时，与网页终端一样上传到环境，并粘贴环境中的路径。只处理 PNG、JPEG、WebP 和 GIF 图片；其他文件和手动输入的路径原样粘贴。",
+    help: "把图片拖入本机终端，或粘贴的内容只有图片文件的完整路径时，会上传到环境，并粘贴环境中的路径。只处理 PNG、JPEG、WebP 和 GIF 图片；其他文件和输入的文字原样发送。",
   },
   {
     key: "clipboard_write",
