@@ -38,6 +38,8 @@ type fakeScienceDaemon struct {
 	// page is the HTML body served at / (the fixture under test).
 	page   func(nonce string) string
 	assets map[string]string
+	// rootHeaders replace the document's caching headers (a hostile daemon).
+	rootHeaders map[string]string
 }
 
 type fakeScienceRequest struct {
@@ -115,6 +117,9 @@ func newFakeScienceDaemon(t *testing.T) *fakeScienceDaemon {
 			w.Header().Set("Report-To", "{\"url\":\"https://reports.example/r\"}")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("Cache-Control", "no-cache")
+			for name, value := range d.rootHeaders {
+				w.Header().Set(name, value)
+			}
 			_, _ = io.WriteString(w, d.page(nonce))
 		case strings.HasPrefix(r.URL.Path, "/assets/"):
 			body, ok := d.assets[r.URL.Path]
@@ -279,12 +284,18 @@ type testScienceFront struct {
 // fake daemon. The workbench (ancestor) is http://localhost:17777.
 func newTestScienceFront(t *testing.T) *testScienceFront {
 	t.Helper()
+	return newTestScienceFrontAt(t, 0)
+}
+
+// newTestScienceFrontAt listens on the given loopback port (0: any).
+func newTestScienceFrontAt(t *testing.T, port int) *testScienceFront {
+	t.Helper()
 	daemon := newFakeScienceDaemon(t)
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	listener, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	port = listener.Addr().(*net.TCPAddr).Port
 	env := &testScienceFront{daemon: daemon}
 	env.epoch, env.lock = context.WithCancel(context.Background())
 	t.Cleanup(env.lock)
@@ -305,6 +316,12 @@ func newTestScienceFront(t *testing.T) *testScienceFront {
 	t.Cleanup(env.front.close)
 	return env
 }
+
+// sessionOrigin is the origin the frame's requests carry.
+func (env *testScienceFront) sessionOrigin() string { return env.front.origin }
+
+// scienceTestFrameSources is the workbench's frame-src for this front.
+func scienceTestFrameSources(env *testScienceFront) string { return env.front.origin }
 
 // client is a browser stand-in: it reaches localhost:Q on 127.0.0.1 and
 // keeps cookies.
