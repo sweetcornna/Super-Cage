@@ -25,6 +25,10 @@ internal sealed class MainWindow : Form
     // with (null: none, as always) and the frame support that needs them.
     private string? webArguments;
     private ScienceFrameHost? science;
+    // Navigations ScienceFrameHost held: cancelling one still raises
+    // NavigationCompleted (WebErrorStatus OperationCanceled), which is not a
+    // failure to load the workbench.
+    private readonly HashSet<ulong> heldNavigations = [];
 
     public MainWindow()
     {
@@ -201,7 +205,7 @@ internal sealed class MainWindow : Form
             core.NavigationStarting += (_, e) => {
                 if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true;
                 // The pane's document is going away: its frame goes first.
-                else if (science?.Hold(e.Uri) == true) e.Cancel = true;
+                else if (science?.Hold(e.Uri) == true) { e.Cancel = true; heldNavigations.Add(e.NavigationId); }
             };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
@@ -212,6 +216,7 @@ internal sealed class MainWindow : Form
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
                 uri => { if (!web.IsDisposed && web.CoreWebView2 == core) core.Navigate(uri); });
             core.NavigationCompleted += (_, e) => {
+                if (heldNavigations.Remove(e.NavigationId)) return;
                 if (!e.IsSuccess) {
                     var reason = e.WebErrorStatus.ToString() switch {
                         "Timeout" => "等待本机后台响应超时",
@@ -371,7 +376,7 @@ internal sealed class MainWindow : Form
     // The Claude Science pane's frame (ui/src/claude-science.jsx documents
     // the ops). Attaching needs the switches; without them the pane asks for
     // restart, which recreates the WebView with them. The agent transport
-    // cannot reach these ops (ui/src/api.js).
+    // cannot reach these ops (agentNativeAccess in ui/src/agent-native.js).
     private async Task<object> ScienceFrameRequest(string op, string url)
     {
         switch (op)
@@ -383,7 +388,7 @@ internal sealed class MainWindow : Form
                 return await science.Prepare();
             case "attach":
                 if (science == null) throw new InvalidDataException("窗口缺少本机渲染需要的网络限制，请重新载入窗口后再打开。");
-                science.Attach(url);
+                await science.Attach(url);
                 return true;
             case "detach":
                 science?.Detach();

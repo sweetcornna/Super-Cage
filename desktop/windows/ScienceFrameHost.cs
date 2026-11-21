@@ -63,14 +63,29 @@ internal sealed class ScienceFrameHost
         return new { backstop = true, proxy = await ProxyCheck() };
     }
 
-    public void Attach(string url)
+    // Attach returns once the page session's own calls are acknowledged (the
+    // pane frames the session only then); a failure throws, and the pane
+    // falls back to the browser pane.
+    public async Task Attach(string url)
     {
         var next = ScienceFrame.Identity(Backend.Root, url) ?? throw new InvalidDataException("找不到这个本机渲染页面对应的环境，请回到 Claude Science 重新打开。");
         var actions = policy.Arm(next);
         if (actions.Any(action => action.End)) throw new InvalidDataException("窗口正在跳转，本机渲染未打开。");
         origin = ScienceFrame.LabelOrigin(url)!;
         framed.Add(origin);
-        Apply(actions);
+        var page = actions.Where(action => action.Session.Length == 0 && action.Call != null).ToList();
+        try
+        {
+            foreach (var action in page) await Send("", action.Call!);
+        }
+        catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException)
+        {
+            throw new InvalidDataException("窗口没能为本机渲染页面准备时区与语言，本机渲染未打开。", error);
+        }
+        finally
+        {
+            Apply(actions.Where(action => !(action.Session.Length == 0 && action.Call != null)));
+        }
     }
 
     public void Detach()
@@ -109,6 +124,14 @@ internal sealed class ScienceFrameHost
     private async void Apply(IEnumerable<ScienceFrame.Action> actions)
     {
         var list = actions.ToList();
+        // The origins to clear are the ones framed when the page detach was
+        // produced: an attach that follows adds its own for the next one.
+        List<string>? clear = null;
+        if (list.Any(action => action.Session.Length == 0 && action.Call?.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"]?.GetValue<bool>() == false))
+        {
+            clear = framed.ToList();
+            framed.Clear();
+        }
         foreach (var action in list)
         {
             if (action.End) failed(Ended);
@@ -116,8 +139,7 @@ internal sealed class ScienceFrameHost
         }
         await Task.WhenAll(list.Where(action => action.Call != null).GroupBy(action => action.Session)
             .Select(group => Run(group.Key, group.Select(action => action.Call!).ToList())));
-        if (list.Any(action => action.Session.Length == 0 && action.Call?.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"]?.GetValue<bool>() == false))
-            await ClearFramed();
+        if (clear != null) await ClearFramed(clear);
         if (!list.Any(action => action.Proceed)) return;
         navigation++;
         var uri = heldUri;
@@ -142,15 +164,14 @@ internal sealed class ScienceFrameHost
         }
     }
 
-    // ClearFramed empties the storage of the session origins framed since
-    // auto-attach began (their targets are gone by now).
-    private async Task ClearFramed()
+    // ClearFramed empties the storage of session origins whose targets are
+    // gone (framed before the page detach).
+    private async Task ClearFramed(List<string> origins)
     {
         if (!Uri.TryCreate(core.Source, UriKind.Absolute, out var page)) return;
         var site = page.Scheme + "://" + page.Host;
-        foreach (var framedOrigin in framed.ToList())
+        foreach (var framedOrigin in origins)
         {
-            framed.Remove(framedOrigin);
             foreach (var call in ScienceFrame.ClearOrigin(framedOrigin, site))
             {
                 try { await Send("", call); }
