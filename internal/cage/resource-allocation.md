@@ -60,8 +60,10 @@ per-instance state: held demand D and the time it was set.
 4. Grow: L_i < f_i -> to roundUp(f_i) at once, also under host pressure (f is already fair; a guest OOM is
    worse than host reclaim). Reason "guest needs memory" / "fair share of a short host".
 5. Shrink — only memory above the floor F_i = max(f_i, W_i + 256 MiB, g_i), never below the working set:
-   a. capacity needed: N = sum_j max(L_j, f_j) - C > 0. Take N from instances with L > F, inactive first,
-      then active, within a tier proportional to slack (L - F), at most step per instance per round.
+   a. capacity needed: N = sum_j max(L_j, f_j) - C > 0, and some VM grows this round or is short (held below
+      its demand); without either nothing is taken, since a limit above the capacity is not use. Take N from
+      instances with L > F, inactive first, then active, within a tier proportional to slack (L - F), at most
+      step per instance per round.
    b. idle return: an inactive instance with L - max(D, g) >= step returns one step per round toward
       max(D, g). D only decays after the 5-minute hold, so a VM idle for 5 minutes starts to give back;
       an active VM keeps its excess (its page cache is in use) unless (a) or (c).

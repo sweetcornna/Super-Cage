@@ -243,6 +243,15 @@ func TestAllocationActiveVMStillYieldsToAGrowingOne(t *testing.T) {
 	if !yielded || lg < 6*testGiB+memoryMinHeadroom {
 		t.Fatalf("in-use VM kept memory a growing VM needs: busy %d MiB, growing %d MiB", lb>>20, lg>>20)
 	}
+	// The grower has its demand, and nobody is short: the busy VM keeps
+	// the rest, even with the limits together above the capacity, as a limit
+	// is not use. Once its page cache makes the host short, it gives.
+	state.HostAvailable = 3 * testGiB
+	markActive(state, busy, growing)
+	result := allocate(state, held, now)
+	if change, ok := changedIDs(result.changes)[busy]; !ok || change.to >= change.from || change.reason != "host memory is low" {
+		t.Fatalf("in-use VM kept its excess while the host is short: %+v", result.changes)
+	}
 }
 
 func TestAllocationHostPressureTakesIdleFirstAndNeverTheWorkingSet(t *testing.T) {
