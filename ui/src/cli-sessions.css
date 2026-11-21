@@ -5,6 +5,21 @@
 }
 .sidebar-session > span { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .sidebar-session > svg { flex: none; color: var(--muted); }
+/* A Codex session another device or process writes (workspace-tabs.jsx). */
+.sidebar-tab .session-owner-chip { flex: none; margin-left: auto; min-height: 1.2857rem; padding: 0 7px; font-weight: 500; }
+.sidebar-tab .tab-pin + .session-owner-chip,
+.sidebar-tab .session-owner-chip + .session-activity { margin-left: 0; }
+/* While such a row shows its actions, the chip and the pin give way to the
+   title (the tooltip and the unpin action still say both); the live dot stays. */
+.sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) :is(.session-owner-chip, .tab-pin) { display: none; }
+.sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) .session-activity { margin-left: auto; }
+/* A Codex session row's account label ("Codex · 工作") gives way the same way;
+   the pane header and the row's tooltip still name the account. Plain Codex
+   terminal and login tabs keep theirs. */
+.sidebar-tab:has([data-codex-session]):is(:hover, :focus-within, :has([aria-expanded="true"])) .claude-tab-profile { display: none; }
+/* Home rows of Codex sessions (workbench-home.jsx). */
+.home-recent .home-owner { display: inline-flex; flex: none; align-items: center; gap: 8px; margin-right: 6px; }
+.home-recent .home-row-error { margin: -2px 16px 10px 44px; color: var(--error); font-size: var(--fs-caption); line-height: 1.5; overflow-wrap: anywhere; }
 .sidebar-session-open-error { margin: 2px 8px 10px; color: var(--muted); font-size: .8571rem; line-height: 1.5; overflow-wrap: anywhere; }
 .settings-content.settings-content--archives { padding: 32px clamp(24px, 4vw, 64px); }
 .archived-sessions { display: grid; gap: 28px; min-width: 0; width: 100%; max-width: 1120px; margin-inline: auto; }
@@ -47,6 +62,8 @@
 .archived-session + .archived-session { border-top: 1px solid var(--line); }
 .archived-session-row { display: flex; align-items: center; gap: 16px; min-height: 42px; }
 .archived-session-title { min-width: 0; flex: 1; display: grid; gap: 5px; }
+/* The Codex mark leads a Codex title on its first line. */
+.archived-session-title .archived-provider { margin-inline-end: 6px; color: var(--muted); vertical-align: -2px; }
 .archived-sessions .archived-session-title h4 { margin: 0; font-size: 15px; font-weight: 550; overflow-wrap: anywhere; line-height: 1.5; }
 .archived-session-title time, .archive-note { color: var(--muted); font-size: 13px; overflow-wrap: anywhere; line-height: 1.5; }
 .archived-session-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; flex: none; }

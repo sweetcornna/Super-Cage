@@ -20,6 +20,8 @@ import {
 import { api } from "./api";
 import { SafetyMessage } from "./safety-message";
 import { ProxyYAMLInput } from "./proxy-yaml-input";
+import { NetworkExplanation } from "./network-explanation";
+import { networkState } from "./safety-state.mjs";
 import "./proxy.css";
 
 const bytes = (v) => {
@@ -414,6 +416,8 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
           {proxy.state_label}
         </span>
       </div>
+      {networkState(status).explanation && <NetworkExplanation explanation={networkState(status).explanation} compact
+        canRecheck={Boolean(status.ready && status.safety?.gate && !status.job?.running)} />}
       {proxy.active && status.location && (
         <p className="field-help">
           最近检测出口：{status.location.ip} · {status.location.country}{" "}
