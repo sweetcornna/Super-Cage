@@ -192,7 +192,7 @@ func TestAutomaticAllocationFollowsTheMachine(t *testing.T) {
 		if memory, _, err := (ResourceAllocation{MemoryGiB: maxMemory, CPUs: maxCPUs}).Limits(); err != nil || memory != maxMemory {
 			t.Fatalf("manual allocation at the range end rejected: %d %v", memory, err)
 		}
-		if _, _, err := (ResourceAllocation{MemoryGiB: maxMemory + 1, CPUs: 1}).Limits(); err == nil {
+		if err := (ResourceAllocation{MemoryGiB: maxMemory + 1, CPUs: 1}).Validate(); err == nil {
 			t.Fatal("manual allocation above the range accepted")
 		}
 	}

@@ -24,6 +24,7 @@ export function operationName(path = "", method = "GET") {
   if (path.startsWith("/projects")) return "连接项目目录";
   if (path.startsWith("/account")) return "处理账户操作";
   if (path.startsWith("/claude-desktop")) return "操作 Claude Desktop";
+  if (path.startsWith("/claude-science")) return reading ? "读取 Claude Science 状态" : "操作 Claude Science";
   if (path.startsWith("/terminals")) return "连接终端";
   if (path === "/start") return "启动环境";
   if (path === "/stop") return "停止环境";

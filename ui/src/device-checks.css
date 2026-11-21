@@ -1,8 +1,15 @@
-.device-checks { margin-block: 1rem; }
-.device-check-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
-.device-check-results { list-style: none; padding: 0; display: grid; gap: .75rem; }
-.device-check-results li { border: 1px solid var(--border, #8886); border-radius: .5rem; padding: .75rem; }
-.device-check-results li > span { margin-inline-start: .75rem; }
-.device-check-results li[data-state="failed"] > span { color: var(--error, #b23434); }
-.device-check-results li p, .device-checks dd { overflow-wrap: anywhere; }
-.device-checks dd { margin: .25rem 0 .75rem; }
+/* 设备配置与渲染检测: results are hairline rows with a state chip. */
+.device-checks { margin-block: 0; }
+.device-checks > p { margin: 0; color: var(--muted); font-size: var(--fs-caption); line-height: 1.65; }
+.device-check-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 12px; }
+.device-check-results { margin: 12px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.device-check-results li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.device-check-results li > strong { color: var(--ink); font-weight: 500; }
+.device-check-results li > span { justify-self: end; color: var(--muted); font-size: var(--fs-caption); font-weight: 600; }
+.device-check-results li[data-state="passed"] > span { color: var(--green); }
+.device-check-results li[data-state="warning"] > span { color: var(--amber); }
+.device-check-results li[data-state="failed"] > span { color: var(--error); }
+.device-check-results li > p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: var(--fs-caption); overflow-wrap: anywhere; }
+.device-checks dl { margin: 8px 0 0; font-size: var(--fs-caption); }
+.device-checks dt { color: var(--muted); }
+.device-checks dd { margin: 2px 0 10px; color: var(--ink); overflow-wrap: anywhere; }

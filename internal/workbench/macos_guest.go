@@ -117,7 +117,7 @@ func (s *Server) macOSGateCloseReason(state cage.GateStatus) string {
 		return "客机重新连接，外网等待重新检查"
 	}
 	cfg, cfgErr := loadConfig(s.configPath)
-	if state.Mode != cage.GateOpen || cfgErr != nil || state.Report == nil || !time.Now().Before(state.Until) || state.Report.Authorizes(state.RunID, cfg.Fingerprint(), time.Now()) != nil {
+	if state.Mode != cage.GateOpen || cfgErr != nil || state.Report == nil || !time.Now().Before(state.Deadline()) || state.Report.Authorizes(state.RunID, cfg.Fingerprint(), time.Now()) != nil {
 		return "网络授权未通过当前配置的完整检查"
 	}
 	return ""

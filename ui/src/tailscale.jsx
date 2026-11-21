@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, ExternalLink, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Smartphone, Terminal, Trash2 } from "lucide-react";
 import { api, writeClipboard } from "./api";
+import { EmptyState } from "./drawings";
 import "./tailscale.css";
 
 const labels = { Running: "已连接", NeedsLogin: "等待登录", NeedsMachineAuth: "等待管理员批准", Starting: "正在连接", Stopped: "已断开", NotInstalled: "尚未安装" };
@@ -79,7 +80,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     if (await act(logout ? "logout" : "disconnect")) { setSelected(""); setSSHOpen(false); }
   };
   return <div className="tailscale-panel">
-      <div className={`tailscale-overview${connected ? " connected" : ""}`}>
+      <div className={`tailscale-overview${connected ? " connected" : ""}`} data-backend={ready ? state?.backend || "loading" : "waiting"}>
         <div className="tailscale-state" role="status">
           <div className="tailscale-network-icon"><Network size={24} /></div>
           <div><strong>{!ready ? "等待 Super Cage 环境就绪" : labels[state?.backend] || (state ? "连接状态待确认" : "正在读取状态…")}</strong>
@@ -112,8 +113,8 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       <section className="tailscale-section tailscale-devices" aria-labelledby="tailscale-devices-title">
         <div className="tailscale-section-heading"><h3 id="tailscale-devices-title">网络中的设备{connected && <span>{peers.length}</span>}</h3>{connected && peers.length > 0 && <span className="field-help">{peers.filter(peer => peer.online).length} 台在线</span>}</div>
         {connected && peers.length > 0 && <label className="tailscale-search"><Search size={16} /><input aria-label="搜索设备" type="search" placeholder="搜索设备名称或地址" value={query} onChange={e => setQuery(e.target.value)} /></label>}
-        {!connected ? <div className="tailscale-empty"><Monitor size={26} /><strong>连接后查看你的设备</strong><p>在浏览器完成登录，设备清单会自动出现。</p></div>
-          : peers.length === 0 ? <div className="tailscale-empty"><Monitor size={26} /><strong>私网已连接，还没有发现其他设备</strong><p>在电脑或手机安装 Tailscale，并加入同一网络。这里只显示此网络允许 Super Cage 发现的设备。</p></div>
+        {!connected ? <EmptyState compact className="tailscale-empty" drawing="plug" title="连接后查看你的设备">在浏览器完成登录，设备清单会自动出现。</EmptyState>
+          : peers.length === 0 ? <EmptyState compact className="tailscale-empty" drawing="server" title="私网已连接，还没有发现其他设备">在电脑或手机安装 Tailscale，并加入同一网络。这里只显示此网络允许 Super Cage 发现的设备。</EmptyState>
           : visible.length === 0 ? <p className="tailscale-empty">没有匹配的设备，请尝试其他名称或地址。</p>
           : <div className="tailscale-peers">{visible.map(peer => <article className="tailscale-peer" key={peer.id || peer.ip}>
             <div className="tailscale-peer-row"><DeviceIcon os={peer.os} /><div className="tailscale-peer-info"><strong>{deviceName(peer)}</strong><span>{peer.ip}{peer.os ? ` · ${peer.os}` : ""}</span></div>

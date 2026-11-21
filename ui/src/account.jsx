@@ -20,6 +20,7 @@ import {
 import { api, native, nativeAvailable, writeClipboard } from "./api";
 import { getClientContext, isCloudWorkbench } from "./client-context.mjs";
 import { BrandMark } from "./brand";
+import { Drawing } from "./drawings";
 import "./account.css";
 
 const AccountContext = createContext(null);
@@ -309,8 +310,10 @@ export function AccountGate({ children }) {
       >
         {creating ? (
           <BrandMark size={64} className="account-welcome-logo" />
+        ) : account ? (
+          <AccountAvatar account={account} large />
         ) : (
-          account && <AccountAvatar account={account} large />
+          <Drawing name="plug" className="account-drawing" />
         )}
         <h1>
           {creating
@@ -319,6 +322,7 @@ export function AccountGate({ children }) {
               ? `欢迎回来，${account.username}`
               : "正在连接 Super Cage"}
         </h1>
+        <Drawing name="squiggle" className="account-underline" />
         <p className="account-entry-intro">
           {creating
             ? isCloudWorkbench() ? "在云端创建账户，保护这台主机上的工作与登录状态。" : "先注册用户名和密码，再选择客机系统并安装环境。macOS 客机会使用同一套账密。"
@@ -448,6 +452,7 @@ function RecoveryKeyScreen() {
   const [notice, setNotice] = useState("");
   return <main className="account-gate">
     <section className="account-entry account-recovery" aria-label="保存恢复密钥">
+      <Drawing name="key" className="account-drawing" />
       <h1>{recovery.reset ? "密码已重置" : "保存你的恢复密钥"}</h1>
       <p className="account-entry-intro">{recovery.reset && "请保存新的恢复密钥。"}账户：{recovery.username}。这份密钥可以重置密码并访问原有资料，请存入密码管理器或安全的离线位置，不要分享给他人。</p>
       <label className="account-field">恢复密钥<textarea aria-label="恢复密钥" readOnly value={recovery.key} rows={4} spellCheck={false} autoComplete="off" onFocus={(event) => event.target.select()} /></label>
@@ -486,6 +491,7 @@ function AccountRecovery({ onBack, onReset }) {
   const [error, setError] = useState("");
   return <main className="account-gate">
     <section className="account-entry account-recovery" aria-label="恢复账户">
+      <Drawing name="key" className="account-drawing" />
       <h1>使用恢复密钥重置密码</h1>
       <p className="account-entry-intro">为 {account.username} 设置新密码，原来的资料和 Claude 登录状态会保留。</p>
       {account.recovery_ready ? <form onSubmit={async (event) => {

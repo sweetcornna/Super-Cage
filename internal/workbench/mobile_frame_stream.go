@@ -163,7 +163,7 @@ func (s *Server) phoneNetwork(ctx context.Context, cache *phoneGateCache, cached
 	}
 	now := time.Now()
 	ok := gate.Configuration == fingerprint && gate.Mode == cage.GateOpen && gate.PolicyVerified &&
-		!gate.Fault && gate.Until.After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
+		!gate.Fault && gate.Deadline().After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
 	cache.mu.Lock()
 	switch {
 	case ok && !hit:

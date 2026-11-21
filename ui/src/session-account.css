@@ -6,3 +6,76 @@
 .session-account-options input[type=checkbox] { flex: none; }
 .session-account--compact { padding: 6px 12px; flex: none; max-height: 65%; overflow-y: auto; }
 .session-account > button { display: inline-flex; align-items: center; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: inherit; font: inherit; cursor: pointer; }
+
+/* Desktop terminal (brand/design-language.md §6): the binding is a quiet chip
+   above the terminal, and its options float over the terminal as a popover so
+   opening them never reflows the terminal. The phone keeps the rules above. */
+.terminal-view > .session-account {
+  position: relative;
+  z-index: 4;
+  max-height: none;
+  overflow: visible;
+  padding: 0 0 8px;
+  font-size: var(--fs-caption);
+}
+.terminal-view > .session-account > button {
+  gap: 6px;
+  min-height: var(--h-compact);
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  background: var(--surface);
+  color: var(--muted);
+  font-weight: 500;
+  transition: background-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.terminal-view > .session-account > button::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.terminal-view > .session-account > button:hover,
+.terminal-view > .session-account > button[aria-expanded="true"] { background: var(--soft); color: var(--ink); }
+.terminal-view > .session-account > button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.terminal-view > .session-account:has(.session-account-options [role="status"]) > button::before { background: var(--amber); }
+.terminal-view .session-account-options {
+  position: absolute;
+  top: calc(var(--h-compact) + 6px);
+  left: 0;
+  width: min(28rem, calc(100vw - 48px));
+  max-height: min(34rem, 70vh);
+  overflow-y: auto;
+  gap: 12px;
+  padding: 16px;
+  border-color: var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+  font-size: var(--fs-secondary);
+}
+.terminal-view .session-account-options p { font-size: var(--fs-caption); line-height: 1.6; }
+.terminal-view .session-account-options > p:first-child { color: var(--ink); font-size: var(--fs-secondary); }
+.terminal-view .session-account-options > p[role="status"] {
+  padding: 8px 12px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--amber) 12%, var(--surface));
+  color: var(--amber);
+}
+.terminal-view .session-account-options > p[role="alert"] { color: var(--error); }
+.terminal-view .session-account-options > label:not(.check-line) { gap: 6px; color: var(--ink); font-weight: 500; }
+.terminal-view .session-account-options .check-line { align-items: center; gap: 8px; margin: 0; color: var(--ink); }
+.terminal-view .session-account-options .check-line input { margin: 0; accent-color: var(--ink); }
+.terminal-view .session-account-options > button {
+  justify-self: end;
+  min-height: var(--h-control);
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--r-md);
+  background: var(--button);
+  color: var(--button-ink);
+  font: inherit;
+  font-weight: 500;
+}
+.terminal-view .session-account-options > button:disabled { background: var(--soft); color: var(--faint); }

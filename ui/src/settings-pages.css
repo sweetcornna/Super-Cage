@@ -1,0 +1,721 @@
+/*
+ * Settings sub-pages: 账户, 密码保险箱, 已归档会话, 远程连接, 网络与代理,
+ * 时区与语言, 环境与恢复, 关于 (brand/design-language.md §6).
+ *
+ * One pattern for all of them: the serif page title, serif group titles over
+ * a hairline, rows separated by hairlines rather than boxed cards, quiet
+ * actions, help in muted caption type. Everything is scoped under
+ * .settings-subpage, which settings.jsx puts on every section except 通用
+ * and 外观 (those two are frozen and keep settings.css alone).
+ *
+ * Desktop only: the phone shares cli-sessions.css and session-account.css but
+ * never loads this file, so the archive overrides below stay off the phone.
+ */
+
+.settings-page .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── Group titles ────────────────────────────────────────── */
+/* A group opens with a serif title over a hairline; the first group after the
+   page title needs no rule of its own. */
+.settings-subpage :is(
+  .settings-fields > h4,
+  .settings-fields > section > h4,
+  .environment-versions > h4,
+  .environment-cache > h4,
+  .settings-group > h3,
+  .device-checks > h4,
+  .account-settings form h4,
+  .account-device-settings > h4,
+  .vault-blocked > h4,
+  .network-exit-policy .section-title h3
+) {
+  margin: 0 0 6px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+  font-weight: 500;
+  line-height: var(--lh-title);
+  letter-spacing: var(--track-cjk);
+}
+.settings-subpage :where(
+  .environment-versions,
+  .environment-cache,
+  .settings-group,
+  section[aria-label="客机系统权限"],
+  section[aria-label="客机屏幕共享"],
+  .account-device-settings
+) {
+  margin: 48px 0 0;
+  padding: 40px 0 0;
+  border-top: 1px solid var(--line);
+}
+.settings-subpage .section-title + :where(.environment-versions, .settings-group) {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+/* The help line under a group title sits close to it. */
+.settings-subpage :is(.environment-versions, .environment-cache, .settings-group, .device-checks) > :is(h3, h4) + :is(.field-help, .footnote, p) {
+  margin-top: 0;
+}
+
+/* ── Summary rows: label left, value right, hairline below ─ */
+.settings-subpage .setting-summary-row {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 24px;
+  min-height: 2.9rem;
+  margin: 0;
+  padding: 11px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 400;
+}
+.settings-subpage .setting-summary-row > span {
+  flex: none;
+}
+.settings-subpage .setting-summary-row strong {
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-body);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.settings-subpage .setting-summary-row + .field-help {
+  margin-top: 12px;
+}
+
+/* A disabled primary waits quietly instead of being the loudest thing on the
+   page; the frozen settings footer is outside .settings-subpage. */
+.settings-subpage :is(button.primary, .resource-actions button[type="submit"]):disabled,
+.settings-subpage .environment-storage .storage-actions button:disabled {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--faint);
+  opacity: 1;
+}
+
+/* ── Action rows ─────────────────────────────────────────── */
+.settings-subpage :is(.environment-version-actions, .storage-actions, .device-check-actions, .project-recovery-actions, .about-check-actions) {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 20px 0 12px;
+}
+.settings-subpage .account-error,
+.settings-subpage .archive-error {
+  margin: 16px 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--error) 7%, var(--surface));
+  color: var(--error);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* ── 账户 ────────────────────────────────────────────────── */
+.settings-subpage .account-settings form > fieldset {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+}
+.settings-subpage .account-profile-heading {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  margin: 0 0 28px;
+}
+.settings-subpage .account-profile-heading .account-avatar.large {
+  width: 64px;
+  height: 64px;
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+}
+.settings-subpage .account-profile-heading > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 4px;
+}
+.settings-subpage .account-profile-heading .quiet-button {
+  margin-left: -10px;
+}
+.settings-subpage .account-profile-heading .field-help {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+}
+.settings-subpage .account-settings .account-field {
+  margin-bottom: 20px;
+}
+/* Each form ends in its own action, right under the last field. */
+.settings-subpage .account-settings form > fieldset > button,
+.settings-subpage .account-device-settings > form > button,
+.settings-subpage .account-device-settings > button {
+  align-self: flex-start;
+  margin-top: 4px;
+}
+.settings-subpage .account-settings form > fieldset > button.quiet-button,
+.settings-subpage .account-device-settings button.quiet-button {
+  min-height: var(--h-control);
+  padding: 0 14px;
+  border-color: var(--line-strong);
+  background: var(--surface);
+  font-size: var(--fs-body);
+}
+.settings-subpage .account-settings form > fieldset > button.quiet-button:hover:not(:disabled),
+.settings-subpage .account-device-settings button.quiet-button:hover:not(:disabled) {
+  background: var(--soft);
+}
+.settings-subpage .account-section-divider {
+  height: 0;
+  margin: 48px 0 40px;
+  border-top: 1px solid var(--line);
+}
+.settings-page .settings-subpage .account-settings fieldset > h4 + .field-help {
+  margin: 0 0 24px;
+}
+.settings-subpage .account-saved {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0;
+  color: var(--green);
+  font-size: var(--fs-secondary);
+}
+.settings-subpage .account-settings-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 48px 0 0;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+.settings-subpage .account-settings-note svg {
+  flex: none;
+  color: var(--faint);
+}
+.settings-subpage .account-device-option {
+  padding: 14px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* ── 已归档会话 (desktop look over the phone-shared stylesheet) ── */
+.settings-page .settings-content.settings-content--archives {
+  padding: 48px var(--s-gutter) 72px;
+}
+.settings-subpage .archived-sessions {
+  gap: 20px;
+  max-width: none;
+  margin: 0;
+}
+.settings-subpage .archive-toolbar {
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+.settings-subpage .archive-search {
+  height: var(--h-control);
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--faint);
+}
+.settings-subpage .archive-search:focus-within {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.settings-page .settings-content.settings-subpage .archive-toolbar .archive-search input[type="search"] {
+  height: calc(var(--h-control) - 2px);
+  padding: 0;
+  font-size: var(--fs-body);
+}
+.settings-page .settings-content .archive-toolbar .inline-select-trigger {
+  height: var(--h-control);
+  border-color: var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-body);
+}
+.settings-subpage .archive-filter-label svg {
+  color: var(--muted);
+}
+.settings-subpage .archive-bulk-toolbar {
+  min-height: var(--h-control);
+  padding: 0 0 12px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-subpage .archived-sessions .archive-selection {
+  font-size: var(--fs-secondary);
+}
+.settings-subpage .archived-sessions .archive-selection input {
+  accent-color: auto;
+}
+.settings-subpage .archive-note {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.settings-subpage :is(.archive-button, .archive-restore) {
+  min-height: var(--h-compact);
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  font-weight: 500;
+}
+.settings-subpage :is(.archive-button, .archive-restore):hover:not(:disabled) {
+  background: var(--soft);
+}
+.settings-subpage .archive-button.archive-delete {
+  color: var(--error);
+}
+.settings-subpage .archive-project {
+  gap: 4px;
+  margin-top: 12px;
+}
+.settings-subpage .archive-project-heading {
+  min-height: var(--h-compact);
+  padding: 0;
+  color: var(--muted);
+}
+.settings-subpage .archive-project-heading h3 {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+.settings-subpage .archive-project-heading > span {
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .archive-project-list {
+  padding: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
+}
+.settings-subpage .archived-session {
+  gap: 8px;
+  padding: 10px 0 10px 28px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-subpage .archived-session + .archived-session {
+  border-top: 0;
+}
+.settings-subpage .archived-session-row {
+  gap: 12px;
+  min-height: var(--h-compact);
+}
+.settings-subpage .archived-session-row > .archive-selection {
+  margin-left: -28px;
+  width: 28px;
+  justify-content: flex-start;
+}
+.settings-subpage .archived-sessions .archived-session-title h4 {
+  font-size: var(--fs-body);
+  font-weight: 500;
+  line-height: 1.45;
+}
+.settings-subpage .archived-session-title time {
+  font-size: var(--fs-caption);
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .archived-session:has(.archive-selection input:checked) .archived-session-title h4 {
+  color: var(--ink);
+}
+.settings-subpage .archived-session:has(.archive-selection input:checked) {
+  background: linear-gradient(var(--selected), var(--selected)) no-repeat 0 0 / 3px 100%;
+}
+.settings-subpage .archive-icon-button {
+  width: var(--h-compact);
+  min-height: var(--h-compact);
+  border-radius: var(--r-sm);
+}
+.settings-subpage .archive-confirm {
+  padding: 14px 16px;
+  border-color: color-mix(in srgb, var(--error) 28%, var(--line));
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--error) 5%, var(--surface));
+}
+.settings-subpage .archived-sessions .empty-state {
+  padding-top: 56px;
+}
+
+/* ── 远程连接 ────────────────────────────────────────────── */
+.settings-page .settings-content.settings-content--remote {
+  padding: 48px var(--s-gutter) 72px;
+}
+.settings-subpage .remote-link-settings {
+  max-width: none;
+  margin: 0;
+}
+.settings-subpage .remote-link-settings .section-title h3 {
+  font-size: var(--fs-title);
+}
+.settings-subpage .remote-link-settings .section-title p {
+  font-size: var(--fs-body);
+}
+/* Pairing: text and actions on the left, the code (or its placeholder) on the right. */
+.settings-subpage .remote-pair-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 32px;
+  align-content: start;
+  margin: 0;
+  padding: 28px 28px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xl);
+  background: var(--surface);
+  text-align: left;
+}
+.settings-subpage .remote-pair-card > * {
+  grid-column: 1;
+}
+.settings-subpage .remote-pair-card > :is(.remote-pair-code, .remote-pair-placeholder) {
+  grid-column: 2;
+  grid-row: 1 / span 8;
+  align-self: start;
+  margin: 0;
+}
+.settings-page .settings-content .remote-pair-card h4 {
+  margin: 0 0 8px;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+  font-weight: 500;
+  letter-spacing: var(--track-cjk);
+}
+.settings-subpage .remote-pair-instruction,
+.settings-subpage .remote-pair-card > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.7;
+}
+.settings-subpage .remote-pair-device {
+  justify-content: flex-start;
+  gap: 10px;
+  margin: 0 0 6px;
+}
+.settings-subpage .remote-pair-device strong {
+  color: var(--ink);
+  font-size: var(--fs-lead);
+  font-weight: 500;
+}
+.settings-subpage .remote-pair-device span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.5rem;
+  padding: 0 9px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--green) 13%, var(--surface));
+  color: var(--green);
+  font-size: var(--fs-caption);
+  font-weight: 600;
+}
+.settings-subpage .remote-pair-card > .note {
+  margin-top: 8px;
+  font-size: var(--fs-caption);
+}
+.settings-subpage .remote-pair-placeholder {
+  display: grid;
+  place-items: center;
+  width: 168px;
+  height: 168px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-lg);
+  background: var(--paper);
+  color: var(--faint);
+}
+.settings-subpage .remote-pair-code img {
+  display: block;
+  width: 200px;
+  height: 200px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+.settings-subpage .remote-pair-code .field-help {
+  max-width: 200px;
+  margin: 8px 0 0;
+  text-align: center;
+}
+.settings-subpage .remote-pair-actions {
+  justify-content: flex-start;
+  gap: 8px;
+  margin: 20px 0 0;
+}
+.settings-page .settings-content .remote-pair-actions button {
+  min-height: var(--h-control);
+  padding: 0 16px;
+  font-size: var(--fs-body);
+}
+.settings-subpage .remote-pair-privacy {
+  margin: 14px 0 0;
+  font-size: var(--fs-caption);
+}
+.settings-subpage .remote-pair-card [role="status"],
+.settings-subpage .remote-pair-card [role="alert"] {
+  margin: 12px 0 0;
+}
+.settings-subpage .remote-relay-settings {
+  margin: 48px 0 0;
+  padding-top: 40px;
+  border-top: 1px solid var(--line);
+}
+.settings-page .settings-content .remote-relay-settings h4 {
+  margin: 0 0 6px;
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+  font-weight: 500;
+  letter-spacing: var(--track-cjk);
+}
+.settings-subpage .remote-relay-row {
+  align-items: flex-start;
+  gap: 16px 24px;
+}
+/* The relay choice is a segmented control, like the theme mode in 外观. */
+.settings-subpage .remote-relay-options {
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: var(--soft);
+}
+.settings-page .settings-content .remote-relay-options button {
+  min-height: calc(var(--h-control) - 6px);
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.settings-page .settings-content .remote-link-settings .remote-relay-options button[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 10%, transparent);
+}
+.settings-subpage .remote-relay-settings label {
+  margin-top: 24px;
+}
+
+/* ── 时区与语言 ──────────────────────────────────────────── */
+.settings-subpage .toggle-row + label,
+.settings-subpage .inline-info + label {
+  margin-top: 8px;
+}
+
+/* ── 环境与恢复 ──────────────────────────────────────────── */
+/* 当前项目 opens its own group under the storage section. */
+.settings-subpage .settings-fields > .setting-summary-row {
+  margin-top: 40px;
+  border-top: 1px solid var(--line);
+}
+.settings-subpage .section-title + .setting-summary-row {
+  margin-top: 0;
+}
+.settings-subpage .project-explanation {
+  margin: 8px 0 0;
+  padding: 16px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: none;
+}
+.settings-page .settings-content.settings-subpage .project-explanation {
+  padding: 16px 0;
+  background: none;
+  border-radius: 0;
+}
+.settings-subpage .environment-storage > label {
+  margin-top: 20px;
+}
+.settings-subpage .environment-tool-table {
+  width: 100%;
+  margin: 16px 0 4px;
+  border-collapse: collapse;
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .environment-tool-table th {
+  padding: 0 12px 8px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  font-weight: 500;
+  text-align: left;
+}
+.settings-subpage .environment-tool-table td {
+  padding: 9px 12px 9px 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.settings-subpage .environment-tool-table td:first-child {
+  color: var(--ink);
+  font-weight: 500;
+}
+.settings-subpage .environment-tool-table tr.outdated td:nth-child(2) {
+  color: var(--amber);
+}
+.settings-subpage .environment-tool-table tr.outdated td:nth-child(2)::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 8px 2px 0;
+  border-radius: 50%;
+  background: var(--amber);
+}
+.settings-subpage .resource-runtime {
+  margin-top: 32px;
+  padding-top: 0;
+  border-top: 0;
+}
+.settings-subpage .resource-runtime-heading {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.settings-page .settings-subpage .resource-runtime-heading h5 {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 600;
+}
+.settings-page .settings-subpage .resource-runtime .setting-summary-row {
+  padding: 10px 0;
+  font-size: var(--fs-body);
+}
+.settings-subpage .resource-runtime .setting-summary-row strong {
+  color: var(--ink);
+}
+.settings-subpage .resource-observation-note summary {
+  color: var(--muted);
+}
+.settings-subpage .settings-group .footnote {
+  margin: 8px 0 16px;
+}
+.settings-subpage .settings-fields > .text-button {
+  margin-top: 40px;
+}
+
+/* 计算资源 with automatic allocation (internal/cage/resource-allocation.md §7):
+   the server's notice as a nudge card with one clay action, the two ways as
+   choice rows, the manual sliders under them, then advice and one quiet row
+   of live figures. An older server keeps the controls above. */
+.settings-subpage .resource-automatic .resource-notice {
+  margin: 4px 0 20px;
+  padding: 16px 18px;
+}
+.settings-page .settings-subpage .resource-automatic .resource-notice p {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  line-height: 1.7;
+}
+.settings-subpage .resource-automatic .resource-notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 16px;
+  margin-top: 12px;
+}
+.settings-page .settings-subpage .resource-automatic .resource-notice-actions button {
+  min-height: var(--h-compact);
+  padding: 0 14px;
+  border-radius: var(--r-md);
+  font-size: var(--fs-secondary);
+}
+.settings-page .settings-subpage .resource-automatic .resource-notice-actions .text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 500;
+}
+.settings-page .settings-subpage .resource-automatic .resource-notice-actions .text-button:hover:enabled { color: var(--ink); }
+.settings-page .settings-content .resource-automatic .resource-modes { margin: 0 0 16px; }
+.settings-subpage .resource-automatic .resource-mode-figure {
+  margin-left: 10px;
+  color: var(--muted);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .resource-automatic .choice.checked .resource-mode-figure { color: var(--ink); }
+.settings-page .settings-content .resource-automatic .resource-sliders {
+  margin: 0 0 4px;
+  padding: 16px 18px;
+  border-radius: var(--r-lg);
+  background: var(--soft);
+}
+.settings-subpage .resource-automatic .resource-field { display: grid; gap: 8px; min-width: 0; }
+.settings-subpage .resource-automatic .resource-field > span:first-child { color: var(--ink); font-size: var(--fs-secondary); font-weight: 500; }
+.settings-subpage .resource-automatic .resource-slider-row { display: grid; grid-template-columns: minmax(0, 1fr) 7.5rem; align-items: center; gap: 12px; }
+.settings-subpage .resource-automatic .resource-slider-row input[type="range"] { width: 100%; margin: 0; accent-color: var(--ink); }
+.settings-page .settings-content .resource-automatic .resource-input input { height: var(--h-control); padding-right: 40px; font-size: var(--fs-body); }
+.settings-page .resource-automatic .resource-input > span { right: 28px; }
+.settings-subpage .resource-automatic .resource-actions { margin-top: 16px; }
+.settings-subpage .resource-automatic .resource-advice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 16px;
+  margin: 16px 0 0;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--amber) 11%, var(--surface));
+}
+.settings-subpage .resource-automatic .resource-restart { background: var(--soft); }
+.settings-page .settings-subpage .resource-automatic .resource-advice p { flex: 1 1 20em; margin: 0; color: var(--ink); font-size: var(--fs-secondary); line-height: 1.65; }
+.settings-page .settings-subpage .resource-automatic .resource-advice .text-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--clay-ink);
+  font-size: var(--fs-secondary);
+  font-weight: 600;
+}
+.settings-subpage .resource-automatic .resource-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 20px;
+  margin: 20px 0 0;
+  padding: 12px 0 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .resource-automatic .resource-live-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-right: auto;
+  color: var(--muted);
+  font-weight: 500;
+}
+.settings-subpage .resource-automatic .resource-live-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.settings-subpage .resource-automatic .resource-live-state[data-tone="amber"] { color: var(--amber); }
+.settings-subpage .resource-automatic .resource-live-state[data-tone="amber"]::before { background: var(--amber); }
+.settings-subpage .resource-automatic .resource-live-figure small { margin-right: 6px; color: var(--muted); font-size: var(--fs-caption); }

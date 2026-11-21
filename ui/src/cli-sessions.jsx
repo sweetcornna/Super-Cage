@@ -55,7 +55,7 @@ export function useCLISessions(enabled, visible) {
   return { sessions, error, loading, refresh };
 }
 
-export function ArchivedSessions({ request = desktopSessionRequest, ready, onRestored }) {
+export function ArchivedSessions({ request = desktopSessionRequest, ready, onRestored, empty }) {
   const [sessions, setSessions] = useState(null);
   const [error, setError] = useState("");
   const [readError, setReadError] = useState("");
@@ -173,7 +173,7 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
       {readError && <button className="archive-button" onClick={() => setRevision(value => value + 1)} disabled={busy}>重新读取</button>}
     </div>}
     {!sessions && !readError && <p role="status">正在读取…</p>}
-    {sessions?.length === 0 && <p className="archive-note">暂无已归档会话。</p>}
+    {sessions?.length === 0 && (empty || <p className="archive-note">暂无已归档会话。</p>)}
     {Boolean(sessions?.length) && !groups.size && <p className="archive-note">没有符合筛选条件的已归档会话。</p>}
     {[...groups].map(([path,items]) => <section className="archive-project" key={path} aria-label={projectLabel(path) + "的已归档会话"}>
       <header className="archive-project-heading">

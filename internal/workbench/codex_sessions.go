@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -189,11 +191,19 @@ func (m *mobileCLIStore) noteCodexCLI(caps *codexCLICaps) {
 	m.codexCLI = &copied
 }
 
-// codexAccountLabels names Codex accounts as the account panel does.
+// codexAccountLabels names Codex accounts as the account panel does. The
+// accounts file is read again only when it is another file (every save
+// replaces it) or its size or modification time changed.
 func (s *Server) codexAccountLabels() map[string]string {
-	s.codexAccounts.mu.Lock()
+	c := &s.codexAccounts
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, statErr := os.Stat(filepath.Join(s.profile, "codex-accounts.json"))
+	if statErr == nil && c.labelsFile != nil && os.SameFile(info, c.labelsFile) && info.Size() == c.labelsFile.Size() && info.ModTime().Equal(c.labelsFile.ModTime()) {
+		return maps.Clone(c.labels)
+	}
+	c.labels, c.labelsFile = nil, nil
 	list, err := s.loadCodexAccounts()
-	s.codexAccounts.mu.Unlock()
 	labels := map[string]string{}
 	if err != nil {
 		return labels
@@ -203,6 +213,9 @@ func (s *Server) codexAccountLabels() map[string]string {
 		if labels[a.ID] == "" {
 			labels[a.ID] = a.Email
 		}
+	}
+	if statErr == nil {
+		c.labels, c.labelsFile = maps.Clone(labels), info
 	}
 	return labels
 }
