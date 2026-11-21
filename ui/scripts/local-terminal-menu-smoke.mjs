@@ -23,8 +23,11 @@ async function run({ theme, viewport, desktop = true }) {
   const replies = [];
   let release = null;
   const loaded = [];
+  const natives = [];
   const fixture = await createWorkbench({
     viewport, clientContext: context,
+    // The desktop app writes the clipboard through its native bridge.
+    nativeRequest: body => { natives.push(body); return null; },
     beforeNavigate: page => page.emulateMedia({ colorScheme: theme }),
     clientRequest: async (route, path, body) => {
       if (path === "/client/context") return route.fulfill({ json: context });
@@ -95,10 +98,9 @@ async function run({ theme, viewport, desktop = true }) {
     assert.equal(await page.getByRole("dialog").count(), 0, "the notice is shown once");
     assert.doesNotMatch(await toast.textContent(), /无法在 iTerm2 中打开/);
     await shot("failure-toast");
-    await page.context().grantPermissions(["clipboard-read", "clipboard-write"]);
     await toast.getByRole("button", { name: "复制命令" }).click();
     await page.locator(".toast").getByText("已复制命令").waitFor();
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), "cage attach --new shell --project " + project + " current");
+    assert.deepEqual(natives.filter(body => body.action === "clipboardWrite").map(body => body.text), ["cage attach --new shell --project " + project + " current"]);
     // Locked: the server's sentence, no 复制命令 and no advice to switch apps.
     replies.push({ status: 423, body: "Super Cage 已锁定：解锁后再打开本机终端" });
     await openProjectMenu();
