@@ -113,6 +113,10 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 		s.localBrowserExtensions(w, r)
 		return
 	}
+	if path == "local-terminal" || strings.HasPrefix(path, "local-terminal/") {
+		s.localTerminalRequest(w, r, path)
+		return
+	}
 	if path == "project-shares" || strings.HasPrefix(path, "project-shares/") {
 		s.clientProjectShareRequest(w, r, path)
 		return
