@@ -33,7 +33,7 @@
 .environment-picker { flex:1; min-width:0; overflow:auto; display:grid; align-items:start; justify-items:center; padding:clamp(40px,12vh,140px) 24px 32px; background:var(--paper); }
 .environment-picker > div { width:min(100%,492px); }
 .environment-logo { width:40px; height:40px; object-fit:contain; margin-bottom:12px; }
-.environment-picker h1 { font-size:1.7rem; margin:0 0 8px; color:var(--strong); }
+.environment-picker h1 { font-size:var(--fs-title); margin:0 0 8px; color:var(--ink); }
 .environment-picker p { line-height:1.65; margin:0 0 18px; color:var(--muted); }
 .environment-actions, .remote-button-row { display:flex; align-items:center; flex-wrap:wrap; gap:8px; }
 .environment-recent { margin-top:24px; border-top:1px solid var(--line); }
@@ -45,15 +45,15 @@
 .ssh-dialog-body svg { vertical-align:middle; }
 .remote-host-form > fieldset { border:0; padding:0; min-width:0; margin:0; display:grid; gap:15px; }
 .remote-host-form label, .ssh-host-actions label { display:flex; flex-direction:column; gap:7px; font-weight:500; }
-.remote-host-form input, .ssh-host-actions input { width:100%; min-width:0; height:36px; border:1px solid var(--line); border-radius:6px; background:var(--input); color:var(--ink); padding:7px 10px; font:inherit; font-weight:400; }
-.remote-host-form .inline-select-trigger { justify-content:space-between; height:36px; border-radius:6px; background:var(--input); padding:7px 10px; }
-.remote-host-form small, .remote-host-form summary { color:var(--muted); font-weight:400; font-size:.85rem; }
+.remote-host-form input, .ssh-host-actions input { width:100%; min-width:0; height:var(--h-control); border:1px solid var(--line-strong); border-radius:var(--r-md); background:var(--surface); color:var(--ink); padding:7px 10px; font:inherit; font-weight:400; }
+.remote-host-form .inline-select-trigger { justify-content:space-between; height:var(--h-control); border-radius:var(--r-md); background:var(--surface); padding:7px 10px; }
+.remote-host-form small, .remote-host-form summary { color:var(--muted); font-weight:400; font-size:var(--fs-caption); }
 .remote-host-form summary { cursor:pointer; }
 .remote-form-row { display:flex; align-items:start; gap:12px; }
 .remote-form-row > label { flex:1; min-width:0; }
 .remote-form-row > .remote-port { flex:0 0 92px; }
 .remote-advanced { display:grid; gap:16px; margin-top:16px; }
-.remote-directory-picker { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; }
+.remote-directory-picker { display: grid; gap: 12px; padding: 16px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); }
 .remote-directory-heading { display: flex; align-items: start; gap: 12px; }
 .remote-directory-heading strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .remote-directory-list { display: grid; gap: 8px; max-height: 240px; overflow: auto; }
@@ -65,3 +65,38 @@
   .client-toolbar, .local-background { padding:6px 10px; }
   .local-background span { display:block; margin:0; }
 }
+
+/* SSH host list (brand/design-language.md §6): hosts as quiet sidebar rows,
+   the chosen host's actions as a small form under it. Scoped to the SSH
+   sidebar with one more class: this file loads before style.css. */
+.ssh-sidebar .ssh-list-heading { margin: 12px 0 4px; padding-left: 10px; color: var(--muted); font-size: var(--fs-caption); font-weight: 500; }
+.ssh-sidebar .ssh-host-row { min-height: 2.75rem; gap: 10px; padding: 6px 10px; border-radius: var(--r-md); transition: background-color var(--dur-fast) var(--ease-out); }
+.ssh-sidebar .ssh-host-row:hover { background: var(--soft); }
+.ssh-sidebar .ssh-host-row.selected { background: var(--selected); }
+.ssh-sidebar .ssh-host-row > svg { flex: none; color: var(--muted); }
+.ssh-sidebar .ssh-host-row strong { color: var(--ink); font-size: var(--fs-nav); font-weight: 500; }
+.ssh-sidebar .ssh-host-row small { color: var(--muted); font-family: var(--font-mono); font-size: var(--fs-caption); }
+.ssh-sidebar .ssh-host-actions, .ssh-sidebar .ssh-connection, .ssh-sidebar .ssh-empty { gap: 8px; margin: 12px 10px; }
+.ssh-sidebar .ssh-host-actions label { gap: 6px; color: var(--muted); font-size: var(--fs-caption); font-weight: 500; }
+.ssh-sidebar .ssh-host-actions input { height: var(--h-control); border-color: var(--line-strong); border-radius: var(--r-md); background: var(--surface); }
+.ssh-sidebar .ssh-host-actions button { min-height: var(--h-control); border-radius: var(--r-md); }
+.ssh-sidebar .ssh-host-actions .remote-button-row button:not(.primary) { border-color: transparent; background: transparent; color: var(--muted); font-weight: 500; }
+.ssh-sidebar .ssh-host-actions .remote-button-row button:not(.primary):hover:enabled { background: var(--soft); color: var(--ink); }
+.ssh-sidebar .ssh-empty p { color: var(--muted); font-size: var(--fs-secondary); }
+.ssh-sidebar .ssh-empty button { min-height: var(--h-control); border: 1px dashed var(--line-strong); border-radius: var(--r-md); background: transparent; color: var(--ink); }
+.ssh-sidebar .ssh-empty button:hover { background: var(--soft); }
+.ssh-sidebar .ssh-local-action, .ssh-sidebar .ssh-help { margin: 16px 10px 10px; padding-top: 12px; color: var(--muted); font-size: var(--fs-caption); }
+
+/* Environment picker (no environment connected yet): the mark, a serif title,
+   one line and the actions; recent hosts as hairline rows. */
+.environment-picker .environment-logo { display: block; color: var(--ink); margin-bottom: 16px; }
+.environment-picker h1 { font-family: var(--font-serif); font-weight: 500; line-height: var(--lh-title); letter-spacing: var(--track-cjk); }
+.environment-picker p { font-size: var(--fs-body); }
+.environment-picker .environment-actions button { min-height: var(--h-control); padding: 0 14px; }
+.environment-picker .environment-recent h2 { margin: 20px 0 4px; color: var(--muted); font-size: var(--fs-caption); font-weight: 500; }
+.environment-picker .environment-recent button { min-height: var(--h-control); margin: 0; padding: 0 8px; border-radius: 0; border-bottom: 1px solid var(--line); background: transparent; color: var(--ink); font-weight: 450; }
+.environment-picker .environment-recent button:hover:not(:disabled) { background: var(--soft); }
+.environment-picker .environment-recent button > svg { flex: none; color: var(--muted); }
+.environment-picker .environment-recent small { font-family: var(--font-mono); font-size: var(--fs-caption); }
+.client-toolbar strong { font-family: var(--font-serif); font-size: var(--fs-body); font-weight: 500; letter-spacing: var(--track-cjk); }
+.local-background strong { font-weight: 500; }

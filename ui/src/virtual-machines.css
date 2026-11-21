@@ -1,0 +1,87 @@
+/* 虚拟机 dialog (brand/design-language.md §6): the machines as hairline rows
+   with the current one marked, then one field to create another. Scoped to
+   the dialog body; the shared project-form rules stay for other dialogs. */
+.modal-body.vm-dialog { gap: 20px; }
+.modal-body.vm-dialog .project-picker-list { gap: 0; max-height: 320px; }
+.modal-body.vm-dialog .project-picker-list legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  font-weight: 500;
+}
+.modal-body.vm-dialog .project-picker-list legend + * { clear: both; border-top: 1px solid var(--line); }
+.modal-body.vm-dialog .ssh-host-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 3.25rem;
+  padding: 8px 6px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: left;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.modal-body.vm-dialog .ssh-host-row:hover:enabled { background: var(--soft); }
+.modal-body.vm-dialog .ssh-host-row:disabled { opacity: 1; cursor: default; }
+.modal-body.vm-dialog .ssh-host-row > span { flex: 1; min-width: 0; }
+.modal-body.vm-dialog .ssh-host-row strong {
+  display: block;
+  overflow: hidden;
+  font-size: var(--fs-body);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.modal-body.vm-dialog .ssh-host-row small { display: block; margin-top: 2px; color: var(--green); font-size: var(--fs-caption); }
+.modal-body.vm-dialog .ssh-host-row > svg { flex: none; color: var(--green); }
+.modal-body.vm-dialog .vm-mark {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--soft);
+  color: var(--muted);
+}
+.modal-body.vm-dialog .ssh-host-row[aria-current] .vm-mark { background: var(--clay-soft); color: var(--clay-ink); }
+.modal-body.vm-dialog form.project-form { gap: 8px; }
+.modal-body.vm-dialog form.project-form > label { margin: 0; color: var(--ink); font-size: var(--fs-secondary); font-weight: 500; }
+.modal-body.vm-dialog .folder-input input {
+  height: var(--h-control);
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.modal-body.vm-dialog .folder-input button {
+  min-height: var(--h-control);
+  padding: 0 16px;
+  border-radius: var(--r-md);
+}
+.modal-body.vm-dialog .folder-input button.primary:disabled { border-color: var(--line); background: var(--surface); color: var(--faint); opacity: 1; }
+.modal-body.vm-dialog > .error-message {
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--error) 7%, var(--surface));
+  color: var(--error);
+}
+.modal-body.vm-dialog > .vm-retry {
+  align-self: flex-start;
+  min-height: var(--h-control);
+  padding: 0 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+}
+.modal-body.vm-dialog > p[role="status"] { margin: 0; color: var(--muted); }
+.modal-body.vm-dialog .empty-state { padding: 12px 0 4px; }

@@ -37,6 +37,8 @@ import { MacOSLogin } from "./macos-login";
 import { ScreenSharingChecks } from "./macos-screen-sharing";
 import { AccountSettings } from "./account";
 import { AboutSettings } from "./about-settings";
+import { EmptyState } from "./drawings";
+import "./settings-pages.css";
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
@@ -248,10 +250,13 @@ export function SettingsPanel({
         </nav>
       </aside>
       <div className="settings-main">
-        <div className={section === "archived-sessions" ? "settings-content settings-content--archives" : section === "mobile" ? "settings-content settings-content--remote" : "settings-content"} ref={contentRef}>
+        <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "mobile" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
           {section === "appearance" && <AppearanceSettings />}
           {section === "about" && <AboutSettings />}
-          {section === "archived-sessions" && <ArchivedSessions ready={status.ready && !busy} />}
+          {section === "archived-sessions" && <>
+            <div className="section-title"><h3>已归档会话</h3><p>归档的会话不在侧栏显示，可以随时取消归档；永久删除后无法恢复。</p></div>
+            <ArchivedSessions ready={status.ready && !busy} empty={<EmptyState drawing="tray" title="归档里还没有会话"><span>暂无已归档会话。</span>归档后的会话会收在这里。</EmptyState>} />
+          </>}
           {section === "vault" && <PasswordVaultSettings onConfirm={onConfirm} onDirty={setAccountDirty} />}
           {section === "account" && <AccountSettings busy={busy} onDirty={setAccountDirty} />}
           <fieldset className="settings-fields" disabled={busy && !(section === "project" && status.storage_recovery?.required)}>
