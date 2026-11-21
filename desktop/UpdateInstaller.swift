@@ -8,6 +8,8 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
     private var manager = FileManager.default
     private var didReplace = false
     private var originalVersion = ""
+    // The workbench's record of this attempt, written back into the result.
+    private var attempt = ""
 
     static func main() {
         CageProfile.pinEnvironment()
@@ -73,7 +75,8 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
                 _ = try CageUpdateFiles.signingInfo(backup, bundle: true, expectedTeam: self.plan.team)
                 self.send(["status": "ready"])
                 let command = FileHandle.standardInput.readDataToEndOfFile()
-                guard command == Data("COMMIT\n".utf8) else { self.exitHelper(); return }
+                guard let attempt = CageUpdateDecision.commitAttempt(command) else { self.exitHelper(); return }
+                self.attempt = attempt
                 let deadline = Date().addingTimeInterval(90)
                 while !self.parent.isTerminated && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
                 guard self.parent.isTerminated else { throw CageUpdateError("Super Cage 尚未退出，更新未安装") }
@@ -96,7 +99,7 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
     }
     private func openInstalled() {
         let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
+        configuration.activates = plan.activates ?? true
         configuration.createsNewApplicationInstance = true
         let token = UUID().uuidString
         var environment = inheritedProfile(); environment["CAGE_UPDATE_CONFIRMATION"] = token
@@ -169,7 +172,9 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
         }
     }
     private func record(success: Bool, message: String) {
-        guard let data = try? JSONSerialization.data(withJSONObject: ["success": success, "message": message, "version": plan.version]) else { return }
+        var result: [String: Any] = ["success": success, "message": message, "version": plan.version]
+        if !attempt.isEmpty { result["attempt"] = attempt }
+        guard let data = try? JSONSerialization.data(withJSONObject: result) else { return }
         try? CageUpdateFiles.write(data, to: URL(fileURLWithPath: plan.resultPath))
     }
     private func cleanSuccessfulTask() {

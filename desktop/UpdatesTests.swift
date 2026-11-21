@@ -218,6 +218,63 @@ enum UpdatesTests {
         try expect(String(data: invocationData, encoding: .utf8) == "x", "native menu or install bypassed cooldown")
         print("PASS: native update failure retained retry deadline and blocked early check/install")
 
+        // The workbench decides "may I install now?"; the shell only passes on
+        // what the person confirmed or the workbench's own silent request.
+        try expect(CageUpdateDecision.arguments(version: "0.1.16", silentRequest: nil, confirmed: ["terminal-command:7", "bad,id", "agent:claude"]) ==
+            ["prepare-update", "--stop", "--json", "--app-update", "0.1.16", "--trigger", "click", "--confirmed", "terminal-command:7,agent:claude"], "click arguments")
+        try expect(CageUpdateDecision.arguments(version: "0.1.16", silentRequest: "0123456789abcdef", confirmed: []) ==
+            ["prepare-update", "--stop", "--json", "--app-update", "0.1.16", "--trigger", "silent", "--request", "0123456789abcdef"], "silent arguments")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared","attempt":"0123456789abcdef"}"#.utf8), exitStatus: 0) == .prepared(attempt: "0123456789abcdef"), "prepared")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared","attempt":"../x"}"#.utf8), exitStatus: 0) == .prepared(attempt: ""), "invalid attempt dropped")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"blocked","code":"must_wait","message":"以下操作完成后才能升级：「更新环境组件」正在进行"}"#.utf8), exitStatus: 0) ==
+            .blocked(code: "must_wait", message: "以下操作完成后才能升级：「更新环境组件」正在进行"), "blocked")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared"}"#.utf8), exitStatus: 1) == .failed("环境未能安全停止，更新未安装"), "prepared with a failed exit is not prepared")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"error","message":"后台尚未退出"}"#.utf8), exitStatus: 1) == .failed("后台尚未退出"), "error")
+        try expect(CageUpdateDecision.outcome(Data("not json".utf8), exitStatus: 0) == .failed("无法确认环境已停止"), "garbage")
+        try expect(CageUpdateDecision.commitAttempt(CageUpdateDecision.commitLine(attempt: "0123456789abcdef")) == "0123456789abcdef", "commit carries attempt")
+        try expect(CageUpdateDecision.commitAttempt(CageUpdateDecision.commitLine(attempt: "")) == "", "plain commit")
+        for refused in ["COMMIT", "COMMIT x\n", "COMMIT 0123456789abcdef0\n", "ABORT\n", ""] {
+            try expect(CageUpdateDecision.commitAttempt(Data(refused.utf8)) == nil, "commit refused: \(refused)")
+        }
+        try expect(CageUpdateDecision.silentMode(Data(#"{"mode":"silent"}"#.utf8)), "silent mode")
+        for manual in [#"{"mode":"manual"}"#, "{}", "garbage"] { try expect(!CageUpdateDecision.silentMode(Data(manual.utf8)), "manual: \(manual)") }
+        try expect(!CageUpdateDecision.silentMode(nil), "missing policy is manual")
+        try expect(CageUpdateDecision.silentRequest(Data(#"{"id":"0123456789abcdef","version":"0.1.16"}"#.utf8), current: "0.1.15")?.id == "0123456789abcdef", "silent request")
+        for refused in [#"{"id":"0123456789abcdef","version":"0.1.15"}"#, #"{"id":"0123456789abcdef","version":"0.1.14"}"#, #"{"id":"0123456789abcdef","version":"0.1.16-rc.1"}"#, #"{"id":"short","version":"0.1.16"}"#] {
+            try expect(CageUpdateDecision.silentRequest(Data(refused.utf8), current: "0.1.15") == nil, "silent request refused: \(refused)")
+        }
+
+        // A silent request starts the ordinary download only while the policy
+        // file says silent; a manual policy ignores the same request.
+        let silentBundle = root.appendingPathComponent("silent.app")
+        let silentResources = silentBundle.appendingPathComponent("Contents/Resources")
+        try CageUpdateFiles.privateDirectory(silentResources)
+        let silentCount = root.appendingPathComponent("silent-invocations")
+        let silentScript = "#!/bin/sh\nprintf '%s;' \"$*\" >> '\(silentCount.path)'\nprintf '%s\\n' '{\"phase\":\"failed\",\"message\":\"offline\",\"retryable\":true}'\nexit 1\n"
+        try Data(silentScript.utf8).write(to: silentResources.appendingPathComponent("cage"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: silentResources.appendingPathComponent("cage").path)
+        let silentInfo: [String: Any] = ["CFBundleIdentifier": cageUpdateBundleID + ".silent-test", "CFBundlePackageType": "APPL", "CageVersion": "0.1.15"]
+        try PropertyListSerialization.data(fromPropertyList: silentInfo, format: .xml, options: 0).write(to: silentBundle.appendingPathComponent("Contents/Info.plist"))
+        let silentProfile = root.appendingPathComponent("silent-profile")
+        let savedConfig = ProcessInfo.processInfo.environment["CLAUDE_CAGE_CONFIG"]
+        setenv("CLAUDE_CAGE_CONFIG", silentProfile.appendingPathComponent("config.json").path, 1)
+        defer { if let savedConfig { setenv("CLAUDE_CAGE_CONFIG", savedConfig, 1) } else { unsetenv("CLAUDE_CAGE_CONFIG") } }
+        let updates = silentProfile.appendingPathComponent("updates")
+        try CageUpdateFiles.privateDirectory(updates)
+        try CageUpdateFiles.write(Data(#"{"id":"0123456789abcdef","version":"0.1.16","decided_at":"2026-11-21T03:00:00Z"}"#.utf8), to: updates.appendingPathComponent("silent-request.json"))
+        try CageUpdateFiles.write(Data(#"{"mode":"manual"}"#.utf8), to: updates.appendingPathComponent("policy.json"))
+        var silentState: [String: Any] = [:]
+        let silent = CageAppUpdater(bundleURL: silentBundle, onChange: { silentState = $0 }, quit: {}, reconnect: {})
+        silent.watchSilentRequests()
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
+        try expect(!FileManager.default.fileExists(atPath: silentCount.path), "manual policy started an unattended download")
+        try CageUpdateFiles.write(Data(#"{"mode":"silent"}"#.utf8), to: updates.appendingPathComponent("policy.json"))
+        let silentDeadline = Date().addingTimeInterval(5)
+        while silentState["phase"] as? String != "failed" && Date() < silentDeadline { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
+        try expect((try? String(contentsOf: silentCount, encoding: .utf8)) == "app-update download;", "silent request started exactly one download")
+        print("PASS: workbench decision arguments and answers, attempt hand-off, silent policy and request files")
+
         if CommandLine.arguments.count == 2 {
             let signed = URL(fileURLWithPath: CommandLine.arguments[1])
             let team = try CageUpdateFiles.signingInfo(signed, bundle: true)
