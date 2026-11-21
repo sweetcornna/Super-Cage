@@ -130,8 +130,11 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 	}
 }
 
-// The entry has no listener, process or timer of its own: its routes sit on
-// the workbench's existing handler. This reads the entry's sources.
+// The entry has no listener, server or idle timer of its own: its routes sit
+// on the workbench's existing handler. Its only timers are bounded and live
+// within one connection: the SSH handshake deadline (entryServe) and the
+// retry while an ssh terminal waits for the operation lock
+// (entryLockOperation). This reads the entry's sources.
 func TestEntryHasNoListenerOfItsOwn(t *testing.T) {
 	sources, _ := filepath.Glob("entry_*.go")
 	files := 0
@@ -144,18 +147,29 @@ func TestEntryHasNoListenerOfItsOwn(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		ast.Inspect(parsed, func(node ast.Node) bool {
-			call, ok := node.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			if selector, ok := call.Fun.(*ast.SelectorExpr); ok {
-				if name := selector.Sel.Name; strings.HasPrefix(name, "Listen") || name == "Serve" || name == "NewTicker" || name == "Tick" {
+		for _, declaration := range parsed.Decls {
+			function, _ := declaration.(*ast.FuncDecl)
+			ast.Inspect(declaration, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				name := selector.Sel.Name
+				timer := name == "NewTicker" || name == "Tick" || name == "AfterFunc" && selector.X.(*ast.Ident).Name == "time"
+				bounded := map[string]string{"entryLockOperation": "NewTicker", "entryServe": "AfterFunc"}
+				if timer && function != nil && bounded[function.Name.Name] == name {
+					return true
+				}
+				if strings.HasPrefix(name, "Listen") || name == "Serve" || timer {
 					t.Errorf("%s calls %s", source, name)
 				}
-			}
-			return true
-		})
+				return true
+			})
+		}
 	}
 	if files < 5 {
 		t.Fatalf("read %d entry sources", files)
