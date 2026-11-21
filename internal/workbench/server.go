@@ -721,7 +721,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"storage_recovery": s.storageRecoveryStatusLocked(),
 		"keyboard":         s.preferences.Keyboard, "auto_timezone": s.preferences.AutoTimezone, "job": s.jobs.snapshot(),
 		"location": s.location, "network_error": s.currentNetworkErrorLocked(), "can_restore": e == nil,
-		"safety": s.safety, "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
+		"safety": s.safetyViewLocked(time.Now()), "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
 		"terminals_revision": terminals,
 	}
 	if s.windowsGuest != nil {

@@ -22,23 +22,25 @@ func (s *Server) windowsGuestObservation(ctx context.Context, input map[string]a
 	var observation guestObservation
 	cfg, err := loadConfig(s.configPath)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	input["timezone"] = cfg.Timezone
 	cmd, err := guestos.WindowsRelayCommand(ctx, s.profile, "safety")
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	data, err := json.Marshal(input)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	cmd.Stdin = bytes.NewReader(append(data, '\n'))
 	cmd.Stderr = io.Discard
 	var output bytes.Buffer
 	cmd.Stdout = &boundedWindowsStatusWriter{buffer: &output, remaining: 64 << 10}
 	if err = cmd.Run(); err != nil {
-		return observation, errors.New("Windows 客机检测未返回完整结果")
+		// The relay fails only when it could not carry the probe; the probe
+		// reports its own failures as a reply (decodeWindowsObservation).
+		return observation, noAnswer(errors.New("Windows 客机检测未返回完整结果"))
 	}
 	var failure struct {
 		Error      string `json:"error"`
@@ -63,21 +65,22 @@ func decodeWindowsObservation(data []byte) (guestObservation, error) {
 		Stage string `json:"stage"`
 	}
 	if json.Unmarshal(data, &status) != nil {
-		return observation, errors.New("Windows 客机检查没有完成，外网保持关闭；请查看具体检查阶段后重试")
+		return observation, noAnswer(errors.New("Windows 客机检查没有完成，外网保持关闭；请查看具体检查阶段后重试"))
 	}
 	if status.Error != "" {
 		stage := map[string]string{"request": "请求校验", "environment": "系统读回", "network": "代理与 DNS", "public-tcp": "公网连接约束", "udp": "UDP 约束", "dns": "公共 DNS 约束", "project-grant": "项目授权", "shared-read": "共享文件读取", "shared-write": "共享文件写回", "private-scope": "私有目录约束"}[status.Stage]
 		if stage == "" {
 			stage = "客机"
 		}
-		return observation, errors.New("Windows " + stage + "检查没有完成，外网保持关闭")
+		// The guest ran the probe and reported this stage as failed.
+		return observation, wrongAnswer(errors.New("Windows " + stage + "检查没有完成，外网保持关闭"))
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	if decoder.Decode(&observation) != nil || decoder.Decode(new(any)) != io.EOF {
-		return observation, errors.New("Windows 客机检测返回无效结果")
+		return observation, noAnswer(errors.New("Windows 客机检测返回无效结果"))
 	}
 	if observation.TZ == "" || observation.SystemTimezone == "" || observation.ProcessLocale == "" || observation.SystemLocale == "" || !observation.LocaleValid {
-		return observation, errors.New("Windows 客机检查缺少系统读回结果，外网保持关闭")
+		return observation, wrongAnswer(errors.New("Windows 客机检查缺少系统读回结果，外网保持关闭"))
 	}
 	return observation, nil
 }

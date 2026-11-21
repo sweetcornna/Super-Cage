@@ -217,7 +217,7 @@ func TestMemoryNoteKeepsPressureWhileProbeTimesOut(t *testing.T) {
 		{"no pressure", cage.ResourceStatus{ObservedAt: now, Guest: sample}, nil, false, ""},
 		{"no reading", cage.ResourceStatus{}, errors.New("resource observation expired"), false, ""},
 	} {
-		note := memoryNote(tc.status, tc.err, now)
+		note := memoryNote(tc.status, tc.err, now, memorySizing{})
 		if note.Short != tc.short || !strings.Contains(note.Reason, tc.reason) || (note.Short && len(note.Advice) == 0) {
 			t.Errorf("%s: %+v", tc.name, note)
 		}

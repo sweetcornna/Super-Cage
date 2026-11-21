@@ -81,12 +81,13 @@ func (s *Server) macOSGuestObservation(ctx context.Context, in map[string]any) (
 	var result guestObservation
 	data, err := json.Marshal(in)
 	if err != nil {
-		return result, err
+		return result, noAnswer(err)
 	}
 	node := "/usr/local/libexec/cage-workbench-browser-4.145.0-pw1.65.0/editor/lib/node"
 	out, err := s.guestControl(ctx, "exec "+shellescape.QuoteCommand([]string{node, "-e", macOSSafetyProbe, base64.StdEncoding.EncodeToString(data)}), "safety-probe")
 	if err != nil || json.Unmarshal(out, &result) != nil {
-		return result, errors.New("macOS 客机未返回完整的网络观测")
+		// The probe reports values; it fails only without them.
+		return result, noAnswer(errors.New("macOS 客机未返回完整的网络观测"))
 	}
 	if in["stage"] == "boundary" {
 		private, _ := in["private_file"].(string)
@@ -239,7 +240,8 @@ func (s *Server) macOSBrowserObservation(ctx context.Context, cfg cage.Config, n
 	var observation browserObservation
 	data, err := s.nativeBrowserClient().request(ctx, "POST", "/audit", map[string]any{"timezone": cfg.Timezone, "network": network})
 	if err != nil || json.Unmarshal(data, &observation) != nil || observation.Platform == "" {
-		return observation, errors.New("无法在虚拟 Mac 的实际浏览器页面读取观测结果")
+		// Only the full check reads this page; the monitor rechecks below.
+		return observation, noAnswer(errors.New("无法在虚拟 Mac 的实际浏览器页面读取观测结果"))
 	}
 	return observation, nil
 }
@@ -247,12 +249,29 @@ func (s *Server) macOSBrowserObservation(ctx context.Context, cfg cage.Config, n
 // A full safety check samples the live Chrome page. Between checks, the
 // monitor verifies that the sampled process, active profile, and its language
 // and timezone settings still match without opening a tab in the user's window.
-func (s *Server) recheckMacOSBrowserSettings(ctx context.Context, cfg cage.Config) bool {
+// The guest's browser service keeps that sample, so a recheck the workbench
+// gave up on loses nothing. A verdict that they changed (or that there is no
+// sample) is a wrong answer; no reply, or a failure without that verdict,
+// is no answer.
+func (s *Server) recheckMacOSBrowserSettings(ctx context.Context, cfg cage.Config) error {
 	data, err := s.nativeBrowserClient().request(ctx, "POST", "/audit-recheck", map[string]string{"timezone": cfg.Timezone, "language": cfg.BrowserLanguage})
-	var result struct {
-		Unchanged bool `json:"unchanged"`
+	var failure windowsBrowserFailure
+	if errors.As(err, &failure) && failure.code == "browser_recheck_needed" {
+		return wrongAnswer(err)
 	}
-	return err == nil && json.Unmarshal(data, &result) == nil && result.Unchanged
+	if err != nil {
+		return noAnswer(err)
+	}
+	var result struct {
+		Unchanged *bool `json:"unchanged"`
+	}
+	if json.Unmarshal(data, &result) != nil || result.Unchanged == nil {
+		return noAnswer(errors.New("虚拟 Mac 的浏览器复核返回无效结果"))
+	}
+	if !*result.Unchanged {
+		return wrongAnswer(errors.New("Chrome 进程或浏览器设置发生变化，请重新检测"))
+	}
+	return nil
 }
 
 func macOSIPv6LinkVerified(v guestObservation, before, after cage.GateStatus) bool {

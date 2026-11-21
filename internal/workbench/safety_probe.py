@@ -126,7 +126,8 @@ def timezone_observation(expected):
 if args["stage"] in ("boundary", "environment"):
     result.update(tz=os.environ.get("TZ", ""), lang=os.environ.get("LANG", ""), lc_all=os.environ.get("LC_ALL", ""))
     try:
-        result["system_timezone"] = Path("/etc/timezone").read_text().strip()
+        # Undecodable bytes are a wrong zone to report, not a probe failure.
+        result["system_timezone"] = Path("/etc/timezone").read_text(errors="replace").strip()
         locale.setlocale(locale.LC_ALL, "")
         result["locale_valid"] = True
     except (OSError, locale.Error):

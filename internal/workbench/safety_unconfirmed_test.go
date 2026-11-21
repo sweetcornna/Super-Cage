@@ -99,9 +99,11 @@ func TestUnconfirmedSettingsReadKeepsLeaseWithoutRenewing(t *testing.T) {
 		guestErr, browserErr error
 		stage                string
 	}{
-		{"system settings read timed out", context.DeadlineExceeded, nil, "无法读取系统时区和语言"},
-		{"system settings probe killed", errors.New("客机检测未返回完整结果: signal: killed"), nil, "无法读取系统时区和语言"},
-		{"browser audit returned no settings", nil, errors.New("浏览器检测未返回完整结果，请更新或重启环境"), "无法读取浏览器时区和语言"},
+		// The reads classify their failures (guest_reads.go); these are
+		// the ones that returned no answer.
+		{"system settings read timed out", noAnswer(context.DeadlineExceeded), nil, "无法读取系统时区和语言"},
+		{"system settings probe killed", noAnswer(errors.New("客机检测未返回完整结果: signal: killed")), nil, "无法读取系统时区和语言"},
+		{"browser audit returned no settings", nil, noAnswer(errors.New("浏览器检测未返回完整结果，请更新或重启环境")), "无法读取浏览器时区和语言"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, gate := unconfirmedMonitorServer(t)
@@ -134,7 +136,10 @@ func TestUnconfirmedSettingsReadKeepsLeaseWithoutRenewing(t *testing.T) {
 				t.Fatal("a recheck was scheduled while the lease is still valid")
 			}
 			e := s.safety.Explanation
-			if e == nil || e.State != networkUnconfirmed || e.LeaseUntil == nil || !e.LeaseUntil.Equal(before.Until) || !strings.Contains(e.Reason, tc.stage) {
+			// lease_until is the remaining lease the gate reported, counted
+			// from when the status request left: at most a few ms early.
+			if e == nil || e.State != networkUnconfirmed || e.LeaseUntil == nil || e.LeaseUntil.After(before.Until) ||
+				before.Until.Sub(*e.LeaseUntil) > 100*time.Millisecond || !strings.Contains(e.Reason, tc.stage) {
 				t.Fatalf("explanation: %+v", e)
 			}
 			if message := s.currentNetworkErrorLocked(); !strings.Contains(message, "现有联网许可未延长") || !strings.Contains(message, "秒后暂停") {
@@ -212,7 +217,7 @@ func TestUnconfirmedReadsUntilDeadlineEndWithGateTimer(t *testing.T) {
 		deadline, _ := ctx.Deadline()
 		deadlines = append(deadlines, deadline)
 		<-ctx.Done() // A guest that never answers.
-		return guestObservation{}, ctx.Err()
+		return guestObservation{}, noAnswer(ctx.Err())
 	}, func(context.Context) (browserObservation, error) {
 		t.Error("browser read after an unconfirmed system read")
 		return browserObservation{}, errors.New("unexpected")
@@ -330,7 +335,7 @@ func TestConfirmedWrongSettingsCloseAtOnce(t *testing.T) {
 			if err := writePrivate(s.configPath, changed); err != nil {
 				return guestObservation{}, err
 			}
-			return guestObservation{}, context.DeadlineExceeded
+			return guestObservation{}, noAnswer(context.DeadlineExceeded)
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

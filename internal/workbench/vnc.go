@@ -82,12 +82,22 @@ const (
 
 var displayHeldGrace = 60 * time.Second
 
+// displayStreamProtocol is the plain RFB stream, which every display path
+// serves; clients offer it next to displayControlProtocol.
+const displayStreamProtocol = "binary"
+
+// upgradeDisplay selects a subprotocol whenever the client offers one it
+// knows: Chrome fails a handshake that offered subprotocols and got none
+// back. A stream with a viewer prefers displayControlProtocol (it holds a
+// hidden stream); every stream takes displayStreamProtocol otherwise, the
+// native macOS and Windows displays included.
 func (s *Server) upgradeDisplay(w http.ResponseWriter, r *http.Request, control bool) (*websocket.Conn, error) {
-	if !control {
-		return s.upgrade(w, r)
+	protocols := []string{displayStreamProtocol}
+	if control {
+		protocols = []string{displayControlProtocol, displayStreamProtocol}
 	}
-	// The same origin rule as upgrade, plus the control subprotocol.
-	up := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == s.origin }, ReadBufferSize: 16384, WriteBufferSize: 16384, Subprotocols: []string{displayControlProtocol}}
+	// The same origin rule and buffers as upgrade, plus the subprotocols.
+	up := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == s.origin }, ReadBufferSize: 16384, WriteBufferSize: 16384, Subprotocols: protocols}
 	ws, err := up.Upgrade(w, r, nil)
 	if err == nil {
 		context.AfterFunc(r.Context(), func() { _ = ws.Close() })
