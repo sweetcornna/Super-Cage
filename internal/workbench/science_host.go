@@ -411,20 +411,26 @@ func (s *Server) localScienceFronts() []int {
 // local front runs (only the desktop entry's document frames it). Only a
 // document navigation needs it; every other response keeps 'none' and
 // reads nothing.
-func (s *Server) scienceFrameSources(r *http.Request) string {
+func (s *Server) scienceDocumentSources(r *http.Request) (frames, connect string) {
 	if dest := r.Header.Get("Sec-Fetch-Dest"); dest != "document" {
-		return "'none'"
+		return "'none'", ""
 	}
 	ports := s.localScienceFronts()
 	if len(ports) == 0 {
-		return "'none'"
+		return "'none'", ""
 	}
 	sources := make([]string, 0, len(ports))
 	for _, port := range ports {
 		sources = append(sources, scienceFrameSource(port))
 	}
-	return strings.Join(sources, " ")
+	return strings.Join(sources, " "), " " + scienceProxyCheckOrigin
 }
+
+// scienceProxyCheckOrigin is the address the window's proxy proof loads
+// (ScienceFrame.ProxyCheckURL): .invalid never resolves. The workbench
+// document may connect to it only while a front runs, since the check is
+// held to the document's connect-src.
+const scienceProxyCheckOrigin = "http://cage-proxy-check.invalid"
 
 // scienceBridgeContract is the scienceFrame bridge version this server's
 // pane needs (claude-science-state.mjs hostRenderContract; the window's

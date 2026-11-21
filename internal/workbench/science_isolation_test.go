@@ -57,7 +57,7 @@ func newScienceFrameHarness(t *testing.T, frameSources string) *scienceFrameHarn
 		switch r.URL.Path {
 		case "/":
 			http.SetCookie(w, &http.Cookie{Name: h.cookieName, Value: "real", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: 86400 * 30})
-			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+"; img-src 'self' data: blob:; object-src 'none'; frame-src "+frameSources+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+			w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+scienceTestCheckSources(frameSources)+"; img-src 'self' data: blob:; object-src 'none'; frame-src "+frameSources+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			fmt.Fprint(w, "<!doctype html><title>Super Cage</title><div id=\"pane\"></div>")
 		case "/slow":

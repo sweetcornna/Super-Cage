@@ -537,7 +537,8 @@ func (s *Server) handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+s.scienceFrameSources(r)+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		frames, checks := s.scienceDocumentSources(r)
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+checks+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frames+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		if (r.Method != "GET" && r.Method != "HEAD") || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			if r.Header.Get("Origin") != s.origin {
 				http.Error(w, "Origin refused", 403)

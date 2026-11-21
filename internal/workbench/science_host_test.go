@@ -128,14 +128,20 @@ func shapeCodes(s *Server) map[string]int {
 
 func frameSources(t *testing.T, s *Server) string {
 	t.Helper()
+	return documentDirective(t, s, "frame-src")
+}
+
+// documentDirective is one directive of the workbench document's CSP.
+func documentDirective(t *testing.T, s *Server, name string) string {
+	t.Helper()
 	w := requestShape{method: "GET", path: "/", headers: map[string]string{"Sec-Fetch-Site": "none", "Sec-Fetch-Mode": "navigate", "Sec-Fetch-Dest": "document"}}.send(s)
 	policy := w.Header().Get("Content-Security-Policy")
 	for _, directive := range strings.Split(policy, ";") {
-		if fields := strings.Fields(directive); len(fields) > 0 && fields[0] == "frame-src" {
+		if fields := strings.Fields(directive); len(fields) > 0 && fields[0] == name {
 			return strings.Join(fields[1:], " ")
 		}
 	}
-	t.Fatalf("no frame-src in %q", policy)
+	t.Fatalf("no %s in %q", name, policy)
 	return ""
 }
 
@@ -156,6 +162,9 @@ func TestScienceHostRenderOffChangesNothing(t *testing.T) {
 			for _, s := range []*Server{workload, entry} {
 				if got := frameSources(t, s); got != "'none'" {
 					t.Fatalf("frame-src %q", got)
+				}
+				if got := documentDirective(t, s, "connect-src"); strings.Contains(got, ".invalid") {
+					t.Fatalf("connect-src %q", got)
 				}
 				// A same-site or cross-site page is treated as before: only
 				// the session cookie decides, and the first cookie of a name
@@ -311,6 +320,10 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	// of the entry reads a control file.
 	if got := frameSources(t, entry); got != scienceFrameSource(front.port) {
 		t.Fatalf("entry frame-src %q", got)
+	}
+	// and run the window's proxy proof (F5).
+	if got := documentDirective(t, entry, "connect-src"); got != "'self' ws://localhost:17778 "+scienceProxyCheckOrigin {
+		t.Fatalf("entry connect-src %q", got)
 	}
 	if got := frameSources(t, workload); got != "'none'" {
 		t.Fatalf("workload frame-src %q", got)

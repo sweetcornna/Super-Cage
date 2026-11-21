@@ -193,6 +193,57 @@ func short(session string) string {
 	return session
 }
 
+// The window's proxy proof (F5): prepare asks the WebView to load an
+// address that cannot exist (.invalid never resolves) under the window's
+// own document, with no cookies. Under the shell's switch the proxy at
+// 127.0.0.1:9 refuses the connection: net::ERR_PROXY_CONNECTION_FAILED.
+// Without it the request fails to resolve, or a system proxy answers. The
+// guest cannot take part: the check runs on the page session before the
+// frame exists. A dead system proxy fails the same way (see the report).
+func scienceProxyCheckURL(nonce string) string {
+	return scienceProxyCheckOrigin + "/" + nonce
+}
+
+const scienceProxyVerified = "net::ERR_PROXY_CONNECTION_FAILED"
+
+func scienceProxyVerdict(success bool, netErrorName string) string {
+	if !success && netErrorName == scienceProxyVerified {
+		return "verified"
+	}
+	return "failed"
+}
+
+// proxyCheck is the window's check (ScienceFrameHost.ProxyCheck).
+func (s *scienceShell) proxyCheck(t *testing.T) (string, string) {
+	t.Helper()
+	var tree struct {
+		FrameTree struct {
+			Frame struct {
+				ID string `json:"id"`
+			} `json:"frame"`
+		} `json:"frameTree"`
+	}
+	if err := s.browser.call(s.page, "Page.getFrameTree", map[string]any{}, &tree); err != nil {
+		t.Fatal(err)
+	}
+	var reply struct {
+		Resource struct {
+			Success        bool   `json:"success"`
+			NetErrorName   string `json:"netErrorName"`
+			HTTPStatusCode int    `json:"httpStatusCode"`
+		} `json:"resource"`
+	}
+	err := s.browser.call(s.page, "Network.loadNetworkResource", map[string]any{
+		"frameId": tree.FrameTree.Frame.ID,
+		"url":     scienceProxyCheckURL(fmt.Sprintf("%x", time.Now().UnixNano())),
+		"options": map[string]any{"disableCache": true, "includeCredentials": false},
+	}, &reply)
+	if err != nil {
+		return "failed", err.Error()
+	}
+	return scienceProxyVerdict(reply.Resource.Success, reply.Resource.NetErrorName), fmt.Sprintf("success=%v error=%q status=%d", reply.Resource.Success, reply.Resource.NetErrorName, reply.Resource.HTTPStatusCode)
+}
+
 // scienceNavigateWait is how long a held navigation waits for the frame's
 // targets (ScienceFrameHost.cs waits as long).
 var scienceNavigateWait = 5 * time.Second

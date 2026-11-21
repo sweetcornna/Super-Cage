@@ -126,6 +126,19 @@
       }
     }
   ],
+  "preferences": {
+    "net": {
+      "network_prediction_options": 2
+    }
+  },
+  "proxy_check": {
+    "options": {
+      "disableCache": true,
+      "includeCredentials": false
+    },
+    "url": "http://cage-proxy-check.invalid/NONCE",
+    "verified": "net::ERR_PROXY_CONNECTION_FAILED"
+  },
   "resume": [
     {
       "method": "Runtime.runIfWaitingForDebugger",

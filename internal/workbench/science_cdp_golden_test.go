@@ -29,7 +29,15 @@ func TestScienceCDPGolden(t *testing.T) {
 		"resume":           scienceResumeCalls(),
 		"settle_ms":        2000,
 		"navigate_wait_ms": 5000,
-		"scenarios":        scienceScenarios(),
+		// The proxy proof prepare runs (F5) and the preferences the shell
+		// writes before the WebView starts with the switches.
+		"proxy_check": map[string]any{
+			"url":      scienceProxyCheckURL("NONCE"),
+			"options":  map[string]any{"disableCache": true, "includeCredentials": false},
+			"verified": scienceProxyVerified,
+		},
+		"preferences": sciencePreferences(),
+		"scenarios":   scienceScenarios(),
 		// The shell's switches; the browser tests replace port 9 (nothing
 		// listens) with a recording proxy.
 		"backstop": scienceBackstopArgs(9),

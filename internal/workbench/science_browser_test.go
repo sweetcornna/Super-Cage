@@ -199,7 +199,7 @@ func newScienceWorkbenchPage(t *testing.T, frameSources string, ticket func() st
 			http.NotFound(w, r)
 			return
 		}
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frameSources+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+scienceTestCheckSources(frameSources)+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frameSources+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprintf(w, "<!doctype html><title>Super Cage</title><div id=\"pane\"><iframe id=\"science\" src=\"%s\" sandbox=\"%s\" allow=\"clipboard-write\" referrerpolicy=\"no-referrer\" style=\"width:1000px;height:700px\"></iframe></div>", ticket(), scienceFrameSandbox)
 	}))
@@ -342,7 +342,7 @@ func TestScienceBrowserExfiltration(t *testing.T) {
 	// prediction turned off (the preference that ends the preconnect).
 	t.Run("shell backstop", func(t *testing.T) { runScienceExfiltration(t, nil) })
 	t.Run("network prediction off", func(t *testing.T) {
-		runScienceExfiltration(t, map[string]any{"net": map[string]any{"network_prediction_options": 2}})
+		runScienceExfiltration(t, sciencePreferences())
 	})
 }
 
@@ -572,6 +572,51 @@ func TestScienceBrowserIdentityProbe(t *testing.T) {
 			}
 			if lines := pageRequests(proxied()); len(lines) != 0 {
 				t.Errorf("requests reached the backstop proxy: %q", lines)
+			}
+		})
+	}
+}
+
+// sciencePreferences is what the shell merges into the WebView's
+// Preferences file before it starts with the switches (golden
+// "preferences"): no network prediction (DNS prefetch, preconnect).
+func sciencePreferences() map[string]any {
+	return map[string]any{"net": map[string]any{"network_prediction_options": 2}}
+}
+
+// scienceTestCheckSources is what scienceDocumentSources adds to the
+// workbench document's connect-src while a front runs.
+func scienceTestCheckSources(frameSources string) string {
+	if frameSources == "'none'" {
+		return ""
+	}
+	return " " + scienceProxyCheckOrigin
+}
+
+// F5: the window's proxy proof holds under the shell's switch only. The
+// second case is the negative control without any proxy switch (this host's
+// system proxy settings apply); the third, a proxy that answers (the canary).
+func TestScienceBrowserProxyCheck(t *testing.T) {
+	harness := newScienceFrameHarness(t, scienceFrameSource(17840))
+	canary, _ := newScienceCanaryProxy(t)
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"the shell's switch", scienceBackstopArgs(9), "verified"},
+		{"no switch", nil, "failed"},
+		{"a proxy that answers", scienceBackstopArgs(canary), "failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			browser := launchTestBrowser(t, scienceHostEnv, tc.args...)
+			page := browser.page(t)
+			shell := newScienceShell(t, browser, page)
+			shell.load(t, harness.origin+"/")
+			got, detail := shell.proxyCheck(t)
+			t.Logf("%s: %s", got, detail)
+			if got != tc.want {
+				t.Fatalf("proxy check %s, want %s (%s)", got, tc.want, detail)
 			}
 		})
 	}
