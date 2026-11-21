@@ -234,23 +234,26 @@
   position: fixed; z-index: 36; right: 16px; top: 104px;
   width: min(380px, calc(100vw - 32px)); max-height: calc(100vh - 160px);
   display: flex; flex-direction: column; border: 1px solid var(--line);
-  border-radius: 12px; background: var(--paper); box-shadow: var(--shadow-float);
+  border-radius: var(--r-xl); background: var(--surface); box-shadow: var(--shadow-float);
   padding: 16px; gap: 12px;
 }
 .favorites-panel header { display: flex; align-items: center; gap: 8px; }
-.favorites-panel h2 { margin: 0; flex: 1; font-size: var(--fs-lead); font-weight: 600; color: var(--ink); }
-.favorites-search { display: flex; align-items: center; gap: 8px; background: var(--chrome); padding: 0 8px; border-radius: 6px; }
+.favorites-panel h2 { margin: 0 0 0 2px; flex: 1; font-family: var(--font-serif); font-size: var(--fs-lead); font-weight: 500; letter-spacing: var(--track-cjk); color: var(--ink); }
+/* The search field is one control: the ring is drawn on the label. */
+.favorites-search { display: flex; align-items: center; gap: 8px; padding: 0 10px; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--paper); color: var(--muted); }
+.favorites-search:focus-within { outline: 2px solid var(--focus); outline-offset: 1px; }
 .favorites-search input { width: 100%; min-width: 0; background: transparent; border: none; }
 .favorites-search input, .favorite-form input, .favorite-form .inline-select-trigger, .favorites-folder-select .inline-select-trigger, .all-tabs-menu input {
-  min-height: 34px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 6px;
+  min-height: 34px; padding: 7px 10px; border: 1px solid var(--line-strong); border-radius: var(--r-md);
   background: var(--surface); color: var(--ink); font: inherit;
 }
 .favorites-search input { border: none; background: transparent; padding-inline: 0; }
+.favorites-search input:focus-visible { outline: none; box-shadow: none; }
 .favorite-form { overflow-y: auto; }
 .favorites-folder-select { display: flex; gap: 4px; align-items: center; }
 .favorites-folder-select .inline-select { flex: 1; min-width: 0; }
 .favorites-list { overflow-y: auto; min-height: 96px; }
-.favorite-row { display: flex; align-items: center; border-radius: 6px; }
+.favorite-row { display: flex; align-items: center; border-radius: var(--r-sm); }
 .favorite-row:hover { background: var(--soft); }
 .favorite-link { border: none; background: transparent; flex: 1; min-width: 0; padding: 8px; text-align: left; gap: 12px; }
 .favorite-link > span { flex: 1; min-width: 0; display: grid; gap: 4px; }
@@ -259,7 +262,7 @@
 .favorite-link small { font-size: var(--fs-caption); color: var(--muted); }
 .favorites-panel footer { display: flex; justify-content: space-between; gap: 8px; color: var(--muted); font-size: var(--fs-caption); }
 .favorites-empty { padding: 24px 8px; text-align: center; color: var(--muted); }
-.favorites-empty p { color: var(--ink); margin: 12px 0 8px; }
+.favorites-empty p { color: var(--ink); margin: 12px 0 8px; font-family: var(--font-serif); font-size: var(--fs-body); font-weight: 500; }
 .favorites-empty span { font-size: var(--fs-secondary); }
 .favorite-form { display: grid; gap: 16px; padding: 20px 24px; }
 .favorite-form label { display: grid; gap: 8px; }
@@ -308,13 +311,16 @@
 }
 .browser-tabs-vertical .browser-tab { min-height: 34px; }
 .browser-tabs-vertical .browser-tab > [role="tab"] { padding: 8px; }
-.browser-tabs-vertical .browser-tab.active { box-shadow: inset 2px 0 var(--focus); }
+/* Selection is drawn in ink and hairline, never in the accent (§1). */
+.browser-tabs-vertical .browser-tab.active { box-shadow: inset 0 0 0 1px var(--line); }
 .vertical-browser .browser-chrome > .navigation-row { flex-wrap: wrap; height: auto; min-height: var(--workbench-header-height); }
 .browser-more-trigger {
   flex: none;
   margin-left: 2px;
 }
 .browser-chrome > .navigation-row { position: relative; }
+/* The more menu matches the shared .menu (components.css): surface, r-lg,
+   compact rows with muted icons. At most 240 px wide (browser-menu-smoke). */
 .browser-more-menu {
   position: absolute;
   top: 100%;
@@ -323,14 +329,18 @@
   display: grid;
   width: min(240px, calc(100% - 24px));
   max-height: 70vh;
+  overflow-x: hidden;
   overflow-y: auto;
   box-shadow: var(--shadow-float);
-  padding: 4px;
+  padding: 6px;
   border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  background: var(--paper);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--ink);
+  grid-template-columns: minmax(0, 1fr);
 }
 .browser-more-menu[hidden] { display: none; }
+.browser-more-menu > * { min-width: 0; }
 .browser-more-actions,
 .browser-more-menu .favorites-actions {
   display: grid;
@@ -341,14 +351,15 @@
   align-items: center;
   justify-content: flex-start;
   width: 100%;
-  min-height: 36px;
+  min-height: var(--h-compact);
   gap: 10px;
-  padding: 8px 12px;
+  padding: 0 10px;
   border: 0;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--ink);
   font-size: var(--fs-secondary);
+  font-weight: 450;
   text-align: left;
 }
 .browser-more-menu .browser-menu-item svg {
@@ -357,38 +368,77 @@
 }
 .browser-more-menu .browser-menu-item:hover,
 .browser-more-menu .browser-menu-item:focus-visible { background: var(--soft); }
+.browser-more-menu .browser-menu-item:focus-visible { outline-offset: -2px; }
 .browser-more-trigger[aria-expanded="true"] { background: var(--selected); }
-.browser-private-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--ink); font-size: 0.8rem; }
-.browser-private-note { margin: 0; padding: 3px 12px 6px; color: var(--muted); font-size: 0.8rem; }
-.browser-cookies { margin: 0 12px 8px; padding: 10px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper); font-size: 0.86rem; }
+.browser-private-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--ink); font-size: var(--fs-caption); }
+.browser-private-note { margin: 0; padding: 3px 12px 6px; color: var(--muted); font-size: var(--fs-caption); }
+/* Cookie panel: a quiet sheet under the toolbar; records are hairline rows
+   with ghost actions, the panel title is serif like the downloads panel. */
+.browser-cookies { margin: 4px 12px 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); font-size: var(--fs-secondary); }
 .cookie-heading, .cookie-toolbar, .cookie-pagination, .cookie-record-heading, .cookie-confirm { display: flex; align-items: center; gap: 8px; }
-.cookie-heading { margin-bottom: 8px; }
+.cookie-heading { margin-bottom: 10px; }
+.cookie-heading > strong { color: var(--ink); font-family: var(--font-serif); font-size: var(--fs-body); font-weight: 500; letter-spacing: var(--track-cjk); }
 .cookie-heading > span, .cookie-pagination > span { color: var(--muted); margin-right: auto; }
 .cookie-toolbar { flex-wrap: wrap; align-items: flex-start; }
 .cookie-toolbar > .inline-select { min-width: 130px; }
 .cookie-toolbar > input { flex: 1; min-width: 140px; width: 0; }
 .browser-cookies button { font-size: inherit; }
-.cookie-toolbar > button, .cookie-confirm > button, .cookie-pagination > button, .cookie-record-heading > button { display: inline-flex; align-items: center; gap: 4px; padding: 6px 8px; flex: none; }
-.cookie-list { max-height: min(25vh, 220px); overflow: auto; margin-top: 8px; }
+.cookie-toolbar > button, .cookie-confirm > button, .cookie-pagination > button, .cookie-record-heading > button { display: inline-flex; align-items: center; gap: 6px; min-height: var(--h-compact); padding: 0 10px; flex: none; }
+.cookie-record-heading > button, .cookie-pagination > button { min-height: 28px; padding: 0 8px; border-color: transparent; background: transparent; color: var(--muted); }
+.cookie-record-heading > button:hover:not(:disabled), .cookie-pagination > button:hover:not(:disabled) { background: var(--soft); color: var(--ink); }
+.cookie-record-heading > button:last-child:hover:not(:disabled) { color: var(--error); }
+.cookie-list { max-height: min(25vh, 220px); overflow: auto; margin-top: 10px; }
 .cookie-list > p { color: var(--muted); margin: 8px 0; }
 .cookie-record { padding: 8px 0; border-top: 1px solid var(--line); overflow-wrap: anywhere; }
-.cookie-record-heading > strong { margin-right: auto; min-width: 0; }
-.cookie-metadata { color: var(--muted); line-height: 1.6; }
-.cookie-value { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px; background: var(--soft); max-height: 100px; overflow: auto; user-select: text; }
-.cookie-pagination { margin-top: 8px; flex-wrap: wrap; }
-.cookie-confirm { margin-top: 8px; padding: 8px; background: var(--soft); flex-wrap: wrap; }
+.cookie-record-heading > strong { margin-right: auto; min-width: 0; color: var(--ink); font-family: var(--font-mono); font-size: var(--fs-caption); font-weight: 500; }
+.cookie-metadata { color: var(--muted); font-size: var(--fs-caption); line-height: 1.6; }
+.cookie-value { white-space: pre-wrap; overflow-wrap: anywhere; margin: 6px 0 0; padding: 8px 10px; border-radius: var(--r-sm); background: var(--soft); font-family: var(--font-mono); font-size: var(--fs-caption); max-height: 100px; overflow: auto; user-select: text; }
+.cookie-pagination { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); flex-wrap: wrap; font-size: var(--fs-caption); }
+.cookie-confirm { margin-top: 10px; padding: 10px 12px; border-radius: var(--r-md); background: var(--soft); flex-wrap: wrap; }
 .cookie-confirm > span { flex: 1 1 240px; }
 .cookie-error { color: var(--error); margin: 8px 0; }
+/* Passwords in the more menu: the save prompt is one soft block, saved
+   accounts are compact rows that never widen the menu. */
 .browser-more-menu .vault-browser {
   border-top: 1px solid var(--line);
-  padding: 2px 0 0;
-  margin-top: 2px;
+  padding: 4px 0 0;
+  margin-top: 4px;
+  font-size: var(--fs-secondary);
 }
 .browser-more-menu .vault-browser-heading {
   display: grid;
   gap: 4px;
 }
-.browser-more-menu .vault-picker,
-.browser-more-menu .vault-save,
-.browser-more-menu .vault-browser-heading > span { padding: 8px 12px; }
-.browser-more-menu .vault-account-choice { flex-wrap: wrap; }
+.browser-more-menu .vault-browser-heading > span { padding: 4px 10px; color: var(--muted); font-size: var(--fs-caption); }
+.browser-more-menu .vault-save {
+  margin: 4px 0 6px;
+  padding: 12px;
+  border-radius: var(--r-md);
+  background: var(--soft);
+}
+.browser-more-menu .vault-save strong { color: var(--ink); font-weight: 500; }
+.browser-more-menu .vault-save span,
+.browser-more-menu .vault-save small { margin-top: 4px; font-size: var(--fs-caption); line-height: 1.5; }
+.browser-more-menu .vault-save .vault-actions { gap: 8px; margin-top: 12px; }
+.browser-more-menu .vault-save .vault-actions > button:not(.text-button) { min-height: var(--h-compact); padding: 0 12px; }
+.browser-more-menu .vault-save .vault-actions > .text-button { flex-basis: 100%; justify-content: flex-start; padding: 2px 0; color: var(--muted); font-size: var(--fs-caption); }
+.browser-more-menu .vault-save .vault-actions > .text-button:hover:not(:disabled) { color: var(--ink); }
+.browser-more-menu .vault-picker { padding: 4px 0 6px; }
+.browser-more-menu .vault-picker > p { margin: 2px 10px 6px; color: var(--muted); font-size: var(--fs-caption); }
+.browser-more-menu .vault-account-choice {
+  min-width: 0;
+  min-height: var(--h-compact);
+  margin: 0;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink);
+  font-size: var(--fs-secondary);
+  font-weight: 450;
+}
+.browser-more-menu .vault-account-choice:hover:not(:disabled),
+.browser-more-menu .vault-account-choice:focus-visible { background: var(--soft); }
+.browser-more-menu .vault-account-choice:focus-visible { outline-offset: -2px; }
+.browser-more-menu .vault-account-choice span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.browser-more-menu .vault-picker > .text-button { margin: 4px 10px 0; padding: 2px 0; font-size: var(--fs-caption); }
