@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,12 +18,7 @@ import (
 // session cookies. One NDJSON line in/out is {type:"text"|"binary",data:...};
 // binary data uses JSON's []byte base64 encoding.
 func AgentSocket(ctx context.Context, configPath string, target AgentTarget, path string, input io.ReadCloser, output io.Writer) (returned error) {
-	if !strings.HasPrefix(path, "/api/") || strings.ContainsAny(path, "\r\n\\") || strings.Contains(path, "#") || strings.Contains(path, "://") {
-		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
-	}
-	if u, err := url.Parse(path); err != nil || u.IsAbs() || u.Host != "" || u.RawPath != "" || !agentPlainPath(u.Path) {
-		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path without traversal or unusual escaping", NextAction: "routes"}
-	} else if refusal := agentRouteRefusal(http.MethodGet, u.Path); refusal != nil {
+	if refusal := agentSocketRefusal(path); refusal != nil {
 		return refusal
 	}
 	c, err := agentConnectTarget(ctx, configPath, target)

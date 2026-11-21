@@ -3,6 +3,7 @@ package workbench
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 )
@@ -72,6 +73,9 @@ var agentWindowRoutes = []agentWindowRoute{
 	{"/api/entry/", "The SSH entry and its device keys are managed by the person in the desktop window.", "open_desktop"},
 	{"/api/client/entry", "The SSH entry and its device keys are managed by the person in the desktop window.", "open_desktop"},
 	{"/api/client/entry/", "The SSH entry and its device keys are managed by the person in the desktop window.", "open_desktop"},
+	// Keeping a terminal open after its SSH-entry connection ends (branch
+	// local-terminal-ssh) is decided by the person.
+	{"POST /api/terminals/{id}/keep", "Keeping a terminal open for the SSH entry is decided by the person in the desktop window.", "open_desktop"},
 	// A paired phone reports its own device.
 	{"POST /api/mobile/device", "Only a paired phone reports its own device details.", "mobile.get"},
 }
@@ -128,9 +132,9 @@ var agentRoutes = []string{
 	"POST /api/client/candidate", "POST /api/client/commit", "POST /api/client/cancel", "POST /api/client/local-stop",
 	"POST /api/client/project-shares", "DELETE /api/client/project-shares/{id}",
 	"POST /api/client/tenant/login", "POST /api/client/tenant/vms",
-	// Routes of branches not merged yet, classified ahead (browser-data,
-	// local-terminal-ssh): guest browsing data and keeping a terminal open.
-	"POST /api/browser/data", "POST /api/browser/data-settings", "POST /api/terminals/{id}/keep",
+	// Routes of the browser-data branch, classified ahead of its merge:
+	// the guest browser's browsing data.
+	"POST /api/browser/data", "POST /api/browser/data-settings",
 }
 
 // agentRouteFamilies are registered {action} routes whose values differ:
@@ -167,6 +171,17 @@ func agentPlainPath(path string) bool {
 		}
 	}
 	return true
+}
+
+// agentSocketRefusal is the gate for `cage agent socket`: the same path shape
+// as a request, then the same registry for the decoded path (a WebSocket is
+// a GET upgrade).
+func agentSocketRefusal(path string) *AgentError {
+	u, err := url.Parse(path)
+	if err != nil || u.IsAbs() || u.Host != "" || u.Fragment != "" || !strings.HasPrefix(u.Path, "/api/") || strings.ContainsAny(path, "\r\n\\#") || u.RawPath != "" || !agentPlainPath(u.Path) {
+		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path without traversal or unusual escaping", NextAction: "routes"}
+	}
+	return agentRouteRefusal(http.MethodGet, u.Path)
 }
 
 func agentPatternMatches(pattern, method, path string) bool {

@@ -168,6 +168,7 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 		{"GET", "/api/entry"}, {"POST", "/api/entry/on"}, {"GET", "/api/entry/include"}, {"POST", "/api/entry/devices/x/revoke"}, {"POST", "/api/client/entry/keys"},
 		{"POST", "/api/client/trusted-login"}, {"POST", "/api/account/prepare-macos"}, {"POST", "/api/account/device-enroll"},
 		{"POST", "/api/input/files/desktop/open"}, {"POST", "/api/agent/native/x/complete"}, {"GET", "/api/agent/native?consumer=window"},
+		{"POST", "/api/terminals/t1/keep"}, {"GET", "/api/entry/ssh"}, {"POST", "/api/entry/include"}, {"POST", "/api/entry/devices/x/rename"}, {"POST", "/api/entry/off"},
 		{"GET", "/api/client/virtual-machines"},
 	} {
 		refused(route[0], route[1], "native_transport_required")
@@ -231,8 +232,18 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 			}
 			for _, route := range routes {
 				registered[route] = true
-				if access, _ := agentRouteClass(route); access == "not_open" {
+				access, _ := agentRouteClass(route)
+				if access == "not_open" {
 					t.Errorf("%s (%s listener, %s guest) changes state and is neither open to agents nor window only: classify it in agent_access.go", route, listener, guest)
+				}
+				// Every GET route may be a WebSocket: cage agent socket must
+				// answer it exactly as cage agent request does.
+				if method, path, _ := strings.Cut(route, " "); method == "GET" && strings.HasPrefix(path, "/api/") {
+					sample := regexp.MustCompile(`\{[^/]*\}`).ReplaceAllString(path, "x")
+					socket := agentSocketRefusal(sample)
+					if (socket != nil) != (access == "window_only") || (socket != nil && !reflect.DeepEqual(socket, agentRouteRefusal("GET", sample))) {
+						t.Errorf("socket gate and request gate disagree on %s: %v", route, socket)
+					}
 				}
 			}
 			w = request(s, "GET", "/api/agent/routes?access=1", "", "", true)
@@ -265,7 +276,7 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 		}
 	}
 	// Classified ahead of their branches' merge; drop from here once merged.
-	pending := map[string]bool{"POST /api/browser/data": true, "POST /api/browser/data-settings": true, "POST /api/terminals/{id}/keep": true}
+	pending := map[string]bool{"POST /api/browser/data": true, "POST /api/browser/data-settings": true}
 	// No stale entries: an open pattern is registered, or a value of a family,
 	// or a /api/client/ route dispatched outside the mux.
 	for _, open := range agentRoutes {
