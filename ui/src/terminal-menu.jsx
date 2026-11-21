@@ -2,7 +2,9 @@ import React, { useLayoutEffect, useRef } from "react";
 import { TerminalSquare } from "lucide-react";
 import { ProviderMark } from "./provider-mark";
 
-export function TerminalMenu({ choice, busy, codex = false, onClose, onSelect }) {
+// codexLabel: "Codex 会话" where the server makes Codex sessions from the menu,
+// "Codex 终端" (a plain Codex terminal) otherwise (codexMenuLabel).
+export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", onClose, onSelect }) {
   const menu = useRef(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -59,7 +61,7 @@ export function TerminalMenu({ choice, busy, codex = false, onClose, onSelect })
         <ProviderMark provider="claude" decorative />Claude 终端
       </button>
       {codex && <button role="menuitem" disabled={busy} onClick={() => onSelect("codex")}>
-        <ProviderMark provider="codex" decorative />Codex 终端
+        <ProviderMark provider="codex" decorative />{codexLabel}
       </button>}
     </div>
   );
