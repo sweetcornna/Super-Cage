@@ -22,8 +22,9 @@ import (
 	"github.com/sylvinus/agent-vm/internal/version"
 )
 
-// H1: the agent transport never reaches the update, and nothing it may not
-// request is queued for the window.
+// H1: an agent may read the update state and look for a version
+// (appUpdate status and check), never download, install or cancel; nothing
+// outside the registry in agent_access.go is queued for the window.
 func TestReviewAgentCannotQueueAppUpdate(t *testing.T) {
 	s := agentTestController(t)
 	for _, refused := range []string{
