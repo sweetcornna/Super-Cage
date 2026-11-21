@@ -237,13 +237,15 @@ export class BrowserData {
     };
   }
 
-  async site({ session = "normal", site, page = 0 }) {
+  async site({ session = "normal", site, page = 0, query = "" }) {
     const scope = await this.scope(session);
     if (!scope) return { site, origins: [], cookies: [], total: 0, page: 0 };
     const index = await this.siteIndex(session);
     const origins = index.sites.find(item => item.site === site)?.origins || [];
     const bytes = await this.usage(scope, origins);
-    const cookies = (await this.cookies(scope)).filter(cookie => siteOf(cookieHost(cookie)) === site)
+    const search = String(query).trim().toLowerCase();
+    const cookies = (await this.cookies(scope)).filter(cookie => siteOf(cookieHost(cookie)) === site &&
+      (!search || `${cookie.domain}\n${cookie.name}`.toLowerCase().includes(search)))
       .sort((a, b) => a.domain.localeCompare(b.domain) || a.name.localeCompare(b.name) || a.path.localeCompare(b.path));
     const current = Math.min(page, Math.max(0, Math.ceil(cookies.length / pageSize) - 1));
     return {

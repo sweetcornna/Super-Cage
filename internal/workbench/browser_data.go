@@ -289,7 +289,7 @@ func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]a
 			body["sort"] = "size"
 		}
 	case "site":
-		body["site"], body["page"] = in.Site, in.Page
+		body["site"], body["page"], body["query"] = in.Site, in.Page, in.Query
 	case "cookie":
 		body["site"], body["key"], body["action"] = in.Site, in.Key, in.Action
 	case "history":
