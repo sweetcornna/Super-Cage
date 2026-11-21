@@ -35,6 +35,10 @@ var localTerminalRunner localterm.Runner = localterm.ExecRunner{}
 // localTerminalDetect finds the installed applications; tests replace it.
 var localTerminalDetect = localterm.Detect
 
+// localTerminalHome is the owner's home, where Warp reads its launch
+// configurations; tests replace it.
+var localTerminalHome = os.UserHomeDir
+
 var localTerminalConnection = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
 func (s *Server) localTerminalDir() string { return filepath.Dir(s.localTerminalConfig()) }
@@ -185,16 +189,17 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	home, err := os.UserHomeDir()
+	home, err := localTerminalHome()
 	if err != nil {
 		requestError(w, err)
 		return
 	}
-	name := strings.ToLower(input.TerminalID)
-	if name == "" {
-		var b [8]byte
-		_, _ = rand.Read(b[:])
-		name = hex.EncodeToString(b[:])
+	// Every window has its own files, even for one terminal opened twice.
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	name := hex.EncodeToString(b[:])
+	if input.TerminalID != "" {
+		name = strings.ToLower(input.TerminalID) + "-" + name[:8]
 	}
 	scratch := filepath.Join(dir, "local-terminal")
 	localterm.PruneScratch(scratch, home, 10*time.Minute)
@@ -210,6 +215,14 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonReply(w, map[string]any{"app": app.Name, "automation": app.Automation})
+}
+
+// pruneLocalTerminal removes what launches of an earlier run left behind:
+// the desktop is starting, so none of it is still on its way to a window.
+func (s *Server) pruneLocalTerminal() {
+	if home, err := localTerminalHome(); err == nil {
+		localterm.PruneScratch(filepath.Join(s.localTerminalDir(), "local-terminal"), home, 0)
+	}
 }
 
 func (s *Server) localTerminalConfig() string {

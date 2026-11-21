@@ -17,11 +17,14 @@ type Plan struct {
 	Steps []Step
 }
 
-// PlanFile is a file a plan writes before its steps run.
+// PlanFile is a file a plan writes before its steps run. Its directory is
+// made private (0700, this user's, not a link) unless AppDir marks it as
+// another application's (Warp's), which is only created private if missing.
 type PlanFile struct {
 	Path    string
 	Content string
 	Mode    os.FileMode
+	AppDir  bool
 }
 
 // Step is one program to run. Detach marks a program that may become the
@@ -102,7 +105,7 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 			scheme = "warppreview"
 		}
 		yaml := "---\nname: " + YAMLString("Super Cage "+in.Name) + "\nwindows:\n  - tabs:\n      - title: \"Super Cage\"\n        layout:\n          cwd: " + YAMLString(in.Home) + "\n          commands:\n            - exec: " + YAMLString(ShellQuote(script)) + "\n"
-		return Plan{Files: []PlanFile{scriptFile, {Path: filepath.Join(warpConfigDir(in.Home), config), Content: yaml, Mode: 0o600}},
+		return Plan{Files: []PlanFile{scriptFile, {Path: filepath.Join(warpConfigDir(in.Home), config), Content: yaml, Mode: 0o600, AppDir: true}},
 			Steps: []Step{{Argv: []string{"/usr/bin/open", scheme + "://launch/" + config}}}}, nil
 	case "wezterm":
 		// wezterm start asks a running WezTerm for a new window, or starts one.
@@ -160,29 +163,106 @@ type Runner interface {
 	Run(ctx context.Context, step Step) error
 }
 
-// Launch writes a plan's files and runs its steps until one succeeds.
+// launchFileLife is how long a launch's files stay when the application
+// does not take them: a script never run (the owner refused Automation, say)
+// or a Warp launch configuration, which Warp would keep listing.
+var launchFileLife = 10 * time.Minute
+
+// Launch writes a plan's files and runs its steps until one succeeds. Files
+// are created only where nothing was, never through a link; a launch that
+// fails removes them, one that succeeds removes them after launchFileLife
+// if they are still there.
 func Launch(ctx context.Context, plan Plan, run Runner) error {
+	var written []writtenFile
+	removeAll := func() {
+		for _, w := range written {
+			w.remove()
+		}
+	}
 	for _, f := range plan.Files {
-		if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		w, err := writeExclusive(f)
+		if err != nil {
+			removeAll()
 			return err
 		}
-		if err := os.WriteFile(f.Path, []byte(f.Content), f.Mode); err != nil {
-			return err
-		}
-		if err := os.Chmod(f.Path, f.Mode); err != nil {
-			return err
-		}
+		written = append(written, w)
 	}
 	var failure error
 	for _, step := range plan.Steps {
 		if failure = run.Run(ctx, step); failure == nil {
+			for _, w := range written {
+				time.AfterFunc(launchFileLife, w.remove)
+			}
 			return nil
 		}
 	}
+	removeAll()
 	if failure == nil {
 		failure = errors.New("没有可用的启动方式")
 	}
 	return failure
+}
+
+// writtenFile is a file a launch created, as it was created.
+type writtenFile struct {
+	path string
+	info os.FileInfo
+}
+
+// remove deletes the file if it is still the one created: a script that ran
+// has removed itself, and anything put there since stays.
+func (w writtenFile) remove() {
+	if info, err := os.Lstat(w.path); err == nil && os.SameFile(info, w.info) {
+		_ = os.Remove(w.path)
+	}
+}
+
+func writeExclusive(f PlanFile) (writtenFile, error) {
+	dir := filepath.Dir(f.Path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return writtenFile{}, err
+	}
+	if !f.AppDir {
+		if err := privateDir(dir); err != nil {
+			return writtenFile{}, err
+		}
+	}
+	file, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|openNoFollow, f.Mode)
+	if err != nil {
+		return writtenFile{}, errors.New("无法写入启动文件：" + err.Error())
+	}
+	_, err = file.WriteString(f.Content)
+	if err == nil {
+		err = file.Chmod(f.Mode)
+	}
+	info, statErr := file.Stat()
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = statErr
+	}
+	if err != nil {
+		_ = os.Remove(f.Path)
+		return writtenFile{}, err
+	}
+	return writtenFile{path: f.Path, info: info}, nil
+}
+
+// privateDir checks that dir is a directory of this user, not a link, and
+// makes it 0700.
+func privateDir(dir string) error {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || !ownedByMe(info) {
+		return errors.New("启动文件目录不安全：" + dir)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return os.Chmod(dir, 0o700)
+	}
+	return nil
 }
 
 // PruneScratch removes what earlier launches left behind once it is older

@@ -76,6 +76,9 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	desktop, workload, full := desktopBeforeWorkload(t)
 	launches := &recordingLaunches{}
 	localTerminalRunner = launches
+	home := t.TempDir()
+	localTerminalHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { localTerminalHome = os.UserHomeDir })
 	localTerminalDetect = func() []localterm.Installed {
 		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
 	}
@@ -214,4 +217,43 @@ func scriptCommand(t *testing.T, step []string) []string {
 		words = append(words, word.String())
 	}
 	return words
+}
+
+// Opening the same terminal twice in quick succession gives each window its
+// own script: neither can remove or replace the other's.
+func TestLocalTerminalOpensTheSameTerminalTwice(t *testing.T) {
+	desktop, workload, _ := desktopBeforeWorkload(t)
+	launches := &recordingLaunches{}
+	localTerminalRunner = launches
+	home := t.TempDir()
+	localTerminalHome = func() (string, error) { return home, nil }
+	t.Cleanup(func() { localTerminalHome = os.UserHomeDir })
+	localTerminalDetect = func() []localterm.Installed {
+		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
+	}
+	t.Cleanup(func() { localTerminalRunner = localterm.ExecRunner{}; localTerminalDetect = localterm.Detect })
+	generation := desktop.remote.desktop.generation
+	session := startChild(t, workload, "report")
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\"}", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	open := "{\"terminal_id\":\"" + session.id + "\"}"
+	for range 2 {
+		if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		time.Sleep(1100 * time.Millisecond) // past the rate limit, if any
+	}
+	if len(launches.steps) != 2 {
+		t.Fatal(launches.steps)
+	}
+	first, second := launches.steps[0][len(launches.steps[0])-1], launches.steps[1][len(launches.steps[1])-1]
+	if first == second {
+		t.Fatal("both windows share one script", first)
+	}
+	for _, script := range []string{first, second} {
+		if _, err := os.Stat(script); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
