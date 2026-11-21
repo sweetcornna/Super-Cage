@@ -4,7 +4,7 @@ import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import { ProviderMark } from "./provider-mark";
 import { createSessionList } from "./session-list.mjs";
-import { isCodexSession, purgeCopy, sessionListPath } from "./session-provider.mjs";
+import { isCodexSession, purgeCopy, selectionProvider, sessionListPath } from "./session-provider.mjs";
 import "./cli-sessions.css";
 
 export const desktopSessionRequest = (path, options = {}) => api("/cli" + path, options.body);
@@ -170,7 +170,7 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
     {progress && <p role="status" className="archive-note">正在处理 {progress.done} / {progress.total} 个会话…</p>}
     {resultMessage && <p role="status" className="archive-note">{resultMessage}</p>}
     {bulkConfirm && <div className="archive-confirm" role="group" aria-label="确认批量永久删除会话">
-      <p>{purgeCopy(isCodexSession(bulkConfirm[0]) ? "codex" : "", bulkConfirm[0]?.title, bulkConfirm.length)}</p>
+      <p>{purgeCopy(selectionProvider(bulkConfirm), "", bulkConfirm.length, true)}</p>
       <div className="archived-session-actions"><button className="archive-button" disabled={busy} onClick={() => setBulkConfirm(null)}>取消</button>
         <button className="archive-button archive-delete" disabled={busy || !ready} onClick={() => change(bulkConfirm, "purge")}>永久删除所选会话</button></div>
     </div>}

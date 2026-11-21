@@ -118,10 +118,18 @@ export function codexSessionAccountLabel(session, accounts) {
   return codexAccountName(accounts?.find((account) => account.id === session.codex_account_id)) || "Codex 账号";
 }
 
-export function purgeCopy(provider, title, count = 1) {
-  const history = provider === CODEX ? "Codex 原始对话" : "Claude Code 原始对话和子代理记录";
-  if (count > 1) return `永久删除所选的 ${count} 个会话及其原始对话？此操作无法撤销。`;
+// provider: "codex", "" (Claude) or "mixed" (a selection of both). A bulk
+// confirmation names the count even for one session, as it did before.
+export function purgeCopy(provider, title, count = 1, bulk = count > 1) {
+  const history = provider === CODEX ? "Codex 原始对话" : provider === "mixed" ? "原始对话" : "Claude Code 原始对话和子代理记录";
+  if (bulk) return `永久删除所选的 ${count} 个会话及其${provider === "mixed" ? "" : " "}${history}？此操作无法撤销。`;
   return `永久删除“${title || "新会话"}”及其 ${history}？此操作无法撤销。`;
+}
+
+// The provider of a selection for purgeCopy.
+export function selectionProvider(sessions) {
+  const codex = sessions.filter(isCodexSession).length;
+  return !codex ? "" : codex === sessions.length ? CODEX : "mixed";
 }
 
 export function codexCapabilities(answer) {

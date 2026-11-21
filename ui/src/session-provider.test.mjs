@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sessionKey } from "./session-order.mjs";
 import { canContinueInTerminal, canStopFromPane, codexCapabilities, codexMenuLabel, codexSessionAccountLabel, codexSessionAction,
-  isCodexSession, isCodexTab, mixedSessionRows, archiveCopy, codexStateWord, sessionViewPath, ownerState, providerChip, providerLabel, purgeCopy, sessionListPath, sessionOwner,
+  isCodexSession, isCodexTab, mixedSessionRows, archiveCopy, codexStateWord, sessionViewPath, ownerState, providerChip, providerLabel, purgeCopy, selectionProvider, sessionListPath, sessionOwner,
   shouldGateStartup, showSessionAccount } from "./session-provider.mjs";
 
 const codex = (id, owner = "", extra = {}) => ({ id, provider: "codex", owner, title: id, ...extra });
@@ -85,6 +85,13 @@ test("account labels, purge copy, capabilities and the menu entry", () => {
   assert.equal(purgeCopy("codex", "修复登录"), "永久删除“修复登录”及其 Codex 原始对话？此操作无法撤销。");
   assert.equal(purgeCopy("", ""), "永久删除“新会话”及其 Claude Code 原始对话和子代理记录？此操作无法撤销。");
   assert.match(purgeCopy("codex", "", 3), /所选的 3 个会话/);
+  // A bulk confirmation keeps its wording for one session; Claude only reads as before.
+  assert.equal(purgeCopy("", "", 1, true), "永久删除所选的 1 个会话及其 Claude Code 原始对话和子代理记录？此操作无法撤销。");
+  assert.equal(purgeCopy("mixed", "", 2), "永久删除所选的 2 个会话及其原始对话？此操作无法撤销。");
+  assert.equal(purgeCopy("codex", "", 2), "永久删除所选的 2 个会话及其 Codex 原始对话？此操作无法撤销。");
+  assert.equal(selectionProvider([claude("a"), claude("b")]), "");
+  assert.equal(selectionProvider([codex("a"), codex("b")]), "codex");
+  assert.equal(selectionProvider([codex("a"), claude("b")]), "mixed");
   assert.deepEqual(codexCapabilities({ sessions: [] }), { known: false, sessions: false, cli: null });
   const caps = codexCapabilities({ capabilities: { codex_sessions: true, codex_cli: { version: "0.171.0" } } });
   assert.deepEqual(caps, { known: true, sessions: true, cli: { version: "0.171.0" } });
