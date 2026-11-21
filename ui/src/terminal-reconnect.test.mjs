@@ -29,6 +29,9 @@ test("the keepalive is the ping the terminal stream answers", () => {
 test("the stream resumes after the last received byte", () => {
   assert.equal(terminalStreamPath("0123456789abcdef", null), "/terminals/0123456789abcdef/stream?after=0");
   assert.equal(terminalStreamPath("0123456789abcdef", 1234), "/terminals/0123456789abcdef/stream?after=1234");
+  assert.equal(terminalStreamPath("0123456789abcdef", 7, "web-0123456789ab"), "/terminals/0123456789abcdef/stream?after=7&viewer=web-0123456789ab");
+  for (const viewer of ["short", "has space 12345", "a".repeat(65), 42])
+    assert.equal(terminalStreamPath("0123456789abcdef", 7, viewer), "/terminals/0123456789abcdef/stream?after=7");
   for (const invalid of [-1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 2, "12", undefined])
     assert.equal(terminalStreamPath("a", invalid), "/terminals/a/stream?after=0");
 });
