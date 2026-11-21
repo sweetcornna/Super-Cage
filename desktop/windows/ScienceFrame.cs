@@ -5,18 +5,30 @@ using System.Text.RegularExpressions;
 namespace Cage.Windows;
 
 // Claude Science host rendering (phase 2a), the part without WebView2: which
-// switches the window needs, which front a frame address belongs to, and the
-// DevTools calls that give the page the guest's identity. desktop/windows.tests
-// checks these against internal/workbench/testdata/science-cdp.json, the
-// contract the Go tests run in headless Chromium. ScienceFrameHost applies
-// them to the WebView.
+// switches the window needs, which environment a frame address belongs to,
+// the DevTools calls that give the Science frame's own targets the guest's
+// identity, and the policy that decides which target gets which calls.
+// desktop/windows.tests checks all of it against
+// internal/workbench/testdata/science-cdp.json, the contract the Go tests run
+// in headless Chromium (science_shell_test.go has the same policy).
+// ScienceFrameHost applies it to the WebView.
 internal static partial class ScienceFrame
 {
+    // The scienceFrame bridge version (op "capabilities"): 2 gives the
+    // identity to the frame's targets only; the workbench keeps the host's.
+    public const int Contract = 2;
+
     // Only while some environment has host rendering on: no proxy (loopback
     // still bypasses it, so the workbench and the front load), no non-proxied
     // WebRTC, no shared workers (CDP cannot pause them before they run), no
     // hyperlink-auditing pings.
     public const string BackstopArguments = "--proxy-server=http://127.0.0.1:9 --webrtc-ip-handling-policy=disable_non_proxied_udp --disable-shared-workers --no-pings";
+
+    // How long a target whose call failed may take to detach before the frame
+    // ends, and how long a held top-level navigation waits for the frame's
+    // targets.
+    public const int SettleMilliseconds = 2000;
+    public const int NavigateWaitMilliseconds = 5000;
 
     public sealed record Call(string Method, JsonObject Params);
 
@@ -43,19 +55,31 @@ internal static partial class ScienceFrame
         Profiles(root).Any(profile => ReadObject(Path.Combine(profile, "workbench.json"))?["science_host_render"] is JsonValue value &&
             value.TryGetValue<bool>(out var on) && on) ? BackstopArguments : null;
 
+    [GeneratedRegex(@"^[0-9a-f]{32}\.localhost$")]
+    private static partial Regex Label();
+
+    // LabelOrigin is the session origin of a front's entry address,
+    // http://<label>.localhost:<port>/_cage/enter (science_front.go), or null.
+    public static string? LabelOrigin(string raw)
+    {
+        if (!Uri.TryCreate(raw, UriKind.Absolute, out var url) || url.Scheme != "http" || !Label().IsMatch(url.Host) ||
+            url.IsDefaultPort || url.UserInfo.Length != 0 || url.AbsolutePath != "/_cage/enter" || url.Query.Length != 0 || url.Fragment.Length != 0)
+            return null;
+        return url.GetLeftPart(UriPartial.Authority);
+    }
+
     // Identity is what a running workload published in its control.json for
     // the front at the address's port; null for anything that is not a
     // front's entry. A record left by a workload that exited is skipped: the
     // port it names may belong to another environment's front now.
     public static JsonObject? Identity(string root, string raw)
     {
-        if (!Uri.TryCreate(raw, UriKind.Absolute, out var url) || url.Scheme != "http" || url.Host != "localhost" ||
-            url.IsDefaultPort || url.UserInfo.Length != 0 || url.AbsolutePath != "/_cage/enter" || url.Query.Length != 0 || url.Fragment.Length < 2)
-            return null;
+        if (LabelOrigin(raw) == null) return null;
+        var port = new Uri(raw).Port;
         foreach (var profile in Profiles(root))
         {
             var control = ReadObject(Path.Combine(profile, "control.json"));
-            if (control?["science_port"] is not JsonValue port || !port.TryGetValue<int>(out var number) || number != url.Port) continue;
+            if (control?["science_port"] is not JsonValue value || !value.TryGetValue<int>(out var number) || number != port) continue;
             if (control["pid"] is not JsonValue pid || !pid.TryGetValue<int>(out var process) || !Running(process)) continue;
             if (control["science_identity"] is JsonObject identity && Valid(identity)) return (JsonObject)identity.DeepClone();
         }
@@ -93,23 +117,31 @@ internal static partial class ScienceFrame
         ["autoAttach"] = on, ["waitForDebuggerOnStart"] = on, ["flatten"] = true,
     });
 
-    public static Call Resume => Make("Runtime.runIfWaitingForDebugger", new JsonObject());
+    public static Call[] Resume => [Make("Runtime.runIfWaitingForDebugger", new JsonObject())];
 
-    // The page (and a frame in its own process): time zone, locale, user agent;
-    // no host file chooser (the page sees a cancel; interception needs the
-    // Page domain); then pause every new worker and frame until it has them
-    // too.
-    public static Call[] Arm(JsonObject identity) => [
+    // The window's page session only watches: every new target starts paused.
+    public static Call[] PageAttach => [AutoAttach(true)];
+
+    // Turning it off drops every override and lets paused targets run: the
+    // policy sends it only once no guest target is left.
+    public static Call[] PageDetach => [AutoAttach(false)];
+
+    // The Science frame (and a frame inside it): time zone, locale, user
+    // agent; no host file chooser (the page sees a cancel; interception needs
+    // the Page domain); its own new workers and frames paused until they have
+    // them too; then it runs.
+    public static Call[] Frame(JsonObject identity) => [
         Make("Emulation.setTimezoneOverride", new JsonObject { ["timezoneId"] = Text(identity, "timezone") }),
         Make("Emulation.setLocaleOverride", new JsonObject { ["locale"] = Text(identity, "locale") }),
         UserAgent(identity),
         Make("Page.enable", new JsonObject()),
         Make("Page.setInterceptFileChooserDialog", new JsonObject { ["enabled"] = true, ["cancel"] = true }),
         AutoAttach(true),
+        .. Resume,
     ];
 
-    // A dedicated worker: CDP has no navigator.platform override for workers,
-    // so the getter is replaced before the worker's script runs.
+    // A dedicated worker of the frame: CDP has no navigator.platform override
+    // for workers, so the getter is replaced before the worker's script runs.
     public static Call[] Worker(JsonObject identity) => [
         UserAgent(identity),
         Make("Runtime.evaluate", new JsonObject {
@@ -117,31 +149,205 @@ internal static partial class ScienceFrame
                 JsonSerializer.Serialize(Text(identity, "platform")) + "; }, configurable: true, enumerable: true }); true",
         }),
         AutoAttach(true),
-        Resume,
-    ];
-
-    // A frame in another process gets the page's calls, then runs.
-    public static Call[] Frame(JsonObject identity) => [.. Arm(identity), Resume];
-
-    public static Call[] Disarm => [
-        AutoAttach(false),
-        Make("Emulation.setTimezoneOverride", new JsonObject { ["timezoneId"] = "" }),
-        Make("Emulation.setLocaleOverride", new JsonObject()),
-        Make("Emulation.setUserAgentOverride", new JsonObject { ["userAgent"] = "" }),
-        Make("Page.setInterceptFileChooserDialog", new JsonObject { ["enabled"] = false }),
-        Make("Page.disable", new JsonObject()),
+        .. Resume,
     ];
 
     // The locale override is per renderer process: a second target in the
     // same process reports the one already set.
     public static bool Benign(string message) => message.Contains("Another locale override is already in effect", StringComparison.Ordinal);
 
-    // What a newly attached target gets: workers and frames their calls;
-    // service and shared workers only resume (Emulation calls never answer
-    // there); anything else resumes.
-    public static Call[] ForTarget(string type, JsonObject identity) => type switch {
-        "worker" => Worker(identity),
-        "iframe" => Frame(identity),
-        _ => [Resume],
-    };
+    // The proxy proof prepare runs (F5): an address that cannot exist, loaded
+    // under the window's own document without cookies. Only the switch's
+    // proxy (127.0.0.1:9, where nothing listens) ends it with this error.
+    public const string ProxyVerified = "net::ERR_PROXY_CONNECTION_FAILED";
+    public static string ProxyCheckURL(string nonce) => "http://cage-proxy-check.invalid/" + nonce;
+    public static JsonObject ProxyCheckOptions() => new() { ["disableCache"] = true, ["includeCredentials"] = false };
+    public static string ProxyVerdict(bool success, string netErrorName) => !success && netErrorName == ProxyVerified ? "verified" : "failed";
+
+    // PreferencesPath is the WebView's profile preferences under its user
+    // data folder (WebView2 keeps the browser profile in EBWebView).
+    public static string PreferencesPath(string userDataFolder) => Path.Combine(userDataFolder, "EBWebView", "Default", "Preferences");
+
+    // SeedPreferences runs before the browser process starts: with the
+    // switches, no network prediction (DNS prefetch, preconnect); without
+    // them, the default again. A file it cannot read is left alone.
+    public static bool SeedPreferences(string userDataFolder, bool on)
+    {
+        var path = PreferencesPath(userDataFolder);
+        JsonObject root;
+        try { root = File.Exists(path) ? JsonNode.Parse(File.ReadAllText(path)) as JsonObject ?? throw new JsonException("not an object") : new JsonObject(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { return false; }
+        var net = root["net"] as JsonObject;
+        if (on)
+        {
+            if (net == null) root["net"] = net = new JsonObject();
+            if (net["network_prediction_options"] is JsonValue current && current.TryGetValue<int>(out var value) && value == 2) return true;
+            net["network_prediction_options"] = 2;
+        }
+        else
+        {
+            if (net?["network_prediction_options"] is not JsonValue current || !current.TryGetValue<int>(out var value) || value != 2) return true;
+            net.Remove("network_prediction_options");
+        }
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            var temporary = path + ".cage-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temporary, root.ToJsonString());
+            File.Move(temporary, path, true);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    // Action is one thing the window does: calls on a session ("" is the
+    // page), ending the frame, removing the frame element before a held
+    // navigation, or letting the held navigation go.
+    public sealed record Action(string Session, Call? Call, bool End = false, bool Remove = false, bool Proceed = false);
+
+    // Policy is what the window does with each DevTools target while host
+    // rendering may show a frame (science_shell_test.go scienceFramePolicy):
+    //  - Arm: the page session auto-attaches (paused) to every new target.
+    //    Nothing on the workbench document itself changes.
+    //  - A page-level iframe while armed is the Science frame: it gets the
+    //    guest's identity and only then runs. Unarmed, it stays paused (and
+    //    is prepared if the window arms again).
+    //  - Any other page-level target is the workbench's own: resumed at once.
+    //  - Under a guest target: workers get Worker, frames Frame, anything
+    //    else stays paused and the frame ends.
+    //  - A failed call never resumes its target. If the target detaches (it
+    //    died), nothing more happens; if it is still attached when the window
+    //    settles it, the frame ends.
+    //  - Detach: auto-attach stays on until the last guest (and paused)
+    //    target has detached.
+    //  - Navigate (the window's document is about to navigate): while a guest
+    //    target is attached the navigation is held, the frame removed, and it
+    //    goes once the targets are gone and auto-attach is off; if they do
+    //    not go in time, the navigation is dropped and the frame ends. Arming
+    //    while a navigation is held is refused.
+    public sealed class Policy
+    {
+        private JsonObject? identity;
+        private bool detaching, navigating;
+        private readonly Dictionary<string, JsonObject> guests = new(StringComparer.Ordinal);
+        private readonly SortedSet<string> held = new(StringComparer.Ordinal);
+        private readonly HashSet<string> failed = new(StringComparer.Ordinal);
+
+        public bool Attached { get; private set; }
+
+        private static IEnumerable<Action> On(string session, IEnumerable<Call> calls) => calls.Select(call => new Action(session, call));
+
+        public List<Action> Arm(JsonObject next)
+        {
+            if (navigating) return [new Action("", null, End: true)];
+            identity = next;
+            detaching = false;
+            var actions = new List<Action>();
+            if (!Attached)
+            {
+                Attached = true;
+                actions.AddRange(On("", PageAttach));
+            }
+            foreach (var session in held.ToList())
+            {
+                held.Remove(session);
+                guests[session] = next;
+                actions.AddRange(On(session, Frame(next)));
+            }
+            return actions;
+        }
+
+        public List<Action> Detach()
+        {
+            identity = null;
+            if (!Attached) return [];
+            detaching = true;
+            return MaybeDetach();
+        }
+
+        private List<Action> MaybeDetach()
+        {
+            if (!detaching || identity != null || guests.Count > 0 || held.Count > 0) return [];
+            Attached = detaching = false;
+            var actions = On("", PageDetach).ToList();
+            if (navigating)
+            {
+                navigating = false;
+                actions.Add(new Action("", null, Proceed: true));
+            }
+            return actions;
+        }
+
+        public List<Action> Navigate()
+        {
+            var actions = Detach();
+            if (!Attached)
+            {
+                actions.Add(new Action("", null, Proceed: true));
+                return actions;
+            }
+            navigating = true;
+            actions.Add(new Action("", null, Remove: true));
+            return actions;
+        }
+
+        public List<Action> NavigateTimedOut()
+        {
+            if (!navigating) return [];
+            navigating = false;
+            return [new Action("", null, End: true)];
+        }
+
+        public List<Action> AttachedTarget(string parent, string session, string type)
+        {
+            if (parent.Length == 0)
+            {
+                if (type != "iframe") return On(session, Resume).ToList();
+                if (identity == null)
+                {
+                    held.Add(session);
+                    return [];
+                }
+                guests[session] = identity;
+                return On(session, Frame(identity)).ToList();
+            }
+            if (!guests.TryGetValue(parent, out var inherited))
+            {
+                // Under a paused or unknown target: stays paused.
+                held.Add(session);
+                return [];
+            }
+            switch (type)
+            {
+                case "worker":
+                    guests[session] = inherited;
+                    return On(session, Worker(inherited)).ToList();
+                case "iframe":
+                    guests[session] = inherited;
+                    return On(session, Frame(inherited)).ToList();
+            }
+            held.Add(session);
+            return [new Action("", null, End: true)];
+        }
+
+        public List<Action> CallFailed(string session)
+        {
+            if (guests.ContainsKey(session)) failed.Add(session);
+            return [];
+        }
+
+        public List<Action> Settle(string session)
+        {
+            if (!failed.Remove(session) || !guests.ContainsKey(session)) return [];
+            return [new Action("", null, End: true)];
+        }
+
+        public List<Action> DetachedTarget(string session)
+        {
+            guests.Remove(session);
+            held.Remove(session);
+            failed.Remove(session);
+            return MaybeDetach();
+        }
+    }
 }

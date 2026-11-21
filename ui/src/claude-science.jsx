@@ -200,7 +200,7 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
       <div className="science-frame-body">
         {url ? (
           <iframe key={url} src={url} title="Claude Science" sandbox={frameSandbox} allow="clipboard-write" referrerPolicy="no-referrer"
-            data-phase={phase} />
+            data-phase={phase} data-science-frame="" />
         ) : <div className="science-frame-wait"><span className="live-dot" aria-hidden="true" />{status.text}</div>}
       </div>
     </>

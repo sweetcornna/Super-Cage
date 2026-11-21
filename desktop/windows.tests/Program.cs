@@ -85,16 +85,20 @@ assertions = 0;
 
         var control = golden["control"]!.DeepClone().AsObject();
         control["pid"] = Environment.ProcessId; // the golden record names no process
-        var entry = "http://localhost:" + control["science_port"] + "/_cage/enter#" + new string('a', 43);
+        var origin = "http://0123456789abcdef0123456789abcdef.localhost:" + control["science_port"];
+        var entry = origin + "/_cage/enter";
+        Check(ScienceFrame.LabelOrigin(entry) == origin, "label origin of an entry address");
         Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity without a control file");
         File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
         var identity = ScienceFrame.Identity(scienceRoot, entry);
         Check(identity != null && Same(identity, control["science_identity"]), "identity differs from the control file");
         foreach (var other in new[] {
-            entry.Replace("http://localhost:17840", "http://localhost:17841"), entry.Replace("http://localhost", "http://127.0.0.1"),
-            entry.Replace("http://", "https://"), entry.Replace("http://", "http://user@"), entry.Replace("/_cage/enter", "/"),
-            entry.Replace("/_cage/enter#", "/_cage/enter?x=1#"), "http://localhost:17840/_cage/enter", "http://localhost/_cage/enter#x", "not a url",
+            entry.Replace(":17840", ":17841"), entry.Replace("0123456789abcdef0123456789abcdef.localhost", "localhost"),
+            entry.Replace("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcde"), entry.Replace("0123456789abcdef0123456789abcdef", "0123456789ABCDEFX123456789abcdef"),
+            entry.Replace(".localhost", ".localhost.evil"), entry.Replace("http://", "https://"), entry.Replace("http://", "http://user@"),
+            entry.Replace("/_cage/enter", "/"), entry + "?x=1", entry + "#ticket", "http://127.0.0.1:17840/_cage/enter",
+            "http://0123456789abcdef0123456789abcdef.localhost/_cage/enter", "not a url",
         })
             Check(ScienceFrame.Identity(scienceRoot, other) == null, "identity for a foreign address: " + other);
         // A record left by an exited workload with the same port is skipped.
@@ -113,13 +117,67 @@ assertions = 0;
         Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity with a value that is not plain text");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
 
-        Check(Same(Calls(ScienceFrame.Arm(identity!)), golden["arm"]), "arm calls differ from the contract");
+        // The calls and the policy are the ones the Go tests prove in headless Chromium.
+        Check(golden["contract"]!.GetValue<int>() == ScienceFrame.Contract, "bridge contract differs");
+        Check(golden["settle_ms"]!.GetValue<int>() == ScienceFrame.SettleMilliseconds, "settle time differs");
+        Check(golden["navigate_wait_ms"]!.GetValue<int>() == ScienceFrame.NavigateWaitMilliseconds, "navigation wait differs");
+        Check(Same(Calls(ScienceFrame.PageAttach), golden["page_attach"]), "page attach calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.PageDetach), golden["page_detach"]), "page detach calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Frame(identity!)), golden["frame"]), "frame calls differ from the contract");
         Check(Same(Calls(ScienceFrame.Worker(identity!)), golden["worker"]), "worker calls differ from the contract");
-        Check(Same(Calls(ScienceFrame.Disarm), golden["disarm"]), "disarm calls differ from the contract");
-        Check(Same(Calls(ScienceFrame.Frame(identity!)), Calls([.. ScienceFrame.Arm(identity!), ScienceFrame.Resume])), "frame calls are not arm then resume");
-        foreach (var type in new[] { "service_worker", "shared_worker", "page", "" })
-            Check(ScienceFrame.ForTarget(type, identity!) is [var only] && only.Method == "Runtime.runIfWaitingForDebugger", "a " + type + " target gets more than resume");
+        Check(Same(Calls(ScienceFrame.Resume), golden["resume"]), "resume differs from the contract");
         Check(ScienceFrame.Benign("Another locale override is already in effect") && !ScienceFrame.Benign("Target closed"), "benign locale error");
+        var proxy = golden["proxy_check"]!.AsObject();
+        Check(ScienceFrame.ProxyCheckURL("NONCE") == proxy["url"]!.GetValue<string>(), "proxy check address differs");
+        Check(Same(ScienceFrame.ProxyCheckOptions(), proxy["options"]), "proxy check options differ");
+        Check(ScienceFrame.ProxyVerified == proxy["verified"]!.GetValue<string>(), "proxy check error differs");
+        Check(ScienceFrame.ProxyVerdict(false, ScienceFrame.ProxyVerified) == "verified" && ScienceFrame.ProxyVerdict(false, "net::ERR_NAME_NOT_RESOLVED") == "failed" &&
+            ScienceFrame.ProxyVerdict(true, "") == "failed" && ScienceFrame.ProxyVerdict(false, "net::ERR_HTTP_RESPONSE_CODE_FAILURE") == "failed", "proxy verdicts");
+        var scenarios = 0;
+        foreach (var scenario in golden["scenarios"]!.AsArray())
+        {
+            var policy = new ScienceFrame.Policy();
+            var steps = scenario!["steps"]!.AsArray();
+            for (var i = 0; i < steps.Count; i++)
+            {
+                var step = steps[i]!.AsObject();
+                string Field(string name) => step[name]?.GetValue<string>() ?? "";
+                var actions = Field("do") switch
+                {
+                    "arm" => policy.Arm(identity!),
+                    "detach" => policy.Detach(),
+                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type")),
+                    "failed" => policy.CallFailed(Field("session")),
+                    "settle" => policy.Settle(Field("session")),
+                    "detached" => policy.DetachedTarget(Field("session")),
+                    "navigate" => policy.Navigate(),
+                    "navigate_timeout" => policy.NavigateTimedOut(),
+                    var other => throw new InvalidDataException("unknown scenario step " + other),
+                };
+                var got = actions.Select(action => action.End ? "end" : action.Remove ? "remove" : action.Proceed ? "proceed" :
+                    (action.Session.Length == 0 ? "page" : action.Session) + " " + action.Call!.Method).ToArray();
+                var want = step["expect"]!.AsArray().Select(item => item!.GetValue<string>()).ToArray();
+                Check(got.SequenceEqual(want), scenario["name"] + ", step " + i + ": " + string.Join(", ", got));
+            }
+            scenarios++;
+        }
+        Check(scenarios == 12, "scenario count " + scenarios);
+
+        // Preferences: written before the browser starts, the default again without the switches.
+        var data = Path.Combine(scienceRoot, "webview2");
+        var preferences = ScienceFrame.PreferencesPath(data);
+        Check(ScienceFrame.SeedPreferences(data, false) && !File.Exists(preferences), "preferences written while off");
+        Directory.CreateDirectory(Path.GetDirectoryName(preferences)!);
+        File.WriteAllText(preferences, "{\"browser\":{\"x\":1},\"net\":{\"other\":true}}");
+        Check(ScienceFrame.SeedPreferences(data, true), "preferences not written");
+        var seeded = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(preferences))!;
+        Check(Same(seeded["net"]!["network_prediction_options"], golden["preferences"]!["net"]!["network_prediction_options"]) &&
+            seeded["browser"]!["x"]!.GetValue<int>() == 1 && seeded["net"]!["other"]!.GetValue<bool>(), "preferences differ from the contract or lost a value");
+        Check(ScienceFrame.SeedPreferences(data, false), "preferences not restored");
+        var restored = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(preferences))!;
+        Check(restored["net"]!["network_prediction_options"] == null && restored["net"]!["other"]!.GetValue<bool>(), "prediction stayed off without the switches");
+        File.WriteAllText(preferences, "{ broken");
+        Check(!ScienceFrame.SeedPreferences(data, true) && File.ReadAllText(preferences) == "{ broken", "an unreadable preferences file was replaced");
     }
     finally { Directory.Delete(scienceRoot, true); }
 }

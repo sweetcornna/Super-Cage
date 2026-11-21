@@ -185,6 +185,9 @@ internal sealed class MainWindow : Form
                     finally { previous.BrowserProcessExited -= BrowserExited; }
                 }
             }
+            // Before the browser process starts: no network prediction with
+            // the switches, the default without them.
+            ScienceFrame.SeedPreferences(Path.Combine(Backend.Root, "webview2"), arguments != null);
             var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Backend.Root, "webview2"),
                 arguments == null ? null : new CoreWebView2EnvironmentOptions(arguments));
             webArguments = arguments;
@@ -197,7 +200,8 @@ internal sealed class MainWindow : Form
             core.Settings.IsPasswordAutosaveEnabled = false; core.Settings.IsGeneralAutofillEnabled = false;
             core.NavigationStarting += (_, e) => {
                 if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true;
-                else if (science?.Armed == true) _ = science.Disarm(); // the pane's document is going away
+                // The pane's document is going away: its frame goes first.
+                else if (science?.Hold(e.Uri) == true) e.Cancel = true;
             };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
@@ -205,7 +209,8 @@ internal sealed class MainWindow : Form
             core.WebMessageReceived += Receive;
             core.ProcessFailed += (_, _) => { webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。"); };
             science = arguments == null ? null : new ScienceFrameHost(core, reason =>
-                Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"));
+                Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
+                uri => { if (!web.IsDisposed && web.CoreWebView2 == core) core.Navigate(uri); });
             core.NavigationCompleted += (_, e) => {
                 if (!e.IsSuccess) {
                     var reason = e.WebErrorStatus.ToString() switch {
@@ -364,21 +369,24 @@ internal sealed class MainWindow : Form
     }
 
     // The Claude Science pane's frame (ui/src/claude-science.jsx documents
-    // the ops). Arming needs the switches; without them the pane asks for
-    // restart, which recreates the WebView with them.
+    // the ops). Attaching needs the switches; without them the pane asks for
+    // restart, which recreates the WebView with them. The agent transport
+    // cannot reach these ops (ui/src/api.js).
     private async Task<object> ScienceFrameRequest(string op, string url)
     {
         switch (op)
         {
+            case "capabilities":
+                return new { contract = ScienceFrame.Contract };
             case "prepare":
-                if (science != null) await science.Disarm();
-                return new { backstop = science != null };
-            case "arm":
+                if (science == null) return new { backstop = false, proxy = "" };
+                return await science.Prepare();
+            case "attach":
                 if (science == null) throw new InvalidDataException("窗口缺少本机渲染需要的网络限制，请重新载入窗口后再打开。");
-                await science.Arm(url);
+                science.Attach(url);
                 return true;
-            case "disarm":
-                if (science != null) await science.Disarm();
+            case "detach":
+                science?.Detach();
                 return true;
             case "restart":
                 if (ScienceFrame.Arguments(Backend.Root) == webArguments) return true;

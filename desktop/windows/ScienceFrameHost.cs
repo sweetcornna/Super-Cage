@@ -1,77 +1,140 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Web.WebView2.Core;
 
 namespace Cage.Windows;
 
-// ScienceFrameHost applies ScienceFrame's calls to the window's WebView. It
-// exists only when the WebView was created with ScienceFrame.BackstopArguments
-// (some environment has host rendering on); otherwise the window keeps every
-// handler it always had and refuses to arm.
+// ScienceFrameHost drives ScienceFrame.Policy with the window's DevTools
+// protocol. It exists only when the WebView was created with
+// ScienceFrame.BackstopArguments (some environment has host rendering on);
+// otherwise the window keeps every handler it always had and refuses to
+// attach.
 //
-// The overrides are WebView-wide (the workbench page sees the guest's time
-// zone and language, and its own file inputs open no chooser, while the
-// frame shows); the pane disarms when the frame
-// goes away, and this host disarms on a main-frame navigation or a renderer
-// failure.
+// The guest's identity goes to the Science frame's own targets only: the
+// page session auto-attaches (flatten) and every target starts paused; the
+// frame's targets get their calls on their own sessions
+// (CoreWebView2.CallDevToolsProtocolMethodForSessionAsync; events carry the
+// parent's CoreWebView2DevToolsProtocolEventReceivedEventArgs.SessionId).
+// The workbench document never gets an override.
 internal sealed class ScienceFrameHost
 {
+    private const string Ended = "页面的一个后台线程或子页面没能使用环境的时区与语言，已停止本机渲染。";
+    private const string NavigationDropped = "本机渲染页面没有及时关闭，窗口没有跳转。请再试一次。";
+    // The pane marks its frame element (claude-science.jsx).
+    private const string RemoveFrame = "document.querySelectorAll('iframe[data-science-frame]').forEach(frame => frame.remove());";
+
     private readonly CoreWebView2 core;
     private readonly Action<string> failed;
-    private readonly CoreWebView2DevToolsProtocolEventReceiver attached;
-    private JsonObject? identity;
+    private readonly Action<string> navigate;
+    private readonly ScienceFrame.Policy policy = new();
+    private readonly CoreWebView2DevToolsProtocolEventReceiver attached, detached;
     private string origin = "";
-    private int generation;
+    private string heldUri = "";
+    private int navigation;
 
-    public ScienceFrameHost(CoreWebView2 core, Action<string> failed)
+    // failed tells the pane its frame ended; navigate re-issues a navigation
+    // this host held.
+    public ScienceFrameHost(CoreWebView2 core, Action<string> failed, Action<string> navigate)
     {
         this.core = core;
         this.failed = failed;
-        // Frames navigate to the armed front only; the workbench itself
-        // has no frames (its CSP is frame-src 'none' without a front).
+        this.navigate = navigate;
+        // Frames navigate to the attached session's origin only (and to
+        // about:blank or srcdoc documents, which stay in it); the workbench
+        // itself has no frames (frame-src 'none' without a front).
         core.FrameNavigationStarting += (_, e) => {
+            if (e.Uri is "about:blank" or "about:srcdoc") return;
             if (origin.Length == 0 || !Uri.TryCreate(e.Uri, UriKind.Absolute, out var url) ||
                 url.GetLeftPart(UriPartial.Authority) != origin || url.UserInfo.Length != 0) e.Cancel = true;
         };
         attached = core.GetDevToolsProtocolEventReceiver("Target.attachedToTarget");
         attached.DevToolsProtocolEventReceived += Attached;
+        detached = core.GetDevToolsProtocolEventReceiver("Target.detachedFromTarget");
+        detached.DevToolsProtocolEventReceived += Detached;
     }
 
-    public bool Armed => identity != null;
+    // Prepare drops any earlier identity and proves the proxy switch (F5).
+    public async Task<object> Prepare()
+    {
+        origin = "";
+        Apply(policy.Detach());
+        return new { backstop = true, proxy = await ProxyCheck() };
+    }
 
-    public async Task Arm(string url)
+    public void Attach(string url)
     {
         var next = ScienceFrame.Identity(Backend.Root, url) ?? throw new InvalidDataException("找不到这个本机渲染页面对应的环境，请回到 Claude Science 重新打开。");
-        await Disarm();
-        var current = ++generation;
-        try
-        {
-            foreach (var call in ScienceFrame.Arm(next)) await Send("", call);
-        }
-        catch
-        {
-            await Disarm();
-            throw new InvalidDataException("无法把环境的时区、语言和浏览器标识交给窗口，已停止本机渲染。");
-        }
-        if (current != generation)
-        {
-            // Disarmed while arming: undo whatever reached the page after it.
-            await Disarm();
-            throw new InvalidDataException("本机渲染已停止。");
-        }
-        identity = next;
-        origin = new Uri(url).GetLeftPart(UriPartial.Authority);
+        var actions = policy.Arm(next);
+        if (actions.Any(action => action.End)) throw new InvalidDataException("窗口正在跳转，本机渲染未打开。");
+        origin = ScienceFrame.LabelOrigin(url)!;
+        Apply(actions);
     }
 
-    public async Task Disarm()
+    public void Detach()
     {
-        generation++;
-        identity = null;
         origin = "";
-        foreach (var call in ScienceFrame.Disarm)
+        Apply(policy.Detach());
+    }
+
+    // Hold answers NavigationStarting for the window's own document: true
+    // cancels it, and it is issued again once the frame's targets are gone.
+    public bool Hold(string uri)
+    {
+        origin = "";
+        var actions = policy.Navigate();
+        if (actions.Any(action => action.Proceed))
         {
-            try { await Send("", call); }
-            catch (Exception error) when (error is InvalidOperationException or System.Runtime.InteropServices.COMException or ArgumentException) { }
+            Apply(actions.Where(action => !action.Proceed));
+            return false;
+        }
+        heldUri = uri;
+        var current = ++navigation;
+        Apply(actions);
+        _ = DropAfter(current);
+        return true;
+    }
+
+    private async Task DropAfter(int current)
+    {
+        await Task.Delay(ScienceFrame.NavigateWaitMilliseconds);
+        if (current != navigation) return;
+        if (policy.NavigateTimedOut().Count == 0) return;
+        heldUri = "";
+        failed(NavigationDropped);
+    }
+
+    private async void Apply(IEnumerable<ScienceFrame.Action> actions)
+    {
+        var list = actions.ToList();
+        foreach (var action in list)
+        {
+            if (action.End) failed(Ended);
+            else if (action.Remove) await Script(RemoveFrame);
+        }
+        await Task.WhenAll(list.Where(action => action.Call != null).GroupBy(action => action.Session)
+            .Select(group => Run(group.Key, group.Select(action => action.Call!).ToList())));
+        if (!list.Any(action => action.Proceed)) return;
+        navigation++;
+        var uri = heldUri;
+        heldUri = "";
+        if (uri.Length != 0) navigate(uri);
+    }
+
+    // Run sends one session's calls in order. A failed call never resumes
+    // its target: the policy settles it after SettleMilliseconds.
+    private async Task Run(string session, List<ScienceFrame.Call> calls)
+    {
+        foreach (var call in calls)
+        {
+            try { await Send(session, call); }
+            catch (Exception)
+            {
+                policy.CallFailed(session);
+                await Task.Delay(ScienceFrame.SettleMilliseconds);
+                Apply(policy.Settle(session));
+                return;
+            }
         }
     }
 
@@ -86,36 +149,57 @@ internal sealed class ScienceFrameHost
         catch (Exception error) when (ScienceFrame.Benign(error.Message)) { }
     }
 
-    // Every new worker and frame starts paused (waitForDebuggerOnStart):
-    // it gets the identity, then runs. It always runs, so a failure cannot
-    // hang the page; a worker or frame that could not take the identity
-    // ends the frame instead.
-    private async void Attached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    private async Task Script(string script)
     {
-        string session = "", type = "";
+        try { await core.ExecuteScriptAsync(script); }
+        catch (Exception error) when (error is InvalidOperationException or COMException) { }
+    }
+
+    private static bool Read(string json, out string session, out string type)
+    {
+        session = type = "";
         try
         {
-            using var data = JsonDocument.Parse(e.ParameterObjectAsJson);
+            using var data = JsonDocument.Parse(json);
             session = data.RootElement.GetProperty("sessionId").GetString() ?? "";
-            type = data.RootElement.GetProperty("targetInfo").GetProperty("type").GetString() ?? "";
+            if (data.RootElement.TryGetProperty("targetInfo", out var info)) type = info.GetProperty("type").GetString() ?? "";
+            return session.Length != 0;
         }
-        catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException) { return; }
-        if (session.Length == 0) return;
-        var current = identity;
-        var calls = current == null ? [ScienceFrame.Resume] : ScienceFrame.ForTarget(type, current);
+        catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException) { return false; }
+    }
+
+    private void Attached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    {
+        if (Read(e.ParameterObjectAsJson, out var session, out var type)) Apply(policy.AttachedTarget(e.SessionId ?? "", session, type));
+    }
+
+    private void Detached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
+    {
+        if (Read(e.ParameterObjectAsJson, out var session, out _)) Apply(policy.DetachedTarget(session));
+    }
+
+    // ProxyCheck loads ScienceFrame.ProxyCheckURL under the window's main
+    // frame (the workbench document allows it in connect-src while a front
+    // runs): "verified" only when the switch's proxy refused the connection.
+    private async Task<string> ProxyCheck()
+    {
         try
         {
-            foreach (var call in calls) await Send(session, call);
+            using var tree = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Page.getFrameTree", "{}"));
+            var frame = tree.RootElement.GetProperty("frameTree").GetProperty("frame").GetProperty("id").GetString();
+            var parameters = new JsonObject {
+                ["frameId"] = frame,
+                ["url"] = ScienceFrame.ProxyCheckURL(Guid.NewGuid().ToString("N")),
+                ["options"] = ScienceFrame.ProxyCheckOptions(),
+            };
+            using var reply = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Network.loadNetworkResource", parameters.ToJsonString()));
+            var resource = reply.RootElement.GetProperty("resource");
+            var name = resource.TryGetProperty("netErrorName", out var error) ? error.GetString() ?? "" : "";
+            return ScienceFrame.ProxyVerdict(resource.GetProperty("success").GetBoolean(), name);
         }
-        catch (Exception)
+        catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or COMException or ArgumentException)
         {
-            try { await Send(session, ScienceFrame.Resume); }
-            catch (Exception) { }
-            if (current != null && type is "worker" or "iframe")
-            {
-                await Disarm();
-                failed("页面的一个后台线程没能使用环境的时区与语言，已停止本机渲染。");
-            }
+            return "failed";
         }
     }
 }
