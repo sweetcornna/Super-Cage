@@ -81,8 +81,9 @@ type appUpdateState struct {
 	unavailableReason string
 }
 
-// appUpdateStopTimeout bounds the stop an update makes, like the stop button.
-const appUpdateStopTimeout = 3 * time.Minute
+// appUpdateStopTimeout bounds the stop an update makes, like the existing
+// update handoff's stop. The macOS shell gives prepare-update 180 seconds.
+const appUpdateStopTimeout = 2 * time.Minute
 
 // heldOperation stands in for Server.op when the caller already holds it:
 // the update's stop runs as an ordinary stop job inside the decision's
@@ -542,6 +543,10 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 		if err = managedproxy.Stop(s.profile); err != nil {
 			stopErr = errors.New("代理尚未停止")
 		}
+	}
+	if stopErr == nil && r.Context().Err() != nil {
+		// The shell gave up waiting: nobody would install, so do not exit.
+		stopErr = errors.New("升级请求已取消")
 	}
 	if stopErr == nil {
 		// Installing is recorded before the shell may install: a record left

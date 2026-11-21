@@ -38,8 +38,8 @@ type AppUpdatePrepared struct {
 }
 
 // appUpdateHandoffTimeout covers the decision, the guest read and stopping
-// the environment, which the existing stop allows two minutes for.
-const appUpdateHandoffTimeout = 4 * time.Minute
+// the environment (two minutes), inside the shell's 180 seconds.
+const appUpdateHandoffTimeout = 150 * time.Second
 
 func appUpdateBlocked(code policy.Code, message string) AppUpdatePrepared {
 	return AppUpdatePrepared{Status: "blocked", Code: code, Message: message}
