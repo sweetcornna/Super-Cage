@@ -164,6 +164,7 @@ function AppUpdateConfirmation({ version, blocked, onCancel, onContinue }) {
             {view.items.map(item => <li key={item.id} data-unknown={item.unknown || undefined}>{item.label}</li>)}
           </ul>
         )}
+        {!loading && view.mustWait.length > 0 && <p className="app-update-wait-heading">需要先完成：</p>}
         {!loading && view.mustWait.length > 0 && (
           <ul className="app-update-interruptions" aria-label="需要先完成的操作" data-kind="wait">
             {view.mustWait.map(label => <li key={label}>{label}</li>)}

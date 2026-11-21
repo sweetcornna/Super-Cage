@@ -75,8 +75,8 @@ function AppUpdateSettings() {
   };
   return <section className="about-updates" aria-label="应用更新">
     <h4>应用更新</h4>
-    <div className="about-update-modes" role="radiogroup" aria-label="更新方式">
-      {view.options.map(option => <label key={option.value} className="about-update-mode" data-disabled={option.disabled || undefined}>
+    <div className="choice-list about-update-modes" role="radiogroup" aria-label="更新方式">
+      {view.options.map(option => <label key={option.value} className={`choice ${view.mode === option.value ? "checked" : ""}`} data-disabled={option.disabled || undefined}>
         <input type="radio" name="app-update-mode" value={option.value} checked={view.mode === option.value}
           disabled={!view.editable || option.disabled || Boolean(saving)} onChange={() => choose(option.value)} />
         <span>

@@ -8,3 +8,4 @@
 .app-update-interruptions li[data-unknown]::before { background: var(--amber); }
 .app-update-interruptions[data-kind="wait"] li::before { background: var(--clay); }
 .app-update-confirmation .footnote { margin: 0; }
+.app-update-confirmation > .app-update-wait-heading { margin: 4px 0 -6px; color: var(--muted); font-size: var(--fs-secondary); }

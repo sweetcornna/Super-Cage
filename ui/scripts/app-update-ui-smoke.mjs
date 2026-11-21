@@ -66,6 +66,7 @@ try {
   await page.screenshot({ path: `${output}/available.png` });
   await button.click();
   let dialog = await confirmUpgrade("0.1.3-alpha.2");
+  await page.waitForTimeout(400);
   await page.screenshot({ path: `${output}/confirmation.png` });
   await dialog.getByRole("button", { name: "稍后", exact: true }).click();
   await dialog.waitFor({ state: "hidden" });
