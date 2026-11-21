@@ -1022,15 +1022,19 @@ func (a *attacher) resume(ctx context.Context, cause error) (*controlwire.Conn, 
 		}
 		ws, err := a.c.Dial(ctx, a.cfg.Target, a.streamPath())
 		var ae *controlclient.AgentError
-		if errors.As(err, &ae) && ae.Code == "connection_failed" {
-			// The desktop may have restarted on another port.
+		if errors.As(err, &ae) && ae.Code == "connection_failed" || controlclient.Identity(err) != nil {
+			// The desktop may have restarted: on another port, or on the
+			// same one with a new proof key. Its record says.
 			if c, connectErr := a.connect(ctx, a.cfg.Target); connectErr == nil {
 				a.c.Close()
 				a.c = c
 				ws, err = a.c.Dial(ctx, a.cfg.Target, a.streamPath())
 			} else if controlclient.Identity(connectErr) != nil {
-				// What answers now cannot prove itself: stop, sending nothing.
+				// What its record names cannot prove itself: stop, having
+				// sent it nothing.
 				return nil, attachFailure(connectErr), false
+			} else if controlclient.Identity(err) != nil {
+				err = &controlclient.AgentError{Code: "connection_failed"}
 			}
 		}
 		if err == nil {
@@ -1071,9 +1075,6 @@ func (a *attacher) explain(ctx context.Context) (Exit, bool) {
 		Unlocked *bool `json:"unlocked"`
 	}
 	if err := a.request(ctx, "GET", "/api/account", nil, &account); err != nil {
-		if controlclient.Identity(err) != nil {
-			return attachFailure(err), true
-		}
 		var refused *attachHTTPError
 		if errors.As(err, &refused) && refused.status != 503 && refused.status != 429 {
 			return refused.exit(), true

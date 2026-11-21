@@ -1246,7 +1246,9 @@ func TestAttachGivesUpAndResets(t *testing.T) {
 			mu.Lock()
 			busy := refuse
 			mu.Unlock()
-			if busy {
+			// The controller answers its identity challenge before anything
+			// that can be busy (control_proof.go).
+			if busy && r.URL.Path != controllerProofPath {
 				http.Error(w, "busy", http.StatusServiceUnavailable)
 				return
 			}
