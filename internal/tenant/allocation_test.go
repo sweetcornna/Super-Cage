@@ -205,6 +205,55 @@ func TestAllocationHoldsDemandBeforeReturningIdleMemory(t *testing.T) {
 	}
 }
 
+// Being in use only orders who gives and spares a VM idle return; it never
+// keeps memory another VM needs. The gateway counts every proxied chunk,
+// terminal heartbeats included, as use, so a workspace with an open
+// terminal is in use for good: it still yields what lies above its fair
+// allocation to a VM that grows (and, under host pressure, what lies above
+// its working set: TestAllocationHostPressureTakesIdleFirstAndNeverTheWorkingSet).
+func TestAllocationActiveVMStillYieldsToAGrowingOne(t *testing.T) {
+	busy, growing := vmID(5), vmID(6)
+	now := time.Unix(1e9, 0)
+	// 16 GiB host, 13.6 GiB to share. The busy VM was sized up while it was
+	// alone and now holds 10 GiB, mostly page cache over a 2 GiB working
+	// set; the other one starts at 3 GiB and needs 6 GiB.
+	state := MemoryState{HostTotal: 16 * testGiB, HostAvailable: 8 * testGiB, Ceiling: 12 * testGiB, Instances: map[string]InstanceMemory{
+		busy: guestVM(10*testGiB, 2*testGiB, 0), growing: guestVM(3*testGiB, 0, 0),
+	}}
+	held := map[string]demandState{}
+	yielded := false
+	for round := range 60 {
+		// Both are in use every round, the busy one through its heartbeat.
+		markActive(state, busy, growing)
+		simulateGuests(&state, map[string]int64{busy: 2 * testGiB, growing: 6 * testGiB})
+		result := allocate(state, held, now)
+		held = result.held
+		for _, change := range result.changes {
+			if change.id == busy && change.to < change.from {
+				if change.reason != "others need memory" || change.to < result.report[busy].Fair {
+					t.Fatalf("round %d: %+v (fair %d MiB)", round, change, result.report[busy].Fair>>20)
+				}
+				yielded = true
+			}
+			applyChange(&state, change)
+		}
+		now = now.Add(15 * time.Second)
+	}
+	lb, lg := state.Instances[busy].Limit, state.Instances[growing].Limit
+	if !yielded || lg < 6*testGiB+memoryMinHeadroom {
+		t.Fatalf("in-use VM kept memory a growing VM needs: busy %d MiB, growing %d MiB", lb>>20, lg>>20)
+	}
+	// The grower has its demand, and nobody is short: the busy VM keeps
+	// the rest, even with the limits together above the capacity, as a limit
+	// is not use. Once its page cache makes the host short, it gives.
+	state.HostAvailable = 3 * testGiB
+	markActive(state, busy, growing)
+	result := allocate(state, held, now)
+	if change, ok := changedIDs(result.changes)[busy]; !ok || change.to >= change.from || change.reason != "host memory is low" {
+		t.Fatalf("in-use VM kept its excess while the host is short: %+v", result.changes)
+	}
+}
+
 func TestAllocationHostPressureTakesIdleFirstAndNeverTheWorkingSet(t *testing.T) {
 	idle, busy := vmID(3), vmID(4)
 	now := time.Unix(1e9, 0)
@@ -330,6 +379,7 @@ func TestAllocationProperties(t *testing.T) {
 		if severe {
 			step = memoryPressureStep
 		}
+		var grown int64
 		var fairSum int64
 		for id, report := range result.report {
 			if state.Instances[id].GuestSilent {
@@ -345,6 +395,13 @@ func TestAllocationProperties(t *testing.T) {
 			if change.to%(1<<20) != 0 || change.to < MinimumMemory {
 				t.Fatalf("invalid size %+v", change)
 			}
+			if change.to > entry.Limit && change.reason != "guest did not answer" {
+				grown += change.to - entry.Limit
+			}
+			// Never from above the fair allocation to below it.
+			if fair := result.report[change.id].Fair; change.to < entry.Limit && entry.Limit > fair && change.to < fair {
+				t.Fatalf("shrank across the fair allocation %d: %+v", fair, change)
+			}
 			if change.to < entry.Limit {
 				working := entry.GuestTotal - entry.GuestAvailable
 				if entry.GuestSilent || entry.Status != "Running" {
@@ -357,6 +414,15 @@ func TestAllocationProperties(t *testing.T) {
 					t.Fatalf("step too large: %+v", change)
 				}
 			}
+		}
+		// Growth stays within the host's free memory above what it keeps.
+		if grown > max(0, state.HostAvailable-hostKeep(reserve)) {
+			t.Fatalf("grew %d MiB with %d MiB available: %+v", grown>>20, state.HostAvailable>>20, result.changes)
+		}
+		if result.backlog > 0 {
+			// Growth that waits for free memory or for pressure to end goes on
+			// in the next rounds, as the inputs change.
+			continue
 		}
 		// Stable: with the same input and the result applied, a second round
 		// moves nothing that the first did not already decide.

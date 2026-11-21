@@ -19,10 +19,21 @@ floor. Without fresh limits (no host agent, or an older one) it applies the
 same rule to this guest's own MemTotal. It reports each class's use, stall
 and limits for the probe (/run/cage-resources/state). Everything is best
 effort: when a step fails the guest runs on without it. On exit, and from
-ExecStopPost after a crash, the limits are reset.
+ExecStopPost after a crash, the limits are reset and the runtime settings it
+made are removed.
+
+The two accounts (the sessions' user, the browser's) come from the unit's
+environment, CAGE_SESSION_USER and CAGE_BROWSER_USER, which the host renders
+with the environment's own account names. The governor never guesses them:
+when either is missing or unknown it cannot tell the browser user's slice
+from the sessions', so it protects and limits only the slices it can name
+(system.slice, cage-browser.slice), leaves user.slice unprotected, reports no
+classes (the host agent then reads the whole guest's pressure, as for a guest
+without the governor) and says why in the state file ("accounts unresolved").
 """
 import os
 import pwd
+import re
 import signal
 import stat
 import subprocess
@@ -36,12 +47,14 @@ MEMINFO = '/proc/meminfo'
 UPTIME = '/proc/uptime'
 MOUNTS = '/proc/mounts'
 SYSTEMCTL = ['/usr/bin/systemctl']
+# Where systemctl set-property --runtime keeps what it sets.
+CONTROL = '/run/systemd/system.control'
 CLASSES = (('control', 'system.slice'), ('sessions', 'user.slice'), ('browser', 'cage-browser.slice'))
-# The sessions' user, and the browser's: on Ubuntu guests snap Chromium runs
-# in a scope of the browser user's own slice under user.slice, so that slice
-# belongs to the browser class, not to the sessions.
-SESSION_USER = 'cage'
-BROWSER_USER = 'cage-browser'
+# The unit's variables naming the sessions' user and the browser's: on Ubuntu
+# guests snap Chromium runs in a scope of the browser user's own slice under
+# user.slice, so that slice belongs to the browser class, not to the sessions.
+ACCOUNTS = (('session', 'CAGE_SESSION_USER'), ('browser', 'CAGE_BROWSER_USER'))
+ACCOUNT_NAME = re.compile(r'[a-z_][a-z0-9_-]{0,31}')
 MIB = 1 << 20
 FRESH = 10.0
 STEP = 64 * MIB
@@ -97,11 +110,24 @@ def some_avg10(text):
     return 0.0
 
 
-def user_slice(name):
-    try:
-        return 'user.slice/user-%d.slice' % pwd.getpwnam(name).pw_uid
-    except KeyError:
-        return None
+def accounts():
+    """The user slices of the sessions' and the browser's accounts, as paths
+    below the cgroup root, and the roles that could not be resolved. A slice
+    of a resolved account need not exist (no session of that user yet)."""
+    uids, unresolved = {}, []
+    for role, variable in ACCOUNTS:
+        name = os.environ.get(variable, '')
+        try:
+            if not ACCOUNT_NAME.fullmatch(name):
+                raise KeyError(name)
+            uids[role] = pwd.getpwnam(name).pw_uid
+        except KeyError:
+            unresolved.append(role)
+    if not unresolved and uids['session'] == uids['browser']:
+        unresolved = ['session', 'browser']
+    if unresolved:
+        return None, None, unresolved
+    return tuple('user.slice/user-%d.slice' % uids[role] for role, _ in ACCOUNTS) + ([],)
 
 
 def cgroup(path):
@@ -124,13 +150,13 @@ def cgroup(path):
     return entry
 
 
-def classes():
+def classes(session_slice, browser_slice):
     found = {}
     for name, unit in CLASSES:
         entry = cgroup(unit)
         if entry:
             found[name] = entry
-    browser_user = cgroup(user_slice(BROWSER_USER))
+    browser_user = cgroup(browser_slice)
     if browser_user:
         if 'sessions' in found:
             found['sessions']['current'] = max(found['sessions']['current'] - browser_user['current'], 0)
@@ -141,7 +167,7 @@ def classes():
             found['browser'] = browser_user
     # The sessions' own slice carries the probes and the terminals: its stall,
     # not the browser user's, is the sessions' stall.
-    session_user = cgroup(user_slice(SESSION_USER))
+    session_user = cgroup(session_slice)
     if session_user and 'sessions' in found:
         found['sessions']['stall'] = session_user['stall']
     return found
@@ -218,11 +244,10 @@ class Governor:
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.applied[(unit, prop)] = size
 
-    def apply(self, limits):
+    def apply(self, limits, session_slice, browser_slice, resolved):
         browsers = ['cage-browser.slice']
         sessions = ['user.slice']
-        for slices, user in ((browsers, BROWSER_USER), (sessions, SESSION_USER)):
-            path = user_slice(user)
+        for slices, path in ((browsers, browser_slice), (sessions, session_slice)):
             if path and os.path.isdir(os.path.join(CGROUP, path)):
                 slices.append(os.path.basename(path))
         steps = []
@@ -230,9 +255,14 @@ class Governor:
             steps += [(unit, 'MemoryHigh', limits['browser_high']), (unit, 'MemoryMax', limits['browser_max'])]
         if recursive_protection():
             # The sessions' user slice claims all of user.slice's protection,
-            # so none is left over for the browser user's slice.
+            # so none is left over for the browser user's slice. Without the
+            # accounts user.slice may hold the browser: it is not protected,
+            # and a protection set before is taken back.
             steps.append(('system.slice', 'MemoryLow', limits['control_low']))
-            steps += [(unit, 'MemoryLow', limits['sessions_low']) for unit in sessions]
+            if resolved:
+                steps += [(unit, 'MemoryLow', limits['sessions_low']) for unit in sessions]
+            else:
+                steps.append(('user.slice', 'MemoryLow', 0))
         for unit, prop, size in steps:
             try:
                 self.set(unit, prop, size)
@@ -241,7 +271,11 @@ class Governor:
 
     def once(self):
         total = memtotal()
-        found = classes()
+        session_slice, browser_slice, unresolved = accounts()
+        if unresolved:
+            self.warn('accounts unresolved (%s): user.slice is neither protected nor counted' %
+                      ', '.join('%s=%r' % (variable, os.environ.get(variable, '')) for role, variable in ACCOUNTS if role in unresolved))
+        found = classes(session_slice, browser_slice)
         limits = received(time.time(), total)
         source = 'host'
         if limits is None:
@@ -250,8 +284,8 @@ class Governor:
         if source != self.source:
             print('cage-resource-governor: limits from the %s' % ('host agent' if source == 'host' else 'guest size'), file=sys.stderr)
             self.source = source
-        self.apply(limits)
-        report(uptime(), classes())
+        self.apply(limits, session_slice, browser_slice, not unresolved)
+        report(uptime(), {} if unresolved else classes(session_slice, browser_slice), unresolved)
 
     def warn(self, message):
         if message not in self.errors:
@@ -259,8 +293,12 @@ class Governor:
             print('cage-resource-governor: ' + message, file=sys.stderr)
 
 
-def report(stamp, found):
+def report(stamp, found, unresolved=()):
+    # The probe parses this file: a line's first word must not be one of its
+    # keys (resources.go, parseResources).
     lines = ['governor 1 %.1f' % stamp]
+    if unresolved:
+        lines.append('accounts unresolved ' + ' '.join(unresolved))
     for name, _ in CLASSES:
         entry = found.get(name)
         if entry:
@@ -275,21 +313,54 @@ def report(stamp, found):
 
 
 def reset():
+    """Undo everything the governor set: every limit and protection goes back
+    to systemd's default, and its runtime drop-ins and runtime directory go.
+    The user slices are those of the unit's accounts, and any user slice that
+    holds a runtime memory setting (made while the accounts were other ones)."""
     governor = Governor()
-    steps = [('cage-browser.slice', 'MemoryHigh'), ('cage-browser.slice', 'MemoryMax'), ('system.slice', 'MemoryLow'), ('user.slice', 'MemoryLow')]
-    for user, props in ((BROWSER_USER, ('MemoryHigh', 'MemoryMax')), (SESSION_USER, ('MemoryLow',))):
-        path = user_slice(user)
+    steps = {('cage-browser.slice', 'MemoryHigh'), ('cage-browser.slice', 'MemoryMax'), ('system.slice', 'MemoryLow'), ('user.slice', 'MemoryLow')}
+    session_slice, browser_slice, _ = accounts()
+    for path, props in ((browser_slice, ('MemoryHigh', 'MemoryMax')), (session_slice, ('MemoryLow',))):
         if path and os.path.isdir(os.path.join(CGROUP, path)):
-            steps += [(os.path.basename(path), prop) for prop in props]
-    for unit, prop in steps:
+            steps.update((os.path.basename(path), prop) for prop in props)
+    try:
+        entries = os.listdir(CONTROL)
+    except OSError:
+        entries = []
+    for entry in entries:
+        if re.fullmatch(r'user-\d+\.slice\.d', entry):
+            steps.update((entry[:-2], prop) for prop in ('MemoryHigh', 'MemoryMax', 'MemoryLow')
+                         if os.path.exists(os.path.join(CONTROL, entry, '50-%s.conf' % prop)))
+    for unit, prop in sorted(steps):
         try:
             governor.set(unit, prop, 0, force=True)
         except (OSError, subprocess.SubprocessError):
+            continue
+        # The default is in force: the runtime drop-in that says so goes too.
+        try:
+            os.unlink(os.path.join(CONTROL, unit + '.d', '50-%s.conf' % prop))
+        except OSError:
             pass
+    for unit in {unit for unit, _ in steps}:
+        try:
+            os.rmdir(os.path.join(CONTROL, unit + '.d'))
+        except OSError:
+            pass
+    inbox = os.path.join(RUN, 'in')
     try:
-        os.unlink(os.path.join(RUN, 'state'))
+        leftovers = [os.path.join(inbox, name) for name in os.listdir(inbox) if name == 'limits' or name.startswith('.limits.')]
     except OSError:
-        pass
+        leftovers = []
+    for path in [os.path.join(RUN, 'state')] + leftovers:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+    for path in (inbox, RUN):
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
 
 
 def main(argv):

@@ -46,6 +46,7 @@ try{
   assert.equal(profiles[0].id,"b");
   await policy.click();await page.getByRole("option",{name:"额度耗尽后自动接续",exact:true}).click();
   assert.equal(scheduling.switch_policy,"allow");
+  await page.getByRole("article",{name:"账号 A",exact:true}).getByRole("button",{name:"设置接续分组"}).click();
   await page.getByRole("textbox",{name:"账号 A 的接续分组"}).fill("本人账号");
   await page.getByRole("article",{name:"账号 A",exact:true}).getByRole("button",{name:"保存分组"}).click();
   assert.equal(profiles.find(a=>a.id==="a").handoff_group,"本人账号");

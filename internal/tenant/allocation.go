@@ -27,10 +27,18 @@ import (
 //   - while the host is short, by tiers: idle VMs above their demand, in-use
 //     VMs above their demand, then the headroom of idle and then in-use VMs.
 //
-// Nothing ever goes below the working set plus memoryMinHeadroom or the
-// guarantee, a VM whose guest did not answer this round keeps its size, and a
-// shrink is at most one step per round (memoryShrinkStep, memoryPressureStep
-// when the host is below its reserve).
+// Nothing ever goes below the working set plus memoryMinHeadroom, the
+// guarantee or (from above it) its fair allocation, a VM whose guest did not
+// answer this round keeps its size, and a shrink is at most one step per round
+// (memoryShrinkStep, memoryPressureStep when the host is below its reserve).
+//
+// Page cache of a guest fills its limit and is resident on the host, so a
+// host whose limits add up to its capacity has about its reserve (less its
+// own use) available: that is the plan, not a shortage. The host is in
+// pressure when tasks wait for memory, when less than hostKeep is available,
+// or when it is below its reserve while its limits leave more unallocated
+// than it has (its own use is above the reserve). Growth happens at once,
+// within the host's free memory above hostKeep.
 
 const (
 	// memoryDemandHold is how long a VM's demand is held before it may fall.
@@ -44,6 +52,10 @@ const (
 	// that marks a guest as short.
 	memoryShortStall = 10
 )
+
+// hostKeep is the least free memory the host keeps beyond the limits it
+// grants in one round: well under its reserve, which also covers its own use.
+func hostKeep(reserve int64) int64 { return max(int64(memoryShrinkStep), reserve/4) }
 
 // demandState is the held demand of one VM.
 type demandState struct {
@@ -75,6 +87,9 @@ type allocationResult struct {
 	report   map[string]vmAllocation
 	capacity int64
 	pressure bool
+	// backlog is what the VMs below their fair allocations did not get this
+	// round: growth that waits for pressure to end or for free memory.
+	backlog int64
 	// overcommitted is set when the guarantees alone exceed the capacity.
 	overcommitted bool
 }
@@ -182,21 +197,15 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 		return result
 	}
 	ceiling := max(guarantee, min(roundDownMemory(state.Ceiling), roundDownMemory(state.HostTotal-reserve)))
-	pressure := state.HostAvailable < 2*reserve || state.HostStall >= 10
-	severe := state.HostAvailable < reserve || state.HostStall >= 10
-	result.pressure = pressure
-	step := int64(memoryShrinkStep)
-	if severe {
-		step = memoryPressureStep
-	}
 
-	var adjustable []string
-	var pinned int64
+	var adjustable, silent []string
+	var pinned, sumLimits int64
 	var grow, shrink []memoryChange
 	for id, entry := range state.Instances {
 		switch {
 		case entry.Status == "Running" && !in.fixed[id] && entry.GuestTotal > 0 && !entry.GuestSilent:
 			adjustable = append(adjustable, id)
+			sumLimits += entry.Limit
 		case entry.Status == "Running" || entry.Status == "Frozen":
 			// A frozen VM keeps its memory until the kernel swaps it out; a VM
 			// that did not answer keeps its size: a failed sample means hold.
@@ -205,19 +214,43 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 				result.held[id] = previous
 			}
 			if entry.Status == "Running" && !in.fixed[id] && in.silent[id] && entry.Limit < ceiling {
-				to := ceiling
-				if pressure {
-					to = min(ceiling, roundUpMemory(entry.Limit+memoryShrinkStep))
-				}
-				grow = append(grow, memoryChange{id: id, from: entry.Limit, to: to, reason: "guest did not answer"})
-				result.report[id] = vmAllocation{Limit: entry.Limit, Target: to, Reason: "guest did not answer"}
+				silent = append(silent, id)
 			}
 		}
 	}
-	slices.SortFunc(grow, func(a, b memoryChange) int { return strings.Compare(a.id, b.id) })
-	slices.Sort(adjustable)
 	capacity := max(0, state.HostTotal-reserve-pinned)
 	result.capacity = capacity
+	// Guest page cache fills the limits, so a host whose limits fill its
+	// capacity has about its reserve less its own use available: the plan,
+	// not pressure. Pressure is tasks waiting for memory, less than hostKeep
+	// available (limits above the capacity being filled), or less than the
+	// reserve while the limits leave more unallocated than is available (the
+	// host's own use is above its reserve). Below twice the reserve the host
+	// takes back memory above the demands early (reclaim), which never holds
+	// growth back.
+	keep := hostKeep(reserve)
+	pressure := state.HostStall >= 10 || state.HostAvailable < keep || state.HostAvailable < reserve && state.HostAvailable < capacity-sumLimits
+	reclaim := pressure || state.HostAvailable < 2*reserve
+	// Below the reserve, memory above the demands comes back a larger step
+	// per round; it is never below a fair allocation, so this cannot undo
+	// growth.
+	severe := state.HostAvailable < reserve || state.HostStall >= 10
+	result.pressure = pressure
+	step := int64(memoryShrinkStep)
+	if severe {
+		step = memoryPressureStep
+	}
+	for _, id := range silent {
+		entry := state.Instances[id]
+		to := ceiling
+		if pressure {
+			to = min(ceiling, roundUpMemory(entry.Limit+memoryShrinkStep))
+		}
+		grow = append(grow, memoryChange{id: id, from: entry.Limit, to: to, reason: "guest did not answer"})
+		result.report[id] = vmAllocation{Limit: entry.Limit, Target: to, Reason: "guest did not answer"}
+	}
+	slices.SortFunc(grow, func(a, b memoryChange) int { return strings.Compare(a.id, b.id) })
+	slices.Sort(adjustable)
 	if len(adjustable) == 0 {
 		result.changes = grow
 		return result
@@ -265,32 +298,68 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 	result.overcommitted = int64(len(adjustable))*unitsUp(guarantee) > units(capacity)
 	fair := make(map[string]int64, len(adjustable))
 	limits := make(map[string]int64, len(adjustable))
-	var growth, sumLimits int64
+	gap := make(map[string]int64, len(adjustable))
+	var growth int64
 	anyShort := false
 	for i, id := range adjustable {
 		entry := state.Instances[id]
 		fair[id] = bytesOf(fairUnits[i])
 		limits[id] = entry.Limit
-		sumLimits += entry.Limit
-		reason := ""
 		if fair[id] < heldDemand[id] {
 			anyShort = true
 		}
-		// While the host is short only a guest that is short itself grows: one
-		// that merely lacks its headroom waits, so a shrink into the headroom
-		// is not undone in the next round.
+		// While the host is in pressure only a guest that is short itself
+		// grows; one that merely lacks its headroom waits.
 		if entry.Limit < fair[id] && (!pressure || short[id]) {
-			reason = "guest needs memory"
+			gap[id] = fair[id] - entry.Limit
+			growth += gap[id]
+		}
+		result.report[id] = vmAllocation{Working: working[id], Demand: demand[id], Held: heldDemand[id], Fair: fair[id], Limit: entry.Limit, Target: entry.Limit}
+		if gap[id] == 0 && entry.Limit < fair[id] {
+			result.backlog += fair[id] - entry.Limit
+		}
+	}
+	// Growth is at once within what the host has free above hostKeep, short
+	// guests first; the rest of a guest's way to its fair allocation follows
+	// as memory taken back from others is freed, in the next rounds.
+	free := units(max(0, state.HostAvailable-keep))
+	for _, shortTier := range []bool{true, false} {
+		var ids []string
+		var gaps []int64
+		for _, id := range adjustable {
+			if gap[id] > 0 && short[id] == shortTier {
+				ids = append(ids, id)
+				gaps = append(gaps, unitsUp(gap[id]))
+			}
+		}
+		if len(ids) == 0 {
+			continue
+		}
+		var wanted int64
+		for _, n := range gaps {
+			wanted += n
+		}
+		granted := waterFill(min(free, wanted), make([]int64, len(ids)), gaps)
+		for i, id := range ids {
+			free -= granted[i]
+			entry := state.Instances[id]
+			to := min(fair[id], entry.Limit+bytesOf(granted[i]))
+			result.backlog += fair[id] - to
+			if to <= entry.Limit {
+				continue
+			}
+			reason := "guest needs memory"
 			if entry.NestedShort > 0 {
 				reason = "nested guest needs memory"
 			}
 			if fair[id] < heldDemand[id] {
 				reason = "fair share of a short host"
 			}
-			grow = append(grow, memoryChange{id: id, from: entry.Limit, to: fair[id], reason: reason})
-			growth += fair[id] - entry.Limit
+			grow = append(grow, memoryChange{id: id, from: entry.Limit, to: to, reason: reason})
+			report := result.report[id]
+			report.Target, report.Reason = to, reason
+			result.report[id] = report
 		}
-		result.report[id] = vmAllocation{Working: working[id], Demand: demand[id], Held: heldDemand[id], Fair: fair[id], Limit: entry.Limit, Target: max(entry.Limit, fair[id]), Reason: reason}
 	}
 
 	// What each shrinkable VM may give, by reason, in units.
@@ -354,14 +423,20 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 		}
 		note(used, why)
 	}
-	aboveDemand := func(id string) int64 { return demand[id] }
+	// Every floor is at least the fair allocation: a VM above it is never
+	// taken below it, so nothing taken is grown back in the next round.
+	aboveDemand := func(id string) int64 { return max(demand[id], fair[id]) }
 	aboveFair := func(id string) int64 { return fair[id] }
-	aboveWorking := func(string) int64 { return 0 }
-	// Host pressure first, so that its reason wins a tie: by tiers, never below
-	// the working set plus the minimum headroom.
-	if pressure {
-		takeByPriority(unitsUp(max(2*reserve-state.HostAvailable, step)), [][]string{idle, inUse, idle, inUse},
-			[]func(string) int64{aboveDemand, aboveDemand, aboveWorking, aboveWorking}, "host memory is low")
+	// Host memory first, so that its reason wins a tie: early, only what lies
+	// above the demands; in pressure also the headroom above the working sets.
+	if reclaim {
+		need := max(2*reserve-state.HostAvailable, step)
+		tiers, floors := [][]string{idle, inUse}, []func(string) int64{aboveDemand, aboveDemand}
+		if pressure {
+			need = max(need, max(capacity-sumLimits, keep)-state.HostAvailable)
+			tiers, floors = append(tiers, idle, inUse), append(floors, aboveFair, aboveFair)
+		}
+		takeByPriority(unitsUp(need), tiers, floors, "host memory is low")
 	}
 	// Capacity needed: others grow, or are held below their demand, while the
 	// limits exceed what the host can give. Without either nothing is taken:
@@ -381,7 +456,7 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 			continue
 		}
 		to := limits[id] - bytesOf(n)
-		to = max(to, floorOf(id, 0))
+		to = max(to, floorOf(id, fair[id]))
 		if to >= limits[id] {
 			continue
 		}
