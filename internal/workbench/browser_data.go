@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
 
@@ -27,45 +28,65 @@ import (
 // in <profile>/browser-data.json, served by /api/browser/data-settings.
 // Guest calls follow the locking model: outside s.op, only while the
 // environment is ready and no job runs. A reset restarts the browser and so
-// runs as a job. Native guests and older guest controllers report the
-// capability as unavailable and keep the earlier screens.
+// runs as a job, and so does a clear (browser-clear): stop, reset, a network
+// check and other windows wait for it, and every window follows the same one.
+// Native guests and older guest controllers report the capability as
+// unavailable and keep the earlier screens.
 
 const browserDataLimit = browserResponseLimit
 
 var (
-	browserDataModes  = []string{"capabilities", "summary", "clear", "clear-sites", "job", "sites", "site", "cookie", "history", "history-delete", "reset"}
+	browserDataModes  = []string{"capabilities", "summary", "clear", "clear-sites", "job", "sites", "site", "cookie", "history", "history-url", "history-delete", "reset"}
 	browserDataTypes  = []string{"history", "site", "cache", "downloads"}
 	browserDataRanges = map[string]time.Duration{"hour": time.Hour, "day": 24 * time.Hour, "week": 7 * 24 * time.Hour, "month": 28 * 24 * time.Hour, "all": 0}
 	browserDataHost   = regexp.MustCompile(`^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$|^\[[0-9a-f:.]+\]$`)
 	browserDataJobID  = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	browserDataKey    = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	errBrowserDataOld = errors.New("browser data unsupported by the guest")
-	browserDataMu     sync.Mutex
+	browserHistoryID  = regexp.MustCompile(`^[0-9]{1,20}$`)
+	errBrowserDataOld = errors.New("浏览器组件不支持管理浏览数据，请更新环境组件")
+	// errBrowserDataSettingsUnreadable is a settings file that exists but
+	// cannot be read or understood. It is left as it is: only a missing file
+	// means the defaults, so the kept sites are never replaced by none.
+	errBrowserDataSettingsUnreadable = errors.New("浏览数据设置暂时读不出来，请稍后重试；保持登录的网站列表没有改动")
+	browserDataMu                    sync.Mutex
+	// browserRestartLimit bounds the wait for a reset's restart and
+	// browserClearLimit a clear's; tests shorten them.
+	browserRestartLimit = 90 * time.Second
+	browserClearLimit   = 150 * time.Second
 )
 
 type browserDataInput struct {
-	Mode     string   `json:"mode"`
-	Session  string   `json:"session,omitempty"`
-	Range    string   `json:"range,omitempty"`
-	Since    int64    `json:"since,omitempty"`
-	Types    []string `json:"types,omitempty"`
-	Protect  string   `json:"protect,omitempty"`
-	Keep     []string `json:"keep,omitempty"`
-	Sites    []string `json:"sites,omitempty"`
-	Site     string   `json:"site,omitempty"`
-	Key      string   `json:"key,omitempty"`
-	Action   string   `json:"action,omitempty"`
-	Query    string   `json:"query,omitempty"`
-	Sort     string   `json:"sort,omitempty"`
-	Page     int      `json:"page,omitempty"`
-	Before   int64    `json:"before,omitempty"`
-	Limit    int      `json:"limit,omitempty"`
-	URLs     []string `json:"urls,omitempty"`
-	Host     string   `json:"host,omitempty"`
-	Start    int64    `json:"start,omitempty"`
-	End      int64    `json:"end,omitempty"`
-	ID       string   `json:"id,omitempty"`
-	Remember bool     `json:"remember,omitempty"`
+	Mode     string                `json:"mode"`
+	Session  string                `json:"session,omitempty"`
+	Range    string                `json:"range,omitempty"`
+	Since    int64                 `json:"since,omitempty"`
+	Types    []string              `json:"types,omitempty"`
+	Protect  string                `json:"protect,omitempty"`
+	Keep     []string              `json:"keep,omitempty"`
+	Sites    []string              `json:"sites,omitempty"`
+	Site     string                `json:"site,omitempty"`
+	Key      string                `json:"key,omitempty"`
+	Action   string                `json:"action,omitempty"`
+	Query    string                `json:"query,omitempty"`
+	Sort     string                `json:"sort,omitempty"`
+	Page     int                   `json:"page,omitempty"`
+	Before   int64                 `json:"before,omitempty"`
+	Limit    int                   `json:"limit,omitempty"`
+	URLs     []string              `json:"urls,omitempty"`
+	Entries  []browserHistoryEntry `json:"entries,omitempty"`
+	Time     float64               `json:"time,omitempty"`
+	Host     string                `json:"host,omitempty"`
+	Start    int64                 `json:"start,omitempty"`
+	End      int64                 `json:"end,omitempty"`
+	ID       string                `json:"id,omitempty"`
+	Remember bool                  `json:"remember,omitempty"`
+}
+
+// A history entry by its id and last visit, for an address too long to send
+// whole (the guest cuts addresses past 2048 characters in its replies).
+type browserHistoryEntry struct {
+	ID   string  `json:"id"`
+	Time float64 `json:"time"`
 }
 
 type browserKeptSite struct {
@@ -79,13 +100,20 @@ type browserDataDefaults struct {
 }
 
 type browserDataAuto struct {
-	Enabled bool      `json:"enabled"`
-	Trigger string    `json:"trigger"`
-	Days    int       `json:"days"`
-	Types   []string  `json:"types"`
-	Last    time.Time `json:"last,omitzero"`
-	Result  string    `json:"result,omitempty"`
+	Enabled bool     `json:"enabled"`
+	Trigger string   `json:"trigger"`
+	Days    int      `json:"days"`
+	Types   []string `json:"types"`
+	// What the host stores about the last automatic run, all of it made by
+	// the host: the time of the last success, the time and outcome of the last
+	// attempt (done, failed, timeout or unsupported) and the bytes it freed.
+	Last      time.Time `json:"last,omitzero"`
+	Attempted time.Time `json:"attempted,omitzero"`
+	Result    string    `json:"result,omitempty"`
+	Freed     int64     `json:"freed,omitempty"`
 }
+
+var browserAutoResults = []string{"done", "failed", "timeout", "unsupported"}
 
 type browserDataSettings struct {
 	Defaults browserDataDefaults `json:"defaults"`
@@ -118,14 +146,34 @@ func readLimitedFile(path string, limit int64) ([]byte, error) {
 	return data, err
 }
 
-func (s *Server) loadBrowserDataSettings() browserDataSettings {
-	settings := defaultBrowserDataSettings()
+// loadBrowserDataSettings reads the host settings. A missing file is the
+// defaults; any other failure (permissions, size, format, a field of the
+// wrong type) is errBrowserDataSettingsUnreadable, and the file stays as it
+// is: callers do not write over it.
+func (s *Server) loadBrowserDataSettings() (browserDataSettings, error) {
 	data, err := readLimitedFile(s.browserDataSettingsPath(), 256<<10)
-	if err != nil || json.Unmarshal(data, &settings) != nil {
-		return defaultBrowserDataSettings()
+	if errors.Is(err, os.ErrNotExist) {
+		return defaultBrowserDataSettings(), nil
+	}
+	settings := defaultBrowserDataSettings()
+	if err == nil {
+		err = json.Unmarshal(data, &settings)
+	}
+	if err != nil {
+		fault := "format"
+		switch {
+		case errors.Is(err, os.ErrPermission):
+			fault = "permission"
+		case err.Error() == "file too large":
+			fault = "size"
+		case data == nil:
+			fault = "read"
+		}
+		diagnostics.Log("warn", "browser-data", "settings unreadable: "+fault)
+		return browserDataSettings{}, errBrowserDataSettingsUnreadable
 	}
 	settings.normalize()
-	return settings
+	return settings, nil
 }
 
 func (b *browserDataSettings) normalize() {
@@ -141,9 +189,16 @@ func (b *browserDataSettings) normalize() {
 	if !slices.Contains([]int{1, 7, 30}, b.Auto.Days) {
 		b.Auto.Days = 7
 	}
+	if !slices.Contains(browserAutoResults, b.Auto.Result) {
+		b.Auto.Result = ""
+	}
+	b.Auto.Freed = min(max(b.Auto.Freed, 0), 1<<50)
+	// Stored entries are checked for form only: the rules for adding one
+	// (browserKeptDomain) may grow, and a kept site must not vanish because
+	// of it.
 	kept := []browserKeptSite{}
 	for _, entry := range b.Keep {
-		if domain, err := browserKeptDomain(entry.Domain); err == nil && !slices.ContainsFunc(kept, func(k browserKeptSite) bool { return k.Domain == domain }) {
+		if domain, err := browserDomainForm(entry.Domain); err == nil && !slices.ContainsFunc(kept, func(k browserKeptSite) bool { return k.Domain == domain }) {
 			kept = append(kept, browserKeptSite{Domain: domain, Added: entry.Added})
 		}
 	}
@@ -162,8 +217,58 @@ func validBrowserDataTypes(types []string) []string {
 
 // A kept site is a domain: what someone types or copies (a URL, a host with a
 // port, a leading "*." or "www.") becomes the host. A domain also keeps its
-// subdomains, so "www." is dropped.
+// subdomains, so "www." is dropped. A host Chromium cannot take as an origin
+// (a last label of digits that is not a full IPv4 address) and a public
+// suffix are refused.
 func browserKeptDomain(value string) (string, error) {
+	domain, err := browserDomainForm(value)
+	if err != nil {
+		return "", err
+	}
+	if !browserHostUsable(domain) {
+		return "", errors.New("请输入网站域名或完整的 IP 地址，例如 github.com 或 192.168.1.10")
+	}
+	if browserPublicSuffix(domain) {
+		return "", fmt.Errorf("%s 是公共后缀，下面是许多互不相干的网站，不能整个保留。请输入具体的网站，例如 example.%s", domain, domain)
+	}
+	return domain, nil
+}
+
+// Public suffixes refused as kept domains, since keeping one keeps every
+// site under it: a generic second level under a two-letter country code
+// (co.uk, com.cn, ac.jp, …) and common hosting suffixes, the same lists the
+// guest groups sites by (browser-data.mjs siteOf). The full public suffix
+// list has thousands more; those are not recognised (docs/guide/browser.md).
+var (
+	browserHostingSuffixes = []string{"github.io", "gitlab.io", "vercel.app", "netlify.app", "pages.dev", "workers.dev", "herokuapp.com",
+		"appspot.com", "web.app", "firebaseapp.com", "blogspot.com", "azurewebsites.net", "cloudfront.net", "onrender.com", "fly.dev", "glitch.me"}
+	browserSecondLevels = []string{"com", "net", "org", "gov", "edu", "ac", "co", "ne", "or", "go", "mil", "gen", "biz", "info", "nom", "ltd", "plc", "sch"}
+)
+
+func browserPublicSuffix(domain string) bool {
+	labels := strings.Split(domain, ".")
+	if len(labels) != 2 {
+		return false
+	}
+	return slices.Contains(browserHostingSuffixes, domain) ||
+		(len(labels[1]) == 2 && strings.Trim(labels[1], "abcdefghijklmnopqrstuvwxyz") == "" && slices.Contains(browserSecondLevels, labels[0]))
+}
+
+// A host whose last label is all digits is read as an IPv4 address by
+// browsers; only a full dotted quad is one (Chromium refuses a removal for
+// "https://foo.123" or "https://1.2.3" whole).
+func browserHostUsable(host string) bool {
+	labels := strings.Split(host, ".")
+	if last := labels[len(labels)-1]; last == "" || strings.Trim(last, "0123456789") != "" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return len(labels) == 4 && ip != nil && ip.To4() != nil
+}
+
+// browserDomainForm is the form of a kept domain, without the rules for
+// adding one.
+func browserDomainForm(value string) (string, error) {
 	value = strings.ToLower(strings.TrimSpace(value))
 	if strings.Contains(value, "://") {
 		parsed, err := url.Parse(value)
@@ -183,8 +288,13 @@ func browserKeptDomain(value string) (string, error) {
 	return value, nil
 }
 
+// A site as the guest names it: a host, or an IPv6 address with or without
+// brackets.
 func browserDataSite(value string) bool {
-	return value != "" && len(value) <= 253 && browserDataHost.MatchString(value)
+	if strings.Contains(value, ":") {
+		return len(value) <= 64 && net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(value, "["), "]")) != nil
+	}
+	return value != "" && len(value) <= 253 && browserDataHost.MatchString(value) && browserHostUsable(value)
 }
 
 func (in *browserDataInput) validate(now time.Time) error {
@@ -241,8 +351,21 @@ func (in *browserDataInput) validate(now time.Time) error {
 		if !browserDataJobID.MatchString(in.ID) {
 			return invalid
 		}
+	case "history-url":
+		if !browserHistoryID.MatchString(in.ID) || in.Time < 0 || in.Time > 1e15 {
+			return invalid
+		}
 	case "history-delete":
 		switch {
+		case len(in.Entries) > 0:
+			if len(in.Entries) > 100 || len(in.URLs) > 0 || in.Host != "" || in.End != 0 {
+				return invalid
+			}
+			for _, entry := range in.Entries {
+				if !browserHistoryID.MatchString(entry.ID) || entry.Time < 0 || entry.Time > 1e15 {
+					return invalid
+				}
+			}
 		case len(in.URLs) > 0:
 			if len(in.URLs) > 100 || in.Host != "" || in.End != 0 {
 				return invalid
@@ -301,8 +424,12 @@ func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]a
 		if in.Limit == 0 {
 			body["limit"] = 100
 		}
+	case "history-url":
+		body["id"], body["time"] = in.ID, in.Time
 	case "history-delete":
-		if len(in.URLs) > 0 {
+		if len(in.Entries) > 0 {
+			body["entries"] = in.Entries
+		} else if len(in.URLs) > 0 {
 			body["urls"] = in.URLs
 		} else if in.Host != "" {
 			body["host"] = in.Host
@@ -311,6 +438,13 @@ func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]a
 		}
 	}
 	return body
+}
+
+// A regular clear of site data or the cache excludes the kept sites, so it
+// needs the settings to be readable.
+func (in *browserDataInput) needsKeptSites() bool {
+	return in.Mode == "clear" && in.Protect != "none" && in.Session != "private" &&
+		(slices.Contains(in.Types, "site") || slices.Contains(in.Types, "cache"))
 }
 
 type browserDataGuestError struct{ message string }
@@ -365,12 +499,29 @@ func (s *Server) browserData(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	ready, token := s.ready, s.credentials.Token
 	s.mu.Unlock()
+	// The clear a browser-clear job runs is followed here, also while the
+	// host is busy with it, and read back after it ended.
+	if input.Mode == "job" {
+		if reply := s.browserClears.status(input.ID); reply != nil {
+			writeJSONBytes(w, reply)
+			return
+		}
+	}
 	if !ready {
 		http.Error(w, errBrowserNotReady.Error(), http.StatusConflict)
 		return
 	}
 	if native {
 		http.Error(w, "此环境的浏览器使用自己的设置页管理浏览数据", http.StatusConflict)
+		return
+	}
+	settings, settingsErr := s.loadBrowserDataSettings()
+	if settingsErr != nil && input.needsKeptSites() {
+		http.Error(w, settingsErr.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if input.Mode == "clear" || input.Mode == "clear-sites" {
+		s.browserClear(w, token, input, settings)
 		return
 	}
 	if s.busy() {
@@ -381,27 +532,115 @@ func (s *Server) browserData(w http.ResponseWriter, r *http.Request) {
 		s.resetBrowser(w)
 		return
 	}
-	settings := s.loadBrowserDataSettings()
 	timeout := 15 * time.Second
 	if input.Mode == "history-delete" || input.Mode == "summary" || input.Mode == "sites" {
 		timeout = 45 * time.Second
 	}
 	data, err := s.browserDataGuest(r.Context(), token, input.guestBody(settings), timeout)
-	if errors.Is(err, errBrowserDataOld) {
-		if input.Mode == "capabilities" {
-			jsonReply(w, map[string]any{"available": false, "reason": "update"})
-			return
-		}
-		http.Error(w, "浏览器组件不支持管理浏览数据，请更新环境组件", http.StatusConflict)
+	if errors.Is(err, errBrowserDataOld) && input.Mode == "capabilities" {
+		jsonReply(w, map[string]any{"available": false, "reason": "update"})
 		return
 	}
 	if err != nil {
-		status := http.StatusBadGateway
-		var guest browserDataGuestError
-		if errors.As(err, &guest) {
-			status = http.StatusConflict
+		browserDataFailure(w, err)
+		return
+	}
+	writeJSONBytes(w, data)
+}
+
+func writeJSONBytes(w http.ResponseWriter, data []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
+}
+
+// browserDataFailure answers a failed guest call: an older controller and the
+// guest's own sentences as a conflict, a lost guest as a bad gateway.
+func browserDataFailure(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	var guest browserDataGuestError
+	if errors.Is(err, errBrowserDataOld) || errors.As(err, &guest) {
+		status = http.StatusConflict
+	}
+	http.Error(w, err.Error(), status)
+}
+
+// browserClearTracker follows the clear a browser-clear job runs: the host
+// job, the guest's job id and the guest's latest reply, or a failure the host
+// wrote when it lost track.
+type browserClearTracker struct {
+	mu    sync.Mutex
+	job   string
+	id    string
+	reply []byte
+}
+
+func (t *browserClearTracker) set(job, id string, reply []byte) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.job, t.id, t.reply = job, id, reply
+}
+
+func (t *browserClearTracker) status(id string) []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.id == "" || t.id != id {
+		return nil
+	}
+	return t.reply
+}
+
+func (t *browserClearTracker) forJob(job string) []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.job == "" || t.job != job {
+		return nil
+	}
+	return t.reply
+}
+
+// fail records an outcome the host decided (never guest text) and returns it.
+func (t *browserClearTracker) fail(job, id, message string) error {
+	reply, _ := json.Marshal(map[string]any{"job": map[string]any{"id": id, "state": "failed", "error": message}})
+	t.set(job, id, reply)
+	return errors.New(message)
+}
+
+type browserDataJobReply struct {
+	Job struct {
+		ID     string `json:"id"`
+		State  string `json:"state"`
+		Result struct {
+			FreedBytes float64 `json:"freedBytes"`
+		} `json:"result"`
+	} `json:"job"`
+}
+
+// browserClear starts a clear as a host job and answers with the guest's
+// job, which the window then polls. A clear asked for while another runs
+// (another window, a double click) follows that one instead.
+func (s *Server) browserClear(w http.ResponseWriter, token string, input browserDataInput, settings browserDataSettings) {
+	body := input.guestBody(settings)
+	started := make(chan error, 1)
+	job, err := s.submitJob("browser-clear", func() error { return s.runBrowserClear(token, body, started) })
+	if err != nil {
+		if running := s.jobs.snapshot(); errors.Is(err, errJobBusy) && running.Running && running.Kind == "browser-clear" {
+			for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+				if reply := s.browserClears.forJob(running.ID); reply != nil {
+					writeJSONBytes(w, reply)
+					return
+				}
+			}
 		}
-		http.Error(w, err.Error(), status)
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	select {
+	case err = <-started:
+	case <-time.After(30 * time.Second):
+		err = errors.New("浏览器没有响应，请确认环境仍在运行后重试")
+	}
+	if err != nil {
+		browserDataFailure(w, err)
 		return
 	}
 	if input.Mode == "clear" && input.Remember && (input.Session == "" || input.Session == "normal") {
@@ -415,14 +654,99 @@ func (s *Server) browserData(w http.ResponseWriter, r *http.Request) {
 			return nil
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(data)
+	writeJSONBytes(w, s.browserClears.forJob(job.ID))
+}
+
+// runBrowserClear is the browser-clear job: it starts the guest's clear and
+// follows it to the end.
+func (s *Server) runBrowserClear(token string, body map[string]any, started chan<- error) error {
+	execution := s.jobs.execution()
+	s.setMessage("正在清除浏览数据…")
+	data, err := s.browserDataGuest(execution.ctx, token, body, 15*time.Second)
+	var reply browserDataJobReply
+	if err == nil && (json.Unmarshal(data, &reply) != nil || !browserDataJobID.MatchString(reply.Job.ID)) {
+		err = errors.New("浏览数据结果无效，请重试")
+	}
+	if err != nil {
+		started <- err
+		return err
+	}
+	s.browserClears.set(execution.id, reply.Job.ID, data)
+	started <- nil
+	return s.followBrowserClear(token, execution.id, reply.Job.ID)
+}
+
+// followBrowserClear polls the guest's clear to its end on a context of its
+// own, bounded by browserClearLimit: a stop that preempts this job waits for
+// the clear rather than stopping Chromium in the middle of it.
+func (s *Server) followBrowserClear(token, job, id string) error {
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), browserClearLimit)
+	defer cancel()
+	lease := s.browserLease("正在清除浏览数据…")
+	failures := 0
+	for {
+		select {
+		case <-ctx.Done():
+			return s.browserClears.fail(job, id, "清除用时过长，结果未知。请稍后重新打开查看")
+		case <-time.After(250 * time.Millisecond):
+		}
+		lease.check()
+		data, err := s.browserDataGuest(ctx, token, map[string]any{"mode": "job", "id": id}, 10*time.Second)
+		var status browserDataJobReply
+		if err == nil && json.Unmarshal(data, &status) == nil && status.Job.ID == id {
+			failures = 0
+			s.browserClears.set(job, id, data)
+			switch status.Job.State {
+			case "running":
+				continue
+			case "done":
+				return nil
+			}
+			return errors.New("浏览数据没有全部清除，详情见浏览数据窗口")
+		}
+		if failures++; failures >= 3 {
+			return s.browserClears.fail(job, id, "浏览器没有响应，清除结果未知。请稍后重新打开查看")
+		}
+	}
+}
+
+// browserLeaseWatch notes, in the running job's message, when the network
+// gate's lease ran out while a browser job waited: the monitor does not renew
+// it during a job, so networking closes until the full recheck the monitor
+// schedules once the job is over.
+type browserLeaseWatch struct {
+	s        *Server
+	deadline time.Time
+	message  string
+	noted    bool
+}
+
+func (s *Server) browserLease(message string) *browserLeaseWatch {
+	watch := &browserLeaseWatch{s: s, message: message}
+	s.mu.Lock()
+	if gate := s.safety.Gate; gate != nil && gate.Mode != cage.GateClosed && !gate.Until.IsZero() {
+		watch.deadline = gate.Deadline()
+	}
+	s.mu.Unlock()
+	return watch
+}
+
+func (l *browserLeaseWatch) check() {
+	if l.noted || l.deadline.IsZero() || time.Now().Before(l.deadline) {
+		return
+	}
+	l.noted = true
+	l.s.setMessage(l.message + "联网授权已到期，外网暂时关闭，完成后会自动重新检查联网")
+	diagnostics.Log("warn", "browser-data", "network lease ran out during a browser job")
 }
 
 func (s *Server) updateBrowserDataSettings(change func(*browserDataSettings) error) error {
 	browserDataMu.Lock()
 	defer browserDataMu.Unlock()
-	settings := s.loadBrowserDataSettings()
+	settings, err := s.loadBrowserDataSettings()
+	if err != nil {
+		return err
+	}
 	if err := change(&settings); err != nil {
 		return err
 	}
@@ -433,7 +757,12 @@ func (s *Server) updateBrowserDataSettings(change func(*browserDataSettings) err
 // Host data only: it works while the environment is stopped, like favourites.
 func (s *Server) browserDataSettingsRoute(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		jsonReply(w, s.loadBrowserDataSettings())
+		settings, err := s.loadBrowserDataSettings()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		jsonReply(w, settings)
 		return
 	}
 	var input struct {
@@ -480,20 +809,32 @@ func (s *Server) browserDataSettingsRoute(w http.ResponseWriter, r *http.Request
 		return nil
 	})
 	var inputError browserInputError
-	if errors.As(err, &inputError) {
+	switch {
+	case errors.As(err, &inputError):
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
-	}
-	if err != nil {
+	case errors.Is(err, errBrowserDataSettingsUnreadable):
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	case err != nil:
 		http.Error(w, "保存浏览数据设置失败，请重试", http.StatusInternalServerError)
 		return
 	}
-	jsonReply(w, s.loadBrowserDataSettings())
+	settings, err := s.loadBrowserDataSettings()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	jsonReply(w, settings)
 }
 
 // A reset restarts the browser controller on a fresh profile. It is a job:
 // the environment monitor does not take the restart for a failure, and other
-// operations wait. Open sign-in pages would be lost, so they block it.
+// operations wait. Open sign-in pages would be lost, so they block it. Once
+// the controller accepted it, the reset happens whatever the job does next:
+// the job follows the restart on its own bound (a stop waits for it), re-
+// attaches the new controller as after a crash and reports the outcome the
+// controller wrote; when it gives up it cancels the request.
 func (s *Server) resetBrowser(w http.ResponseWriter) {
 	job, err := s.submitJob("browser-reset", func() error {
 		ctx := s.operationContext()
@@ -520,12 +861,48 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 		}) {
 			return errors.New("请先完成或关闭账号授权页面，再重置浏览器")
 		}
-		if _, err = s.browserDataGuest(ctx, token, map[string]any{"mode": "reset"}, 10*time.Second); err != nil {
+		id := randomToken()[:16]
+		if _, err = s.browserDataGuest(ctx, token, map[string]any{"mode": "reset", "id": id}, 10*time.Second); err != nil {
+			if errors.Is(err, errBrowserDataOld) {
+				return errors.New("浏览器组件不支持重置，请先更新环境组件")
+			}
 			return err
 		}
 		diagnostics.Log("info", "browser-data", "reset requested")
-		s.setMessage("正在以全新资料重新启动浏览器…")
-		return s.waitBrowserRestart(ctx, token, 90*time.Second)
+		// The controller restarts now: until it is back, the host and the
+		// page treat the browser as not ready, as after a controller crash.
+		s.mu.Lock()
+		s.ready = false
+		s.mu.Unlock()
+		const restarting = "正在以全新资料重新启动浏览器…"
+		s.setMessage(restarting)
+		wait, cancel := context.WithTimeout(s.lifetimeContext(), browserRestartLimit)
+		defer cancel()
+		if err := s.waitBrowserRestart(wait, token, s.browserLease(restarting)); err != nil {
+			giveUp, done := context.WithTimeout(s.lifetimeContext(), 5*time.Second)
+			defer done()
+			_, _ = s.browserDataGuest(giveUp, token, map[string]any{"mode": "reset-cancel", "id": id}, 5*time.Second)
+			diagnostics.Log("warn", "browser-data", "reset restart timed out")
+			return errors.New("浏览器重新启动用时过长，暂时无法确认是否已重置。浏览器恢复后会自动重新连接，请到时再查看")
+		}
+		if err := s.reattachBrowser(wait, token); err != nil {
+			return err
+		}
+		var outcome struct {
+			State string `json:"state"`
+		}
+		data, err := s.browserDataGuest(wait, token, map[string]any{"mode": "reset-status", "id": id}, 5*time.Second)
+		if err != nil || json.Unmarshal(data, &outcome) != nil {
+			return errors.New("浏览器已重新启动，但无法确认是否已重置，请重新打开浏览数据查看")
+		}
+		diagnostics.Log("info", "browser-data", "reset outcome="+map[string]string{"done": "done", "failed": "failed", "expired": "expired"}[outcome.State])
+		switch outcome.State {
+		case "done":
+			return nil
+		case "failed":
+			return errors.New("浏览器资料未能重置（客机磁盘空间或权限问题），仍在使用原来的资料。请重试；仍失败时重启环境")
+		}
+		return errors.New("浏览器重新启动了，但没有完成重置，仍在使用原来的资料。请重试")
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusConflict)
@@ -534,19 +911,19 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 	jsonReply(w, job)
 }
 
-// The controller closes Chromium and exits; systemd starts it again after
-// RestartSec. Wait for the old one to stop answering, then for the new one.
-func (s *Server) waitBrowserRestart(ctx context.Context, token string, limit time.Duration) error {
-	deadline := time.Now().Add(limit)
+// The controller closes Chromium and exits (or stops a Chromium that does
+// not exit); systemd starts it again after RestartSec. Wait for the old one
+// to stop answering, then for the new one.
+func (s *Server) waitBrowserRestart(ctx context.Context, token string, lease *browserLeaseWatch) error {
 	down := false
-	for time.Now().Before(deadline) {
+	for {
+		lease.check()
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, err := s.browserClient().request(probe, token, http.MethodGet, "/health", nil)
 		cancel()
 		if err != nil {
 			down = true
 		} else if down {
-			diagnostics.Log("info", "browser-data", "reset finished")
 			return nil
 		}
 		select {
@@ -555,15 +932,39 @@ func (s *Server) waitBrowserRestart(ctx context.Context, token string, limit tim
 		case <-time.After(400 * time.Millisecond):
 		}
 	}
-	return errors.New("浏览器重新启动用时过长。请稍后重新打开浏览器；仍无法使用时重启环境")
+}
+
+// reattachBrowser follows a restarted browser controller as attach does
+// after a controller crash: the homepage again, ready again (the page
+// rebuilds its event stream when ready changes) and the window's visibility
+// sent again, since a new controller starts with its window shown.
+func (s *Server) reattachBrowser(ctx context.Context, token string) error {
+	s.mu.Lock()
+	home := browserHomeURL(s.preferences)
+	s.mu.Unlock()
+	if err := s.setBrowserHome(ctx, token, home); err != nil {
+		return errors.New("浏览器已重新启动，但暂时连不上，稍后会自动重新连接")
+	}
+	s.mu.Lock()
+	s.ready = true
+	s.mu.Unlock()
+	s.browserViews.reset()
+	s.browserViews.background(s.changeBrowserVisibility)
+	return nil
 }
 
 // Automatic cleaning, off by default. Called inside the stop job (Linux,
 // before the guest stops) and after a start; "days" runs at the first of
 // either once the interval has passed. Best effort and bounded: a failure is
-// recorded and never fails the stop or the start.
+// recorded and never fails the stop or the start. At stop the pages are not
+// reloaded: a page reloaded then only stores new data before Chromium shuts
+// down. What is stored about the run is made by the host.
 func (s *Server) browserDataAutoClean(trigger string) {
-	settings := s.loadBrowserDataSettings()
+	settings, err := s.loadBrowserDataSettings()
+	if err != nil {
+		diagnostics.Log("warn", "browser-data", "auto-clean skipped: settings unreadable")
+		return
+	}
 	auto := settings.Auto
 	if !auto.Enabled || len(auto.Types) == 0 || s.macosGuest != nil || s.windowsGuest != nil {
 		return
@@ -580,48 +981,50 @@ func (s *Server) browserDataAutoClean(trigger string) {
 	if !ready {
 		return
 	}
+	s.setMessage("正在自动清理浏览数据…")
 	ctx, cancel := context.WithTimeout(s.operationContext(), 20*time.Second)
 	defer cancel()
 	input := browserDataInput{Mode: "clear", Types: auto.Types}
-	result := "failed"
-	data, err := s.browserDataGuest(ctx, token, input.guestBody(settings), 10*time.Second)
-	var started struct {
-		Job struct {
-			ID string `json:"id"`
-		} `json:"job"`
+	body := input.guestBody(settings)
+	if trigger == "stop" {
+		body["reload"] = false
 	}
-	if err == nil && json.Unmarshal(data, &started) == nil && started.Job.ID != "" {
-		for ctx.Err() == nil {
+	result, freed := "failed", int64(0)
+	data, err := s.browserDataGuest(ctx, token, body, 10*time.Second)
+	var started browserDataJobReply
+	if errors.Is(err, errBrowserDataOld) {
+		result = "unsupported"
+	} else if err == nil && json.Unmarshal(data, &started) == nil && browserDataJobID.MatchString(started.Job.ID) {
+		for {
 			data, err = s.browserDataGuest(ctx, token, map[string]any{"mode": "job", "id": started.Job.ID}, 5*time.Second)
-			var status struct {
-				Job struct {
-					State  string `json:"state"`
-					Result struct {
-						FreedBytes int64 `json:"freedBytes"`
-					} `json:"result"`
-				} `json:"job"`
-			}
+			var status browserDataJobReply
 			if err != nil || json.Unmarshal(data, &status) != nil {
 				break
 			}
 			if status.Job.State != "running" {
-				result = status.Job.State
-				diagnostics.Log("info", "browser-data", fmt.Sprintf("auto-clean trigger=%s types=%s state=%s freed=%d", trigger, strings.Join(auto.Types, ","), result, status.Job.Result.FreedBytes))
+				if status.Job.State == "done" {
+					result, freed = "done", int64(min(max(status.Job.Result.FreedBytes, 0), 1<<50))
+				}
 				break
 			}
 			select {
 			case <-ctx.Done():
 			case <-time.After(200 * time.Millisecond):
 			}
+			if ctx.Err() != nil {
+				break
+			}
 		}
 	}
-	if result != "done" {
-		diagnostics.Log("warn", "browser-data", fmt.Sprintf("auto-clean trigger=%s state=%s", trigger, result))
+	if result != "done" && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result = "timeout"
 	}
+	diagnostics.Log("info", "browser-data", fmt.Sprintf("auto-clean trigger=%s types=%s result=%s freed=%d", trigger, strings.Join(auto.Types, ","), result, freed))
+	now := time.Now().UTC()
 	_ = s.updateBrowserDataSettings(func(settings *browserDataSettings) error {
-		settings.Auto.Result = result
+		settings.Auto.Result, settings.Auto.Attempted, settings.Auto.Freed = result, now, freed
 		if result == "done" {
-			settings.Auto.Last = time.Now().UTC()
+			settings.Auto.Last = now
 		}
 		return nil
 	})

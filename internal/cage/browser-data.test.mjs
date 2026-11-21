@@ -250,6 +250,8 @@ test("finding 2: IP and numeric hosts never get a www. origin; every origin hand
   const siteRemove = evaluations().filter(input => input.op === "remove").at(-1);
   assert.deepEqual(siteRemove.origins.filter(origin => !validOrigin(origin)), []);
   assert.ok(siteRemove.origins.includes("http://127.0.0.1") && siteRemove.origins.includes("https://192.168.1.10"));
+  await finish(data, await data.request({ mode: "clear-sites", sites: ["::1"] }));
+  assert.ok(evaluations().filter(input => input.op === "remove").at(-1).origins.includes("http://[::1]"), "an IPv6 site is cleared by its bracketed origin");
   const before = evaluations().length;
   const onlyInvalid = await finish(data, await data.request({ mode: "clear-sites", sites: ["foo.123"] }));
   assert.equal(onlyInvalid.state, "done");

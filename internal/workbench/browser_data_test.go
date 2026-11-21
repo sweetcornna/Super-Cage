@@ -2,9 +2,11 @@ package workbench
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -106,10 +108,24 @@ func TestBrowserDataRouteBoundary(t *testing.T) {
 	}
 }
 
+// The calls of one mode, in order (a clear is followed by its job polls).
+func browserDataCallsOf(calls []browserDataGuestCall, mode string) []browserDataGuestCall {
+	var found []browserDataGuestCall
+	for _, call := range calls {
+		if call.Body["mode"] == mode {
+			found = append(found, call)
+		}
+	}
+	return found
+}
+
 func TestBrowserDataForwardsOnlyWhatTheGuestNeeds(t *testing.T) {
 	s, calls := browserDataServer(t, func(path string, body map[string]any) (int, string) {
-		if body["mode"] == "clear" {
+		switch body["mode"] {
+		case "clear":
 			return 200, `{"job":{"id":"0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11","state":"running"}}`
+		case "job":
+			return 200, `{"job":{"id":"0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11","state":"done"}}`
 		}
 		return 200, `{"ok":true}`
 	})
@@ -123,7 +139,8 @@ func TestBrowserDataForwardsOnlyWhatTheGuestNeeds(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
 	}
-	got := calls()
+	awaitJobIdle(t, &s.jobs)
+	got := browserDataCallsOf(calls(), "clear")
 	if len(got) != 1 || got[0].Path != "/data" {
 		t.Fatalf("guest calls: %+v", got)
 	}
@@ -138,22 +155,24 @@ func TestBrowserDataForwardsOnlyWhatTheGuestNeeds(t *testing.T) {
 	if body["keepEnabled"] != true {
 		t.Fatalf("keepEnabled default: %v", body["keepEnabled"])
 	}
-	settings := s.loadBrowserDataSettings()
+	settings := mustBrowserDataSettings(t, s)
 	if settings.Defaults.Range != "day" || strings.Join(settings.Defaults.Types, ",") != "history,site" {
 		t.Fatalf("defaults not remembered: %+v", settings.Defaults)
 	}
 	w = request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["site"],"protect":"none","session":"private"}`, true)
-	if w.Code != 200 || calls()[1].Body["keepEnabled"] != false || calls()[1].Body["since"].(float64) != 0 || calls()[1].Body["session"] != "private" {
-		t.Fatalf("unticked keep or private session lost: %d %+v", w.Code, calls()[1].Body)
+	awaitJobIdle(t, &s.jobs)
+	if second := browserDataCallsOf(calls(), "clear")[1].Body; w.Code != 200 || second["keepEnabled"] != false || second["since"].(float64) != 0 || second["session"] != "private" {
+		t.Fatalf("unticked keep or private session lost: %d %+v", w.Code, second)
 	}
-	if s.loadBrowserDataSettings().Defaults.Range != "day" {
+	if mustBrowserDataSettings(t, s).Defaults.Range != "day" {
 		t.Fatal("a private clear must not change the remembered defaults")
 	}
 	w = request(s, "POST", "/api/browser/data", s.origin, `{"mode":"sites","query":"git","page":2,"limit":5}`, true)
-	if w.Code != 200 || calls()[2].Body["sort"] != "size" || calls()[2].Body["query"] != "git" {
-		t.Fatalf("sites: %+v", calls()[2].Body)
+	sites := browserDataCallsOf(calls(), "sites")[0].Body
+	if w.Code != 200 || sites["sort"] != "size" || sites["query"] != "git" {
+		t.Fatalf("sites: %+v", sites)
 	}
-	if _, leaked := calls()[2].Body["keep"]; leaked {
+	if _, leaked := sites["keep"]; leaked {
 		t.Fatal("only a clear carries kept sites")
 	}
 }
@@ -206,7 +225,7 @@ func TestBrowserDataSettingsValidateAndWorkOffline(t *testing.T) {
 		t.Fatalf("settings: %+v", settings)
 	}
 	request(s, "POST", "/api/browser/data-settings", s.origin, `{"action":"keep-remove","domain":"localhost"}`, true)
-	if len(s.loadBrowserDataSettings().Keep) != 0 {
+	if len(mustBrowserDataSettings(t, s).Keep) != 0 {
 		t.Fatal("keep-remove")
 	}
 	info, err := os.Stat(s.browserDataSettingsPath())
@@ -216,8 +235,9 @@ func TestBrowserDataSettingsValidateAndWorkOffline(t *testing.T) {
 	if err := os.WriteFile(s.browserDataSettingsPath(), []byte("{broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.loadBrowserDataSettings(); got.Auto.Enabled || got.Defaults.Range != "day" {
-		t.Fatalf("a damaged file must read as the defaults: %+v", got)
+	// Review 3, finding 4: only a missing file is the defaults.
+	if _, err := s.loadBrowserDataSettings(); !errors.Is(err, errBrowserDataSettingsUnreadable) {
+		t.Fatalf("a damaged file must be reported, not read as the defaults: %v", err)
 	}
 }
 
@@ -247,7 +267,7 @@ func TestBrowserDataAutoCleanRunsOnlyWhenDue(t *testing.T) {
 	if keep, _ := json.Marshal(got[0].Body["keep"]); string(keep) != `["github.com"]` || got[0].Body["keepEnabled"] != true {
 		t.Fatalf("automatic cleaning must honour kept sites: %s", keep)
 	}
-	settings := s.loadBrowserDataSettings()
+	settings := mustBrowserDataSettings(t, s)
 	if settings.Auto.Result != "done" || settings.Auto.Last.IsZero() {
 		t.Fatalf("result not recorded: %+v", settings.Auto)
 	}
@@ -366,9 +386,15 @@ func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
 	if reply := post("/api/browser/data", `{"mode":"clear","session":"normal","range":"week","types":["history","site","cache","downloads"],"protect":"none","remember":true}`); reply["job"].(map[string]any)["id"] != jobID {
 		t.Fatalf("clear reply: %v", reply)
 	}
-	post("/api/browser/data", `{"mode":"clear","session":"normal","range":"hour","types":["history"],"remember":false}`)
-	post("/api/browser/data", `{"mode":"clear","session":"private","range":"all","types":["site","cache"],"remember":false}`)
-	post("/api/browser/data", `{"mode":"clear-sites","session":"normal","sites":["github.com","127.0.0.1"]}`)
+	awaitJobIdle(t, &s.jobs)
+	for _, body := range []string{
+		`{"mode":"clear","session":"normal","range":"hour","types":["history"],"remember":false}`,
+		`{"mode":"clear","session":"private","range":"all","types":["site","cache"],"remember":false}`,
+		`{"mode":"clear-sites","session":"normal","sites":["github.com","127.0.0.1"]}`,
+	} {
+		post("/api/browser/data", body)
+		awaitJobIdle(t, &s.jobs)
+	}
 	job := post("/api/browser/data", `{"mode":"job","id":"`+jobID+`"}`)["job"].(map[string]any)
 	result := job["result"].(map[string]any)
 	if job["state"] != "done" || job["steps"] != float64(4) || result["freedBytes"] != float64(2048) || len(result["kept"].([]any)) != 1 {
@@ -395,7 +421,7 @@ func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
 	if since := int64(clears[0]["since"].(float64)); since > time.Now().Add(-7*24*time.Hour+time.Minute).UnixMilli() {
 		t.Fatalf("week not converted: %d", since)
 	}
-	settings := s.loadBrowserDataSettings()
+	settings := mustBrowserDataSettings(t, s)
 	if settings.Defaults.Range != "week" || len(settings.Defaults.Types) != 4 {
 		t.Fatalf("remembered defaults (the preset and the private clear must not change them): %+v", settings.Defaults)
 	}
@@ -414,7 +440,7 @@ func TestBrowserDataAcceptsTheUIRequests(t *testing.T) {
 	} {
 		post("/api/browser/data-settings", body)
 	}
-	settings = s.loadBrowserDataSettings()
+	settings = mustBrowserDataSettings(t, s)
 	if len(settings.Keep) != 1 || settings.Keep[0].Domain != "kept.localhost" || settings.Auto.Enabled || settings.Auto.Trigger != "stop" || len(settings.Auto.Types) != 1 {
 		t.Fatalf("settings after the privacy section: %+v", settings)
 	}
@@ -457,4 +483,348 @@ func TestAgentBodyRulesKeepResetAndUnprotectedClearsForThePerson(t *testing.T) {
 	if refused := agentRouteRefusal("POST", "/api/browser/data-settings"); refused != nil {
 		t.Errorf("data-settings refused: %+v", refused)
 	}
+}
+
+// Review 3, findings 3 and 4: a settings file that cannot be read is left as
+// it is and reported; nothing that depends on the kept list runs meanwhile.
+func TestBrowserDataSettingsUnreadableAreKeptAndReported(t *testing.T) {
+	const jobID = "0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11"
+	valid := `{"defaults":{"range":"day","types":["history"]},"keep":[{"domain":"github.com","added":"2026-11-01T00:00:00Z"}],"auto":{"enabled":true,"trigger":"stop","days":7,"types":["site"]}}`
+	cases := []struct {
+		name    string
+		content string
+		mode    os.FileMode
+	}{
+		{"unreadable", valid, 0},
+		{"oversized", valid + strings.Repeat(" ", 300<<10), 0o600},
+		{"wrong type", `{"keep":"github.com"}`, 0o600},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if c.mode == 0 && os.Geteuid() == 0 {
+				t.Skip("root reads any file")
+			}
+			s, calls := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+				if body["mode"] == "clear" {
+					return 200, `{"job":{"id":"` + jobID + `","state":"running"}}`
+				}
+				return 200, `{"job":{"id":"` + jobID + `","state":"done"}}`
+			})
+			path := s.browserDataSettingsPath()
+			if err := os.WriteFile(path, []byte(c.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, c.mode); err != nil {
+				t.Fatal(err)
+			}
+			defer os.Chmod(path, 0o600)
+			if w := request(s, "GET", "/api/browser/data-settings", "", "", true); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "设置暂时读不出来") {
+				t.Fatalf("GET: %d %s", w.Code, w.Body.String())
+			}
+			if w := request(s, "POST", "/api/browser/data-settings", s.origin, `{"action":"keep-add","domain":"example.org"}`, true); w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("a write over an unreadable file: %d %s", w.Code, w.Body.String())
+			}
+			for _, body := range []string{`{"mode":"clear","range":"all","types":["site"]}`, `{"mode":"clear","range":"all","types":["history","cache"],"remember":true}`} {
+				if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "设置暂时读不出来") {
+					t.Fatalf("a clear that needs the kept list: %d %s", w.Code, w.Body.String())
+				}
+			}
+			s.browserDataAutoClean("stop")
+			if len(calls()) != 0 {
+				t.Fatalf("clears that need the kept list reached the guest: %+v", calls())
+			}
+			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["history"],"remember":true}`, true); w.Code != 200 {
+				t.Fatalf("a history clear does not need the kept list: %d %s", w.Code, w.Body.String())
+			}
+			awaitJobIdle(t, &s.jobs)
+			if err := os.Chmod(path, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(path); err != nil || string(data) != c.content {
+				t.Fatalf("the unreadable file was changed: %v", err)
+			}
+		})
+	}
+	s := testServer(t)
+	if w := request(s, "GET", "/api/browser/data-settings", "", "", true); w.Code != 200 {
+		t.Fatalf("a missing file reads as the defaults: %d", w.Code)
+	}
+}
+
+// Review 3, findings 3 and 8: automatic cleaning stores only values the host
+// made, and cleaning at stop leaves the pages alone and says what it does.
+func TestBrowserDataAutoCleanStoresHostMadeValues(t *testing.T) {
+	const jobID = "0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11"
+	var server *Server
+	var message string
+	s, calls := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+		if body["mode"] == "clear" {
+			message = server.jobs.snapshot().Message
+			return 200, `{"job":{"id":"` + jobID + `","state":"running"}}`
+		}
+		return 200, `{"job":{"id":"` + jobID + `","state":"` + strings.Repeat("<", 45<<10) + `","result":{"freedBytes":1e30}}}`
+	})
+	server = s
+	request(s, "POST", "/api/browser/data-settings", s.origin, `{"action":"auto","enabled":true,"trigger":"stop","days":7,"types":["site","cache"]}`, true)
+	if _, err := s.submitJob("stop", func() error { s.browserDataAutoClean("stop"); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	awaitJobIdle(t, &s.jobs)
+	got := calls()
+	if len(got) == 0 || got[0].Body["reload"] != false {
+		t.Fatalf("cleaning at stop must not reload pages: %+v", got)
+	}
+	if !strings.Contains(message, "自动清理") {
+		t.Fatalf("no progress message during cleaning at stop: %q", message)
+	}
+	info, err := os.Stat(s.browserDataSettingsPath())
+	if err != nil || info.Size() > 4096 {
+		t.Fatalf("settings file grew with guest text: %v %v", info.Size(), err)
+	}
+	settings, err := s.loadBrowserDataSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Auto.Result != "failed" || settings.Auto.Attempted.IsZero() || !settings.Auto.Last.IsZero() || settings.Auto.Freed != 0 {
+		t.Fatalf("stored result: %+v", settings.Auto)
+	}
+	reply := request(s, "GET", "/api/browser/data-settings", "", "", true).Body.String()
+	if !strings.Contains(reply, `"attempted"`) || strings.Contains(reply, "<") || strings.Contains(reply, "\u003c") {
+		t.Fatalf("settings reply: %.200s", reply)
+	}
+}
+
+// Review 3, findings 2 and 11: hosts Chromium cannot take as an origin and
+// public suffixes are refused; IP addresses and IPv6 sites work.
+func TestBrowserKeptDomainRefusesNumericHostsAndPublicSuffixes(t *testing.T) {
+	for _, input := range []string{"192.168.1.10", "10.0.0.1", "127.0.0.1", "bbc.co.uk", "someone.github.io", "example.com.cn"} {
+		if _, err := browserKeptDomain(input); err != nil {
+			t.Errorf("%q refused: %v", input, err)
+		}
+	}
+	for _, input := range []string{"1.2.3", "foo.123", "1.2.3.4.5", "999.1.1.1"} {
+		if _, err := browserKeptDomain(input); err == nil {
+			t.Errorf("%q accepted", input)
+		}
+	}
+	for _, input := range []string{"co.uk", "github.io", "com.cn", "vercel.app", "*.co.jp"} {
+		if _, err := browserKeptDomain(input); err == nil || !strings.Contains(err.Error(), "公共后缀") {
+			t.Errorf("%q: %v", input, err)
+		}
+	}
+	s, calls := browserDataServer(t, func(string, map[string]any) (int, string) {
+		return 200, `{"job":{"id":"0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11","state":"done"}}`
+	})
+	for _, body := range []string{`{"mode":"clear-sites","sites":["1.2.3"]}`, `{"mode":"clear-sites","sites":["foo.123"]}`, `{"mode":"site","site":"foo.123"}`} {
+		if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != http.StatusBadRequest {
+			t.Fatalf("%s: %d", body, w.Code)
+		}
+	}
+	if len(calls()) != 0 {
+		t.Fatal("refused sites reached the guest")
+	}
+	for _, body := range []string{`{"mode":"site","site":"::1"}`, `{"mode":"clear-sites","sites":["192.168.1.10","::1"]}`} {
+		if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != 200 {
+			t.Fatalf("%s: %d %s", body, w.Code, w.Body.String())
+		}
+		awaitJobIdle(t, &s.jobs)
+	}
+}
+
+// Review 3, finding 9: a clear is a host job. A second window joins it,
+// every window can follow it while it runs, reset waits, and a stop that
+// comes in the middle waits for the clear instead of stopping Chromium.
+func TestBrowserClearIsAHostJob(t *testing.T) {
+	const jobID = "0b7c4c5e-9d55-4c4b-9f43-6a8f1e0b2c11"
+	release := make(chan struct{})
+	var clearDone time.Time
+	var doneMu sync.Mutex
+	s, calls := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+		switch body["mode"] {
+		case "clear":
+			return 200, `{"job":{"id":"` + jobID + `","state":"running","step":1,"steps":4}}`
+		case "job":
+			select {
+			case <-release:
+				doneMu.Lock()
+				if clearDone.IsZero() {
+					clearDone = time.Now()
+				}
+				doneMu.Unlock()
+				return 200, `{"job":{"id":"` + jobID + `","state":"done","step":4,"steps":4,"result":{"cleared":["site"],"freedBytes":10}}}`
+			default:
+				return 200, `{"job":{"id":"` + jobID + `","state":"running","step":2,"steps":4}}`
+			}
+		}
+		return 200, `{"ok":true}`
+	})
+	first := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["site"]}`, true)
+	if first.Code != 200 || !strings.Contains(first.Body.String(), jobID) {
+		t.Fatalf("clear: %d %s", first.Code, first.Body.String())
+	}
+	if job := s.jobs.snapshot(); !job.Running || job.Kind != "browser-clear" {
+		t.Fatalf("a clear must be a host job: %+v", job)
+	}
+	second := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"hour","types":["history"]}`, true)
+	if second.Code != 200 || !strings.Contains(second.Body.String(), jobID) {
+		t.Fatalf("a second window joins the running clear: %d %s", second.Code, second.Body.String())
+	}
+	poll := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"job","id":"`+jobID+`"}`, true)
+	if poll.Code != 200 || !strings.Contains(poll.Body.String(), `"running"`) {
+		t.Fatalf("the job is followed while the host is busy with it: %d %s", poll.Code, poll.Body.String())
+	}
+	if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"reset"}`, true); w.Code != http.StatusConflict {
+		t.Fatalf("reset during a clear: %d", w.Code)
+	}
+	stopRan := make(chan time.Time, 1)
+	if _, err := s.submitJob("stop", func() error { stopRan <- time.Now(); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-stopRan:
+		t.Fatal("a stop ran in the middle of a clear")
+	default:
+	}
+	close(release)
+	ran := <-stopRan
+	doneMu.Lock()
+	finished := clearDone
+	doneMu.Unlock()
+	if finished.IsZero() || ran.Before(finished) {
+		t.Fatalf("the stop did not wait for the clear: clear %v stop %v", finished, ran)
+	}
+	awaitJobIdle(t, &s.jobs)
+	poll = request(s, "POST", "/api/browser/data", s.origin, `{"mode":"job","id":"`+jobID+`"}`, true)
+	if poll.Code != 200 || !strings.Contains(poll.Body.String(), `"done"`) {
+		t.Fatalf("the outcome after the job: %d %s", poll.Code, poll.Body.String())
+	}
+	clears := 0
+	for _, call := range calls() {
+		if call.Body["mode"] == "clear" {
+			clears++
+		}
+	}
+	if clears != 1 {
+		t.Fatalf("two windows, one clear: %d", clears)
+	}
+}
+
+// Review 3, findings 5 and 10: after a reset the host follows the new
+// controller as after a crash (ready toggles, a hidden picture is minimised
+// again), reports the outcome the controller wrote, and gives up truthfully.
+func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
+	restartLimit := browserRestartLimit
+	defer func() { browserRestartLimit = restartLimit }()
+	for _, c := range []struct {
+		name, status, wantError string
+		comesBack               bool
+	}{
+		{"done", "done", "", true},
+		{"failed", "failed", "仍在使用原来的资料", true},
+		{"never back", "", "用时过长", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			browserRestartLimit = 2 * time.Second
+			var mu sync.Mutex
+			var resetID, canceled string
+			var healthCalls int
+			var readyDuring []bool
+			var visibility []bool
+			var server *Server
+			s, _ := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case path == "/tabs":
+					return 200, `{"tabs":[]}`
+				case path == "/visibility":
+					visibility = append(visibility, body["visible"] == true)
+					return 200, `{"ok":true}`
+				case path == "/health":
+					healthCalls++
+					server.mu.Lock()
+					readyDuring = append(readyDuring, server.ready)
+					server.mu.Unlock()
+					if resetID == "" || !c.comesBack || healthCalls < 3 {
+						return 502, `{"error":"down"}`
+					}
+					return 200, `{"ok":true}`
+				case body["mode"] == "reset":
+					resetID, _ = body["id"].(string)
+					return 200, `{"ok":true,"restarting":true}`
+				case body["mode"] == "reset-status":
+					if body["id"] != resetID {
+						return 200, `{"state":"unknown"}`
+					}
+					return 200, `{"state":"` + c.status + `"}`
+				case body["mode"] == "reset-cancel":
+					canceled, _ = body["id"].(string)
+					return 200, `{"ok":true}`
+				}
+				return 200, `{"ok":true}`
+			})
+			server = s
+			// The picture is hidden: the host told the old controller so.
+			if err := s.browserViews.apply(s.changeBrowserVisibility); err != nil {
+				t.Fatal(err)
+			}
+			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"reset"}`, true); w.Code != 200 {
+				t.Fatalf("reset: %d %s", w.Code, w.Body.String())
+			}
+			job := awaitJobIdle(t, &s.jobs)
+			time.Sleep(800 * time.Millisecond)
+			mu.Lock()
+			defer mu.Unlock()
+			if resetID == "" {
+				t.Fatal("the reset carries no id")
+			}
+			if !slices.Contains(readyDuring, false) {
+				t.Fatalf("ready never dropped during the restart: %v", readyDuring)
+			}
+			if c.wantError == "" {
+				if job.Error != "" {
+					t.Fatalf("reset: %+v", job)
+				}
+			} else if !strings.Contains(job.Error, c.wantError) {
+				t.Fatalf("reset error: %+v", job)
+			}
+			s.mu.Lock()
+			ready := s.ready
+			s.mu.Unlock()
+			if c.comesBack {
+				if !ready {
+					t.Fatal("not ready after the controller came back")
+				}
+				if len(visibility) < 2 || visibility[len(visibility)-1] {
+					t.Fatalf("the hidden picture was not minimised again: %v", visibility)
+				}
+			} else if canceled != resetID {
+				t.Fatalf("a reset the job gave up on must be cancelled: %q %q", canceled, resetID)
+			}
+		})
+	}
+}
+
+func TestBrowserResetOnAnOldGuestSaysSoInChinese(t *testing.T) {
+	s, _ := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+		if path == "/tabs" {
+			return 200, `{"tabs":[]}`
+		}
+		return 400, `{"error":"Unknown browser action"}`
+	})
+	request(s, "POST", "/api/browser/data", s.origin, `{"mode":"reset"}`, true)
+	job := awaitJobIdle(t, &s.jobs)
+	if !strings.Contains(job.Error, "更新环境组件") || strings.Contains(job.Error, "unsupported") {
+		t.Fatalf("old guest: %q", job.Error)
+	}
+}
+
+func mustBrowserDataSettings(t *testing.T, s *Server) browserDataSettings {
+	t.Helper()
+	settings, err := s.loadBrowserDataSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settings
 }

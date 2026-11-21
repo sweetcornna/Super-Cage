@@ -46,6 +46,7 @@ type Server struct {
 	desktopViews                                     displayViewDemand
 	desktopDisplayUpdate                             func(bool) error
 	browserViews                                     displayViewDemand
+	browserClears                                    browserClearTracker
 	desktopStatus                                    desktopStatusCache
 	scienceLast                                      claudeScienceLast
 	agentNativeQueue                                 agentNativeQueue

@@ -66,7 +66,8 @@ const webOrigin = value => { try { const url = new URL(value); return ["http:", 
 // "https://www.192.168.1.10" (review 3, finding 2): "www." is added only to a
 // name whose last label has a letter, and every list is checked before use.
 const validOrigin = origin => webOrigin(origin) === origin;
-const originsOf = host => ["https://" + host, "http://" + host, ...(/[a-z]/.test(host.split(".").at(-1)) ? ["https://www." + host] : [])];
+const originsOf = host => host.includes(":") ? ["https://[" + host.replace(/^\[|\]$/g, "") + "]", "http://[" + host.replace(/^\[|\]$/g, "") + "]"]
+  : ["https://" + host, "http://" + host, ...(/[a-z]/.test(host.split(".").at(-1)) ? ["https://www." + host] : [])];
 // Operations that change data are sent at most once: after a timeout it is
 // unknown whether Chromium ran them. Only a call that never reached the page
 // is sent again.
