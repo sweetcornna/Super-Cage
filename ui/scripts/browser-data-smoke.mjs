@@ -93,8 +93,13 @@ try {
   const dialog = page.getByRole("dialog", { name: "清除浏览数据" });
   const loaded = () => page.waitForFunction(() => { const metas = [...document.querySelectorAll(".bd-meta")]; return metas.length > 0 && metas.every(node => node.textContent && !node.textContent.includes("正在统计")); });
 
-  // 1. The clear dialog from the menu: sizes, defaults, both sessions.
+  // 1. The clear dialog from the menu: sizes, defaults, both sessions. The
+  // workbench loads its own lazy panes right after the first paint; measure
+  // once that has settled (up to 10 s), as a user opening the dialog would.
   let started = Date.now();
+  for (let last = -1, count = 0; Date.now() - started < 10000 && count !== last; await delay(500)) { last = count; count = await page.evaluate(() => performance.getEntriesByType("resource").length); }
+  results.timings.settleMs = Date.now() - started;
+  started = Date.now();
   await menu().click();
   await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
   await dialog.waitFor(); await loaded();

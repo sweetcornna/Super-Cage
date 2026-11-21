@@ -1189,7 +1189,7 @@ function App() {
       if (k === "t" && !event.shiftKey) handle = newPage;
       if (k === "n" && event.shiftKey) handle = () => openBrowserPage(undefined, true);
       if (k === "d") handle = () => document.dispatchEvent(new Event("cage-add-favorite"));
-      if (event.shiftKey && (k === "backspace" || k === "delete") && browserAvailable && !terminal && !desktopOpen) handle = () => openBrowserData({ view: "clear", tab: liveBrowser });
+      if (event.shiftKey && (k === "backspace" || k === "delete") && browserAvailable && status?.ready && !busy && !terminal && !desktopOpen) handle = () => openBrowserData({ view: "clear", tab: liveBrowser });
       if (k === "enter" && event.shiftKey) handle = newTerminalHere;
       if (k === "l")
         handle = () => {

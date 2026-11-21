@@ -1,7 +1,9 @@
 // Browser data on servers and guests that do not have it: an old server
 // (404), an old guest (available:false, reason "update") keep the earlier
 // cookie panel, privacy section and Chromium's clear page; a busy or
-// unreachable guest shows its error with a retry instead of switching screens.
+// unreachable guest shows its error with a retry instead of switching screens;
+// a browser-data chunk that fails to load falls back the same way, without
+// the app's error screen, and the next use loads it again.
 // CAGE_UI_URL=... CAGE_TEST_BROWSER_PATH=... node scripts/browser-data-fallback-smoke.mjs
 import assert from "node:assert/strict";
 import { createWorkbench } from "./workbench-fixture.mjs";
@@ -79,6 +81,34 @@ try {
   await privacy.getByText("环境正在执行其他操作，请稍后再试").waitFor();
   check("busy: the privacy section shows the reason with 重试", await privacy.getByRole("button", { name: "重试", exact: true }).count() === 1 && await privacy.getByRole("combobox", { name: "Cookie 浏览会话" }).count() === 0);
   check("no page errors", errors.length === 0);
+  variant = "404";
+  const chunk = /\/(assets\/browser-data-[A-Za-z0-9_-]{8}\.js|src\/browser-data\.jsx)(\?|$)/;
+  let aborted = 0;
+  await page.route(chunk, route => { aborted++; return route.abort(); });
+  await open();
+  const crashed = () => page.getByText("工作台显示遇到异常").count();
+  const chunkBefore = internal.length;
+  await menu().click();
+  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
+  for (let i = 0; i < 100 && internal.length === chunkBefore; i++) await page.waitForTimeout(50);
+  check("chunk: a failed load opens Chromium's clear page instead of the error screen", aborted > 0 && internal.at(-1) === "clear" && await crashed() === 0);
+  await menu().click();
+  await page.getByRole("menuitem", { name: "管理 Cookie", exact: true }).click();
+  const cookiePanel = page.getByRole("region", { name: "Cookie 管理" });
+  await cookiePanel.getByText("srv", { exact: true }).waitFor();
+  check("chunk: 管理 Cookie falls back to the earlier cookie panel", await crashed() === 0);
+  await cookiePanel.getByRole("button", { name: "关闭 Cookie 管理" }).click();
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy" } })));
+  const chunkPrivacy = page.getByRole("region", { name: "隐私与网站数据" });
+  await chunkPrivacy.getByRole("button", { name: "清除普通会话浏览数据", exact: true }).waitFor();
+  check("chunk: the privacy section keeps Chromium's pages", await chunkPrivacy.getByRole("button", { name: "网站权限", exact: true }).count() === 1 && await crashed() === 0);
+  await page.unroute(chunk);
+  variant = "busy";
+  await page.getByRole("tab", { name: "s1.localhost", exact: true }).click();
+  await menu().click();
+  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
+  await page.getByRole("dialog", { name: "浏览数据暂时不可用" }).waitFor();
+  check("chunk: the next use loads the chunk again", true);
   results.passed = true;
   console.log(JSON.stringify(results, null, 1));
 } finally {
