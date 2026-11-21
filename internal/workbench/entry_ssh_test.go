@@ -210,10 +210,15 @@ func TestEntryTerminalEndsWithTheConnectionUnlessKept(t *testing.T) {
 		}
 		id := listed[0]["id"].(string)
 		if keep {
-			// "保留" is a terminal action: the desktop and the phone may both
-			// press it, like closing a terminal.
-			if w := request(f.s, "POST", "/api/terminals/"+id+"/keep", f.s.origin, "{}", true); w.Code != 200 || !strings.Contains(w.Body.String(), "\"kept\":true") {
-				t.Fatalf("keep: %d %s", w.Code, w.Body)
+			// "保留" answers only the trusted local view, the window on this
+			// computer or cage (F3 and F10 of the review): a phone or a
+			// remote view cannot keep a terminal past its ssh connection.
+			if w := request(f.s, "POST", "/api/terminals/"+id+"/keep", f.s.origin, "{}", true); w.Code != 403 {
+				t.Fatalf("keep without the trusted view: %d %s", w.Code, w.Body)
+			}
+			var kept map[string]any
+			if err := f.call("POST", "/api/terminals/"+id+"/keep", map[string]any{}, &kept); err != nil || kept["origin"].(map[string]any)["kept"] != true {
+				t.Fatalf("keep: %v %v", kept, err)
 			}
 		}
 		client.Close()
@@ -433,6 +438,12 @@ func TestEntrySFTPSubsystemReachesSFTPServer(t *testing.T) {
 // connection, fires the event, and returns how long the client waited for
 // the connection to end.
 func entryCut(t *testing.T, f *entryFixture, fire func()) time.Duration {
+	return entryCutKeeping(t, f, fire, false)
+}
+
+// entryCutKeeping is entryCut for an event that keeps the ssh terminal
+// running (a lock, F4 of the review).
+func entryCutKeeping(t *testing.T, f *entryFixture, fire func(), kept bool) time.Duration {
 	t.Helper()
 	client, err := f.dial(f.device)
 	if err != nil {
@@ -467,6 +478,12 @@ func entryCut(t *testing.T, f *entryFixture, fire func()) time.Duration {
 	select {
 	case at := <-ended:
 		elapsed := at.Sub(start)
+		if kept {
+			if listed := entrySSHTerminals(f.s); len(listed) != 1 || listed[0]["closed"] == true {
+				t.Fatalf("the terminal did not stay: %v", listed)
+			}
+			return elapsed
+		}
 		entryAwait(t, 5*time.Second, "the ssh terminal to end", func() bool { return len(entrySSHTerminals(f.s)) == 0 })
 		return elapsed
 	case <-time.After(5 * time.Second):
@@ -504,7 +521,7 @@ func TestEntryCutsWithinOneSecond(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			f := newEntryFixture(t, true)
 			f.on()
-			elapsed := entryCut(t, f, func() { c.fire(f) })
+			elapsed := entryCutKeeping(t, f, func() { c.fire(f) }, c.name == "lock")
 			t.Logf("%s: connection ended %v after the event", c.name, elapsed)
 			if elapsed > time.Second {
 				t.Fatalf("%s took %v", c.name, elapsed)
@@ -599,26 +616,11 @@ func TestEntryDevicesRevokeAndRenew(t *testing.T) {
 	}
 }
 
-// --- design 5.7 hook: the escape filter ---
-
-// TestEntryTerminalOutputUsesEscapeFilter fails until internal/termfilter
-// (branch local-terminal-attach) is plugged into entryNewOutputFilter. A
-// guest's OSC 52 clipboard query must never reach the owner's application.
-func TestEntryTerminalOutputUsesEscapeFilter(t *testing.T) {
-	if entryNewOutputFilter == nil {
-		t.Fatal("HOOK(termfilter): entryNewOutputFilter is not plugged in; the entry's terminal output reaches the owner's terminal unfiltered")
-	}
-	f := newEntryFixture(t, true)
-	f.on()
-	shell := entryOpenShell(t, f.client(), 100, 30, "")
-	shell.send("printf 'A=1\\033]52;c;?\\007B=2\\n'\n")
-	shell.expect("B=")
-	shell.mu.Lock()
-	defer shell.mu.Unlock()
-	if bytes.Contains(shell.output.Bytes(), []byte("\x1b]52;c;?")) {
-		t.Fatal("an OSC 52 clipboard query reached the ssh client")
-	}
-}
+// --- design 5.7: the escape filter ---
+// While no filter is plugged in, terminal sessions are refused
+// (TestEntryRefusesTerminalSessionsWithoutFilter); the fixture plugs in a
+// recording stand-in that drops the OSC 52 query, and
+// TestEntryFrameResetsTheFilterAtGaps checks how the endpoint drives it.
 
 // entrySyncBuffer is a bytes.Buffer safe for a writer goroutine and a reader.
 type entrySyncBuffer struct {

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // entryRefusal is why the entry refuses a dial or cut a connection, in the
@@ -22,12 +23,13 @@ var (
 	errEntryOff         = &entryRefusal{http.StatusConflict, "off", "本机终端未在这个环境里开启"}
 	errEntryUnknown     = &entryRefusal{http.StatusForbidden, "device_unknown", "这台电脑还没有加入这个环境的本机终端：在 Super Cage 里重新开启"}
 	errEntryRevoked     = &entryRefusal{http.StatusForbidden, "device_revoked", "这台电脑的钥匙已撤销：在 Super Cage 里重新开启本机终端即可生成新钥匙"}
-	errEntryLocked      = &entryRefusal{http.StatusLocked, "locked", "Super Cage 已锁定：先在 Super Cage 里解锁"}
+	errEntryLocked      = &entryRefusal{http.StatusLocked, "locked", "Super Cage 已锁定，请在应用中解锁"}
 	errEntryUnsupported = &entryRefusal{http.StatusConflict, "unsupported", "这个环境暂不支持本机终端"}
 	errEntryStopped     = &entryRefusal{http.StatusConflict, "stopped", "环境已停止：先在 Super Cage 里启动环境"}
 	errEntryStarting    = &entryRefusal{http.StatusConflict, "starting", "环境正在启动或停止：稍后再连接"}
 	errEntryPaused      = &entryRefusal{http.StatusConflict, "paused", "网络已暂停：本机终端会在恢复网络后重新可用"}
 	errEntryClosing     = &entryRefusal{http.StatusServiceUnavailable, "closing", "Super Cage 正在退出"}
+	errEntryWindowOnly  = &entryRefusal{http.StatusForbidden, "window_only", "本机终端只能在 Super Cage 窗口或 cage entry 里管理"}
 )
 
 // entryConn is one live connection of the entry: one WebSocket carrying one
@@ -36,6 +38,11 @@ type entryConn struct {
 	device string
 	ctx    context.Context
 	cancel context.CancelCauseFunc
+	// epoch is the account unlock the dial was admitted under; it ends when
+	// Super Cage locks.
+	epoch context.Context
+	// flush holds a cut back until terminal sessions wrote their reset.
+	flush entryFlush
 	// What the connection runs now, for the status line.
 	shells, execs, sftps atomic.Int32
 	channels             atomic.Int32
@@ -62,6 +69,47 @@ func (c *entryConn) refusals() map[string]int {
 		out[k] = v
 	}
 	return out
+}
+
+// entryFlush counts the terminal sessions of a connection that still write
+// their last bytes (the reset of design 5.7) before a cut closes it.
+type entryFlush struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n drops to 0
+}
+
+func (f *entryFlush) begin() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n == 0 {
+		f.idle = make(chan struct{})
+	}
+	f.n++
+}
+
+func (f *entryFlush) end() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.n--; f.n == 0 {
+		close(f.idle)
+	}
+}
+
+// wait returns when no session is writing any more, or after limit.
+func (f *entryFlush) wait(limit time.Duration) {
+	f.mu.Lock()
+	idle, n := f.idle, f.n
+	f.mu.Unlock()
+	if n == 0 {
+		return
+	}
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-idle:
+	case <-timer.C:
+	}
 }
 
 // entryRegistry holds every live connection of this environment's entry.

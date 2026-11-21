@@ -4,15 +4,21 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
 	"al.essio.dev/pkg/shellescape"
+	"golang.org/x/crypto/ssh"
+
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
 
 // The entry's routes sit behind the workbench's session, Origin and
@@ -29,13 +35,22 @@ func (s *Server) entryRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/entry/devices/{id}/revoke", s.entryLocal(s.entryRevoke))
 	mux.HandleFunc("POST /api/entry/devices/{id}/rename", s.entryLocal(s.entryRename))
 	mux.HandleFunc("GET /api/entry/ssh", s.entrySSH)
-	mux.HandleFunc("POST /api/terminals/{id}/keep", s.keepTerminal)
+	mux.HandleFunc("POST /api/terminals/{id}/keep", s.entryLocal(s.keepTerminal))
 }
+
+// agentRequestHeader marks the requests of the agent transport (AgentRequest,
+// AgentSocket). Their callers cannot set it or leave it out, so the entry's
+// routes can refuse them on the server as well.
+const agentRequestHeader = "X-Cage-Agent"
 
 func (s *Server) entryLocal(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.desktopEntry || s.clientOnly {
 			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get(agentRequestHeader) != "" {
+			entryRefuse(w, errEntryWindowOnly)
 			return
 		}
 		if !s.hasTrustedView(r) {
@@ -187,8 +202,15 @@ func (s *Server) entryOn(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			st = entryState{Version: entryStateVersion}
 		}
+		// A new key when this one was revoked, here or in any environment
+		// of this computer (revoked.json); one revoked here before that
+		// list existed counts too.
 		current, known, _ := entryReadComputer(paths)
-		rotate := known && st.device(current.ID) != nil && st.device(current.ID).Revoked != nil
+		rotate := false
+		if key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(current.Public)); known && err == nil {
+			record := st.device(current.ID)
+			rotate = entryKeyRevoked(paths, key) || record != nil && record.Revoked != nil && record.PublicKey == current.Public
+		}
 		computer, err := entryEnsureComputer(paths, rotate)
 		if err != nil {
 			return err
@@ -213,15 +235,17 @@ func (s *Server) entryOn(w http.ResponseWriter, r *http.Request) {
 		requestError(w, errors.New("无法开启本机终端："+err.Error()))
 		return
 	}
-	// Put the guest's run script in place now when the environment runs, so
-	// the first scp does not wait for it; a failure here is retried then.
+	if err := entrySweepOrphans(paths); err != nil {
+		diagnostics.Log("warn", "entry", "removing the ssh configuration of deleted environments: "+err.Error())
+	}
+	// Start putting the guest's run script in place when the environment
+	// runs, so the first scp does not wait for it; nothing waits for it
+	// here, and a failure is retried by the first channel that needs it.
 	s.mu.Lock()
 	ready := s.ready
 	s.mu.Unlock()
 	if ready && s.vmRunning() {
-		ctx, cancel := context.WithTimeout(r.Context(), entryWrapperTimeout)
-		_ = s.entryEnsureWrapper(ctx)
-		cancel()
+		s.entryStartWrapper()
 	}
 	jsonReply(w, s.entryView())
 }
@@ -253,6 +277,9 @@ func (s *Server) entryOff(w http.ResponseWriter, r *http.Request) {
 		requestError(w, errors.New("本机终端已关闭，但 ssh 配置没能全部移除："+err.Error()))
 		return
 	}
+	if err := entrySweepOrphans(paths); err != nil {
+		diagnostics.Log("warn", "entry", "removing the ssh configuration of deleted environments: "+err.Error())
+	}
 	jsonReply(w, s.entryView())
 }
 
@@ -274,7 +301,7 @@ func (s *Server) entryIncludeRoute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		jsonReply(w, entryIncludePreview(paths))
+		jsonReply(w, entryIncludePreviewFor(paths, entryEnvironmentID(s.profile), entryEnvironmentName(s.profile)))
 		return
 	}
 	if !s.entryEnabled() {
@@ -303,8 +330,23 @@ func (s *Server) entryIncludeRoute(w http.ResponseWriter, r *http.Request) {
 
 // entryRevoke cuts the device's connections at once and refuses it until
 // the entry is turned on again from that computer, which renews its key.
+// The key is revoked for the whole computer (revoked.json), and every other
+// environment whose controller runs is told at once, so it cuts that
+// device's connections too and marks it revoked (F10 of the review).
 func (s *Server) entryRevoke(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
+	var input struct {
+		// Propagated: another environment passes its revocation on.
+		Propagated bool `json:"propagated"`
+	}
+	if r.ContentLength != 0 && !readJSON(w, r, &input, 1<<10) {
+		return
+	}
+	paths, err := s.entryPaths()
+	if err != nil {
+		requestError(w, err)
+		return
+	}
 	s.entry.mu.Lock()
 	st, err := entryLoadState(s.profile)
 	if err == nil && !st.Enabled {
@@ -318,18 +360,57 @@ func (s *Server) entryRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "没有这台设备", http.StatusNotFound)
 		return
 	}
-	if record.Revoked == nil {
+	if record.PublicKey != "" {
+		err = entryRevokeKey(paths, record.PublicKey)
+	}
+	if record.Revoked == nil && err == nil {
 		now := time.Now().UTC()
 		record.Revoked = &now
 		err = entrySaveState(s.profile, st)
 	}
 	s.entry.mu.Unlock()
+	s.entry.registry.cutDevice(id, errEntryRevoked)
 	if err != nil {
 		requestError(w, err)
 		return
 	}
-	s.entry.registry.cutDevice(id, errEntryRevoked)
+	if !input.Propagated {
+		s.entryRevokeElsewhere(paths, id)
+	}
 	jsonReply(w, s.entryView())
+}
+
+// entryPropagateWait bounds how long a revocation waits for the other
+// environments' controllers; one that does not answer in time, or does not
+// run, refuses the key from revoked.json at its next dial.
+const entryPropagateWait = 2 * time.Second
+
+// entryRevokeElsewhere passes a revocation on to the controllers of the
+// other environments on this computer whose entry is on.
+func (s *Server) entryRevokeElsewhere(paths entryPaths, device string) {
+	here := entryEnvironmentID(s.profile)
+	defaultConfig := filepath.Join(paths.ComputerDir, "config.json")
+	matches, _ := filepath.Glob(filepath.Join(paths.hostsDir(), "*.conf"))
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), entryPropagateWait)
+	defer cancel()
+	var calls sync.WaitGroup
+	for _, match := range matches {
+		environment := strings.TrimSuffix(filepath.Base(match), ".conf")
+		configPath, err := entryProfileConfig(defaultConfig, environment)
+		if environment == here || err != nil {
+			continue
+		}
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			err := entryCall(ctx, configPath, "POST", "/api/entry/devices/"+url.PathEscape(device)+"/revoke", map[string]bool{"propagated": true}, nil)
+			var refusal *entryRefusal
+			if err != nil && !(errors.As(err, &refusal) && refusal.Code == errEntryOff.Code) {
+				diagnostics.Log("info", "entry", "revocation not passed on to environment "+entryShortID(environment)+": "+entryClientError(err))
+			}
+		}()
+	}
+	calls.Wait()
 }
 
 func validEntryDeviceName(name string) bool {

@@ -476,7 +476,7 @@ func TestEntryProxyRefusalMessages(t *testing.T) {
 		port := strings.TrimPrefix(f.s.origin, "http://localhost:")
 		var number int
 		fmt.Sscan(port, &number)
-		if err := writePrivate(filepath.Join(f.s.profile, "control.json"), controlFile{Port: number, Token: f.s.token, PID: os.Getpid(), Controller: f.s.identity}); err != nil {
+		if err := writePrivate(filepath.Join(f.s.profile, "control.json"), f.s.controlRecord(number)); err != nil {
 			t.Fatal(err)
 		}
 	}

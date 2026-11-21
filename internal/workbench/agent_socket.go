@@ -37,7 +37,7 @@ func AgentSocket(ctx context.Context, configPath string, target AgentTarget, pat
 		connection = target.Connection
 	}
 	req, _ := http.NewRequest("GET", c.origin, nil)
-	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{connection}}
+	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{connection}, agentRequestHeader: []string{"1"}}
 	for _, cookie := range c.client.Jar.Cookies(req.URL) {
 		headers.Add("Cookie", cookie.String())
 	}

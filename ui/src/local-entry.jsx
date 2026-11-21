@@ -13,6 +13,7 @@ import {
   revokeConfirm,
   shortFingerprint,
   sortedDevices,
+  unfilteredNote,
   validDeviceName,
 } from "./local-entry-state.mjs";
 import "./local-entry.css";
@@ -82,6 +83,12 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         <>
           {dialog.intro}
           <code className="local-entry-include-line">{dialog.line}</code>
+          {dialog.block && (
+            <>
+              {dialog.aliasText}
+              <pre className="local-entry-include-block">{dialog.block}</pre>
+            </>
+          )}
           {dialog.after}
         </>
       ),
@@ -228,6 +235,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         ))}
       </ul>
       <span className="sr-only" aria-live="polite">{copied ? "已复制" : ""}</span>
+      <p className="field-help local-entry-unfiltered">{unfilteredNote}</p>
       {include && (
         <p className="local-entry-include" data-state={include.state}>
           {include.text}

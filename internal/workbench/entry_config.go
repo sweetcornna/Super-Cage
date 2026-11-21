@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,7 +11,9 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -44,7 +47,7 @@ const (
 	entryDeviceRecord = "device.json"
 	entryHostKey      = "host_ed25519"
 	entryClientDir    = "super-cage"
-	entryBackupSuffix = ".super-cage-backup"
+	entryRevokedFile  = "revoked.json"
 	// entrySettingsFile is cage attach's per-computer settings file
 	// (internal/localterm on branch local-terminal-attach). The entry only
 	// reads it; replace entryLoadLocalSettings with localterm.LoadSettings
@@ -66,6 +69,10 @@ type entryPaths struct {
 	Proxy func(environment string) string
 	// Cage is the cage command shown in the commands to copy.
 	Cage string
+	// SystemConfig is the system-wide ssh client configuration, read (never
+	// written) to keep a generated alias off a name it already uses; empty
+	// in tests.
+	SystemConfig string
 }
 
 func defaultEntryPaths(profile, executable string) (entryPaths, error) {
@@ -438,7 +445,9 @@ func validEntryConfigValue(value string) bool {
 }
 
 // entryHostAlias is "cage-<slug>" from the environment's name, unique among
-// the Host blocks already written on this computer.
+// the Host blocks already written on this computer and never a name the
+// owner's own ssh configuration already uses (F6 of the review): Super
+// Cage's Include comes first, so its block would take that host over.
 func entryHostAlias(paths entryPaths, environment, name string) string {
 	var slug []byte
 	dash := false
@@ -461,16 +470,192 @@ func entryHostAlias(paths entryPaths, environment, name string) string {
 			base = environment[:8]
 		}
 	}
-	alias := "cage-" + base
-	taken := entryAliasesInUse(paths, environment)
-	if slices.Contains(taken, alias) {
-		suffix := environment
-		if len(suffix) > 6 {
-			suffix = suffix[:6]
-		}
-		alias = "cage-" + base + "-" + suffix
+	suffix := environment
+	if len(suffix) > 6 {
+		suffix = suffix[:6]
 	}
-	return alias
+	taken := entryAliasesInUse(paths, environment)
+	owner := entryOwnerPatterns(paths)
+	candidates := []string{"cage-" + base, "cage-" + base + "-" + suffix, "super-cage-" + base, "super-cage-" + base + "-" + suffix}
+	for n := 2; ; n++ {
+		if len(candidates) == 0 {
+			candidates = append(candidates, fmt.Sprintf("super-cage-%s-%s-%d", base, suffix, n))
+		}
+		alias := candidates[0]
+		candidates = candidates[1:]
+		if !slices.Contains(taken, alias) && !entryClaimed(owner, alias) {
+			return alias
+		}
+	}
+}
+
+// entryChooseAlias keeps the environment's alias unless the owner's own
+// configuration has come to use it since, and picks a new one then.
+func entryChooseAlias(paths entryPaths, environment, name string) string {
+	if alias := entryReadAlias(paths.hostFile(environment)); alias != "" && !entryClaimed(entryOwnerPatterns(paths), alias) {
+		return alias
+	}
+	return entryHostAlias(paths, environment, name)
+}
+
+// entryOwnerPatterns reads the host patterns of the owner's own ssh client
+// configuration: every Host line and every "Match host" or "Match
+// originalhost" list in ~/.ssh/config, the system-wide file and the files
+// they include, leaving out Super Cage's own files. It never writes and runs
+// nothing.
+func entryOwnerPatterns(paths entryPaths) [][]string {
+	home := filepath.Dir(paths.SSHDir)
+	var rules [][]string
+	seen := map[string]bool{}
+	var read func(path, base string, depth int)
+	read = func(path, base string, depth int) {
+		if depth > 16 || seen[path] || entryWithin(paths.clientDir(), path) {
+			return
+		}
+		seen[path] = true
+		data, err := os.ReadFile(path)
+		if err != nil || len(data) > 1<<20 {
+			return
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			keyword, args := entryConfigLine(line)
+			switch strings.ToLower(keyword) {
+			case "host":
+				rules = append(rules, args)
+			case "match":
+				rules = append(rules, entryMatchHosts(args)...)
+			case "include":
+				for _, pattern := range args {
+					if strings.HasPrefix(pattern, "~/") {
+						pattern = filepath.Join(home, pattern[2:])
+					}
+					if !filepath.IsAbs(pattern) {
+						pattern = filepath.Join(base, pattern)
+					}
+					matches, _ := filepath.Glob(pattern)
+					for _, match := range matches {
+						read(match, base, depth+1)
+					}
+				}
+			}
+		}
+	}
+	read(paths.userConfig(), paths.SSHDir, 0)
+	if paths.SystemConfig != "" {
+		read(paths.SystemConfig, filepath.Dir(paths.SystemConfig), 0)
+	}
+	return rules
+}
+
+func entryWithin(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// entryConfigLine splits an ssh_config line into its keyword and arguments
+// the way ssh reads it: "Keyword args", "Keyword=args", double quotes
+// grouping, a # starting a word ending the line.
+func entryConfigLine(line string) (string, []string) {
+	line = strings.TrimSpace(strings.TrimPrefix(line, "\ufeff"))
+	if line == "" || line[0] == '#' {
+		return "", nil
+	}
+	end := strings.IndexAny(line, " \t=")
+	if end < 0 {
+		return line, nil
+	}
+	keyword, rest := line[:end], strings.TrimLeft(line[end:], " \t")
+	rest = strings.TrimLeft(strings.TrimPrefix(rest, "="), " \t")
+	var args []string
+	for rest != "" {
+		if rest[0] == '#' {
+			break
+		}
+		var word string
+		if rest[0] == '"' {
+			closing := strings.IndexByte(rest[1:], '"')
+			if closing < 0 {
+				return keyword, nil
+			}
+			word, rest = rest[1:1+closing], rest[2+closing:]
+		} else if space := strings.IndexAny(rest, " \t"); space >= 0 {
+			word, rest = rest[:space], rest[space:]
+		} else {
+			word, rest = rest, ""
+		}
+		args = append(args, word)
+		rest = strings.TrimLeft(rest, " \t")
+	}
+	return keyword, args
+}
+
+// entryMatchHosts are the pattern lists of a Match line's host and
+// originalhost criteria; a negated criterion claims nothing.
+func entryMatchHosts(args []string) [][]string {
+	var rules [][]string
+	for i := 0; i < len(args); i++ {
+		switch strings.ToLower(args[i]) {
+		case "all", "canonical", "final":
+		case "host", "originalhost":
+			if i+1 < len(args) {
+				rules = append(rules, strings.Split(args[i+1], ","))
+			}
+			i++
+		default:
+			i++ // every other criterion takes one argument
+		}
+	}
+	return rules
+}
+
+// entryClaimed reports whether the owner's configuration names alias: a
+// Host or Match host list with a pattern that matches it and has a
+// character of its own (so "Host *" claims nothing), and no negated
+// pattern that matches it.
+func entryClaimed(rules [][]string, alias string) bool {
+	for _, patterns := range rules {
+		claims, excluded := false, false
+		for _, pattern := range patterns {
+			negated := strings.HasPrefix(pattern, "!")
+			pattern = strings.TrimPrefix(pattern, "!")
+			if !entryWildcard(strings.ToLower(pattern), strings.ToLower(alias)) {
+				continue
+			}
+			if negated {
+				excluded = true
+			} else if strings.Trim(pattern, "*?") != "" {
+				claims = true
+			}
+		}
+		if claims && !excluded {
+			return true
+		}
+	}
+	return false
+}
+
+// entryWildcard is ssh's pattern match: * any run of characters, ? one.
+func entryWildcard(pattern, name string) bool {
+	p, n, star, mark := 0, 0, -1, 0
+	for n < len(name) {
+		switch {
+		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == name[n]):
+			p++
+			n++
+		case p < len(pattern) && pattern[p] == '*':
+			star, mark = p, n
+			p++
+		case star >= 0:
+			p, mark = star+1, mark+1
+			n = mark
+		default:
+			return false
+		}
+	}
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
 }
 
 // entryAliasesInUse lists the Host aliases of the other environments' blocks.
@@ -512,8 +697,7 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 		return r
 	}, name))
 	fmt.Fprintf(&b, "Host %s\n", alias)
-	for _, option := range [][2]string{
-		{"IgnoreUnknown", "ObscureKeystrokeTiming"},
+	options := [][2]string{
 		{"HostName", alias + ".invalid"},
 		{"User", "cage"},
 		{"ProxyCommand", paths.Proxy(environment)},
@@ -532,17 +716,128 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 		{"PermitLocalCommand", "no"},
 		{"RemoteCommand", "none"},
 		{"RequestTTY", "auto"},
-		{"ObscureKeystrokeTiming", "no"},
+		// The owner's Host * defaults must not reach this host either (F8 of
+		// the review): no shared master connection, the device key and
+		// nothing else, no other known_hosts, no forking or session type
+		// the owner set for other hosts. The command line still wins.
+		{"ControlMaster", "no"},
+		{"ControlPath", "none"},
+		{"ControlPersist", "no"},
+		{"PubkeyAuthentication", "yes"},
+		{"PreferredAuthentications", "publickey"},
+		{"PasswordAuthentication", "no"},
+		{"KbdInteractiveAuthentication", "no"},
+		{"ProxyUseFdpass", "no"},
+		{"GlobalKnownHostsFile", entryConfigPath(os.DevNull)},
+		{"CanonicalizeHostname", "no"},
+		{"AddKeysToAgent", "no"},
 		{"ServerAliveInterval", "15"},
 		{"ServerAliveCountMax", "4"},
 		// A refused dial prints one Chinese line from the proxy; ssh's own
 		// "Connection closed by UNKNOWN port 65535" after it only confuses.
 		// ssh -v still raises the level, since the command line wins.
 		{"LogLevel", "ERROR"},
-	} {
+	}
+	// Options newer OpenSSH releases added are written only when every ssh
+	// client on this computer accepts them (F7): IgnoreUnknown would hide
+	// them instead, but the first IgnoreUnknown ssh reads wins, so it would
+	// also replace the owner's own.
+	known := entrySSHKnows(slices.Collect(maps.Keys(entryNewerOptions)))
+	for _, option := range entryNewerOptionOrder {
+		if known[option] {
+			options = append(options, [2]string{option, entryNewerOptions[option]})
+		}
+	}
+	for _, option := range options {
 		fmt.Fprintf(&b, "  %s %s\n", option[0], option[1])
 	}
 	return b.String()
+}
+
+// entryNewerOptions are the pins that older OpenSSH clients (Windows 10's
+// 8.1 among them) do not know, with the release that added them.
+var entryNewerOptions = map[string]string{
+	"KnownHostsCommand":       "none",    // 8.5
+	"SessionType":             "default", // 8.7
+	"StdinNull":               "no",      // 8.7
+	"ForkAfterAuthentication": "no",      // 8.7
+	"ObscureKeystrokeTiming":  "no",      // 9.5
+}
+
+var entryNewerOptionOrder = []string{"KnownHostsCommand", "SessionType", "StdinNull", "ForkAfterAuthentication", "ObscureKeystrokeTiming"}
+
+// entrySSHClients are the OpenSSH clients the owner may run on this
+// computer: the system one, the first ssh on PATH and Homebrew's.
+func entrySSHClients() []string {
+	candidates := []string{sshExecutable()}
+	if path, err := exec.LookPath("ssh"); err == nil {
+		candidates = append(candidates, path)
+	}
+	if runtime.GOOS == "darwin" {
+		candidates = append(candidates, "/opt/homebrew/bin/ssh", "/usr/local/bin/ssh")
+	}
+	var clients []string
+	for _, candidate := range candidates {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err != nil {
+			continue
+		}
+		if info, err := os.Stat(resolved); err == nil && info.Mode().IsRegular() && !slices.Contains(clients, resolved) {
+			clients = append(clients, resolved)
+		}
+	}
+	return clients
+}
+
+// entrySSHKnows reports which of the options every local ssh client
+// accepts, asking each with "ssh -G -F <null> -o Option=value": ssh only
+// prints its configuration, reads no file and connects nowhere. With no
+// client found, none counts as known.
+var entrySSHKnows = func(names []string) map[string]bool {
+	clients := entrySSHClients()
+	known := map[string]bool{}
+	for _, name := range names {
+		known[name] = len(clients) > 0
+	}
+	for _, client := range clients {
+		accepted := entryProbeSSH(client, names)
+		for _, name := range names {
+			known[name] = known[name] && accepted[name]
+		}
+	}
+	return known
+}
+
+func entryProbeSSH(client string, names []string) map[string]bool {
+	accepted := map[string]bool{}
+	left := slices.Clone(names)
+	for range len(names) + 1 {
+		args := []string{"-G", "-F", os.DevNull}
+		for _, name := range left {
+			args = append(args, "-o", name+"="+entryNewerOptions[name])
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		output, err := exec.CommandContext(ctx, client, append(args, "probe.invalid")...).CombinedOutput()
+		cancel()
+		if err == nil {
+			for _, name := range left {
+				accepted[name] = true
+			}
+			return accepted
+		}
+		// "command-line: line 0: Bad configuration option: sessiontype"
+		bad := -1
+		for i, name := range left {
+			if bytes.Contains(bytes.ToLower(output), []byte("bad configuration option: "+strings.ToLower(name))) {
+				bad = i
+			}
+		}
+		if bad < 0 {
+			return accepted
+		}
+		left = slices.Delete(left, bad, bad+1)
+	}
+	return accepted
 }
 
 // entryWriteClient writes this environment's Host block and pinned host key,
@@ -571,18 +866,26 @@ func entryWriteClient(paths entryPaths, environment, name string, hostKey ssh.Pu
 	if err := entryWriteFile(paths.clientFile(), []byte(include), 0o600); err != nil {
 		return "", err
 	}
-	alias := entryReadAlias(paths.hostFile(environment))
-	if alias == "" {
-		alias = entryHostAlias(paths, environment, name)
-	}
+	alias := entryChooseAlias(paths, environment, name)
 	if err := entryPinHostKey(paths, environment, hostKey); err != nil {
 		return "", err
 	}
 	return alias, entryWriteFile(paths.hostFile(environment), []byte(entryHostBlock(paths, environment, name, alias)), 0o600)
 }
 
-// entryPinHostKey writes the environment's known_hosts line. Local only: the
-// key comes from this computer's own controller.
+// entryPinHostKey writes the environment's known_hosts line. Only turning
+// the entry on writes it, from the controller's own key (F2 of the review):
+// the proxy compares and never rewrites it.
+// entryPinnedHostKey reads the key entryPinHostKey wrote.
+func entryPinnedHostKey(paths entryPaths, environment string) (ssh.PublicKey, error) {
+	data, err := os.ReadFile(paths.knownHosts(environment))
+	if err != nil {
+		return nil, err
+	}
+	_, _, key, _, _, err := ssh.ParseKnownHosts(data)
+	return key, err
+}
+
 func entryPinHostKey(paths entryPaths, environment string, key ssh.PublicKey) error {
 	line := "cage-" + environment + " " + string(ssh.MarshalAuthorizedKey(key))
 	if current, err := os.ReadFile(paths.knownHosts(environment)); err == nil && string(current) == line {
@@ -614,6 +917,103 @@ func entryRemoveClient(paths entryPaths, environment string) error {
 	return nil
 }
 
+// entryBackupPaths are the backups of ~/.ssh/config: the first one, from
+// before Super Cage changed it, and the latest one.
+func entryBackupPaths(paths entryPaths) (first, latest string) {
+	dir := filepath.Join(paths.DeviceDir, "ssh-config-backups")
+	return filepath.Join(dir, "config.first"), filepath.Join(dir, "config.latest")
+}
+
+// entryBackup keeps a copy of ~/.ssh/config before Super Cage changes it,
+// in Super Cage's own directory (never beside the file a symlink points
+// to): the first one is kept for good, the latest one replaced each time.
+func entryBackup(paths entryPaths, content []byte) (string, error) {
+	first, latest := entryBackupPaths(paths)
+	if err := host.EnsurePrivateDir(paths.DeviceDir); err != nil {
+		return "", err
+	}
+	if err := host.EnsurePrivateDir(filepath.Dir(first)); err != nil {
+		return "", err
+	}
+	if _, err := os.Lstat(first); errors.Is(err, os.ErrNotExist) {
+		if err := entryWriteFile(first, content, 0o600); err != nil {
+			return "", err
+		}
+	}
+	return latest, entryWriteFile(latest, content, 0o600)
+}
+
+// entryIncludePreviewFor is the preview with this environment's alias and
+// the whole Host block the line brings in, as the confirmation shows them.
+func entryIncludePreviewFor(paths entryPaths, environment, name string) entryInclude {
+	view := entryIncludePreview(paths)
+	view.Alias = entryChooseAlias(paths, environment, name)
+	view.Block = entryHostBlock(paths, environment, name, view.Alias)
+	if data, err := os.ReadFile(paths.hostFile(environment)); err == nil && entryReadAlias(paths.hostFile(environment)) == view.Alias {
+		view.Block = string(data)
+	}
+	return view
+}
+
+// entrySweepOrphans removes the blocks of local VMs whose profile is gone
+// (F10 of the review), and with the last block Super Cage's own files and
+// the Include line. The app has no way to delete a local VM yet; this runs
+// when the entry is turned on or off and when the proxy meets one, so a VM
+// deleted by hand or by a later version does not leave a host behind.
+func entrySweepOrphans(paths entryPaths) error {
+	matches, _ := filepath.Glob(filepath.Join(paths.hostsDir(), "*.conf"))
+	var failures []error
+	for _, match := range matches {
+		environment := strings.TrimSuffix(filepath.Base(match), ".conf")
+		if environment == defaultLocalVMID || !validLocalVMID(environment) {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join(paths.ComputerDir, cage.LocalVMDir, environment)); !errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		failures = append(failures, entryRemoveClient(paths, environment))
+	}
+	return errors.Join(failures...)
+}
+
+// entryRevoked is the computer-wide list of revoked device keys: a key
+// revoked in one environment is refused in every environment (F10).
+type entryRevoked struct {
+	Version int      `json:"version"`
+	Keys    []string `json:"keys"`
+}
+
+func entryLoadRevoked(paths entryPaths) entryRevoked {
+	var revoked entryRevoked
+	data, err := os.ReadFile(filepath.Join(paths.DeviceDir, entryRevokedFile))
+	if err != nil || json.Unmarshal(data, &revoked) != nil {
+		return entryRevoked{Version: 1}
+	}
+	return revoked
+}
+
+func entryKeyRevoked(paths entryPaths, key ssh.PublicKey) bool {
+	return slices.Contains(entryLoadRevoked(paths).Keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+}
+
+// entryRevokeKey adds a device key, in authorized_keys form, to the list.
+func entryRevokeKey(paths entryPaths, authorized string) error {
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(authorized))
+	if err != nil {
+		return err
+	}
+	if entryKeyRevoked(paths, key) {
+		return nil
+	}
+	revoked := entryLoadRevoked(paths)
+	revoked.Version = 1
+	revoked.Keys = append(revoked.Keys, strings.TrimSpace(string(ssh.MarshalAuthorizedKey(key))))
+	if err := host.EnsurePrivateDir(paths.DeviceDir); err != nil {
+		return err
+	}
+	return writePrivate(filepath.Join(paths.DeviceDir, entryRevokedFile), revoked)
+}
+
 func isDirNotEmpty(err error) bool {
 	var pathErr *os.PathError
 	return errors.As(err, &pathErr) && (strings.Contains(pathErr.Err.Error(), "not empty") || strings.Contains(pathErr.Err.Error(), "exists"))
@@ -632,6 +1032,10 @@ type entryInclude struct {
 	Token       string `json:"token,omitempty"`
 	Backup      string `json:"backup,omitempty"`
 	Error       string `json:"error,omitempty"`
+	// Alias and Block are this environment's generated Host block, shown in
+	// the confirmation with the line that includes it.
+	Alias string `json:"alias,omitempty"`
+	Block string `json:"block,omitempty"`
 }
 
 // entryUserConfigTarget is ~/.ssh/config, or the file it links to, so a
@@ -670,7 +1074,7 @@ func entryIncludeLines(paths entryPaths) []string {
 }
 
 func entryHasInclude(content []byte, lines []string) bool {
-	for _, line := range strings.Split(string(content), "\n") {
+	for _, line := range strings.Split(strings.TrimPrefix(string(content), entryBOM), "\n") {
 		if slices.Contains(lines, strings.TrimSpace(line)) {
 			return true
 		}
@@ -696,11 +1100,31 @@ func entryIncludePreview(paths entryPaths) entryInclude {
 		return view
 	}
 	view.Present = entryHasInclude(content, entryIncludeLines(paths))
+	if info, err := os.Stat(target); err == nil && info.Mode().Perm()&0o200 == 0 {
+		view.Error = errEntryConfigReadOnly.Error()
+		return view
+	}
+	owner := entryOwnerPatterns(paths)
+	for _, alias := range entryAliasesInUse(paths, "") {
+		if entryClaimed(owner, alias) {
+			view.Error = fmt.Sprintf("~/.ssh/config 里已经有主机 %s：在 Super Cage 里关闭再开启本机终端，换一个名字后再加入", alias)
+			return view
+		}
+	}
 	if !view.Present {
 		view.Token = entryIncludeToken(content, view.Line)
 	}
 	return view
 }
+
+// errEntryConfigReadOnly: a read-only ~/.ssh/config (or the file it links
+// to, a Nix or dotfiles store, say) is never replaced, though its directory
+// would allow it.
+var errEntryConfigReadOnly = errors.New("~/.ssh/config 是只读文件，Super Cage 不会修改它")
+
+// entryBOM is the UTF-8 byte order mark some editors write; it stays the
+// first thing in the file.
+const entryBOM = "\ufeff"
 
 var errEntryIncludeChanged = errors.New("~/.ssh/config 在确认后又有变化：请重新确认")
 
@@ -727,8 +1151,7 @@ func entryIncludeApply(paths entryPaths, token string) (entryInclude, error) {
 	mode := os.FileMode(0o600)
 	if info, err := os.Stat(view.Path); err == nil {
 		mode = info.Mode().Perm()
-		view.Backup = view.Path + entryBackupSuffix
-		if err := entryWriteFile(view.Backup, content, 0o600); err != nil {
+		if view.Backup, err = entryBackup(paths, content); err != nil {
 			return view, err
 		}
 	} else if err := os.MkdirAll(filepath.Dir(view.Path), 0o700); err != nil {
@@ -738,7 +1161,11 @@ func entryIncludeApply(paths entryPaths, token string) (entryInclude, error) {
 	if bytes.Contains(content, []byte("\r\n")) {
 		newline = "\r\n"
 	}
-	updated := append([]byte(view.Line+newline), content...)
+	bom := ""
+	if bytes.HasPrefix(content, []byte(entryBOM)) {
+		bom, content = entryBOM, content[len(entryBOM):]
+	}
+	updated := append([]byte(bom+view.Line+newline), content...)
 	if err := entryWriteFile(view.Path, updated, mode); err != nil {
 		return view, err
 	}
@@ -764,18 +1191,24 @@ func entryIncludeRemove(paths entryPaths) error {
 	if !entryHasInclude(content, lines) {
 		return nil
 	}
+	info, err := os.Stat(target)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		return fmt.Errorf("%w：请自己删掉其中的 %s", errEntryConfigReadOnly, paths.includeLine())
+	}
 	var kept []byte
-	for _, line := range bytes.SplitAfter(content, []byte("\n")) {
+	if bytes.HasPrefix(content, []byte(entryBOM)) {
+		kept = []byte(entryBOM)
+	}
+	for _, line := range bytes.SplitAfter(bytes.TrimPrefix(content, []byte(entryBOM)), []byte("\n")) {
 		if slices.Contains(lines, strings.TrimSpace(string(line))) {
 			continue
 		}
 		kept = append(kept, line...)
 	}
-	info, err := os.Stat(target)
-	if err != nil {
-		return err
-	}
-	if err := entryWriteFile(target+entryBackupSuffix, content, 0o600); err != nil {
+	if _, err := entryBackup(paths, content); err != nil {
 		return err
 	}
 	return entryWriteFile(target, kept, info.Mode().Perm())

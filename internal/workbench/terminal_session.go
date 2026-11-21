@@ -51,10 +51,12 @@ type terminalSession struct {
 	closeOnce             sync.Once
 	cliStartupDone        chan struct{}
 	// origin is "ssh" for a terminal the local SSH entry opened, with the
-	// device's name; kept is the owner's "保留", which keeps it past the
-	// connection.
-	origin, originDevice string
-	kept                 bool
+	// device's name and id; kept is the owner's "保留", which keeps it past
+	// the connection (a lock sets it too). sshViewers counts the ssh
+	// clients showing it.
+	origin, originDevice, originID string
+	kept                           bool
+	sshViewers                     int
 }
 
 func (t *terminalSession) ownsConversation() bool {

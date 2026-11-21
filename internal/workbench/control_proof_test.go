@@ -231,6 +231,11 @@ func TestControllerClientsSendNothingToIPv6Squatter(t *testing.T) {
 				_, err = AgentRequest(ctx, s.configPath, AgentTarget{}, "GET", "/api/settings", nil, "", "")
 				note("AgentRequest", err)
 				_ = AgentSocket(ctx, s.configPath, AgentTarget{}, "/api/terminals/none/stream", io.NopCloser(strings.NewReader("")), io.Discard)
+				// The local SSH entry's proxy (cage entry proxy): refused,
+				// the entry is off, but over the proven connection.
+				if ws, _, err := entryDial(ctx, s.configPath, "none"); err == nil {
+					ws.Close()
+				}
 			}
 			if conns, data := q.seen(); conns != 0 {
 				t.Fatalf("the squatter on [::1]:%d got %d connections; it read:\n%s", port, conns, data)

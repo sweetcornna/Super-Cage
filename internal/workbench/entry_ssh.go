@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,9 +9,13 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/gorilla/websocket"
@@ -27,56 +32,93 @@ import (
 //   - publickey for the enrolled device key only; no other method.
 //   - session channels (at most entryMaxChannels per connection):
 //       pty + shell/exec  -> a Cage terminal (listed, on the phone, the
-//                            same launcher, the 12-terminal limit);
+//                            same launcher, the 12-terminal limit), its
+//                            output through the escape filter; refused
+//                            while no filter is plugged in;
 //       exec, shell        -> the guest's run script over Cage's own hop;
 //       subsystem sftp     -> the guest's sftp-server over the same hop;
 //       Herdr's connect line -> refused until step 3 brings its filter.
 //   - no handler for any forwarding, agent, X11, tunnel or client
 //     environment: those channels are rejected, those requests answered no.
 
+// entryWrapperTimeout bounds one install of the guest's run script; a
+// variable for tests.
+var entryWrapperTimeout = 20 * time.Second
+
 const (
 	entryMaxChannels      = 8
 	entryHandshakeTimeout = 20 * time.Second
-	entryWrapperTimeout   = 20 * time.Second
 	entryHopWaitDelay     = 2 * time.Second
+	// entryCutGrace is how long a cut waits for terminal sessions to write
+	// their reset before it closes the connection.
+	entryCutGrace = 250 * time.Millisecond
 	// entryOperationWait bounds how long a new terminal waits for another
 	// terminal's creation or a monitor round to release the operation lock.
 	entryOperationWait     = 10 * time.Second
 	entryServerVersion     = "SSH-2.0-SuperCage"
 	entryHerdrRefusal      = "Super Cage：本机终端还不能接入 Herdr，需要更新 Super Cage 到支持 Herdr 的版本。"
+	entryNoFilterRefusal   = "Super Cage：这个版本的本机终端还不能打开带终端的会话（ssh -t），需要更新 Super Cage。不带终端的命令、scp、sftp 和 rsync 可以使用。"
+	entryLockedNotice      = "Super Cage 已锁定：这个终端仍在运行。在应用中解锁后，用 ssh -t 重新接入，或在 Super Cage 里打开它。"
 	entryTerminalLimitText = "已有 12 个终端：先关闭一个"
 )
 
 // entryService is the Server's local SSH entry.
 type entryService struct {
 	registry entryRegistry
-	// mu serialises changes to the entry's records and the wrapper install.
-	mu           sync.Mutex
-	wrapperReady bool
+	// mu serialises changes to the entry's records. It is never held while
+	// anything waits on the guest: off and revoke take it.
+	mu sync.Mutex
+	// wrapper is the guest's run script install, with its own lock.
+	wrapper entryWrapper
 	// Test seams: injected paths, the guest's run script and its install.
 	paths   *entryPaths
 	runPath string
 	install func(context.Context) error
 }
 
-// entryOutputFilter is the hook for the escape filter of design 5.7
-// (internal/termfilter, built on branch local-terminal-attach). Until it is
-// plugged in, the output of the entry's terminal sessions reaches the owner's
-// terminal application unfiltered, and
-// TestEntryTerminalOutputUsesEscapeFilter fails. To plug it in (API checked
-// against origin/local-terminal-attach 18ee611, where *termfilter.Filter has
-// this Append; the entry streams live output only, so SetReplay is not
-// needed):
+// entryTitlePush and entryResetSequence are cage attach's TitlePush and
+// ResetSequence (internal/attach, branch local-terminal-attach 13e74a2),
+// written the same way around an ssh terminal session: the title saved
+// before the first output, the local terminal returned to what a shell
+// expects at the end. Use those constants once that branch is merged.
+const (
+	entryTitlePush     = "\x1b[22;0t"
+	entryResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, end a string
+		"\x1b[?2026l" + // end a synchronized update
+		"\x1b7\x1b[?1049l\x1b[r\x1b8" + // main screen, whole-screen scroll region, cursor kept
+		"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // every mouse mode
+		"\x1b[?1004l\x1b[?2004l\x1b[?2048l\x1b[?2031l" + // focus, bracketed paste, in-band resize, colour scheme reports
+		"\x1b[<99u" + // pop every kitty keyboard level
+		"\x1b[?1l\x1b[?66l\x1b>" + // normal cursor keys and keypad
+		"\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // wrap, reverse wrap, insert and new line modes
+		"\x1b(B\x1b)B\x0f" + // US ASCII in G0 and G1, G0 in use
+		"\x1b[m\x1b[0 q\x1b[?25h" + // character attributes, cursor style, visible cursor
+		"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07" + // palette and dynamic colours
+		"\x1b[23;0t" // the title and icon name entryTitlePush saved
+)
+
+// entryOutputFilter is the escape filter of design 5.7 for one terminal
+// session (internal/termfilter, branch local-terminal-attach). Until it is
+// plugged in, the endpoint refuses shell and exec on every channel with a
+// pty (entrySession), so no guest output reaches a terminal application
+// through it unfiltered. *termfilter.Filter has these methods (checked
+// against origin/local-terminal-attach 13e74a2); to plug it in:
 //
 //	entryNewOutputFilter = func(clipboardWrite bool) entryOutputFilter {
 //		return termfilter.New(termfilter.Options{ClipboardWrite: clipboardWrite})
 //	}
 type entryOutputFilter interface {
 	Append(dst, src []byte) []byte
+	// SetReplay marks the bytes that follow as history the owner may have
+	// seen: they only draw.
+	SetReplay(on bool)
+	// Abort ends an unfinished string and forgets the filter's state.
+	Abort(dst []byte) []byte
 }
 
 // entryNewOutputFilter returns the filter of one terminal session, or nil.
-// HOOK(termfilter): nil until internal/termfilter is merged.
+// HOOK(termfilter): nil until internal/termfilter is merged; nil refuses
+// every session with a pty.
 var entryNewOutputFilter func(clipboardWrite bool) entryOutputFilter
 
 func (s *Server) entryPaths() (entryPaths, error) {
@@ -103,21 +145,41 @@ func (s *Server) entryEnvironmentStopped() {
 // entryGuestStarting forgets the installed run script: a start may bring up a
 // new guest.
 func (s *Server) entryGuestStarting() {
-	s.entry.mu.Lock()
-	s.entry.wrapperReady = false
-	s.entry.mu.Unlock()
+	w := &s.entry.wrapper
+	w.mu.Lock()
+	w.ready = false
+	w.generation++
+	w.mu.Unlock()
 }
 
-// entryEnsureWrapper installs the guest's run script the first time a channel
-// needs it after a guest start (cage.EntryInstallScript).
-func (s *Server) entryEnsureWrapper(ctx context.Context) error {
-	s.entry.mu.Lock()
-	defer s.entry.mu.Unlock()
-	if s.entry.wrapperReady {
+// entryWrapper is the state of the guest's run script install. One install
+// runs at a time, under its own lock and its own deadline, and callers wait
+// for it only as long as their own context lasts: a cut never waits on it,
+// and neither do off, revoke or a new connection.
+type entryWrapper struct {
+	mu         sync.Mutex
+	ready      bool
+	generation int           // counts guest starts; an install for an older guest does not count
+	running    chan struct{} // closed when the install in progress ends
+}
+
+var errEntryWrapper = errors.New("无法在环境里准备本机终端组件，请确认环境正在运行")
+
+// entryStartWrapper starts the install unless it is done or running, and
+// returns what to wait for (nil when the run script is in place).
+func (s *Server) entryStartWrapper() <-chan struct{} {
+	w := &s.entry.wrapper
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.ready {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(ctx, entryWrapperTimeout)
-	defer cancel()
+	if w.running != nil {
+		return w.running
+	}
+	done := make(chan struct{})
+	w.running = done
+	generation := w.generation
 	install := s.entry.install
 	if install == nil {
 		install = func(ctx context.Context) error {
@@ -125,10 +187,38 @@ func (s *Server) entryEnsureWrapper(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := install(ctx); err != nil {
-		return errors.New("无法在环境里准备本机终端组件，请确认环境正在运行")
+	go func() {
+		ctx, cancel := context.WithTimeout(s.lifetimeContext(), entryWrapperTimeout)
+		err := install(ctx)
+		cancel()
+		w.mu.Lock()
+		w.ready = err == nil && w.generation == generation
+		w.running = nil
+		w.mu.Unlock()
+		close(done)
+	}()
+	return done
+}
+
+// entryEnsureWrapper installs the guest's run script the first time a channel
+// needs it after a guest start (cage.EntryInstallScript), waiting at most as
+// long as ctx.
+func (s *Server) entryEnsureWrapper(ctx context.Context) error {
+	done := s.entryStartWrapper()
+	if done == nil {
+		return nil
 	}
-	s.entry.wrapperReady = true
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return errEntryWrapper
+	}
+	w := &s.entry.wrapper
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.ready {
+		return errEntryWrapper
+	}
 	return nil
 }
 
@@ -146,7 +236,7 @@ func (s *Server) entryCheck(device string) (entryDevice, *entryRefusal) {
 	if record == nil {
 		return entryDevice{}, errEntryUnknown
 	}
-	if record.Revoked != nil {
+	if record.Revoked != nil || s.entryComputerKeyRevoked(device) {
 		return entryDevice{}, errEntryRevoked
 	}
 	if s.macosGuest != nil || s.windowsGuest != nil {
@@ -168,6 +258,21 @@ func (s *Server) entryCheck(device string) (entryDevice, *entryRefusal) {
 	return *record, nil
 }
 
+// entryComputerKeyRevoked: device is this computer and its key was revoked
+// in another environment whose controller did not run then.
+func (s *Server) entryComputerKeyRevoked(device string) bool {
+	paths, err := s.entryPaths()
+	if err != nil {
+		return false
+	}
+	computer, ok, _ := entryReadComputer(paths)
+	if !ok || computer.ID != device {
+		return false
+	}
+	key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(computer.Public))
+	return err == nil && entryKeyRevoked(paths, key)
+}
+
 func entryRefuse(w http.ResponseWriter, refusal *entryRefusal) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(refusal.Status)
@@ -181,10 +286,24 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 		entryRefuse(w, errEntryLocalOnly)
 		return
 	}
+	if r.Header.Get(agentRequestHeader) != "" {
+		entryRefuse(w, errEntryWindowOnly)
+		return
+	}
 	device := r.URL.Query().Get("device")
 	conn := &entryConn{device: device}
+	conn.epoch, _ = r.Context().Value(accountEpochKey{}).(context.Context)
+	if conn.epoch == nil {
+		entryRefuse(w, errEntryLocked)
+		return
+	}
 	conn.ctx, conn.cancel = context.WithCancelCause(r.Context())
 	defer conn.cancel(nil)
+	// A lock cuts the connection like any other event, so its terminal
+	// sessions write their reset first (the account middleware leaves this
+	// route's request running on a lock).
+	stopLock := context.AfterFunc(conn.epoch, func() { conn.cancel(errEntryLocked) })
+	defer stopLock()
 	// Register before deciding, so an event between the decision and the
 	// registration still reaches this connection: every event changes its
 	// state first and cuts after.
@@ -218,7 +337,12 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 
 // entryServe runs the SSH server of one connection until it ends or is cut.
 func (s *Server) entryServe(conn *entryConn, transport net.Conn, record entryDevice, signer ssh.Signer) {
-	stop := context.AfterFunc(conn.ctx, func() { _ = transport.Close() })
+	// A cut lets terminal sessions write their reset first, for at most
+	// entryCutGrace (entryRunTerminal).
+	stop := context.AfterFunc(conn.ctx, func() {
+		conn.flush.wait(entryCutGrace)
+		_ = transport.Close()
+	})
 	defer stop()
 	config := &ssh.ServerConfig{
 		ServerVersion: entryServerVersion,
@@ -238,7 +362,10 @@ func (s *Server) entryServe(conn *entryConn, transport net.Conn, record entryDev
 	if err != nil {
 		return
 	}
-	closeServer := context.AfterFunc(conn.ctx, func() { _ = server.Close() })
+	closeServer := context.AfterFunc(conn.ctx, func() {
+		conn.flush.wait(entryCutGrace)
+		_ = server.Close()
+	})
 	defer closeServer()
 	defer server.Close()
 	s.entryNoteUse(record.ID)
@@ -281,12 +408,12 @@ func entryShortID(id string) string {
 // current key when the device is this computer and its key was renewed in
 // another environment (the record then follows it).
 func (s *Server) entryKeyAccepted(record entryDevice, key ssh.PublicKey) bool {
+	paths, err := s.entryPaths()
+	if err != nil || entryKeyRevoked(paths, key) {
+		return false
+	}
 	if enrolled, _, _, _, err := ssh.ParseAuthorizedKey([]byte(record.PublicKey)); err == nil && entryKeysEqual(enrolled, key) {
 		return true
-	}
-	paths, err := s.entryPaths()
-	if err != nil {
-		return false
 	}
 	computer, ok, err := entryReadComputer(paths)
 	if err != nil || !ok || computer.ID != record.ID {
@@ -362,6 +489,22 @@ func entryHerdrLine(command string) bool {
 	return (strings.Contains(command, "herdr-core") || entryHerdrName.MatchString(command)) && entryHerdrConnect.MatchString(command)
 }
 
+// entryFrame appends one batch of terminal output as the ssh client gets
+// it. After a gap (a re-join, or output the client fell behind on and lost)
+// the filter forgets what it was in the middle of, the client's terminal is
+// reset, and the batch only draws (replay), as cage attach does.
+func entryFrame(out []byte, filter entryOutputFilter, data []byte, gap bool) []byte {
+	if !gap {
+		return filter.Append(out, data)
+	}
+	out = filter.Abort(out)
+	out = append(out, "\x1bc"...)
+	filter.SetReplay(true)
+	out = filter.Append(out, data)
+	filter.SetReplay(false)
+	return out
+}
+
 func entryExitStatus(channel ssh.Channel, status int) {
 	if status < 0 || status > 255 {
 		status = 255
@@ -384,7 +527,7 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 		_ = channel.Close()
 	}()
 	var pty *entryPTYRequest
-	var resize func(cols, rows uint16)
+	var resize func(cols, rows uint32)
 	var hangup func()
 	started := false
 	start := func(run func()) {
@@ -409,7 +552,7 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 			var input entryWindowChange
 			if ssh.Unmarshal(request.Payload, &input) == nil && input.Cols < 1<<16 && input.Rows < 1<<16 {
 				if resize != nil {
-					resize(uint16(input.Cols), uint16(input.Rows))
+					resize(input.Cols, input.Rows)
 				} else if pty != nil {
 					pty.Cols, pty.Rows = input.Cols, input.Rows
 				}
@@ -452,21 +595,26 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 				continue
 			}
 			if pty != nil {
-				terminal, err := s.createEntryTerminal(conn, *pty, command)
-				if err != nil {
-					message := err.Error()
-					if errors.Is(err, errTerminalLimit) {
-						message = entryTerminalLimitText
-					}
+				if entryNewOutputFilter == nil {
+					// Fail closed (design 5.7): without the escape filter no
+					// guest output reaches a terminal application. Refusing
+					// pty-req would not do: OpenSSH then asks for a shell
+					// without a pty.
+					conn.refuse("pty-unfiltered")
 					start(func() {
-						_, _ = io.WriteString(channel, "Super Cage："+message+"\r\n")
+						_, _ = io.WriteString(channel, entryNoFilterRefusal+"\r\n")
 						entryExitStatus(channel, 1)
 						_ = channel.Close()
 					})
 					continue
 				}
-				resize = func(cols, rows uint16) { entryResize(terminal, cols, rows) }
-				start(func() { s.entryRunTerminal(ctx, conn, channel, terminal) })
+				view := &entryTerminalView{cols: pty.Cols, rows: pty.Rows}
+				resize = view.resize
+				request := *pty
+				// Only an interactive ssh -t is offered the terminals a lock
+				// left running; a command always gets a new terminal.
+				offer := command == ""
+				start(func() { s.entryTerminal(ctx, conn, channel, view, request, command, offer) })
 				continue
 			}
 			mode := "exec"
@@ -516,10 +664,15 @@ func (s *Server) entryRunHop(ctx context.Context, conn *entryConn, channel ssh.C
 		_, _ = io.WriteString(channel.Stderr(), "Super Cage："+err.Error()+"\n")
 		return
 	}
-	script := shellescape.Quote(s.entryRunPath()) + " " + mode
+	run := shellescape.Quote(s.entryRunPath()) + " " + mode
 	if mode == "exec" {
-		script += " " + shellescape.Quote(command)
+		run += " " + shellescape.Quote(command)
 	}
+	// Like guestControl: sshd hands the line to the guest user's login
+	// shell, which exec replaces at once with a bash that reads no profile
+	// or rc file, so nothing the guest wrote there runs before the run
+	// script or changes how its line is read.
+	script := "exec /bin/bash --noprofile --norc -c " + shellescape.Quote(run)
 	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", script)
 	cmd.WaitDelay = entryHopWaitDelay
 	stdin, err := cmd.StdinPipe()
@@ -638,7 +791,7 @@ func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, comma
 		}
 	}
 	session.mu.Lock()
-	session.origin, session.originDevice = "ssh", name
+	session.origin, session.originDevice, session.originID = "ssh", name, conn.device
 	session.mu.Unlock()
 	return session, nil
 }
@@ -659,20 +812,212 @@ func entryResize(session *terminalSession, cols, rows uint16) {
 	}
 }
 
+// entryTerminalView is the client's window and, once chosen, the terminal a
+// pty session shows. window-change requests arrive before the terminal
+// exists while the session offers to re-join one.
+type entryTerminalView struct {
+	mu         sync.Mutex
+	cols, rows uint32
+	session    *terminalSession
+}
+
+func (v *entryTerminalView) resize(cols, rows uint32) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.cols, v.rows = cols, rows
+	if v.session != nil && cols < 1<<16 && rows < 1<<16 {
+		entryResize(v.session, uint16(cols), uint16(rows))
+	}
+}
+
+// show makes session the one the client's size applies to; a re-joined
+// terminal takes this client's size at once.
+func (v *entryTerminalView) show(session *terminalSession, resize bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.session = session
+	if resize && v.cols < 1<<16 && v.rows < 1<<16 {
+		entryResize(session, uint16(v.cols), uint16(v.rows))
+	}
+}
+
+func (v *entryTerminalView) size() (uint32, uint32) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.cols, v.rows
+}
+
+// entryTerminal is the program of a session with a pty: it re-joins a
+// terminal a lock left running when the owner picks one, or opens a new one,
+// and shows it.
+func (s *Server) entryTerminal(ctx context.Context, conn *entryConn, channel ssh.Channel, view *entryTerminalView, pty entryPTYRequest, command string, offer bool) {
+	var session *terminalSession
+	var typed []byte
+	if offer {
+		if waiting := s.entryWaitingTerminals(conn.device); len(waiting) > 0 {
+			chosen, rest, ok := entryOfferRejoin(channel, waiting)
+			if !ok {
+				entryExitStatus(channel, 0)
+				_ = channel.Close()
+				return
+			}
+			if chosen != nil && !chosen.isClosed() {
+				session, typed = chosen, rest
+			}
+		}
+	}
+	rejoin := session != nil
+	if !rejoin {
+		pty.Cols, pty.Rows = view.size()
+		created, err := s.createEntryTerminal(conn, pty, command)
+		if err != nil {
+			message := err.Error()
+			if errors.Is(err, errTerminalLimit) {
+				message = entryTerminalLimitText
+			}
+			_, _ = io.WriteString(channel, "Super Cage："+message+"\r\n")
+			entryExitStatus(channel, 1)
+			_ = channel.Close()
+			return
+		}
+		session = created
+	}
+	view.show(session, rejoin)
+	s.entryRunTerminal(ctx, conn, channel, session, rejoin, typed)
+}
+
+// entryWaitingTerminals are this device's ssh terminals that run without an
+// ssh client: the ones a lock cut, or the owner kept.
+func (s *Server) entryWaitingTerminals(device string) []*terminalSession {
+	s.terminals.mu.Lock()
+	sessions := make([]*terminalSession, 0, len(s.terminals.sessions))
+	for _, session := range s.terminals.sessions {
+		sessions = append(sessions, session)
+	}
+	s.terminals.mu.Unlock()
+	var waiting []*terminalSession
+	for _, session := range sessions {
+		session.mu.Lock()
+		ok := session.origin == "ssh" && session.originID == device && session.kept && session.sshViewers == 0 && !session.closed
+		session.mu.Unlock()
+		if ok {
+			waiting = append(waiting, session)
+		}
+	}
+	slices.SortFunc(waiting, func(a, b *terminalSession) int { return a.sequence - b.sequence })
+	return waiting
+}
+
+func (t *terminalSession) isClosed() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
+// entryOfferRejoin lists the waiting terminals on the client's terminal and
+// reads the owner's choice: a number re-joins that terminal, Enter alone
+// opens a new one (chosen nil), Ctrl-C or Ctrl-D ends the session (ok
+// false). What the owner typed after Enter is returned for the terminal.
+func entryOfferRejoin(channel ssh.Channel, waiting []*terminalSession) (chosen *terminalSession, rest []byte, ok bool) {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Super Cage：这台电脑有 %d 个终端仍在运行：\r\n", len(waiting))
+	for i, session := range waiting {
+		session.mu.Lock()
+		title := session.title
+		session.mu.Unlock()
+		fmt.Fprintf(&b, "  %d  %s\r\n", i+1, entryPrintable(title, 48))
+	}
+	prompt := "输入编号重新接入，直接按回车打开新终端，Ctrl-C 退出："
+	b.WriteString(prompt)
+	if _, err := io.WriteString(channel, b.String()); err != nil {
+		return nil, nil, false
+	}
+	var answer []byte
+	buffer := make([]byte, 256)
+	for {
+		n, err := channel.Read(buffer)
+		for i := 0; i < n; i++ {
+			switch c := buffer[i]; {
+			case c >= '0' && c <= '9' && len(answer) < 3:
+				answer = append(answer, c)
+				_, _ = channel.Write([]byte{c})
+			case c == 0x7f || c == 0x08:
+				if len(answer) > 0 {
+					answer = answer[:len(answer)-1]
+					_, _ = io.WriteString(channel, "\b \b")
+				}
+			case c == 0x03 || c == 0x04:
+				_, _ = io.WriteString(channel, "\r\n")
+				return nil, nil, false
+			case c == '\r' || c == '\n':
+				_, _ = io.WriteString(channel, "\r\n")
+				if len(answer) == 0 {
+					return nil, nil, true
+				}
+				if number, err := strconv.Atoi(string(answer)); err == nil && number >= 1 && number <= len(waiting) {
+					rest = bytes.TrimLeft(buffer[i+1:n], "\n")
+					return waiting[number-1], append([]byte(nil), rest...), true
+				}
+				answer = answer[:0]
+				_, _ = io.WriteString(channel, "没有这个编号。"+prompt)
+			}
+		}
+		if err != nil {
+			return nil, nil, false
+		}
+	}
+}
+
+// entryPrintable is text from the guest (a terminal's title) made safe to
+// print: no control characters, at most limit runes.
+func entryPrintable(text string, limit int) string {
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || r == utf8.RuneError || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, text)
+	if utf8.RuneCountInString(text) > limit {
+		text = string([]rune(text)[:limit-1]) + "…"
+	}
+	if text == "" {
+		return "终端"
+	}
+	return text
+}
+
 // entryRunTerminal makes the channel a viewer of the Cage terminal. Like
-// ssh, closing the connection ends the terminal, unless the owner kept it.
-func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel ssh.Channel, session *terminalSession) {
+// ssh, closing the connection ends the terminal, unless the owner kept it;
+// a lock keeps it (F4 of the review): the work goes on, and after the
+// owner unlocks, a new ssh -t offers to re-join it.
+//
+// Every byte from the guest goes through the escape filter. Before the first
+// output the client's title is saved; when the session ends or is cut, the
+// filter's open string is ended and the client's terminal is reset
+// (entryResetSequence) before the exit status, as cage attach leaves a
+// window. A cut waits up to entryCutGrace for that (conn.flush).
+func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel ssh.Channel, session *terminalSession, rejoin bool, typed []byte) {
 	conn.shells.Add(1)
 	defer conn.shells.Add(-1)
+	conn.flush.begin()
+	defer conn.flush.end()
+	session.mu.Lock()
+	session.sshViewers++
+	session.mu.Unlock()
+	defer func() {
+		session.mu.Lock()
+		session.sshViewers--
+		session.mu.Unlock()
+	}()
 	paths, _ := s.entryPaths()
-	var filter entryOutputFilter
-	if entryNewOutputFilter != nil {
-		filter = entryNewOutputFilter(entryLoadLocalSettings(paths).ClipboardWrite)
-	}
+	filter := entryNewOutputFilter(entryLoadLocalSettings(paths).ClipboardWrite)
 	subscription := session.subscribe()
 	defer subscription.Close()
 	outputDone := make(chan struct{})
 	go func() {
+		if len(typed) > 0 && session.enqueueInputWait(ctx, string(typed), outputDone) != nil {
+			return
+		}
 		buffer := make([]byte, 32<<10)
 		for {
 			n, err := channel.Read(buffer)
@@ -684,18 +1029,20 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			}
 		}
 	}()
-	ended := false
-	var out []byte
-	for !ended {
+	// The history of a new terminal is output nobody saw yet; a re-joined
+	// one's is a gap.
+	out := []byte(entryTitlePush)
+	out = entryFrame(out, filter, subscription.History, rejoin)
+	ended, gone := false, false
+	if _, err := channel.Write(out); err != nil {
+		gone = true
+	}
+	for !gone {
 		batch := subscription.next(terminalFrameLimit)
 		if len(batch.Data) > 0 {
-			data := batch.Data
-			if filter != nil {
-				out = filter.Append(out[:0], data)
-				data = out
-			}
-			if _, err := channel.Write(data); err != nil {
-				break
+			out = entryFrame(out[:0], filter, batch.Data, batch.Resync && batch.Reset)
+			if _, err := channel.Write(out); err != nil {
+				gone = true
 			}
 			continue
 		}
@@ -711,9 +1058,26 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		break
 	}
 	close(outputDone)
+	locked := !ended && conn.epoch.Err() != nil
 	session.mu.Lock()
+	if locked {
+		session.kept = true
+	}
 	kept := session.kept
 	session.mu.Unlock()
+	tail := append(filter.Abort(nil), entryResetSequence...)
+	switch cause := context.Cause(conn.ctx); {
+	case ended:
+	case locked:
+		tail = append(tail, "\r\n"+entryLockedNotice+"\r\n"...)
+	case conn.ctx.Err() != nil:
+		if refusal, ok := cause.(*entryRefusal); ok {
+			tail = append(tail, "\r\nSuper Cage："+refusal.Message+"\r\n"...)
+		}
+	}
+	if !gone {
+		_, _ = channel.Write(tail)
+	}
 	if ended {
 		code := session.exitStatus()
 		if code < 0 {

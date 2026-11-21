@@ -11,6 +11,7 @@ import {
   revokeConfirm,
   shortFingerprint,
   sortedDevices,
+  unfilteredNote,
   validDeviceName,
 } from "./local-entry-state.mjs";
 
@@ -76,6 +77,16 @@ test("include row and dialog", () => {
   assert.equal(dialog.title, "让 ssh 认识这个环境");
   assert.equal(dialog.line, "Include ~/.ssh/super-cage/config");
   assert.deepEqual(Object.values(dialog.actions), ["取消", "不写入，只用 cage ssh", "写入并开启"]);
+  assert.equal(dialog.block, "");
+  // The confirmation shows the host name and the whole block it brings in.
+  const shown = includeDialog({ line: "Include ~/.ssh/super-cage/config", alias: "cage-lab1", block: "Host cage-lab1\n  User cage\n" });
+  assert.equal(shown.aliasText, "之后用 ssh cage-lab1 连接。这一行引入的配置：");
+  assert.equal(shown.block, "Host cage-lab1\n  User cage\n");
+  // A read-only file or a taken host name is said as it is.
+  const readOnly = includeRow({ ...on, include: { error: "~/.ssh/config 是只读文件，Super Cage 不会修改它" } });
+  assert.match(readOnly.text, /^~\/\.ssh\/config 是只读文件，Super Cage 不会修改它。你仍可以用 cage ssh default 连接。$/);
+  // The page names what is not filtered.
+  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤"]) assert.ok(unfilteredNote.includes(word), word);
 });
 
 test("relative times", () => {

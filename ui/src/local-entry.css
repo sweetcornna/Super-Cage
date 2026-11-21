@@ -215,3 +215,22 @@
   overflow-wrap: anywhere;
   user-select: all;
 }
+
+/* The Host block shown in the confirmation, under the Include line. */
+.local-entry-include-block {
+  max-height: 180px;
+  margin: 10px 0;
+  padding: 8px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-secondary);
+  line-height: 1.5;
+  white-space: pre;
+}
+.settings-subpage .local-entry .local-entry-unfiltered {
+  margin: 4px 0 0;
+}

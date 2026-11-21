@@ -241,7 +241,7 @@ func TestEntryIncludeConfirmApplyRemove(t *testing.T) {
 		original = changed
 		preview = entryIncludePreview(paths)
 		applied, err := entryIncludeApply(paths, preview.Token)
-		if err != nil || !applied.Present || applied.Backup != dotfiles+entryBackupSuffix {
+		if _, latest := entryBackupPaths(paths); err != nil || !applied.Present || applied.Backup != latest {
 			t.Fatalf("apply %+v %v", applied, err)
 		}
 		after, _ := os.ReadFile(dotfiles)

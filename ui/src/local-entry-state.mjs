@@ -67,21 +67,35 @@ export function commandRows(view) {
 export function includeRow(view) {
   const include = view?.include;
   if (!view?.enabled || !include) return null;
-  if (include.error) return { state: "error", text: "无法读取 ~/.ssh/config：" + include.error.replace(/^无法读取 ~\/\.ssh\/config：/, "") + "。你仍可以用 " + (view.commands?.cage_ssh || "cage ssh") + " 连接。" };
+  if (include.error) {
+    // Read errors arrive with or without their prefix; a read-only file or
+    // a host name the owner already uses arrive as whole sentences.
+    const read = /^无法读取 ~\/\.ssh\/config：/.test(include.error) || !include.error.startsWith("~/.ssh/config");
+    const text = read ? "无法读取 ~/.ssh/config：" + include.error.replace(/^无法读取 ~\/\.ssh\/config：/, "") : include.error;
+    return { state: "error", text: text + "。你仍可以用 " + (view.commands?.cage_ssh || "cage ssh") + " 连接。" };
+  }
   if (include.present) return { state: "present", text: "~/.ssh/config 已包含 Super Cage 的配置，可以直接 ssh " + (view.host_alias || "") };
   return { state: "absent", text: "~/.ssh/config 还没有包含 Super Cage 的配置，现在用 cage ssh 连接。" };
 }
 
-// The dialog that turns the entry on for the first time on this computer.
+// The dialog that turns the entry on for the first time on this computer:
+// the line, the host name it brings in and the whole block behind it.
 export function includeDialog(preview) {
   return {
     title: "让 ssh 认识这个环境",
     intro: "Super Cage 会在 " + (preview?.display_path || "~/.ssh/config") + " 的最上面加一行：",
     line: preview?.line || "Include ~/.ssh/super-cage/config",
+    alias: preview?.alias || "",
+    aliasText: preview?.alias ? "之后用 ssh " + preview.alias + " 连接。这一行引入的配置：" : "",
+    block: preview?.block || "",
     after: "这一行只引用 Super Cage 自己的文件，原文件会先备份。关闭所有环境的本机终端时会移除它。",
     actions: { cancel: "取消", secondary: "不写入，只用 cage ssh", confirm: "写入并开启" },
   };
 }
+
+// What the page says about bytes that are not filtered (design 5.7).
+export const unfilteredNote =
+  "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。";
 
 // "最近使用 3 分钟前".
 export function relativeTime(iso, now = Date.now()) {
