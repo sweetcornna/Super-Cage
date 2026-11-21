@@ -16,11 +16,13 @@ import (
 // runs only when a decision or a confirmation list needs it, never on a
 // timer. For every session leader started by a workbench terminal
 // (CAGE_WORKBENCH=1) it reports the terminal's foreground command when that
-// is not the shell itself; it lists Claude and Codex processes outside those
+// is not the shell itself (or the leader itself when it is not a shell, as
+// for an exec'd Codex session); it lists Claude and Codex processes outside those
 // sessions, and whether Claude Desktop and Claude Science are running.
 const appUpdateGuestProbe = `python3 -I - <<'CAGE_UPDATE_PROBE'
 import json, os, subprocess
 out = {"shells": [], "agents": [], "services": {}}
+SHELLS = ("bash", "sh", "dash", "zsh", "fish")
 def fields(pid):
     with open("/proc/%d/stat" % pid) as f:
         text = f.read()
@@ -34,7 +36,7 @@ def program(pid):
         return ""
     if not args:
         return ""
-    name = os.path.basename(args[0])
+    name = os.path.basename(args[0]).lstrip("-")
     if name in ("node", "nodejs") and len(args) > 1:
         name = "claude" if "claude-code" in args[1] else os.path.basename(args[1])
     return name[:64]
@@ -58,8 +60,14 @@ for pid, (pgrp, sid, tty, tpgid) in procs.items():
     if b"CAGE_WORKBENCH=1" not in env:
         continue
     sessions.add(sid)
-    foreground = program(tpgid) if tpgid > 0 and tpgid != pgrp else ""
-    out["shells"].append({"sid": sid, "foreground": foreground or ("?" if tpgid > 0 and tpgid != pgrp else "")})
+    if tpgid > 0 and tpgid != pgrp:
+        foreground = program(tpgid) or "?"
+    else:
+        # A terminal whose leader is the program itself (exec codex, a
+        # non-interactive script) has no separate foreground group.
+        leader = program(pid)
+        foreground = "" if leader in SHELLS else (leader or "?")
+    out["shells"].append({"sid": sid, "foreground": foreground})
 for pid, (pgrp, sid, tty, tpgid) in procs.items():
     if sid not in sessions:
         name = program(pid)

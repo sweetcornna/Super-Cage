@@ -343,6 +343,9 @@ final class CageAppUpdater {
     // confirmed, or the workbench's unattended request.
     private var confirmed: [String] = []
     private var silentRequest: String?
+    // A page that predates the confirmation sends no confirmed list; its
+    // click keeps the earlier stop-and-handoff path.
+    private var askWorkbench = false
     private var silentActivity: NSObjectProtocol?
     private var silentWatch: DispatchSourceFileSystemObject?
 
@@ -360,8 +363,8 @@ final class CageAppUpdater {
     }
     /// confirmed lists the interruption ids the person accepted in the
     /// confirmation. A page can never ask for an unattended install.
-    func handle(_ operation: String, confirmed: [String] = []) -> [String: Any] {
-        if operation == "install" && !busyInstalling { self.confirmed = confirmed; silentRequest = nil }
+    func handle(_ operation: String, confirmed: [String]? = nil) -> [String: Any] {
+        if operation == "install" && !busyInstalling { self.confirmed = confirmed ?? []; askWorkbench = confirmed != nil; silentRequest = nil }
         return dispatch(operation)
     }
     private var busyInstalling: Bool {
@@ -451,7 +454,12 @@ final class CageAppUpdater {
     }
     private func change(_ values: [String: Any]) {
         if values["phase"] as? String == "current" { state.removeValue(forKey: "latestVersion") }
-        if let phase = values["phase"] as? String, phase != "blocked" { state.removeValue(forKey: "blocked") }
+        if let phase = values["phase"] as? String {
+            if values["blocked"] == nil { state.removeValue(forKey: "blocked") }
+            // The sleep-preventing activity of a silent install ends as soon
+            // as the updater is no longer working towards that install.
+            if !["checking", "downloading", "downloaded", "verifying", "ready", "installing"].contains(phase) { endSilentActivity() }
+        }
         for (key, value) in values { state[key] = value }
         onChange(state)
     }
@@ -573,7 +581,9 @@ final class CageAppUpdater {
             let response = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
             DispatchQueue.main.async {
                 guard self.installer === process, !self.waitingForTermination else { return }
-                if response?["status"] as? String == "ready" { self.prepareEnvironment() }
+                if response?["status"] as? String == "ready" {
+                    if self.askWorkbench || self.silentRequest != nil { self.prepareEnvironment() } else { self.prepareLegacy(stop: false) }
+                }
                 else { self.abortInstaller(); self.failure(response?["message"] as? String ?? "安全安装准备失败，原应用已保留") }
             }
         }
@@ -609,18 +619,29 @@ final class CageAppUpdater {
                     guard !self.waitingForTermination else { return }
                     switch outcome {
                     case .prepared(let attempt):
-                        guard self.installer?.isRunning == true else { self.failure("安装程序已退出，原应用已保留"); self.reconnect(); return }
+                        // The environment is stopped and the workbench has exited. If
+                        // the installer cannot go ahead, say so in the installer's own
+                        // result file, so the next workbench restores the environment.
+                        guard self.installer?.isRunning == true else {
+                            self.recordAbandoned("安装程序已退出，原应用已保留", version: version, attempt: attempt)
+                            self.failure("安装程序已退出，原应用已保留"); self.reconnect(); return
+                        }
                         do {
                             try self.installerInput?.fileHandleForWriting.write(contentsOf: CageUpdateDecision.commitLine(attempt: attempt))
                             try self.installerInput?.fileHandleForWriting.close()
                             self.installationCommitted = true
                             self.change(["phase": "installing", "message": "正在安装并重启 Super Cage"])
                             self.quit()
-                        } catch { self.abortInstaller(); self.failure("无法开始安装，原应用已保留"); self.reconnect() }
+                        } catch {
+                            self.abortInstaller()
+                            self.recordAbandoned("无法开始安装，原应用已保留", version: version, attempt: attempt)
+                            self.failure("无法开始安装，原应用已保留"); self.reconnect()
+                        }
                     case .blocked(let code, let message):
-                        // Nothing was stopped. The verified package stays ready.
-                        self.abortInstaller(); self.endSilentActivity()
-                        self.change(["phase": "blocked", "message": message, "blocked": ["code": code, "message": message], "retryable": true])
+                        // Nothing was stopped and the verified package stays ready.
+                        // Reported as a retryable failure so every view offers retry.
+                        self.abortInstaller()
+                        self.change(["phase": "failed", "message": message, "blocked": ["code": code, "message": message], "retryable": true, "retryAt": ""])
                     case .failed(let message):
                         self.abortInstaller(); self.failure(message); self.reconnect()
                     }
@@ -654,6 +675,45 @@ final class CageAppUpdater {
         silentActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .suddenTerminationDisabled], reason: "Super Cage 正在空闲时自动升级")
         _ = dispatch("install")
         if !busyInstalling { endSilentActivity(); silentRequest = nil }
+    }
+    private func recordAbandoned(_ message: String, version: String, attempt: String) {
+        var result: [String: Any] = ["success": false, "message": message, "version": version]
+        if !attempt.isEmpty { result["attempt"] = attempt }
+        if let data = try? JSONSerialization.data(withJSONObject: result) { try? CageUpdateFiles.write(data, to: root.appendingPathComponent("last-result.json")) }
+    }
+    /// The earlier stop-and-handoff path, for a page without the confirmation.
+    private func prepareLegacy(stop: Bool) {
+        change(["phase": "installing", "message": stop ? "正在停止环境，准备安装" : "正在检查环境是否可安全更新"])
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let arguments = ["prepare-update"] + (stop ? ["--stop"] : []) + ["--json"]
+                let process = Process(); process.executableURL = self.cage; process.arguments = arguments
+                let output = Pipe(); process.standardOutput = output; process.standardError = FileHandle.nullDevice
+                try process.run()
+                let expiration = DispatchWorkItem { if process.isRunning { process.terminate() } }
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 180, execute: expiration)
+                let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); expiration.cancel()
+                guard data.count <= 16384, let result = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw CageUpdateError("无法确认环境已停止") }
+                DispatchQueue.main.async {
+                    guard !self.waitingForTermination else { return }
+                    switch result["status"] as? String {
+                    case "prepared" where process.terminationStatus == 0:
+                        guard self.installer?.isRunning == true else { self.failure("安装程序已退出，原应用已保留"); self.reconnect(); return }
+                        do {
+                            try self.installerInput?.fileHandleForWriting.write(contentsOf: Data("COMMIT\n".utf8))
+                            try self.installerInput?.fileHandleForWriting.close()
+                            self.installationCommitted = true
+                            self.change(["phase": "installing", "message": "正在安装并重启 Super Cage"])
+                            self.quit()
+                        } catch { self.abortInstaller(); self.failure("无法开始安装，原应用已保留"); self.reconnect() }
+                    case "stop_required" where !stop:
+                        self.prepareLegacy(stop: true)
+                    default:
+                        self.abortInstaller(); self.failure(result["message"] as? String ?? "环境未能安全停止，更新未安装")
+                    }
+                }
+            } catch { DispatchQueue.main.async { self.abortInstaller(); self.failure(error.localizedDescription) } }
+        }
     }
     private func endSilentActivity() {
         if let silentActivity { ProcessInfo.processInfo.endActivity(silentActivity) }

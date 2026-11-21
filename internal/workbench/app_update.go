@@ -167,6 +167,10 @@ func (a *appUpdateState) guestRead(s *Server) func(context.Context) (policy.Read
 	return s.readAppUpdateGuest
 }
 
+// appUpdateLocalRequired is the gateway's answer for a cloud connection;
+// ui/src/app-update-state.mjs recognizes it.
+const appUpdateLocalRequired = "应用升级由本机管理，请切换到本机后查看"
+
 // appUpdateRoute names the window routes of application updates.
 func appUpdateRoute(path string) bool {
 	return path == "/api/app-update" || strings.HasPrefix(path, "/api/app-update/")
@@ -453,9 +457,11 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	}
 	s.appUpdateSealed = true
 	s.mu.Unlock()
+	// Admission closes (closing) only after a successful stop, so a refusal
+	// clears the seal alone and never reopens a shutdown begun meanwhile.
 	unseal := func() {
 		s.mu.Lock()
-		s.appUpdateSealed, s.closing = false, false
+		s.appUpdateSealed = false
 		s.mu.Unlock()
 	}
 	a := &s.appUpdate

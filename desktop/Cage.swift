@@ -447,7 +447,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             guard let operation = body["operation"] as? String, ["status", "check", "install", "cancel"].contains(operation) else { replyHandler(nil,"更新操作无效"); return }
             // A page passes only what the person confirmed; it can never
             // request an unattended install.
-            replyHandler(appUpdater.handle(operation, confirmed: (body["confirmed"] as? [String] ?? []).prefix(64).map { $0 }),nil)
+            replyHandler(appUpdater.handle(operation, confirmed: (body["confirmed"] as? [String]).map { Array($0.prefix(64)) }),nil)
         case "appearance":
             guard let mode = body["mode"] as? String, ["system", "light", "dark"].contains(mode), let background = body["background"] as? String, background.range(of: "^#[0-9a-fA-F]{6}$", options: .regularExpression) != nil else { replyHandler(nil,"外观参数无效"); return }
             let value: [String:Any] = ["mode":mode,"background":background,"translucent":body["translucent"] as? Bool ?? false]

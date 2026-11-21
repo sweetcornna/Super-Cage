@@ -24,8 +24,8 @@ const buttonTable = [
   ["verifying", { shell: { phase: "verifying", latestVersion: "0.1.16" }, status: manualStatus }, "正在验证", null, true, "normal", ""],
   ["stopping the environment", { shell: { phase: "installing", latestVersion: "0.1.16", message: "正在停止环境，准备安装" }, status: manualStatus }, "正在停止环境", null, true, "normal", "正在停止环境"],
   ["installing", { shell: { phase: "installing", latestVersion: "0.1.16", message: "正在安装并重启 Super Cage" }, status: manualStatus }, "正在安装，完成后自动重启", null, true, "normal", ""],
-  ["must wait for a job", { shell: { phase: "blocked", latestVersion: "0.1.16", blocked: { code: "must_wait", message: "以下操作完成后才能升级：「更新环境组件」正在进行" } }, status: manualStatus }, "升级到 0.1.16", "confirm", false, "waiting", "「更新环境组件」"],
-  ["new work since the confirmation", { shell: { phase: "blocked", latestVersion: "0.1.16", blocked: { code: "confirm_required" } }, status: manualStatus }, "升级到 0.1.16", "confirm", false, "waiting", "重新确认"],
+  ["must wait for a job", { shell: { phase: "failed", retryable: true, latestVersion: "0.1.16", message: "以下操作完成后才能升级：「更新环境组件」正在进行", blocked: { code: "must_wait", message: "以下操作完成后才能升级：「更新环境组件」正在进行" } }, status: manualStatus }, "升级到 0.1.16", "confirm", false, "waiting", "「更新环境组件」"],
+  ["new work since the confirmation", { shell: { phase: "failed", retryable: true, latestVersion: "0.1.16", message: "有新的任务正在进行，请确认后再升级", blocked: { code: "confirm_required", message: "有新的任务正在进行，请确认后再升级" } }, status: manualStatus }, "升级到 0.1.16", "confirm", false, "waiting", "重新确认"],
   ["failed", { shell: { phase: "failed", latestVersion: "0.1.16", message: "环境未能安全停止，未安装更新" }, status: manualStatus }, "重试升级", "confirm", false, "failed", "环境未能安全停止"],
   ["rate limited", { shell: { phase: "failed", latestVersion: "0.1.16", message: "更新源请求受限", retryAt: "2026-11-21T04:00:00Z" }, status: manualStatus }, "等待重试", null, false, "failed", "后重试"],
   ["not installable in the app", { shell: { phase: "manual", latestVersion: "0.1.16", message: "此版本的 macOS 安装包未经 Apple 公证，暂不能在应用内安装。" }, status: manualStatus }, "查看新版本", "releases", false, "normal", "未经 Apple 公证"],
@@ -106,7 +106,7 @@ test("the confirmation cannot continue past work that must finish", () => {
 });
 
 test("the confirmation still offers the click when the list cannot be read", () => {
-  const cloud = appUpdateConfirmation({ version: "0.1.16", error: { status: 409, body: '{"local_required":true}' } });
+  const cloud = appUpdateConfirmation({ version: "0.1.16", error: { status: 409, message: "应用升级由本机管理，请切换到本机后查看" } });
   assert.equal(cloud.canContinue, true);
   assert.match(cloud.note, /云端任务不受影响/);
   const unknown = appUpdateConfirmation({ version: "0.1.16", error: { status: 502, message: "远程连接已中断" } });
@@ -144,7 +144,8 @@ test("settings rows for every mode", () => {
 
 test("settings when the workbench cannot answer", () => {
   for (const [error, kind, text] of [
-    [{ status: 409, body: '{"local_required":true}' }, "local_required", "应用升级由本机管理，请切换到本机后设置"],
+    [{ status: 409, message: "应用升级由本机管理，请切换到本机后查看" }, "local_required", "应用升级由本机管理，请切换到本机后设置"],
+    [{ status: 409, message: "连接不可用或已切换，请重新选择工作环境" }, "unreachable", "连接不可用或已切换，请重新选择工作环境"],
     [{ status: 423, message: "Super Cage 已锁定" }, "locked", "解锁 Super Cage 后可查看升级设置"],
     [{ status: 403 }, "forbidden", "只能在本机 Super Cage 窗口中查看升级设置"],
     [{ status: 502, message: "远程连接已中断" }, "unreachable", "远程连接已中断"],

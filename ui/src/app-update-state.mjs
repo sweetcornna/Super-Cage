@@ -30,11 +30,16 @@ const idleWaits = new Set(["busy", "not_held", "changed", "user_active", "user_u
 const versionOf = (shell, status) => shell?.latestVersion || status?.pending?.version || "";
 const percentOf = (shell) => (shell?.totalBytes > 0 ? Math.max(0, Math.min(100, Math.floor(((shell.receivedBytes || 0) / shell.totalBytes) * 100))) : null);
 
-// Maps a failed GET /api/app-update (an Error carrying .status and the body).
+// The gateway's plain-text refusal for a cloud connection
+// (appUpdateLocalRequired in internal/workbench/app_update.go).
+const localRequired = "应用升级由本机管理";
+
+// Maps a failed GET /api/app-update (an Error carrying .status and .message,
+// as ui/src/api.js throws them).
 export function readStatusFailure(error) {
   if (!error) return null;
   const message = error.message || "暂时无法读取升级设置";
-  if (error.status === 409 && /local_required/.test(error.body || message)) {
+  if (error.status === 409 && message.includes(localRequired)) {
     return { kind: "local_required", message: "应用升级由本机管理，请切换到本机后设置" };
   }
   if (error.status === 423) return { kind: "locked", message: "解锁 Super Cage 后可查看升级设置" };
@@ -104,9 +109,10 @@ export function appUpdateButton({ shell = {}, status = null, environment = {}, n
       : "正在安装，完成后自动重启";
     return show({ label, busy: true, disabled: true, percent, hint: shell.message || label });
   }
-  // 3. The workbench refused this click or this unattended attempt.
-  if (shell.phase === "blocked" && version) {
-    const blocked = shell.blocked || {};
+  // 3. The workbench refused this click or this unattended attempt. The
+  // shell reports it as a retryable failure carrying the refusal.
+  if (shell.blocked && version) {
+    const blocked = shell.blocked;
     if (blocked.code === "confirm_required") {
       return show({ label: `升级到 ${version}`, action: "confirm", tone: "waiting", hint: "有新的任务正在进行，请重新确认后再升级" });
     }

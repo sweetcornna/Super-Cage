@@ -441,7 +441,7 @@ func TestAppUpdateRoutesNotForwardedToCloud(t *testing.T) {
 		r := httptest.NewRequest("POST", route, strings.NewReader(`{"mode":"silent"}`))
 		r.Header.Set(connectionHeader, "selected")
 		w := httptest.NewRecorder()
-		if !s.routeRemote(w, r) || w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "local_required") {
+		if !s.routeRemote(w, r) || w.Code != http.StatusConflict || strings.TrimSpace(w.Body.String()) != appUpdateLocalRequired {
 			t.Fatalf("%s: %d %s", route, w.Code, w.Body.String())
 		}
 	}
