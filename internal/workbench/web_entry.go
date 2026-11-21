@@ -19,8 +19,27 @@ func (s *Server) phoneEntry(r *http.Request) bool {
 	if s.desktopEntry || s.clientOnly || s.windowsGuest != nil || s.macosGuest != nil {
 		return false
 	}
-	if choice, ok := webentry.FromHint(r.Header); ok {
-		return choice == webentry.Phone
+	choice, ok := webentry.FromHint(r.Header)
+	if !ok {
+		choice = webentry.Choose(r.Header)
 	}
-	return webentry.Choose(r.Header) == webentry.Phone
+	return choice == webentry.Phone && s.phoneReady(r)
+}
+
+// phoneReady reports whether the phone UI can work for this browser as it is.
+// The phone UI cannot redeem a launch ticket, sign in, unlock the account or
+// recover storage; the desktop document does all of these, so it is served
+// until they are done (its page guard then hands a phone over, see
+// ui/src/entry-layout.mjs). First setup is not checked here: a tenant VM's
+// setup state is not something this rule should be able to get wrong, and the
+// phone UI's environment page reports a server that cannot start.
+func (s *Server) phoneReady(r *http.Request) bool {
+	c, err := r.Cookie(s.cookieName())
+	if err != nil || !equalSecret(c.Value, s.session) {
+		return false
+	}
+	if _, unlocked := s.account.accessFor(s.hasTrustedView(r), false); !unlocked {
+		return false
+	}
+	return s.requireStorageReady() == nil
 }

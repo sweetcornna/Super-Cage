@@ -35,6 +35,7 @@ func rootRequest(s *Server, agent, cookie, hint string) *httptest.ResponseRecord
 	if cookie != "" {
 		r.Header.Set("Cookie", cookie)
 	}
+	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
 	if hint != "" {
 		r.Header.Set(webentry.Header, hint)
 	}
@@ -82,6 +83,7 @@ func TestRootDocumentFollowsTheDevice(t *testing.T) {
 	r := httptest.NewRequest("GET", s.origin+"/", nil)
 	r.Header.Set("User-Agent", entryIPhone)
 	r.Header.Set("If-None-Match", desktopTag)
+	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
 	w := httptest.NewRecorder()
 	s.handler().ServeHTTP(w, r)
 	if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), phone) {
@@ -96,6 +98,38 @@ func TestRootDocumentFollowsTheDevice(t *testing.T) {
 		if w.Code != 200 || !bytes.Equal(w.Body.Bytes(), want) || strings.Contains(strings.Join(w.Header().Values("Vary"), ","), "User-Agent") {
 			t.Fatalf("%s changed", path)
 		}
+	}
+}
+
+// A phone that is not ready for the phone UI gets the desktop document, which
+// redeems a launch ticket, signs in and unlocks.
+func TestRootDocumentWaitsForAReadyBrowser(t *testing.T) {
+	desktop, phone := entryDocuments(t)
+	s := testServer(t)
+	anonymous := func() []byte {
+		r := httptest.NewRequest("GET", s.origin+"/", nil)
+		r.Header.Set("User-Agent", entryIPhone)
+		w := httptest.NewRecorder()
+		s.handler().ServeHTTP(w, r)
+		return w.Body.Bytes()
+	}
+	if !bytes.Equal(anonymous(), desktop) {
+		t.Fatal("a phone without a session (a launch URL) must get the desktop document")
+	}
+	r := httptest.NewRequest("GET", s.origin+"/", nil)
+	r.Header.Set("User-Agent", entryIPhone)
+	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: strings.Repeat("c", 64)})
+	w := httptest.NewRecorder()
+	s.handler().ServeHTTP(w, r)
+	if !bytes.Equal(w.Body.Bytes(), desktop) {
+		t.Fatal("a stale session must get the desktop document")
+	}
+	if !bytes.Equal(rootRequest(s, entryIPhone, "", "phone").Body.Bytes(), phone) {
+		t.Fatal("a ready phone gets the phone UI")
+	}
+	s.account.lock()
+	if !bytes.Equal(rootRequest(s, entryIPhone, "cage-layout=phone", "phone").Body.Bytes(), desktop) {
+		t.Fatal("a locked account is unlocked in the desktop document")
 	}
 }
 
