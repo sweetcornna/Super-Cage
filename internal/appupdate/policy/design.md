@@ -99,6 +99,8 @@ Actors: **S** shell, **C** `cage` CLI child of the shell, **W** local workload (
 | 15 | "已升级到 x.y.z" | W chain `done`, attempt ok | UI shows the release notes link (`https://github.com/sweetcornna/Super-Cage/releases/tag/v<x.y.z>`) and reopens the recorded terminal tabs (Claude/Codex conversations resume by id). |
 
 ### 3.2 Silent path (macOS and Windows, local environment)
+Built for macOS. On Windows silent is reported unavailable until the shell changes in 11.5 land.
+
 Same steps, with: step 1 done by W's hourly tick when the window is hidden; step 2 replaced by the idle decision (section 4) recorded in `updates/silent-request.json`; the shell, watching `updates/` only while silent is on, runs 3–9 with `--trigger silent` and relaunches **without activating** the window; at step 6 W re-decides under the lock and refuses (`busy`, `not_held`, `user_active`, `failed_before`, `not_eligible`, `manual_mode`) unless everything still holds. A refusal before step 6 changes nothing; the verified download is kept for the next idle window.
 
 ### 3.3 Linux desktop (.deb): manual-only
@@ -218,26 +220,31 @@ Inputs: trigger (`click`/`silent`), version, current version, mode, attempts, bl
 | `cage app-update check` | changed | adds `{"phase":"manual","latestVersion":v,"message":reason}` when a newer release exists but is not installable here |
 | `cage app-update download` | unchanged | |
 | `cage prepare-update --json [--stop]` | unchanged | old behaviour for old shells |
-| `cage prepare-update --json --stop --app-update <v> --trigger click\|silent [--confirmed <id,...>] [--request <id>]` | new | `{"status":"prepared"}` or `{"status":"blocked","code":…,"message":…,"blockers":[…]}` (exit 0 with status `blocked`; exit 1 only for errors) |
+| `cage prepare-update --stop --json --app-update <v> --trigger click\|silent [--confirmed <id,...>] [--request <id>]` | new | `{"status":"prepared","attempt":"<16 hex>"}` or `{"status":"blocked","code":…,"message":…,"blockers":[…]}` (exit 0); `{"status":"error","message":…}` exit 1. `--app-update` without `--stop --json` is refused. With no workload running a click falls back to the old `PrepareDesktopUpdate`; a silent request is refused (`unreadable`). |
+
+Budget: the macOS shell kills `prepare-update` after 180 s; the handoff request is allowed 150 s; the stop inside it 120 s. If the shell gives up, the workbench sees its request context cancelled after the stop and does **not** exit: the attempt is recorded as failed at `stopping` and the environment is started again.
 
 ### 6.2 Launcher-token routes on the workload (CLI → W; never forwarded, never via agent transport)
-- `POST /api/desktop-local/app-update-handoff` `{token, version, trigger, confirmed[], request}` → 200 `{"status":"prepared"}` then shutdown, or 409 `{"status":"blocked",…}`.
-- `POST /api/desktop-local/app-update-blockers` `{token}` → snapshot (for diagnostics and a future gateway).
+- `POST /api/desktop-local/app-update-handoff` `{token, version, trigger, confirmed[], request}` → 200 `{"status":"prepared","attempt":id}` (fixed Content-Length) then shutdown, or 409 `{"status":"blocked",code,…}`. Codes: the `Decide` codes plus `stop_failed` (decision allowed, environment did not stop; nothing installed, environment restarted).
+- `POST /api/desktop-local/app-update-blockers` `{token}` → snapshot (diagnostics and a future gateway).
+- Order inside the handoff: TryLock `s.op` → seal admissions (`appUpdateSealed`) → decision snapshot (incl. guest read and, for silent, host input idle) → `Decide` → final snapshot (fingerprint must not move for silent; a click is decided again on it) → attempt + chain(`stopping`) saved → stop with the stop button's own steps (`requireStorageReady`, `stopEnvironmentOwners`, `pauseNetworkForStop`, a `stop` job run inside the held operation) → no VM owner → proxy stopped → chain `installing` saved → `closing` → reply → shutdown. Any failure before the reply unseals and, when the environment was running, starts it again.
 
 ### 6.3 Window routes on the workload (session cookie, Origin on POST, account unlocked, **trusted desktop view**)
-- `GET /api/app-update` → `{mode, pending:{version, requested_at}|null, waiting_for:[blockers], last_attempt, chain:{step, to, from, error, failed_step, next}, silent_available, silent_unavailable_reason}`.
-- `POST /api/app-update/policy` `{mode:"manual"|"silent"}` → the same status. Refused for phones, remote views and the agent transport.
-- `GET /api/app-update/interruptions` → `{blockers:[…], must_wait:[…], confirm:[ids]}` (runs the one guest read).
-- The gateway answers `/api/app-update*` with 409 `{"local_required":true}` when the selected connection is a cloud workspace.
+- `GET /api/app-update` → `policy.Status`: `{mode, mode_error, silent_available, silent_unavailable_reason, pending:{version, published_at, installable, reason, requested}|null, waiting:{code, message, blockers}|null, last_attempt, chain:{step, from, to, trigger, failed_step, error, next, notes_url, terminals, note}|null}`. `pending`/`waiting` are filled by the silent tick only; in manual mode the button's version comes from the shell's own check.
+- `POST /api/app-update/policy` `{mode:"manual"|"silent"}` → the same status. 403 without the trusted view, 423 when locked, 409 with the reason when silent is unavailable. Switching to manual deletes `silent-request.json`.
+- `GET /api/app-update/interruptions` → `{blockers:[interruptible], must_wait:[…], confirm:[ids], reopen:[terminals], environment_running}` (runs the one guest read).
+- The gateway answers `/api/app-update*` with 409 `{"local_required":true,…}` when the selected connection is a cloud workspace; the cloud is never contacted (test).
+- The agent transport refuses non-GET `/api/app-update*`.
 
 ### 6.4 Files in `<profile>/updates/` (private directory, 0700; files 0600)
 | file | writer | reader |
 |---|---|---|
-| `policy.json` `{mode, updated_at}` | W (policy route only) | W, S (to arm the file watch) |
-| `silent-request.json` `{id, version, fingerprint, decided_at}` | W hourly tick | S (file watch), W (decision compares fingerprint) |
+| `policy.json` `{mode, updated_at}` | W (policy route only) | W, S (gates the silent file watch) |
+| `silent-request.json` `{id, version, decided_at}` | W hourly tick | S (file watch). The fingerprint stays in W's memory, so a request from an earlier process never matches. Replaced after one hour. |
 | `attempts.json` (last 20) | W | W |
-| `chain.json` | W (old and new binaries) | W |
-| `last-result.json`, `launch-<token>.json`, `download-resume/`, `verified-*/` | H, S, C (existing) | S |
+| `chain.json` (`environment: {running, network_paused, workspace, terminals}`) | W (old and new binaries) | W |
+| `last-result.json` `{success, message, version, attempt}` | H (installer) | S, W (rollback evidence: attempt id, or version + written after `installing`) |
+| `launch-<token>.json`, `download-resume/`, `verified-*/` | H, S, C (existing) | S |
 
 ## 7. Settings and wording
 
@@ -318,31 +325,42 @@ See 4.5. In numbers: manual mode adds zero requests and zero wakeups; silent mod
 ## 11. Build plan
 
 ### 11.1 Built in this pass (branch `app-update-policy`)
-1. `internal/appupdate/catalog`: `Newest` (newest eligible release regardless of assets), `ManualReason` (`-signed.dmg`, `-setup-unsigned.exe`, missing), `published_at`; fixture test with the real 0.1.15 names.
-2. `internal/appupdate`: `check` reports `manual` with the reason (2.1); in-process `Latest` for the silent tick.
-3. `internal/appupdate/policy` (pure, no workbench imports): mode file, attempts ledger, eligibility, blocker registry with fingerprint and holds, hold tracker, `Decide`, chain record and transitions, status view. Unit tests.
-4. `internal/workbench`: feeders for in-memory state; the decision-time guest read (script + parser); host idle readers (macOS, Windows, other = unknown); admission seal; launcher routes (handoff, blockers); window routes (status, policy, interruptions); gateway refusal for cloud connections; agent-transport refusal; chain resume runner on startup; hourly silent tick writing `silent-request.json`; `PrepareAppUpdate` and the new `prepare-update` flags. Tests listed in 11.3.
-5. `ui/src/app-update-state.mjs` + `app-update-state.test.mjs` (node): button label/hint for every state, confirmation list, settings rows. No view-layer edits.
-6. macOS shell: see 11.2.
+1. `internal/appupdate/catalog`: `Latest` (newest release on the channel, never a downgrade), `manualReason` (`-signed.dmg`, `-setup-unsigned.exe`, missing), `published_at`.
+2. `internal/appupdate`: `check` reports `manual` with the reason (2.1); `CheckLatest` for the silent tick.
+3. `internal/appupdate/policy` (pure): mode file, attempts ledger, eligibility, blocker registry with fingerprint and holds, hold tracker (`HoldSlack` = 1 min absorbs hourly-ticker jitter), `Decide`, chain record and transitions, status view.
+4. `internal/workbench`: feeders (jobs, storage, terminals activity, phone turns, viewers incl. a join counter, audio, downloads, uploads, phone requests within 2 min, VM-owner probe and guest read at decision time); `readAppUpdateGuest` (python3 probe over /proc, ≤4 s; native guests = unknown); host input idle (`ioreg` HIDIdleTime on macOS, `GetLastInputInfo` on Windows, unknown elsewhere); admission seal in `submitJob`, terminal/Codex terminal creation, phone launches and uploads; launcher routes; window routes; gateway and agent-transport refusals; chain resume on startup (start with the person's network pause kept, components job when `guestUpdateRequired`, 检查联网条件 job, done); rollback restored only on the installer's own evidence; hourly tick (manual: one in-memory read and return; silent: release check every 6 h, hold, decision, `silent-request.json`); `PrepareAppUpdate` and the `prepare-update` flags. Silent is reported unavailable on Linux, Windows (shell not wired), development builds and non-writable install locations.
+5. `ui/src/app-update-state.mjs` + test: `appUpdateButton`, `appUpdateConfirmation`, `appUpdateSettings`, `readStatusFailure`, `formatWhen`. No view-layer edits.
+6. macOS shell (`desktop/Updates.swift`, `UpdateInstaller.swift`, `Cage.swift`, `UpdatesTests.swift`): `CageUpdateDecision` (arguments, outcome, COMMIT line with attempt, policy/request readers); `prepareEnvironment` asks with the new flags and handles `blocked` (nothing stopped, verified package kept); `handle(_:confirmed:)` (a page can never ask for a silent install); `watchSilentRequests` (DispatchSource on `updates/`, acts only when `policy.json` says silent and the request is newer and not a prerelease from stable) with a sleep-preventing activity; plan field `activates` (silent relaunch without focus); the installer accepts `COMMIT <attempt>` and writes `attempt` and `version` into `last-result.json`.
 
 ### 11.2 Not built here (wiring and follow-ups)
-- **UI wiring** (after the settings/status-bar restyles land): `useAppUpdates` also polls `GET /api/app-update` when visible; `AppUpdateButton` uses `buttonState()`; the confirmation dialog uses `confirmation()`; 设置 → 关于 uses `settingsRows()`; after relaunch reopen `chain.environment.terminals`.
-- **macOS shell**: pass `--app-update/--trigger/--confirmed/--request` to `prepare-update` and handle `blocked` (back to `available`/`waiting_idle` with the message); `install` takes `confirmed`; file watch on `updates/` while `policy.json` says silent; silent relaunch with `activates = false` (plan field `silent`); power assertion during the chain. Patch plan in 11.4.
-- **Windows shell** (`desktop/windows`): the same four changes in `AppUpdater.cs` (`Backend.Json([... "--app-update", v, "--trigger", t ...])`), `FileSystemWatcher` on `updates/`, refuse silent when `!Directory`-writable(`AppContext.BaseDirectory`), `MarkReady` unchanged. To be written on `app-update-policy-windows` and built on Windows by the lead.
-- **Terminal tags**: give each workbench terminal a `CAGE_TERMINAL_TAG` so the guest read maps foreground commands to tab names and lets an idle Claude/Codex TUI bound to a conversation count as restorable (today it is busy).
-- **Native guest read** (macOS/Windows guests) for terminals and agents; until then a live terminal there is unknown ⇒ busy.
-- **Cloud-only desktops**: a gateway-local status (files only, no account) and the hourly tick in the gateway, so silent mode works when the local workload is not running.
+- **UI wiring** (after the settings/status-bar restyles land): `useAppUpdates` also reads `GET /api/app-update` when visible; `AppUpdateButton` draws `appUpdateButton()`; action `confirm` fetches `/api/app-update/interruptions`, draws `appUpdateConfirmation()` and calls `native("appUpdate", {operation:"install", confirmed})`; 设置 → 关于 draws `appUpdateSettings()` and posts `/api/app-update/policy`; after relaunch offer to reopen `chain.terminals`.
+- **Windows shell**: patch plan 11.5; until then silent is unavailable there.
+- **Terminal tags**: `CAGE_TERMINAL_TAG` per terminal so the guest read names tabs and an idle Claude/Codex TUI bound to a conversation can count as restorable (today it is busy).
+- **Native guest read** (macOS/Windows guests); until then a running native guest is unknown ⇒ busy for silent, confirm for a click.
+- **Cloud-only desktops**: silent needs the local workload; a gateway-side tick is a follow-up.
 - **Guest vendor updaters** (audit rows 8, 10, 12, 16, 17): after the owner decides.
-- **Keep-awake** during the chain (`internal/keepawake` on the Go side, `IOPMAssertion`/`SetThreadExecutionState` in the shells).
+- **Unlock after an unattended relaunch**: restoring waits for the account to be unlocked (status note "解锁 Super Cage 后继续恢复环境"). Whether "记住登录" unlocks a window opened without focus is unverified.
 
-### 11.3 Tests that pin "manual"
-- policy: `TestManualModeRefusesSilentTrigger`, `TestMissingOrCorruptPolicyIsManual`, `TestUnknownBlockerIsBusy`, `TestFeederPanicIsUnknown`, `TestHoldResetsWhenFingerprintChanges`, `TestFailedOrUnfinishedAttemptIsNotRetried`, `TestNoPrereleaseNoDowngrade`, `TestClickNeedsConfirmationOfNewInterruptions`, `TestReleaseAgeForSilent`, chain transition table incl. crash mid-install and rollback.
-- workbench: `TestAppUpdateHandoffManualModeNeverInstallsSilently`, `TestAppUpdateHandoffBlockerAppearingAfterRequestWins` (fingerprint), `TestAppUpdateHandoffSealRefusesNewJob`, `TestAppUpdateHandoffUnknownGuestIsBusy`, `TestAppUpdatePolicyRequiresTrustedDesktopAndUnlockedAccount`, `TestAppUpdateRoutesNotForwardedToCloud`, `TestAgentTransportRefusesAppUpdatePolicy`, `TestSilentTickDoesNothingInManualMode` (no request, no file), chain resume tests (relaunched → start; rolled back → failed + restart; unknown schema → attention).
-- appupdate: `TestCheckReportsManualForUnnotarizedAndUnsignedAssets` (real 0.1.15 names), and the existing tests unchanged.
-- UI: `node --test ui/src/app-update-state.test.mjs`.
+### 11.3 Tests that pin "manual" (all pass, see 11.6)
+- policy: `TestMissingOrCorruptPolicyIsManual`, `TestSilentAllowedOnlyWhenEverythingHolds` (22 refusals + jitter), `TestClickNeedsConfirmationOfNewInterruptions`, `TestLedgerKeepsUnfinishedAttemptsAsFailures`, `TestRegistryUnknownIsBusyAndFingerprintCoversActivity`, `TestExternalHoldBlocksUntilReleased`, `TestHoldResetsWhenFingerprintChanges`, `TestEligibilityAndReleaseAge`, `TestChainResumeAfterReplacementRollbackAndCrash`.
+- workbench: `TestSilentTickDoesNothingInManualMode`, `TestAppUpdateHandoffManualModeNeverInstallsSilently`, `TestAppUpdateSilentInstallsOnlyAfterIdleHeld`, `TestAppUpdateBlockerAppearingAfterRequestWins` (job, phone, work that came and went, viewer that came and went, guest command, person returned), `TestAppUpdateBlockerDuringDecisionWins`, `TestAppUpdateClickNeedsConfirmationOfWhatItInterrupts`, `TestAppUpdateSealRefusesNewWorkDuringDecision`, `TestAppUpdateUnknownGuestIsBusy`, `TestAppUpdateStopFailureRestoresAndIsNotRetried`, `TestAppUpdatePolicyRequiresTrustedDesktopAndUnlockedAccount`, `TestAppUpdateInterruptionsListsWhatAClickStops`, `TestAppUpdateRoutesNotForwardedToCloud`, `TestAppUpdateGuestProbeAnswer`, `TestSilentUnavailableReason`, `TestAppUpdateChainResumesAfterReplacement` (7 cases), `TestSilentTickChecksForReleasesEverySixHours`, `TestParseHIDIdle`.
+- appupdate: `TestCheckReportsManualForUnnotarizedAndUnsignedAssets`, catalog `TestPublishedDesktopPackagesAreManualNotCurrent`, `TestLatestKeepsChannelAndNeverDowngrades`.
+- UI: `node --test ui/src/app-update-state.test.mjs` (30-row button table, "manual never claims automatic", confirmation, settings, failures, dates).
+- Swift: `scripts/test-app-updates.sh` (new block: decision arguments/answers, COMMIT with attempt, policy and request files, a silent request starts exactly one download only under a silent policy).
 
-### 11.4 macOS patch plan (Updates.swift / UpdateInstaller.swift / UpdatesTests.swift)
-See the "macOS shell" section of the final report; implemented only if `scripts/test-app-updates.sh` builds and passes here without touching the installed app.
+### 11.4 macOS: what is still a plan
+- Verify on a real Mac that a window relaunched with `activates = false` still loads the workbench and writes `launch-<token>.json` within the helper's 45 s; otherwise the helper rolls back every silent install.
+- Show the shell's `blocked` phase in the button (the UI module already maps it).
+
+### 11.5 Windows patch plan (for `app-update-policy-windows`, built on Windows)
+1. `AppUpdater.Handle(string operation, string[]? confirmed = null)` (MainWindow.cs line ~379 passes `request`'s `confirmed` string array, at most 64 ids matching `^[A-Za-z0-9:._-]{1,128}$`).
+2. `AppUpdater.Install`: replace the two `prepare-update` calls with one `Backend.Json(["prepare-update","--stop","--json","--app-update",prepared.Version,"--trigger",silentRequest==null?"click":"silent", …"--confirmed",…, …"--request",…])`; on `status=="blocked"` close the helper's stdin without COMMIT and `Change("blocked", message, true)` with a `blocked` dictionary; on `prepared` write `"COMMIT " + attempt` (attempt validated `^[0-9a-f]{16}$`, else plain `COMMIT`).
+3. `UpdateInstaller.cs` line 70: accept `COMMIT` or `COMMIT <attempt>`; line 203: write `{success, message, version = plan.Version, attempt}` so the workbench can prove a rollback (without it, a Windows rollback leaves the chain at `installing` and the environment stopped, with the note).
+4. Silent: `FileSystemWatcher` on `AppUpdater.Root` for `silent-request.json`, same checks as `CageUpdateDecision.silentRequest` and `policy.json` mode; `SetThreadExecutionState(ES_CONTINUOUS|ES_SYSTEM_REQUIRED)` during the chain; the helper's relaunch without stealing focus (`ProcessStartInfo.WindowStyle = Minimized` or a `--background` flag read by `Program.cs`). Then flip `silentUnavailableReason` for `windows` back to the writability check.
+5. Tests in `desktop/windows.update-tests/Program.cs`: the argument builder, the outcome parser and the COMMIT parser, mirroring the Swift block.
+
+### 11.6 Verification run on this Mac (no VM, no guest, no install)
+See the final report for the exact commands and outputs; summary: `go test -p 2 -count=1 ./internal/workbench ./cmd/cage ./internal/appupdate/...` ok; `-race` on the update subset ok; `node --test ui/src/app-update-state.test.mjs` 8/8; `scripts/test-app-updates.sh` all PASS; `swiftc -typecheck` of the app and the helper clean; `GOOS=windows go build ./internal/workbench ./cmd/cage` ok; the guest probe parsed by python3 and run against a fake /proc tree.
 
 ## 12. Verifying on real machines (throwaway builds)
 
@@ -376,9 +394,30 @@ Never on the owner's account or `/Applications/Super Cage.app`. Use a separate m
 | 13 | Sealing breaks the UI during a refused decision | Requests during ≤4 s get "正在准备升级". | Seal blocks only admissions of new work, not reads; documented. |
 | 14 | Stale `silent-request.json` after silent is turned off or the app restarts | Shell could start a chain. | The workload decides again (mode, fingerprint, request id must match the one it wrote in this process); a stale request is refused before anything stops. |
 
+Second round (after the workbench wiring):
+
+| # | Attack / failure | Finding | Change made |
+|---|---|---|---|
+| 15 | Old workload starts while the helper installs and "restores" mid-install | Rollback was inferred from "running version == from". | Restore only on the installer's evidence (attempt id, or version written after `installing`); otherwise leave the chain and the stopped environment alone with a note. `installing` is saved before the reply, so `stopping` proves nothing was installed. |
+| 16 | Release check on every hourly tick | `pending == nil` re-checked every hour when no update exists. | Check when never checked or after 6 h; test runs 6 ticks with one check. |
+| 17 | Gate re-check was a passive read | The chain failed if the gate state was not open. | Runs the existing 检查联网条件 job once (macOS: `checkMacOSNetwork`). |
+| 18 | The real stop differed from the stop button | `stopEnvironment` outside a job skipped the explicit-stop branches and kept `closing` (503) during the stop. | Same steps as `requestStopWith` (shared helpers), run as a `stop` job inside the held operation; `closing` only after the stop succeeded. |
+| 19 | A viewer opening and closing between ticks left the fingerprint unchanged | Only counts were reported. | `displayViewDemand.joined` counter; audio connections touch the registry. |
+| 20 | Network paused by the person came back on after the update | The restore start reset the network intent. | `environment.network_paused` in the chain; the restore start keeps the pause and skips the network check. |
+| 21 | The shell gives up after 180 s while the stop continues | The workload would exit with nobody installing. | Budgets 150 s / 120 s; a cancelled request after the stop fails the attempt and restarts the environment instead of exiting. |
+| 22 | Silent offered on Windows where the shell ignores requests | Status would say "即将自动升级" forever. | Reported unavailable on Windows until the shell is wired (11.5). |
+| 23 | A page asks the shell for a silent install | The bridge forwarded only `operation`. | `handle(_:confirmed:)` takes only confirmed ids from a page; silent requests come only from the file the workbench wrote, and the workbench still checks the id it holds in memory. |
+| 24 | `silentUnavailable()` on every status read (Windows creates a file in the install folder) | Footprint. | Computed once per process. |
+
 ## 14. Open questions and unverified items (存疑)
 - All **unverified** audit rows (8, 9 runtime, 10, 11, 12, 13 runtime, 14 runtime, 16, 17): need a running guest; commands are in the table.
 - Whether the workload controller outlives the window when the app quits (affects who consumes a silent request); this design is safe either way because the decision is re-made under the lock.
 - `GetLastInputInfo` from the workload process on Windows: correct only if the process runs in the user's interactive session (it is started by the app); unverified here (no Windows build).
 - `ioreg` HIDIdleTime after a dark wake: believed to keep counting; unverified.
 - The 24 h / 60 min / 30 min values are proposals; the owner may prefer different ones.
+- The guest probe has run only against a fake /proc tree on macOS (python3 3.x); its cost and correctness on a real Ubuntu guest (and container-mode tenants) are unverified.
+- Hold time is wall-clock: a Mac asleep for an hour counts as idle, and a dark wake can run the tick. Mitigations: host input idle ≥ 30 min, the shell's sleep-preventing activity during the install, the transactional helper. A monotonic or wake-aware hold is a follow-up.
+- After an unattended relaunch the restore waits for the account to be unlocked; if nothing unlocks it, a previously running environment stays stopped until the person returns (reported in the status note, not refused).
+- `activates = false` relaunch and the 45 s launch acknowledgement are unverified on a real Mac.
+- `phoneActiveWindow` (2 min) assumes a foreground phone requests more often than that; unverified with the real phone apps.
+- Windows: no C# written; `GetLastInputInfo` and the Windows build of the Go code are compile-checked only.
