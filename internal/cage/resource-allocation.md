@@ -65,6 +65,12 @@ per-instance state: held demand D and the time it was set.
    b. idle return: an inactive instance with L - max(D, g) >= step returns one step per round toward
       max(D, g). D only decays after the 5-minute hold, so a VM idle for 5 minutes starts to give back;
       an active VM keeps its excess (its page cache is in use) unless (a) or (c).
+      Being active only orders the tiers of (a) and (c) and spares (b); unlike the legacy policy's fair-share
+      exemption it never keeps memory another VM or the host needs. That matters because the gateway counts
+      every proxied chunk, 20 s terminal heartbeats included, as use (review 2, extra item 6): a workspace
+      with an open terminal is active for good, gives nothing through (b), and still yields through (a) and
+      (c) (TestAllocationActiveVMStillYieldsToAGrowingOne, TestAllocationHostPressureTakesIdleFirst...). The
+      heartbeats' other effect, that such a workspace never cools, belongs to idle cooling, not here.
    c. host pressure (Ha < 2R or Hs >= 10): release N_p = max(2R - Ha, step) by tiers:
       T1 inactive above d_i (instantaneous demand), T2 active above d_i (proportional to slack),
       T3 inactive above W_i + 256 MiB, T4 active above W_i + 256 MiB. Never below W + 256 MiB, never

@@ -205,6 +205,46 @@ func TestAllocationHoldsDemandBeforeReturningIdleMemory(t *testing.T) {
 	}
 }
 
+// Being in use only orders who gives and spares a VM idle return; it never
+// keeps memory another VM needs. The gateway counts every proxied chunk,
+// terminal heartbeats included, as use, so a workspace with an open
+// terminal is in use for good: it still yields what lies above its fair
+// allocation to a VM that grows (and, under host pressure, what lies above
+// its working set: TestAllocationHostPressureTakesIdleFirstAndNeverTheWorkingSet).
+func TestAllocationActiveVMStillYieldsToAGrowingOne(t *testing.T) {
+	busy, growing := vmID(5), vmID(6)
+	now := time.Unix(1e9, 0)
+	// 16 GiB host, 13.6 GiB to share. The busy VM was sized up while it was
+	// alone and now holds 10 GiB, mostly page cache over a 2 GiB working
+	// set; the other one starts at 3 GiB and needs 6 GiB.
+	state := MemoryState{HostTotal: 16 * testGiB, HostAvailable: 8 * testGiB, Ceiling: 12 * testGiB, Instances: map[string]InstanceMemory{
+		busy: guestVM(10*testGiB, 2*testGiB, 0), growing: guestVM(3*testGiB, 0, 0),
+	}}
+	held := map[string]demandState{}
+	yielded := false
+	for round := range 60 {
+		// Both are in use every round, the busy one through its heartbeat.
+		markActive(state, busy, growing)
+		simulateGuests(&state, map[string]int64{busy: 2 * testGiB, growing: 6 * testGiB})
+		result := allocate(state, held, now)
+		held = result.held
+		for _, change := range result.changes {
+			if change.id == busy && change.to < change.from {
+				if change.reason != "others need memory" || change.to < result.report[busy].Fair {
+					t.Fatalf("round %d: %+v (fair %d MiB)", round, change, result.report[busy].Fair>>20)
+				}
+				yielded = true
+			}
+			applyChange(&state, change)
+		}
+		now = now.Add(15 * time.Second)
+	}
+	lb, lg := state.Instances[busy].Limit, state.Instances[growing].Limit
+	if !yielded || lg < 6*testGiB+memoryMinHeadroom {
+		t.Fatalf("in-use VM kept memory a growing VM needs: busy %d MiB, growing %d MiB", lb>>20, lg>>20)
+	}
+}
+
 func TestAllocationHostPressureTakesIdleFirstAndNeverTheWorkingSet(t *testing.T) {
 	idle, busy := vmID(3), vmID(4)
 	now := time.Unix(1e9, 0)
