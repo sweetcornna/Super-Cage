@@ -82,6 +82,7 @@ type Server struct {
 	codexAccounts                                    codexAccountManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
+	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
 	diagnosticRateMu                                 sync.Mutex
 	diagnosticWindow                                 time.Time
 	diagnosticCount                                  int

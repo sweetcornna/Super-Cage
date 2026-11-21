@@ -4,6 +4,7 @@ package workbench
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,12 +21,16 @@ import (
 type recordingLaunches struct {
 	mu    sync.Mutex
 	steps [][]string
+	fail  bool // every step fails, as when the application refuses
 }
 
 func (r *recordingLaunches) Run(_ context.Context, step localterm.Step) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.steps = append(r.steps, step.Argv)
+	if r.fail {
+		return errors.New("refused")
+	}
 	return nil
 }
 
@@ -73,6 +78,9 @@ func TestLocalTerminalSettingsStayOnThisComputer(t *testing.T) {
 }
 
 func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
+	every, perMinute := localTerminalOpenEvery, localTerminalOpenPerMinute
+	localTerminalOpenEvery, localTerminalOpenPerMinute = 0, 1000 // many opens in a row
+	t.Cleanup(func() { localTerminalOpenEvery, localTerminalOpenPerMinute = every, perMinute })
 	desktop, workload, full := desktopBeforeWorkload(t)
 	launches := &recordingLaunches{}
 	localTerminalRunner = launches
@@ -345,4 +353,85 @@ func TestLocalTerminalOpenOutlivesTheRequest(t *testing.T) {
 	if launches.cancelled {
 		t.Fatal("the launch was stopped when the request ended")
 	}
+}
+
+func kittyOpens(t *testing.T) (desktop, workload *Server, launches *recordingLaunches) {
+	t.Helper()
+	desktop, workload, _ = desktopBeforeWorkload(t)
+	launches = &recordingLaunches{}
+	localTerminalRunner = launches
+	home := t.TempDir()
+	localTerminalHome = func() (string, error) { return home, nil }
+	localTerminalDetect = func() []localterm.Installed {
+		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
+	}
+	t.Cleanup(func() {
+		localTerminalRunner, localTerminalHome, localTerminalDetect = localterm.ExecRunner{}, os.UserHomeDir, localterm.Detect
+	})
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\"}", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	return desktop, workload, launches
+}
+
+// The settings and the open request are refused while the environment the
+// desktop shows is locked. The lock is the workload's: the desktop asks it.
+func TestLocalTerminalRefusedWhileLocked(t *testing.T) {
+	desktop, workload, launches := kittyOpens(t)
+	generation := desktop.remote.desktop.generation
+	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
+	workload.account.lock()
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != http.StatusLocked {
+		t.Fatal("settings changed while locked:", w.Code, w.Body.String())
+	}
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != http.StatusLocked {
+		t.Fatal("opened while locked:", w.Code, w.Body.String())
+	}
+	if len(launches.steps) != 0 {
+		t.Fatal("launched while locked", launches.steps)
+	}
+	workload.account.setKey(make([]byte, 32))
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 {
+		t.Fatal("not opened after unlocking:", w.Code, w.Body.String())
+	}
+}
+
+// Opening is bounded: once a second, ten times a minute, whether or not
+// the launch worked.
+func TestLocalTerminalOpenRateLimit(t *testing.T) {
+	desktop, workload, launches := kittyOpens(t)
+	generation := desktop.remote.desktop.generation
+	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
+	call := func() int {
+		return clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation).Code
+	}
+	if code := call(); code != 200 {
+		t.Fatal(code)
+	}
+	if code := call(); code != http.StatusTooManyRequests {
+		t.Fatal("a second open within a second:", code)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	launches.fail = true
+	if code := call(); code != http.StatusBadGateway {
+		t.Fatal("a failing launch:", code)
+	}
+	launches.fail = false
+	opened := len(launches.steps)
+	every := localTerminalOpenEvery
+	localTerminalOpenEvery = 20 * time.Millisecond // the minute's bound, faster
+	t.Cleanup(func() { localTerminalOpenEvery = every })
+	for i := 0; i < 12; i++ {
+		time.Sleep(30 * time.Millisecond)
+		if code := call(); code == http.StatusTooManyRequests {
+			if total := 2 + i; total != 10 {
+				t.Fatalf("refused after %d opens in a minute, want 10", total)
+			}
+			if len(launches.steps) != opened+i {
+				t.Fatal("a refused open launched")
+			}
+			return
+		}
+	}
+	t.Fatal("never refused within a minute")
 }

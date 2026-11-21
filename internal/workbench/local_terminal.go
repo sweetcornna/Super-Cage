@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,9 +43,74 @@ var localTerminalDetect = localterm.Detect
 // configurations; tests replace it.
 var localTerminalHome = os.UserHomeDir
 
-// localTerminalOpening is set while a window is being opened. The desktop
-// app runs one server, so it is per desktop.
-var localTerminalOpening atomic.Bool
+// localTerminalOpenEvery and localTerminalOpenPerMinute bound the launches
+// of one desktop: each can open a window or raise macOS's Automation prompt.
+var localTerminalOpenEvery, localTerminalOpenPerMinute = time.Second, 10
+
+// localTerminalGate is the desktop's state for opening windows: one at a
+// time, and the recent launches the bounds count.
+type localTerminalGate struct {
+	opening atomic.Bool
+	mu      sync.Mutex
+	opens   []time.Time
+}
+
+// allow records a launch, or refuses one past the bounds. Every launch
+// counts, whether it opened a window or not.
+func (g *localTerminalGate) allow(now time.Time) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	recent := g.opens[:0]
+	for _, at := range g.opens {
+		if now.Sub(at) < time.Minute {
+			recent = append(recent, at)
+		}
+	}
+	g.opens = recent
+	if n := len(recent); n >= localTerminalOpenPerMinute || n > 0 && now.Sub(recent[n-1]) < localTerminalOpenEvery {
+		return false
+	}
+	g.opens = append(g.opens, now)
+	return true
+}
+
+// localTerminalUnlocked asks the environment the desktop shows whether its
+// account is unlocked, as its lock screen does. The desktop's client routes
+// are served before any account check, and the account is the workload's.
+func (s *Server) localTerminalUnlocked(ctx context.Context, connection string) (bool, error) {
+	session, _, err := s.remote.desktop.acquire(connection)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, session.Origin+"/api/account", nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Origin", session.Origin)
+	response, err := session.Client.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized, http.StatusLocked:
+		return false, nil
+	default:
+		return false, errors.New(response.Status)
+	}
+	var account struct {
+		Unlocked bool `json:"unlocked"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&account); err != nil {
+		return false, err
+	}
+	return account.Unlocked, nil
+}
+
+const localTerminalLocked = "Super Cage 已锁定：解锁后再打开本机终端"
 
 var localTerminalConnection = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
@@ -70,6 +138,14 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 		var settings localterm.Settings
 		if !readJSON(w, r, &settings) {
 			return
+		}
+		// Not while the environment shown is locked. With none shown, or
+		// one that cannot answer, there is no lock to keep.
+		if current := s.remote.context(); current.Mode != "none" && current.ConnectionID != "" {
+			if unlocked, err := s.localTerminalUnlocked(r.Context(), current.ConnectionID); err == nil && !unlocked {
+				http.Error(w, localTerminalLocked, http.StatusLocked)
+				return
+			}
 		}
 		if err := settings.Validate(); err != nil {
 			requestError(w, err)
@@ -166,6 +242,14 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "连接已经切换，请重新打开当前工作台", http.StatusConflict)
 		return
 	}
+	switch unlocked, err := s.localTerminalUnlocked(r.Context(), connection); {
+	case err != nil:
+		http.Error(w, "无法确认工作环境是否已解锁，请稍后再试", http.StatusConflict)
+		return
+	case !unlocked:
+		http.Error(w, localTerminalLocked, http.StatusLocked)
+		return
+	}
 	dir := s.localTerminalDir()
 	settings, _ := localterm.LoadSettings(dir)
 	app := localterm.Lookup(settings.App)
@@ -216,11 +300,16 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	// One open at a time: one may wait while macOS asks the owner to allow
 	// controlling the application, and after "Allow" every waiting open
 	// would become a window.
-	if !localTerminalOpening.CompareAndSwap(false, true) {
+	gate := &s.localTerminal
+	if !gate.opening.CompareAndSwap(false, true) {
 		http.Error(w, "正在打开上一个本机终端窗口：如果 macOS 在询问权限，先选择后再试", http.StatusConflict)
 		return
 	}
-	defer localTerminalOpening.Store(false)
+	defer gate.opening.Store(false)
+	if !gate.allow(time.Now()) {
+		http.Error(w, "打开得太频繁：请稍等片刻再试", http.StatusTooManyRequests)
+		return
+	}
 	// The launch outlives the request: stopping osascript mid-prompt leaves
 	// the prompt on screen with nothing behind it.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 150*time.Second)
