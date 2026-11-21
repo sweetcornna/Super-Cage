@@ -79,17 +79,6 @@ func SameBuild(build string) Check {
 	return func(id ControllerIdentity) bool { return want.Matches(id) }
 }
 
-// SameRelease accepts a controller of the same version and protocol. The
-// slim cage-attach program uses it: it is a different executable from the
-// cage it ships with, and the terminal stream it speaks is versioned on its
-// own (the viewer frame), so hashing the whole cage binary on every start
-// would buy nothing for its cost.
-func SameRelease(version string) Check {
-	return func(id ControllerIdentity) bool {
-		return version != "" && id.Build != "" && id.Version == version && id.Protocol == Protocol
-	}
-}
-
 // CheckLocal refuses a local controller of another build or another
 // configuration, before any session is opened.
 func CheckLocal(launch LaunchResponse, configPath string, accepted bool) error {

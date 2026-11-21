@@ -39,6 +39,11 @@ type ControllerIdentity struct {
 	Build    string `json:"build"`
 	Protocol int    `json:"protocol"`
 	PID      int    `json:"pid"`
+	// Stamp is the build stamp linked into this controller (version.Stamp).
+	Stamp string `json:"stamp,omitempty"`
+	// Attach is the cage-attach installed beside this controller, as it
+	// verified it; absent when there is none.
+	Attach *Companion `json:"attach,omitempty"`
 }
 
 // Matches reports whether two identities are the same executable build.

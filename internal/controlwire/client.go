@@ -150,7 +150,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, conte
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
 	var request bytes.Buffer
-	c.writeHead(&request, method, path)
+	c.writeHead(&request, method, path, c.ConnectionID)
 	if contentType {
 		request.WriteString("Content-Type: application/json\r\n")
 	}
@@ -197,11 +197,12 @@ func (c *Client) dial(ctx context.Context, timeout time.Duration) (net.Conn, err
 	return conn, nil
 }
 
-// writeHead writes the request line and the headers every request carries.
-func (c *Client) writeHead(b *bytes.Buffer, method, path string) {
+// writeHead writes the request line and the headers every request carries,
+// with the connection generation when there is one.
+func (c *Client) writeHead(b *bytes.Buffer, method, path, connection string) {
 	b.WriteString(method + " " + path + " HTTP/1.1\r\nHost: " + c.host + "\r\nOrigin: " + c.origin + "\r\n")
-	if c.ConnectionID != "" {
-		b.WriteString(controlclient.ConnectionHeader + ": " + c.ConnectionID + "\r\n")
+	if connection != "" {
+		b.WriteString(controlclient.ConnectionHeader + ": " + connection + "\r\n")
 	}
 	c.mu.Lock()
 	if len(c.cookies) > 0 {

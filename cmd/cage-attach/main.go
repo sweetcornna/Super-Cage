@@ -20,7 +20,8 @@ import (
 )
 
 func main() {
-	// It is a different executable from the cage it ships with, so it
-	// accepts the controller of the same release rather than the same build.
-	os.Exit(attach.Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, attach.Options{Check: controlclient.SameRelease(version.Version)}))
+	// It is a different executable from the cage it ships with: it accepts
+	// only a controller with its build stamp that verified this very file
+	// beside itself (controlclient.SameCompanion).
+	os.Exit(attach.Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr, attach.Options{Check: controlclient.SameCompanion(version.Stamp)}))
 }

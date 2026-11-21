@@ -106,12 +106,14 @@ try {
     $env:GOARCH = 'amd64'
     $env:GOOS = 'windows'
     $tags = 'external_hcs,external_wsl2,yq_noxml,yq_nolua,yq_noini,yq_nohcl,yq_notoml,yq_noprops,yq_nocsv,yq_nouri,yq_nobase64,yq_nosh,yq_noshell'
-    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion"
+    # One stamp per build in cage.exe and cage-attach.exe: the controller accepts only the cage-attach built with it.
+    $stamp = [guid]::NewGuid().ToString('N')
+    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/sylvinus/agent-vm/internal/version.Stamp=$stamp -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion"
     Invoke-BuildTool $go @('build', '-trimpath', '-tags', $tags, '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage.exe'), './cmd/cage')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-vm-assets')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-web-assets')
     # cage attach runs the slim cage-attach.exe beside cage.exe (cmd/cage-attach):
-    # the same version flags, never cgo.
+    # the same flags and stamp, never cgo.
     $cgo = $env:CGO_ENABLED
     $env:CGO_ENABLED = '0'
     try { Invoke-BuildTool $go @('build', '-trimpath', '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage-attach.exe'), './cmd/cage-attach') } finally { $env:CGO_ENABLED = $cgo }

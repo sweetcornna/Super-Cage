@@ -24,7 +24,7 @@ type ControllerIdentity = controlclient.ControllerIdentity
 
 func currentController() (ControllerIdentity, error) {
 	build, err := version.ExecutableIdentity()
-	return ControllerIdentity{Version: version.Version, Build: build, Protocol: controlProtocol, PID: os.Getpid()}, err
+	return ControllerIdentity{Version: version.Version, Build: build, Protocol: controlProtocol, PID: os.Getpid(), Stamp: version.Stamp}, err
 }
 
 type launchResponse = controlclient.LaunchResponse

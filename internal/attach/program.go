@@ -4,15 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 )
 
 // ProgramName is the file name of the slim cage-attach program.
-func ProgramName() string {
-	if runtime.GOOS == "windows" {
-		return "cage-attach.exe"
-	}
-	return "cage-attach"
-}
+func ProgramName() string { return controlclient.AttachProgram(runtime.GOOS) }
 
 // Beside returns the cage-attach installed in the same directory as the
 // executable exe, after resolving symbolic links, or "" when there is none.

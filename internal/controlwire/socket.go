@@ -80,16 +80,15 @@ func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, pat
 	_, _ = rand.Read(nonce[:])
 	key := base64.StdEncoding.EncodeToString(nonce[:])
 	var request bytes.Buffer
-	c.writeHead(&request, "GET", path)
-	// The generation header is the target's, not the client's default.
-	request.WriteString(controlclient.ConnectionHeader + ": " + controlclient.Connection(target) + "\r\n")
+	// The generation is the target's, as the UI sends it.
+	c.writeHead(&request, "GET", path, controlclient.Connection(target))
 	request.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + key + "\r\n\r\n")
 	r := bufio.NewReaderSize(conn, 4096)
 	var reply reply
 	if _, err = conn.Write(request.Bytes()); err == nil {
 		reply, err = readReply(r)
 	}
-	if stop() == false || err != nil {
+	if !stop() || err != nil {
 		conn.Close()
 		return nil, failed
 	}

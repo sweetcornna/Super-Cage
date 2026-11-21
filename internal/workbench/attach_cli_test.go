@@ -36,6 +36,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/controlwire"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
+	"github.com/sylvinus/agent-vm/internal/version"
 )
 
 // TestAttachChild is the program inside the Cage terminal: it reports what
@@ -764,7 +765,17 @@ func TestAttachProcessFootprint(t *testing.T) {
 	if os.Getenv("CAGE_ATTACH_BENCH") == "" {
 		t.Skip("set CAGE_ATTACH_BENCH=1")
 	}
+	if stamp := os.Getenv("CAGE_ATTACH_STAMP"); stamp != "" {
+		// A built cage-attach accepts the controller only with its stamp.
+		previous := version.Stamp
+		version.Stamp = stamp
+		t.Cleanup(func() { version.Stamp = previous })
+	}
 	s := attachController(t, nil)
+	if program := os.Getenv("CAGE_ATTACH_BINARY"); program != "" {
+		// The controller verifies the cage-attach beside its executable.
+		s.exe = filepath.Join(filepath.Dir(strings.Fields(program)[0]), "cage")
+	}
 	session := startChild(t, s, "echo")
 	args := []string{"--config", s.configPath, "--terminal", session.id}
 	record, err := controlclient.ReadRecord(filepath.Dir(s.configPath))
@@ -910,14 +921,12 @@ func TestAttachProcessFootprint(t *testing.T) {
 			out, _ := exec.Command("/bin/ps", "-o", "time=", "-p", strconv.Itoa(pid)).Output()
 			return strings.TrimSpace(string(out))
 		}
-		wakeups := func() string {
-			out, _ := exec.Command("/usr/bin/top", "-l", "1", "-pid", strconv.Itoa(pid), "-stats", "pid,idlew,time").Output()
-			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-			return lines[len(lines)-1]
-		}
-		cpu0, wake0 := cpu(), wakeups()
-		time.Sleep(d)
-		t.Logf("idle %v: CPU time %s -> %s; top pid,idlew,time %q -> %q; RSS %d KB", d, cpu0, cpu(), wake0, wakeups(), processRSS(t, pid))
+		// One top across the whole sample, counting events as deltas: its
+		// second sample covers exactly d.
+		cpu0 := cpu()
+		out, _ := exec.Command("/usr/bin/top", "-l", "2", "-s", strconv.Itoa(int(d.Seconds())), "-c", "d", "-pid", strconv.Itoa(pid), "-stats", "pid,cpu,time,idlew,csw,threads").Output()
+		lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+		t.Logf("idle %v: CPU time %s -> %s; top (delta) PID %%CPU TIME IDLEW CSW #TH: %q; RSS %d KB", d, cpu0, cpu(), lines[len(lines)-1], processRSS(t, pid))
 	}
 }
 
@@ -1102,5 +1111,23 @@ func TestAttachReplacesASilentStream(t *testing.T) {
 	defer mu.Unlock()
 	if streams < 2 || strings.Count(out, "ready") != 1 {
 		t.Fatalf("streams %d, output %q", streams, out)
+	}
+}
+
+// cage-attach accepts only a controller that verified it; any other ends
+// with the version sentence before anything is created.
+func TestAttachRefusesAControllerThatDidNotVerifyIt(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	before := len(s.terminals.snapshot())
+	result := attach.Run(context.Background(), attachTo(s, session.id), attach.TTY{Out: io.Discard, ErrOut: io.Discard}, attach.Options{Check: controlclient.SameCompanion("another-build")})
+	if result.Code != 1 || !strings.Contains(result.Message, "不是同一个版本") {
+		t.Fatalf("%+v", result)
+	}
+	cfg := attachTo(s, "")
+	cfg.Terminal, cfg.NewKind = "", "shell"
+	result = attach.Run(context.Background(), cfg, attach.TTY{Out: io.Discard, ErrOut: io.Discard}, attach.Options{Check: controlclient.SameCompanion("another-build")})
+	if result.Code != 1 || len(s.terminals.snapshot()) != before {
+		t.Fatalf("%+v, terminals %d -> %d", result, before, len(s.terminals.snapshot()))
 	}
 }

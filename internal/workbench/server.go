@@ -356,7 +356,7 @@ func (s *Server) handler() http.Handler {
 		if !s.launcherAuthenticated(w, r) {
 			return
 		}
-		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.identity})
+		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.launchIdentity()})
 	})
 	if s.desktopEntry || s.clientOnly {
 		mux.HandleFunc("POST /api/handoff", s.handoffEntry)

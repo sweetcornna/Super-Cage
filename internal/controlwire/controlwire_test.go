@@ -130,7 +130,7 @@ func TestSocketReadsFragmentedMessagesAndAnswersPings(t *testing.T) {
 	readerDone := make(chan struct{})
 	upgrader := websocket.Upgrader{WriteBufferSize: 64, CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == "http://"+r.Host }}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(controlclient.ConnectionHeader) != "local" || r.Header.Get("Cookie") != "a=b" {
+		if len(r.Header.Values(controlclient.ConnectionHeader)) != 1 || r.Header.Get(controlclient.ConnectionHeader) != "local" || r.Header.Get("Cookie") != "a=b" {
 			http.Error(w, "no session", http.StatusUnauthorized)
 			return
 		}
@@ -167,6 +167,7 @@ func TestSocketReadsFragmentedMessagesAndAnswersPings(t *testing.T) {
 	}))
 	defer server.Close()
 	c := clientFor(t, server)
+	c.ConnectionID = "gen-default" // the target's generation wins, sent once
 	if _, err := c.Dial(context.Background(), controlclient.AgentTarget{Scope: "local"}, "/api/stream"); err == nil || err.(*controlclient.AgentError).Code != "authentication_failed" {
 		t.Fatal("a refused upgrade is not the agent's 401:", err)
 	}

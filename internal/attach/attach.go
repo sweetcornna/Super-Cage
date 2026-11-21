@@ -606,7 +606,9 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 		a.in = make([]byte, 32<<10)
 	}
 	for {
-		_ = ws.SetReadDeadline(time.Now().Add(Silence))
+		if Silence > 0 {
+			_ = ws.SetReadDeadline(time.Now().Add(Silence))
+		}
 		kind, r, err := ws.NextReader()
 		if err != nil {
 			return err
