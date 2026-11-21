@@ -143,7 +143,6 @@ func AgentOperations() []AgentOperation {
 	for _, action := range []string{"candidate", "commit", "cancel", "disconnect", "local-stop"} {
 		post("client."+action, "Use the desktop chooser's same explicit connection/candidate protocol", "/api/client/"+action, from(switchRequest{}))
 	}
-	post("client.trusted-login", "Use create/resume/enable/disable/protect through the desktop's native trusted-login owner", "/api/client/trusted-login", object(map[string]string{"action": "string", "password": "string", "connection_id": "string"}))
 	post("native.submit", "Queue an existing native bridge action or clientPreferences request for the desktop window; use desktop scope", "/api/agent/native", object(map[string]string{"request": "object", "connection_id": "string"}))
 
 	get("diagnostics.status", "Read log collection status", "/api/diagnostics")
