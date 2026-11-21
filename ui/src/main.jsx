@@ -212,7 +212,7 @@ function App() {
   const sessionsHeld = useSessionSnapshot(sessionList, (list) => list.held);
   const sessionPane = managementPage.startsWith(sessionPanePrefix) ? managementPage.slice(sessionPanePrefix.length) : "";
   // A touch tablet held upright has the sidebar as a drawer (sidebar-drawer.mjs).
-  useSidebarDrawer(sidebarCollapsed, setSidebarCollapsed, clientStorageKey("cage-sidebar-collapsed"), [layout.active, managementPage, showHome, desktopOpen]);
+  useSidebarDrawer(sidebarCollapsed, setSidebarCollapsed, clientStorageKey("cage-sidebar-collapsed"), [layout.active, managementPage, showHome, desktopOpen, settingsOpen]);
   useEffect(() => {
     if (storageRecovery) {
       setDesktopOpen(false);

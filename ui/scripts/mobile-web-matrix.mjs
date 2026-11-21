@@ -123,6 +123,13 @@ function inspect({ insets: notch, keyboard, touch }) {
       return { left: Math.max(r.left, b.left), top: Math.max(r.top, b.top), right: Math.min(r.right, b.right), bottom: Math.min(r.bottom, b.bottom) };
     }, { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
     const mostlyShown = shown.right - shown.left >= rect.width / 2 && shown.bottom - shown.top >= rect.height / 2;
+    // Scrolled under a sticky or fixed bar of its own scroller (the sidebar's account row): not tappable there.
+    const top = document.elementFromPoint((shown.left + shown.right) / 2, (shown.top + shown.bottom) / 2);
+    const bar = top && !el.contains(top) && !top.contains(el) && top.closest("*") && (() => {
+      for (let node = top; node && node !== document.body; node = node.parentElement) if (/(sticky|fixed)/.test(getComputedStyle(node).position)) return node;
+      return null;
+    })();
+    if (bar && !bar.contains(el)) continue;
     if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect, shown });
   }
   // A scroller that runs under the home bar must let its last control scroll clear of it.
@@ -457,20 +464,49 @@ async function tabletScreens(device, variant, sheet) {
       if (reached.length) extra.push(`a tap outside reached the panes behind (${reached.join(", ")})`);
       await check(page, sheet, "tablet drawer closed", { ...opts, extra });
     }
+    // Real fingers (Chromium: CDP touch events; Playwright's tap never moves): a tap that wanders a few pixels.
+    const cdp = engine === "chromium" ? await context.newCDPSession(page) : null;
+    const touch = (type, x, y) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
+    const fingerTap = async (locator) => {
+      await locator.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      if (!cdp) return locator.tap();
+      const box = await locator.boundingBox();
+      const x = box.x + Math.min(40, box.width / 2), y = box.y + box.height / 2;
+      await touch("touchStart", x, y);
+      await touch("touchMove", x + 4, y + 3);
+      await touch("touchMove", x + 7, y + 4);
+      await touch("touchEnd");
+    };
     // Open a terminal from the sidebar: the drawer closes behind the choice.
     await openDrawer();
-    await page.getByRole("tab", { name: /整理发布说明/ }).first().scrollIntoViewIfNeeded();
-    await page.getByRole("tab", { name: /整理发布说明/ }).first().tap();
+    await fingerTap(page.getByRole("tab", { name: /整理发布说明/ }).first());
     await sleep(600);
     await check(page, sheet, "tablet terminal", { ...opts, extra: drawer && await sidebar.count() ? ["the drawer stayed open over the opened terminal"] : [] });
     // Split by finger: drag a second terminal's row onto the right half of the panes.
     if (engine === "chromium") {
       await openDrawer();
-      await page.getByRole("tab", { name: /^bash/ }).first().scrollIntoViewIfNeeded();
+      // The sidebar scrolls under a finger dragged up a row (when it has anything to scroll).
+      const extra = [];
+      const first = page.locator(".workspace-sidebar .sidebar-tab").first();
+      await first.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      const scroller = await first.evaluateHandle((el) => {
+        for (let node = el.parentElement; node; node = node.parentElement) if (/(auto|scroll)/.test(getComputedStyle(node).overflowY) && node.scrollHeight > node.clientHeight + 1) return node;
+        return null;
+      });
+      if (await scroller.evaluate((node) => Boolean(node))) {
+        const start = await scroller.evaluate((node) => node.scrollTop);
+        const room = await scroller.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
+        const fb = await first.boundingBox();
+        await touch("touchStart", fb.x + 40, fb.y + fb.height / 2);
+        for (let i = 1; i <= 10; i++) { await touch("touchMove", fb.x + 40, fb.y + fb.height / 2 - i * 8); await sleep(16); }
+        await touch("touchEnd");
+        await sleep(500);
+        const moved = await scroller.evaluate((node) => node.scrollTop) - start;
+        if (room > 20 && moved < 20) extra.push(`a finger dragged up a sidebar row did not scroll the sidebar (${moved}px)`);
+      }
+      await page.getByRole("tab", { name: /^bash/ }).first().evaluate((el) => el.scrollIntoView({ block: "center" }));
       const row = await page.getByRole("tab", { name: /^bash/ }).first().boundingBox();
       const main = await page.locator(".workbench-main").boundingBox();
-      const cdp = await context.newCDPSession(page);
-      const touch = (type, x, y) => cdp.send("Input.dispatchTouchEvent", { type, touchPoints: type === "touchEnd" ? [] : [{ x, y }] });
       const from = { x: row.x + row.width / 2, y: row.y + row.height / 2 };
       const to = { x: main.x + main.width * 0.8, y: main.y + main.height / 2 };
       await touch("touchStart", from.x, from.y);
@@ -478,7 +514,8 @@ async function tabletScreens(device, variant, sheet) {
       await touch("touchEnd");
       await sleep(800);
       const split = await page.locator(".workspace-split").count();
-      await check(page, sheet, "tablet split (finger)", { ...opts, extra: split ? [] : ["dragging a terminal onto the right half by finger did not split the panes"] });
+      if (!split) extra.push("dragging a terminal onto the right half by finger did not split the panes");
+      await check(page, sheet, "tablet split (finger)", { ...opts, extra });
     }
     // A settings page and a dialog.
     await openDrawer();

@@ -17,7 +17,10 @@ export function createDesktopFixture() {
     environment_directory: workspace, environment_workspace: true, projects: [workspace, research],
     ready: true, vm_running: true, keyboard: "mac", job: { running: false }, can_restore: true, workspace,
     guest_system: "debian-13",
+    // Full-length status bar labels: an exit address with its place, and a measured proxy below.
+    location: { ip: "203.0.113.42", country: "United States", city: "San Francisco" },
   };
+  const proxy = { active: true, running: true, selected: "la02", route: ["la02"], revision: 1, state: "ready" };
   const terminals = [
     { id: "tablet-claude", kind: "claude", title: "整理发布说明", workspace },
     { id: "tablet-shell", kind: "shell", title: "bash", workspace },
@@ -30,7 +33,9 @@ export function createDesktopFixture() {
   ];
   // method, path (without the query): a JSON body, or undefined for the mock's own answer.
   return (method, path) => {
+    if (method === "POST" && path === "/api/proxy/delay") return { delay: 186 };
     if (method !== "GET") return undefined;
+    if (path === "/api/proxy") return proxy;
     if (path === "/api/status") return status;
     if (path === "/api/settings") return settings;
     if (path === "/api/terminals") return terminals;

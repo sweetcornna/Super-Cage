@@ -21,9 +21,20 @@
     min-width: 44px;
     min-height: 44px;
   }
+  /* A narrow status bar shortens its long labels (the exit address) instead of running off the edge. */
+  .status-bar > button {
+    min-width: 0;
+  }
+  .status-bar > button > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .status-bar button,
   .project-disclosure,
   .sidebar-session,
+  :root .workspace-sidebar .sidebar-tab > .sidebar-session,
   .text-button,
   .quiet-button,
   :root .settings-page .settings-sidebar nav button {
@@ -66,6 +77,32 @@
   .sidebar-tab,
   .browser-tab {
     -webkit-touch-callout: none;
+  }
+}
+
+/* The sidebar's rows scroll under a finger; a sideways drag still carries a row onto the panes to split them
+   (browser-chrome.css stops all panning on rows for the mouse-style drag). */
+@media (pointer: coarse) and (hover: none) {
+  .workspace-sidebar .sidebar-tab {
+    touch-action: pan-y;
+  }
+}
+
+/* A short touch screen (a tablet on its side): the whole sidebar scrolls, so its links do not squeeze the
+   project list to a sliver; the account row stays at the bottom. */
+@media (pointer: coarse) and (hover: none) and (max-height: 820px) {
+  .workspace-sidebar {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .workspace-sidebar > .sidebar-scroll {
+    flex: none;
+    overflow: visible;
+  }
+  .workspace-sidebar > .sidebar-bottom {
+    position: sticky;
+    bottom: 0;
+    background: inherit;
   }
 }
 
