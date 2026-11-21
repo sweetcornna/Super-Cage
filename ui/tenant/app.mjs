@@ -2045,6 +2045,8 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     function unmountFrame() {
       if (!mountedFrame) return;
       setPhoneUi(false);
+      // A link one workspace offered is not left over the list or another workspace.
+      if (linkNotice) linkNotice.el.hidden = true;
       if (backTo === mountedFrame) backTo = null;
       mountedFrame.listeners.abort(); // 释放 load/error 回调
       mountedFrame.el.remove(); // 移除即销毁浏览上下文，断开其中的流和 WebSocket

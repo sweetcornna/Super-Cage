@@ -202,6 +202,21 @@ try {
     await sleep(300);
     assert(!(await page.evaluate(() => history.state?.cagePortal)), "the portal's history entry is still there");
   });
+  await step("portal: 返回门户 after going Back inside the workspace (entries ahead) still lands on the list", async () => {
+    const inner = await enter();
+    await tool(inner, "文件");
+    await inner.getByRole("button", { name: /^README\.md/ }).click();
+    await inner.getByText("手机网页版测试项目").waitFor();
+    await back(page);
+    await inner.getByText("手机网页版测试项目").waitFor({ state: "hidden" });
+    assert(await page.evaluate(() => history.length) > 2, "expected entries ahead");
+    await inner.getByRole("button", { name: "展开侧栏", exact: true }).click();
+    await inner.getByRole("button", { name: "返回门户", exact: true }).click();
+    await list();
+    await sleep(300);
+    // Short of the entry before the workspace's, the state would still be the portal's; past it, the portal is gone.
+    assert(!(await page.evaluate(() => history.state?.cagePortal)), "the portal's history entry is still there");
+  });
   await step("portal: the portal's strip stays above the workspace and brings its bar back", async () => {
     await enter();
     for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }]) {
@@ -251,6 +266,13 @@ try {
     await sleep(300);
     assert(await notice.isHidden(), "an invalid link was offered");
     assert((await page.evaluate(() => window.portalOpens)) === 0, "window.open was called");
+    await inner.evaluate(() => parent.postMessage({ type: "cage:open-link", url: "https://example.com/left-over" }, "*"));
+    await notice.waitFor();
+    await page.locator(".portal-strip").click();
+    await page.locator(".home-btn").click();
+    await list();
+    assert(await notice.isHidden(), "the notice outlived its workspace");
+    await enter();
   });
   await step("portal: an expired workspace sign-in re-enters the VM on the same screen", async () => {
     const inner = await frame();
