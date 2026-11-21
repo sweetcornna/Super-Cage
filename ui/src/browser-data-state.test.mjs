@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { categoryMeta, dayLabel, formatBytes, groupByDay, keptBy, keptDomain, relativeVisit, resultLine, siteOf, siteOfURL } from "./browser-data-state.mjs";
+import { categoryMeta, dayLabel, formatBytes, groupByDay, keptBy, keptDomain, relativeVisit, resultLine, siteOf, siteOfURL, autoLine, categories, isLoopbackSite, keptCoverage } from "./browser-data-state.mjs";
 
 test("sizes read like a browser's", () => {
   assert.equal(formatBytes(0), "0 B");
@@ -55,4 +55,27 @@ test("sites and kept domains", () => {
   assert.ok(keptBy("gist.github.com", [{ domain: "github.com" }]));
   assert.ok(keptBy("github.com", [{ domain: "gist.github.com" }]));
   assert.ok(!keptBy("notgithub.com", [{ domain: "github.com" }]));
+});
+
+// Review 3.
+test("finding 1: unsaved downloads are counted, kept and reported", () => {
+  assert.equal(categoryMeta("downloads", { downloads: { count: 4, unsaved: 2 } }), "4 条记录 · 2 个未保存成功的会保留");
+  assert.match(resultLine({ cleared: ["downloads"], keptDownloads: 2 }), /2 个未保存成功的下载已保留/);
+  assert.match(categories.find(item => item.id === "downloads").detail, /未保存成功的下载/);
+});
+
+test("finding 2: skipped origins are reported; automatic cleaning failures show before a first success", () => {
+  assert.match(resultLine({ cleared: ["site"], skippedOrigins: 3 }), /3 个无法识别的网站地址已跳过/);
+  const at = Date.UTC(2026, 10, 20, 8, 0), format = () => "某时";
+  assert.equal(autoLine({ attempted: at, result: "failed" }, format), "自动清理还没有成功过：某时的一次没有完成（浏览器没有完成清除），下次再试。");
+  assert.equal(autoLine({ last: at, attempted: at, result: "timeout" }, format), "上次成功清理：某时。最近一次（某时）没有完成（用时过长），下次再试。");
+  assert.equal(autoLine({ last: at, attempted: at, result: "done", freed: 2048 }, format), "上次自动清理：某时，释放约 2 KB。");
+  assert.equal(autoLine({}, format), "尚未自动清理过。");
+});
+
+test("finding 11: a kept domain says what it covers", () => {
+  assert.equal(keptCoverage("github.com"), "包含子域名的 Cookie 和网站存储");
+  assert.equal(keptCoverage("gist.github.com"), "包含子域名；github.com 的全部 Cookie 也会保留");
+  assert.equal(keptCoverage("192.168.1.10"), "此地址所有端口的 Cookie 和网站存储");
+  assert.ok(isLoopbackSite("127.0.0.1") && isLoopbackSite("localhost") && !isLoopbackSite("192.168.1.10"));
 });

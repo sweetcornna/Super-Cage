@@ -1,18 +1,15 @@
 import React, { Component, Suspense, lazy, useEffect, useRef, useState } from "react";
 import { reportDiagnostic } from "./diagnostics.mjs";
-import "./browser-data-launcher.css";
 
 // Main-bundle wiring for browser data management; everything else loads with
 // browser-data.jsx on first use. Views: clear, site, popover, reset, and
-// privacy (the settings section, optionally at "sites", "history" or "kept").
-const load = () => import("./browser-data.jsx");
-const loadApp = () => lazy(load);
-const loadPrivacy = () => lazy(() => load().then(module => ({ default: module.BrowserPrivacySection })));
-let BrowserDataApp = loadApp(), Privacy = loadPrivacy();
-let pending = "", sections = 0;
-export const takePendingPrivacyView = () => { const view = pending; pending = ""; return view; };
-// A mounted privacy section follows the event itself; a new one reads pending.
-export const privacySectionMounted = () => { sections++; return () => { sections--; }; };
+// privacy (the settings section, optionally at "sites", "history" or "kept"),
+// which the settings page shows (browser-settings.jsx). The lazy chunks reach
+// this module through document events only, so it stays in the main chunk:
+// "cage-browser-data" opens a view, and "cage-browser-data-take" hands a
+// privacy section the view asked for before it was mounted.
+const load = () => lazy(() => import("./browser-data.jsx"));
+let BrowserDataApp = load(), pending = { section: "", at: 0 };
 export const openBrowserData = detail => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail }));
 
 // A chunk that fails to load (an update replaced it, the network dropped) or a
@@ -23,14 +20,7 @@ class Guard extends Component {
   state = { failed: false };
   static getDerivedStateFromError() { return { failed: true }; }
   componentDidCatch(error) { reportDiagnostic("browser-data", error); this.props.onFail(); }
-  render() { return this.state.failed ? this.props.fallback || null : this.props.children; }
-}
-
-export function BrowserPrivacy(props) {
-  return <Guard onFail={() => { Privacy = loadPrivacy(); }} fallback={<div className="browser-settings-links">
-    <button onClick={() => props.onInternal("permissions")}>网站权限</button>
-    <button onClick={() => props.onInternal("clear")}>清除普通会话浏览数据</button>
-  </div>}><Suspense fallback={null}><Privacy {...props} /></Suspense></Guard>;
+  render() { return this.state.failed ? null : this.props.children; }
 }
 
 export function BrowserDataHost(props) {
@@ -40,14 +30,19 @@ export function BrowserDataHost(props) {
   useEffect(() => {
     const open = ({ detail = {} }) => {
       if (detail.view !== "privacy") return setRequest({ ...detail, key: Date.now() });
-      pending = sections ? "" : detail.section || "";
+      // A mounted privacy section follows the event; one mounted next (the
+      // settings page opening, or remounting as its tab comes to the front)
+      // takes the section within a moment.
+      pending = { section: detail.section || "", at: Date.now() };
       latest.current.onSettings?.("privacy");
     };
+    const take = ({ detail }) => { detail.view = Date.now() - pending.at < 3000 ? pending.section : ""; pending = { section: "", at: 0 }; };
     document.addEventListener("cage-browser-data", open);
-    return () => document.removeEventListener("cage-browser-data", open);
+    document.addEventListener("cage-browser-data-take", take);
+    return () => { document.removeEventListener("cage-browser-data", open); document.removeEventListener("cage-browser-data-take", take); };
   }, []);
   const fail = () => {
-    BrowserDataApp = loadApp();
+    BrowserDataApp = load();
     setRequest(null);
     if (request.fallback) request.fallback();
     else if (request.view === "clear") props.onInternal?.("clear");

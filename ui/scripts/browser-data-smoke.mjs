@@ -26,10 +26,14 @@ const settings = { defaults: { range: "day", types: ["history", "site", "cache"]
 const requests = [];
 // What internal/workbench/browser_data.go does before the guest sees a request,
 // including its refusal of fields it does not know.
-const fields = ["mode", "session", "range", "since", "types", "protect", "keep", "sites", "site", "key", "action", "query", "sort", "page", "before", "limit", "urls", "host", "start", "end", "id", "remember"];
+const fields = ["mode", "session", "range", "since", "types", "protect", "keep", "sites", "site", "key", "action", "query", "sort", "page", "before", "limit", "urls", "entries", "time", "host", "start", "end", "id", "remember"];
+// Downloads whose save failed, as the guest counts them (browser-downloads.mjs
+// keeps them; its own tests cover that): set to show them in the dialog.
+let unsavedDownloads = 0;
+const opened = [];
 const settingsFields = ["action", "domain", "range", "types", "enabled", "trigger", "days"];
 const strict = (body, known) => { const extra = Object.keys(body || {}).filter(name => !known.includes(name)); if (extra.length) throw new Error("请求格式无效: " + extra.join(",")); };
-const dataRoute = body => {
+const dataRoute = async body => {
   strict(body, fields);
   const input = { ...body };
   if (input.range) { input.since = windows[input.range] ? Date.now() - windows[input.range] : 0; delete input.range; }
@@ -38,7 +42,9 @@ const dataRoute = body => {
     if (body.remember) settings.defaults = { range: body.range, types: body.types };
     delete input.remember;
   }
-  return c.api("/data", input);
+  const result = await c.api("/data", input);
+  if (input.mode === "summary" && unsavedDownloads && result.downloads) result.downloads = { ...result.downloads, unsaved: unsavedDownloads };
+  return result;
 };
 const settingsRoute = body => {
   strict(body, settingsFields);
@@ -77,6 +83,7 @@ try {
     try {
       if (path === "/browser/data") { requests.push({ at: Date.now(), mode: body.mode }); return route.fulfill({ json: await dataRoute(body) }); }
       if (path === "/browser/data-settings") return route.fulfill({ json: settingsRoute(body) });
+      if (path === "/browser/new") opened.push(body?.url || "");
       return route.fulfill({ json: await c.api(path.replace("/browser", ""), body ?? undefined) });
     } catch (error) { return route.fulfill({ status: /请求格式无效/.test(error.message) ? 400 : 409, contentType: "text/plain; charset=utf-8", body: error.message }); }
   } });
@@ -91,6 +98,7 @@ try {
   const shot = async name => { await delay(350); await page.screenshot({ path: output + name + ".png" }); };
   const menu = () => page.getByRole("button", { name: "浏览器菜单", exact: true }).first();
   const dialog = page.getByRole("dialog", { name: "清除浏览数据" });
+  const openPrivacy = section => page.evaluate(view => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy", section: view } })), section);
   const loaded = () => page.waitForFunction(() => { const metas = [...document.querySelectorAll(".bd-meta")]; return metas.length > 0 && metas.every(node => node.textContent && !node.textContent.includes("正在统计")); });
 
   // 1. The clear dialog from the menu: sizes, defaults, both sessions. The
@@ -270,10 +278,38 @@ try {
   await page.keyboard.press("Escape");
 
   mark("menu+shortcut");
+  // 11. Review 3: unsaved downloads in the dialog; a long address in history
+  // is shown cut, opened whole and deleted by its id.
+  unsavedDownloads = 2;
+  await menu().click();
+  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
+  await dialog.waitFor(); await loaded();
+  check("the dialog says unsaved downloads stay", /2 个未保存成功的会保留/.test(await dialog.getByRole("checkbox", { name: /下载记录/ }).locator("xpath=..").textContent()));
+  await page.keyboard.press("Escape");
+  unsavedDownloads = 0;
+  await go(`http://s8.localhost:${port}/`);
+  await c.evaluate(seedTab, "history.pushState(null, '', '/long?' + 'q'.repeat(6000)); true");
+  await openPrivacy("history");
+  await history.getByRole("textbox", { name: "搜索浏览记录" }).fill("s8.localhost/long");
+  const longRow = history.locator(".bd-history-row").first();
+  await longRow.waitFor();
+  const shownTitle = await longRow.locator(".bd-history-open").getAttribute("title");
+  check("a long address arrives cut", shownTitle.length <= 2049);
+  await longRow.locator(".bd-history-open").click();
+  for (let i = 0; i < 100 && !opened.some(url => url.length > 6000); i++) await delay(50);
+  check("opening it fetches the whole address", opened.some(url => url.length > 6000 && url.includes("/long?")));
+  // Opening showed the page; back to the history to delete the entry.
+  await openPrivacy("history");
+  await history.getByRole("textbox", { name: "搜索浏览记录" }).fill("s8.localhost/long");
+  await longRow.waitFor();
+  await longRow.getByRole("button", { name: /的记录$/ }).click();
+  await history.getByText("没有匹配的记录").waitFor();
+  check("deleting it removes the whole address", !(await c.api("/data", { mode: "history", query: "s8.localhost/long" })).items.length);
+  await history.getByRole("textbox", { name: "搜索浏览记录" }).fill("");
+  mark("review3");
   // The screenshot matrix: every view in the other theme and size combinations
   // (light at 1440×900 was taken along the way).
   for (const url of [`http://s7.localhost:${port}/`, `http://kept.localhost:${port}/`, `http://s1.localhost:${port}/`]) await go(url);
-  const openPrivacy = section => page.evaluate(view => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy", section: view } })), section);
   const views = [
     ["clear-dialog", async () => { await menu().click(); await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click(); await dialog.waitFor(); await loaded(); }, () => page.keyboard.press("Escape")],
     ["privacy", async () => { await openPrivacy(""); await privacy.getByRole("button", { name: /^网站数据/ }).waitFor(); }],

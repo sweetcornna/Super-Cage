@@ -1,10 +1,29 @@
-import React, { Suspense, useEffect, useState } from 'react';
+import React, { Component, Suspense, lazy, useEffect, useState } from 'react';
 import { Globe2, Info, LayoutPanelLeft, Puzzle, Search, ShieldCheck } from 'lucide-react';
 import { api } from './api';
 import { InlineSelect } from './inline-select';
-import { BrowserPrivacy } from './browser-data-launcher';
+import { reportDiagnostic } from './diagnostics.mjs';
 import { BrowserExtensions } from './browser-extensions';
 import './browser-settings.css';
+
+// The privacy section loads with browser-data.jsx when it is first shown. A
+// chunk that fails to load or a render error stays inside the section: it is
+// reported, the earlier Chromium links show instead, and the next showing
+// loads it again.
+const loadPrivacy = () => lazy(() => import('./browser-data.jsx').then(module => ({ default: module.BrowserPrivacySection })));
+let Privacy = loadPrivacy();
+class PrivacyGuard extends Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error) { reportDiagnostic('browser-data', error); Privacy = loadPrivacy(); }
+  render() { return this.state.failed ? this.props.fallback : this.props.children; }
+}
+function BrowserPrivacy(props) {
+  return <PrivacyGuard fallback={<div className="browser-settings-links">
+    <button onClick={() => props.onInternal('permissions')}>网站权限</button>
+    <button onClick={() => props.onInternal('clear')}>清除普通会话浏览数据</button>
+  </div>}><Suspense fallback={null}><Privacy {...props} /></Suspense></PrivacyGuard>;
+}
 
 const sections = [
   { id: 'general', title: '新标签页', icon: Globe2, search: '启动 新标签页 主页 默认 地址 网址' },

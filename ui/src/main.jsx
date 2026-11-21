@@ -113,6 +113,7 @@ function App() {
   const [managementPage, setManagementPage] = useState("");
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
+  const [browserStreamEpoch, setBrowserStreamEpoch] = useState(0);
   const [terminalChoice, setTerminalChoice] = useState(null);
   const [openingSession, setOpeningSession] = useState("");
   const [sessionOpenError, setSessionOpenError] = useState(null);
@@ -189,6 +190,7 @@ function App() {
     browserIds = useRef(new Set()),
     initialized = useRef(false),
     browserStreamReady = useRef(false),
+    browserStreamClosed = useRef(false),
     browserSnapshot = useRef({ tabs: [] }),
     refreshStatus = useRef(null),
     launchAcknowledged = useRef(false),
@@ -865,6 +867,9 @@ function App() {
         if (!live) return;
         jobRunning = next.job.running;
         setStatus(previous => keepSame(previous, next));
+        // An event stream the browser closed for good (it answered with an
+        // error while its controller restarted) is opened again.
+        if (next.ready && browserStreamClosed.current) { browserStreamClosed.current = false; setBrowserStreamEpoch(epoch => epoch + 1); }
         setStartRequest(pending => pending?.id && pending.id === next.job.id ? null : pending);
         setConnectionError("");
         if (
@@ -878,7 +883,8 @@ function App() {
             const install = await api("/environment/guest-systems");
             if (live && install.activate) setGuestSystem(previous => ({ ...previous, activate:true }));
           }
-          if (next.job.error) notify(next.job.error);
+          // A clear reports its outcome in the browser data window that runs it.
+          if (next.job.error && next.job.kind !== "browser-clear") notify(next.job.error);
         }
         if (next.ready) {
           const supportsBrowser = guestCapability(next, "browser");
@@ -1033,7 +1039,10 @@ function App() {
       remote.current?.receiveCopy?.(JSON.parse(event.data));
     });
     stream.onopen = () => { browserStreamReady.current = true; };
-    stream.onerror = () => { browserStreamReady.current = false; };
+    stream.onerror = () => {
+      browserStreamReady.current = false;
+      if (stream.readyState === EventSource.CLOSED) browserStreamClosed.current = true;
+    };
     stream.onmessage = (event) => {
       const b = JSON.parse(event.data);
       setBrowserError("");
@@ -1079,7 +1088,7 @@ function App() {
       browserStreamReady.current = false;
       stream.close();
     };
-  }, [status?.ready, browserAvailable]);
+  }, [status?.ready, browserAvailable, browserStreamEpoch]);
   useEffect(() => {
     if (current && current.kind !== "terminal")
       lastBrowserTab.current = current.id;

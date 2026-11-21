@@ -524,7 +524,7 @@ func TestBrowserDataSettingsUnreadableAreKeptAndReported(t *testing.T) {
 			if w := request(s, "POST", "/api/browser/data-settings", s.origin, `{"action":"keep-add","domain":"example.org"}`, true); w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("a write over an unreadable file: %d %s", w.Code, w.Body.String())
 			}
-			for _, body := range []string{`{"mode":"clear","range":"all","types":["site"]}`, `{"mode":"clear","range":"all","types":["history","cache"],"remember":true}`} {
+			for _, body := range []string{`{"mode":"clear","range":"all","types":["site"]}`, `{"mode":"clear","range":"all","types":["history","site"],"remember":true}`} {
 				if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "设置暂时读不出来") {
 					t.Fatalf("a clear that needs the kept list: %d %s", w.Code, w.Body.String())
 				}
@@ -533,8 +533,8 @@ func TestBrowserDataSettingsUnreadableAreKeptAndReported(t *testing.T) {
 			if len(calls()) != 0 {
 				t.Fatalf("clears that need the kept list reached the guest: %+v", calls())
 			}
-			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["history"],"remember":true}`, true); w.Code != 200 {
-				t.Fatalf("a history clear does not need the kept list: %d %s", w.Code, w.Body.String())
+			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["history","cache"],"remember":true}`, true); w.Code != 200 {
+				t.Fatalf("history and cache clears do not need the kept list: %d %s", w.Code, w.Body.String())
 			}
 			awaitJobIdle(t, &s.jobs)
 			if err := os.Chmod(path, 0o600); err != nil {

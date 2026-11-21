@@ -13,7 +13,7 @@ export const categories = [
   { id: "history", title: "浏览记录", detail: "访问过的网址和标题，地址栏也不再推荐它们。" },
   { id: "site", title: "Cookie 和网站数据", detail: "Cookie、localStorage、IndexedDB、缓存存储和 Service Worker。大多数网站会退出登录。" },
   { id: "cache", title: "缓存的图片和文件", detail: "网页再次打开时重新下载，首次加载会慢一些。" },
-  { id: "downloads", title: "下载记录", detail: "下载面板和浏览器中的记录。已下载的文件保留在原处。" },
+  { id: "downloads", title: "下载记录", detail: "下载面板和浏览器中的记录。已下载的文件保留在原处；未保存成功的下载连同文件保留，可以重试。" },
 ];
 
 // The private session lives in memory and has no history: it is cleared as a
@@ -44,7 +44,7 @@ export function categoryMeta(id, summary, range = "all") {
   if (id === "history") return summary.history ? `${formatCount(summary.history.count)}${summary.history.more ? "+" : ""} 条记录` : "";
   if (id === "site") return summary.sites ? `${formatCount(summary.sites.count)} 个网站 · ${ranged ? "最多 " : ""}${formatBytes(summary.sites.bytes)}` : "";
   if (id === "cache") return summary.cache ? `${ranged ? "最多释放 " : "释放 "}${formatBytes(summary.cache.bytes)}` : "";
-  if (id === "downloads") return summary.downloads ? `${formatCount(summary.downloads.count)} 条记录` : "";
+  if (id === "downloads") return summary.downloads ? `${formatCount(summary.downloads.count)} 条记录${summary.downloads.unsaved ? ` · ${formatCount(summary.downloads.unsaved)} 个未保存成功的会保留` : ""}` : "";
   return "";
 }
 
@@ -57,7 +57,20 @@ export function resultLine(result) {
   if (result.freedBytes > 0) parts.push(`释放约 ${formatBytes(result.freedBytes)}`);
   if (result.reloaded > 0) parts.push(`${result.reloaded} 个网页已重新加载`);
   if (result.kept?.length) parts.push("保持登录的网站和内置页面未受影响");
+  if (result.keptDownloads > 0) parts.push(`${formatCount(result.keptDownloads)} 个未保存成功的下载已保留`);
+  if (result.skippedOrigins > 0) parts.push(`${formatCount(result.skippedOrigins)} 个无法识别的网站地址已跳过`);
   return parts.join("，") + "。";
+}
+
+// The last automatic cleaning, from what the host stored: a failure shows
+// even before a first success.
+const autoFailures = { failed: "浏览器没有完成清除", timeout: "用时过长", unsupported: "需要更新环境组件" };
+export function autoLine(auto, format = time => new Date(time).toLocaleString("zh-CN")) {
+  const failure = auto?.attempted && autoFailures[auto.result];
+  if (failure && auto.last) return `上次成功清理：${format(auto.last)}。最近一次（${format(auto.attempted)}）没有完成（${failure}），下次再试。`;
+  if (failure) return `自动清理还没有成功过：${format(auto.attempted)}的一次没有完成（${failure}），下次再试。`;
+  if (auto?.last) return `上次自动清理：${format(auto.last)}${auto.freed > 0 ? `，释放约 ${formatBytes(auto.freed)}` : ""}。`;
+  return "尚未自动清理过。";
 }
 
 const dayMs = 86_400_000;
@@ -126,6 +139,18 @@ export function keptDomain(value) {
   text = text.replace(/^\*\./, "").replace(/^\./, "").replace(/:\d+$/, "").replace(/^www\./, "").replace(/\.$/, "");
   if (!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(text) || text.length > 253) return "";
   return text.includes(".") || text === "localhost" ? text : "";
+}
+
+// Super Cage's own pages live on these: they are kept by default and never
+// offered as a site to add.
+export const isLoopbackSite = site => ["localhost", "127.0.0.1", "::1", "[::1]"].includes(site);
+
+// What a kept domain covers: Chromium keeps cookies by registrable domain,
+// so a kept subdomain keeps its whole site's cookies.
+export function keptCoverage(domain) {
+  if (/^\d+(\.\d+){3}$/.test(domain)) return "此地址所有端口的 Cookie 和网站存储";
+  const site = siteOf(domain);
+  return site && site !== domain ? `包含子域名；${site} 的全部 Cookie 也会保留` : "包含子域名的 Cookie 和网站存储";
 }
 
 export const keptBy = (site, keep = []) => keep.find(entry => site === entry.domain || site.endsWith("." + entry.domain) || entry.domain.endsWith("." + site));

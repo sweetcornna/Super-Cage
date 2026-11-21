@@ -1,19 +1,25 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { shortcut } from "./platform.mjs";
 import { ArrowLeft, ChevronRight, Clock3, Cookie, ExternalLink, Globe2, KeyRound, LockKeyhole, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, X } from "lucide-react";
 import { api } from "./api";
 import { Modal } from "./modal";
 import { InlineSelect } from "./inline-select";
 import { EmptyState } from "./drawings";
 import { BrowserCookies } from "./browser-cookies";
-import { openBrowserData, privacySectionMounted, takePendingPrivacyView } from "./browser-data-launcher";
-import { builtInNote, categories, categoryMeta, formatBytes, formatCount, groupByDay, hostOf, keptBy, keptDomain, privateCategories, ranges, relativeVisit, resultLine, siteOfURL, sorts, timeLabel } from "./browser-data-state.mjs";
+import { autoLine, builtInNote, categories, categoryMeta, formatBytes, formatCount, groupByDay, hostOf, isLoopbackSite, keptBy, keptCoverage, keptDomain, privateCategories, ranges, relativeVisit, resultLine, siteOfURL, sorts, timeLabel } from "./browser-data-state.mjs";
 import "./browser-data.css";
 
 // Browser data management (docs/guide/browser.md, design in the branch's
 // notes): the clear dialog, a site's data (the former cookie manager), the
 // address bar's site menu, reset, and the privacy section of the browser
 // settings. Everything here is computed on demand while it is on screen.
+
+// The launcher (browser-data-launcher.jsx, main chunk) answers these events.
+// Importing it, or platform.mjs, from this chunk would split them out of the
+// main chunk into files of their own on the first paint.
+const openBrowserData = detail => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail }));
+const takePendingPrivacyView = () => { const request = { view: "" }; document.dispatchEvent(new CustomEvent("cage-browser-data-take", { detail: request })); return request.view; };
+// platform.mjs shortcut("⌘⇧⌫"), spelled out.
+const clearShortcut = /Mac/i.test(globalThis.navigator?.platform || "") ? "⌘⇧⌫" : "Ctrl+Shift+Delete";
 
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const data = (input, signal) => api("/browser/data", input, undefined, {}, { signal });
@@ -61,8 +67,22 @@ async function runJob(input, onProgress) {
 }
 
 const defaultSettings = { defaults: { range: "day", types: ["history", "site", "cache"] }, keep: [], auto: { enabled: false, trigger: "stop", days: 7, types: ["history", "site", "cache"] } };
+// An older server (404) has no settings and shows its defaults. A settings
+// file the host cannot read is an error to show with 重试: the kept sites are
+// never taken for none.
 async function loadSettings() {
-  try { return await api("/browser/data-settings"); } catch { return defaultSettings; }
+  try { return await api("/browser/data-settings"); }
+  catch (error) { if (error.status === 404) return defaultSettings; throw error; }
+}
+function useSettings() {
+  const [settings, setSettings] = useState(null), [error, setError] = useState(""), [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let live = true;
+    setError("");
+    loadSettings().then(value => { if (live) setSettings(value); }, failure => { if (live) setError(failure.message || "浏览数据设置暂时读不出来，请重试"); });
+    return () => { live = false; };
+  }, [attempt]);
+  return { settings, setSettings, error, retry: () => setAttempt(attempt + 1) };
 }
 const saveSettings = input => api("/browser/data-settings", input);
 
@@ -72,7 +92,7 @@ const privateOpen = tabs => (tabs || []).some(tab => tab.incognito && !tab.login
 function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
   const canPrivate = privateOpen(tabs);
   const [session, setSession] = useState(tab?.incognito && canPrivate ? "private" : "normal");
-  const [settings, setSettings] = useState(null);
+  const { settings, error: settingsError, retry: retrySettings } = useSettings();
   const [range, setRange] = useState(preset?.range || "day");
   const [types, setTypes] = useState(() => new Set(preset?.types || defaultSettings.defaults.types));
   const [keepEnabled, setKeepEnabled] = useState(true);
@@ -82,24 +102,18 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    let live = true;
-    loadSettings().then(value => {
-      if (!live) return;
-      setSettings(value);
-      if (!preset) { setRange(value.defaults.range); setTypes(new Set(value.defaults.types)); }
-    });
-    return () => { live = false; };
-  }, []);
+    if (settings && !preset) { setRange(settings.defaults.range); setTypes(new Set(settings.defaults.types)); }
+  }, [settings]);
   const isPrivate = session === "private";
   const effectiveRange = isPrivate ? "all" : range;
   useEffect(() => {
-    if (!settings) return;
+    if (!settings && !settingsError) return;
     const controller = new AbortController();
     setSummary(null);
     data({ mode: "summary", session, range: effectiveRange }, controller.signal).then(setSummary)
       .catch(failure => { if (!controller.signal.aborted) setSummary({ error: failure.message }); });
     return () => controller.abort();
-  }, [settings, session, effectiveRange]);
+  }, [settings, settingsError, session, effectiveRange]);
   const visible = categories.filter(item => !isPrivate || privateCategories.includes(item.id));
   const chosen = visible.filter(item => types.has(item.id)).map(item => item.id);
   const toggle = id => setTypes(previous => { const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next; });
@@ -112,12 +126,15 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
     } catch (failure) { setError(failure.message); setPhase("edit"); }
   };
   const kept = settings?.keep?.length || 0;
+  // A clear of site data skips the kept sites; without them it waits.
+  const needsKept = !isPrivate && keepEnabled && chosen.includes("site");
+  const blocked = needsKept && !settings;
   const footer = phase === "done"
     ? <button className="primary" onClick={onClose} autoFocus>完成</button>
     : <>
       <span className="save-note" role={error ? "alert" : "status"}>{error || (phase === "clearing" ? `正在清除…${step?.steps ? ` ${Math.min(step.step, step.steps)}/${step.steps}` : ""}` : summary?.error || "")}</span>
       <button onClick={onClose} disabled={phase === "clearing"}>取消</button>
-      <button className="danger-fill" onClick={clear} disabled={phase === "clearing" || !chosen.length || !settings}>{phase === "clearing" ? "正在清除…" : "清除数据"}</button>
+      <button className="danger-fill" onClick={clear} disabled={phase === "clearing" || !chosen.length || blocked || (!settings && !settingsError)}>{phase === "clearing" ? "正在清除…" : "清除数据"}</button>
     </>;
   return <Modal title="清除浏览数据" onClose={phase === "clearing" ? undefined : onClose} footer={footer}>
     <div className="modal-body bd-clear" data-browser-dialog aria-busy={phase === "clearing"}>
@@ -140,6 +157,8 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
           </label>}
         </div>
         {isPrivate && <p className="bd-note">无痕会话只在内存中保存，按整个会话清除；它没有浏览记录。</p>}
+        {settingsError && !isPrivate && <div className="bd-unavailable"><p className="error-message" role="alert">{settingsError}{needsKept ? " 读出来之前不清除 Cookie 和网站数据，以免清掉保持登录的网站。" : ""}</p>
+          <button className="compact" onClick={retrySettings}><RefreshCw size={14} />重试</button></div>}
         <div className="choice-list bd-categories" role="group" aria-label="要清除的内容">
           {visible.map(item => <label key={item.id} className={"choice" + (types.has(item.id) ? " checked" : "")}>
             <input type="checkbox" checked={types.has(item.id)} disabled={phase === "clearing"} onChange={() => toggle(item.id)} />
@@ -331,6 +350,14 @@ function HistoryView({ onOpenPage, onBack }) {
     try { await data({ mode: "history-delete", ...input }); setConfirm(null); setRevision(revision + 1); }
     catch (failure) { setError(failure.message); } finally { setBusy(false); }
   };
+  // A long address arrives cut (the guest bounds each entry): it is fetched
+  // whole only to open it, and deleted by its id.
+  const open = async item => {
+    if (!item.truncated) return onOpenPage?.({ url: item.url });
+    setError("");
+    try { onOpenPage?.({ url: (await data({ mode: "history-url", id: item.id, time: item.time })).url }); }
+    catch (failure) { setError(failure.message); }
+  };
   const groups = useMemo(() => groupByDay(items || []), [items]);
   return <section className="bd-history" aria-label="浏览记录">
     <header className="bd-view-head">
@@ -350,9 +377,9 @@ function HistoryView({ onOpenPage, onBack }) {
           const host = hostOf(item.url);
           return <li key={item.url + item.time} className="list-row bd-history-row">
             <time className="bd-time">{timeLabel(item.time)}</time>
-            <button className="bd-history-open" title={item.url} onClick={() => onOpenPage?.({ url: item.url })}>
+            <button className="bd-history-open" title={item.url + (item.truncated ? "…" : "")} onClick={() => open(item)}>
               <span className="list-row-text"><span className="list-row-title">{item.title || host}</span><span className="list-row-meta">{item.label ? `${item.label} · ` : ""}{host}</span></span></button>
-            <button className="icon-button" aria-label={`删除 ${item.title || host} 的记录`} disabled={busy} onClick={() => remove({ urls: [item.url] })}><X size={14} /></button>
+            <button className="icon-button" aria-label={`删除 ${item.title || host} 的记录`} disabled={busy} onClick={() => remove(item.truncated ? { entries: [{ id: item.id, time: item.time }] } : { urls: [item.url] })}><X size={14} /></button>
             <button className="text-button bd-history-site" disabled={busy || !host} onClick={() => setConfirm({ text: `删除 ${host} 的全部浏览记录？`, input: { host } })}>此网站</button>
           </li>;
         })}</ul>
@@ -366,8 +393,9 @@ function HistoryView({ onOpenPage, onBack }) {
 function KeptSites({ settings, onSettings, tabs }) {
   const [domain, setDomain] = useState(""), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   // Sites of the open regular pages, offered as one-click additions.
+  // Super Cage's own pages (127.0.0.1, localhost) are kept by default and not offered.
   const open = [...new Set((tabs || []).filter(tab => !tab.incognito && !tab.login && hostOf(tab.url)).map(tab => siteOfURL(tab.url)))]
-    .filter(site => site && !keptBy(site, settings?.keep)).slice(0, 3);
+    .filter(site => site && !isLoopbackSite(site) && !keptBy(site, settings?.keep)).slice(0, 3);
   const change = async (action, value) => {
     setBusy(true); setError("");
     try { onSettings(await saveSettings({ action, domain: value })); if (action === "keep-add") setDomain(""); }
@@ -376,10 +404,10 @@ function KeptSites({ settings, onSettings, tabs }) {
   const typed = keptDomain(domain);
   return <section className="bd-block" aria-label="保持登录的网站" id="bd-kept">
     <h3>保持登录的网站</h3>
-    <p className="bd-lead">清除浏览数据和自动清理时保留这些网站的 Cookie 和存储。一个域名包含它的子域名，例如 github.com 也保留 gist.github.com。</p>
+    <p className="bd-lead">清除浏览数据和自动清理时保留这些网站的 Cookie 和存储。一个域名包含它的子域名，例如 github.com 也保留 gist.github.com；co.uk、github.io 这类公共后缀不能整个保留。</p>
     <ul className="list bd-kept">
       {(settings?.keep || []).map(entry => <li key={entry.domain} className="list-row"><ShieldCheck size={16} className="bd-row-icon" />
-        <span className="list-row-text"><span className="list-row-title">{entry.domain}</span><span className="list-row-meta">包含子域名</span></span>
+        <span className="list-row-text"><span className="list-row-title">{entry.domain}</span><span className="list-row-meta">{keptCoverage(entry.domain)}</span></span>
         <button className="compact" disabled={busy} aria-label={`不再保留 ${entry.domain}`} onClick={() => change("keep-remove", entry.domain)}>移除</button></li>)}
       <li className="list-row"><LockKeyhole size={16} className="bd-row-icon" /><span className="list-row-text"><span className="list-row-title">Super Cage 内置页面<span className="chip">内置</span></span>
         <span className="list-row-meta">文件编辑器、Claude Science 和浏览器组件使用的本机地址</span></span></li>
@@ -420,7 +448,7 @@ function AutoClean({ settings, onSettings }) {
       </div>
       <div className="bd-auto-types" role="group" aria-label="自动清除的内容">{categories.map(item => <label key={item.id} className="check-line">
         <input type="checkbox" checked={auto.types.includes(item.id)} disabled={busy || (auto.types.length === 1 && auto.types.includes(item.id))} onChange={() => toggleType(item.id)} /><span>{item.title}</span></label>)}</div>
-      <p className="field-help">{auto.last ? `上次自动清理：${new Date(auto.last).toLocaleString("zh-CN")}${auto.result && auto.result !== "done" ? "（未完成，下次再试）" : ""}。` : "尚未自动清理过。"}</p>
+      <p className="field-help">{autoLine(auto)}</p>
     </div>}
     {error && <p className="error-message" role="alert">{error}</p>}
   </section>;
@@ -453,14 +481,12 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   const [available, retry] = useCapability();
   const [view, setView] = useState(() => takePendingPrivacyView());
   const [site, setSite] = useState(null);
-  const [settings, setSettings] = useState(null);
+  const { settings, setSettings, error: settingsError, retry: retrySettings } = useSettings();
   const [reset, setReset] = useState(false), [notice, setNotice] = useState("");
-  useEffect(() => { let live = true; loadSettings().then(value => { if (live) setSettings(value); }); return () => { live = false; }; }, []);
   useEffect(() => {
     const open = ({ detail }) => { if (detail?.view === "privacy") { setView(detail.section || ""); setSite(null); } };
-    const unmount = privacySectionMounted();
     document.addEventListener("cage-browser-data", open);
-    return () => { unmount(); document.removeEventListener("cage-browser-data", open); };
+    return () => document.removeEventListener("cage-browser-data", open);
   }, []);
   useEffect(() => { if (view === "kept") document.getElementById("bd-kept")?.scrollIntoView({ block: "start" }); }, [view, settings]);
   if (!available) return <p className="bd-loading">正在读取浏览器能力…</p>;
@@ -472,7 +498,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   return <div className="bd-privacy">
     <div className="bd-entry-list">
       <button className="bd-entry" onClick={() => openBrowserData({ view: "clear" })}><Trash2 size={18} />
-        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{shortcut("⌘⇧⌫").replace("+⌫", "+Delete")}</kbd><ChevronRight size={16} /></button>
+        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{clearShortcut}</kbd><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("sites")}><Cookie size={18} />
         <span><strong>网站数据</strong><small>查看各网站的 Cookie 和存储，逐个或批量清除</small></span><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("history")}><Clock3 size={18} />
@@ -481,8 +507,11 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
         <span><strong>网站权限</strong><small>摄像头、麦克风、位置和通知等权限，在 Chromium 页面中调整</small></span><ExternalLink size={16} /></button>
     </div>
     {notice && <p className="bd-notice" role="status">{notice}</p>}
-    <KeptSites settings={settings} onSettings={setSettings} tabs={tabs} />
-    <AutoClean settings={settings} onSettings={setSettings} />
+    {settingsError ? <section className="bd-block" aria-label="保持登录的网站" id="bd-kept"><h3>保持登录的网站和自动清理</h3>
+      <Unavailable value={{ message: settingsError + " 读出来之前，清除浏览数据不会清除 Cookie 和网站数据。" }} onRetry={retrySettings} /></section> : <>
+      <KeptSites settings={settings} onSettings={setSettings} tabs={tabs} />
+      <AutoClean settings={settings} onSettings={setSettings} />
+    </>}
     <section className="bd-block bd-danger-zone" aria-label="重置浏览器">
       <h3>重置浏览器</h3>
       <div className="bd-reset-row"><p className="bd-lead">浏览器资料损坏、网页反复出错时，以全新的资料重新开始。收藏夹、密码保险箱和导入的扩展会保留。</p>
@@ -514,7 +543,7 @@ function SitePopover({ tab, anchor, onClose }) {
   useEffect(() => {
     const controller = new AbortController();
     data({ mode: "site", session, site }, controller.signal).then(setDetail).catch(failure => { if (!controller.signal.aborted) setError(failure.message); });
-    if (session === "normal") loadSettings().then(setSettings);
+    if (session === "normal") loadSettings().then(setSettings, () => {});
     return () => controller.abort();
   }, [site, session]);
   const kept = keptBy(site, settings?.keep);
@@ -545,7 +574,7 @@ function SiteDialog({ tab, onClose }) {
   const [available] = useCapability();
   const site = siteOfURL(tab?.url), session = tab?.incognito ? "private" : "normal";
   const [settings, setSettings] = useState(null);
-  useEffect(() => { loadSettings().then(setSettings); }, []);
+  useEffect(() => { loadSettings().then(setSettings, () => {}); }, []);
   return <Modal title="Cookie 和网站数据" wide onClose={onClose} footer={<button className="compact" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "sites" }); }}>所有网站的数据<ChevronRight size={14} /></button>}>
     <div className="modal-body bd-site-dialog" data-browser-dialog>
       {!available ? <p className="bd-loading">正在读取…</p> : !available.available ? <BrowserCookies tab={tab} onClose={onClose} /> :
