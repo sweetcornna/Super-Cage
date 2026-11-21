@@ -20,7 +20,7 @@ import (
 func TestScienceCDPGolden(t *testing.T) {
 	control, _ := json.Marshal(controlFile{Port: 17777, SciencePort: 17840, ScienceIdentity: &testScienceIdentity})
 	golden := map[string]any{
-		"contract":         scienceBridgeContract,
+		"contract":         scienceFramePolicyContract,
 		"control":          json.RawMessage(control),
 		"page_attach":      sciencePageAttachCalls(),
 		"page_detach":      sciencePageDetachCalls(),

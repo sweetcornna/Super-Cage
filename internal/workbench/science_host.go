@@ -448,8 +448,17 @@ const scienceProxyCheckOrigin = "http://cage-proxy-check.invalid"
 
 // scienceBridgeContract is the scienceFrame bridge version this server's
 // pane needs (claude-science-state.mjs hostRenderContract; the window's
-// ScienceFrame.Contract): 2 scopes the identity to the frame's targets.
-const scienceBridgeContract = 2
+// ScienceFrame.Contract): 2 scoped the identity to the frame's targets; 3
+// also ends the front session before a frame is torn down and follows
+// nested workers (round-2 N1, N2). A window answering 2 is never offered
+// the switch.
+const scienceBridgeContract = 3
+
+// scienceFramePolicyContract is the version of the frame policy the golden
+// (testdata/science-cdp.json) describes and ScienceFrame.cs implements. It
+// reaches scienceBridgeContract only once the shell's policy has the round-2
+// fixes.
+const scienceFramePolicyContract = 2
 
 const (
 	scienceReasonUpdateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。"

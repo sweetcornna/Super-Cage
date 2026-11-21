@@ -51,7 +51,7 @@ export function claudeScienceRoute(route, request, path, body, state) {
 // state.framePort) is served by the smoke itself. Like the server, enabling
 // and tickets need the bridge's frame contract, and tickets the window's
 // proxy proof.
-const frameContract = 2;
+const frameContract = 3;
 const updateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
 const proxyUnproven = "窗口没能证明它的代理开关已生效（本机渲染需要它挡住页面的外部连接），本机渲染未打开。请重新载入窗口后重试。";
 const refuse = (route, status, body) => route.fulfill({ status, contentType: "text/plain; charset=utf-8", body });

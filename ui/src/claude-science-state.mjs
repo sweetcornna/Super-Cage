@@ -246,9 +246,11 @@ export function scienceView({ data = null, error = null, actionError = "", job =
 export const hostRenderLabel = "本机渲染（实验性）";
 export const hostRenderExplanation = "在这个窗口中直接显示 Claude Science，页面看到的仍是环境的时区、语言和浏览器标识。";
 // The scienceFrame bridge version this pane needs (science_host.go
-// scienceBridgeContract): 2 gives the guest's identity to the frame's own
-// targets only. The window answers op "capabilities".
-export const hostRenderContract = 2;
+// scienceBridgeContract): 2 gave the guest's identity to the frame's own
+// targets only; 3 also ends the front session before a frame is torn down
+// and follows nested workers (round-2 N1, N2). The window answers op
+// "capabilities"; one answering 2 is never offered the switch.
+export const hostRenderContract = 3;
 export const hostRenderUpdateNotice = "请更新 Windows 应用后再使用本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
 export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性";
 

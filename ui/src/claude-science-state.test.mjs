@@ -247,10 +247,12 @@ test("host rendering: the frame only while everything holds", () => {
 });
 
 test("host rendering: offered only to a window whose bridge has the frame contract (F8)", () => {
-  assert.equal(hostRenderContract, 2);
+  assert.equal(hostRenderContract, 3);
   // null: the probe has not answered; 0: the bridge has no scienceFrame
   // capabilities op (an older window); 1: overrides on the whole WebView.
-  for (const contract of [null, 0, 1]) {
+  // 2: today's Windows shell, whose frame policy lets guest workers outlive
+  // their overrides (round-2 N1, N2).
+  for (const contract of [null, 0, 1, 2]) {
     assert.equal(render("running-host-render-available", { contract }).toggle, null, String(contract));
     assert.equal(render("running-host-render", { contract }).frame, false, String(contract));
   }

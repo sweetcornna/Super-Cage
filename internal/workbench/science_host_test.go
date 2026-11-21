@@ -270,7 +270,10 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	if w := on(workload, true, false); w.Code != http.StatusConflict || workload.scienceFrontRunning() != nil {
 		t.Fatalf("enabled without the window: %d", w.Code)
 	}
-	for _, body := range []string{`{"enabled":true}`, fmt.Sprintf(`{"enabled":true,"contract":%d}`, scienceBridgeContract-1)} {
+	// 2 is what today's ScienceFrame.cs answers: its frame policy lets
+	// guest workers outlive their overrides (round-2 N1, N2), so it is
+	// never offered the switch.
+	for _, body := range []string{`{"enabled":true}`, fmt.Sprintf(`{"enabled":true,"contract":%d}`, scienceBridgeContract-1), `{"enabled":true,"contract":2}`} {
 		if w := post(workload, body, true); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "请更新 Windows 应用") || workload.scienceFrontRunning() != nil {
 			t.Fatalf("enabled for a window without the frame contract (%s): %d %s", body, w.Code, w.Body)
 		}

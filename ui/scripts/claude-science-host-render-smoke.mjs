@@ -16,7 +16,7 @@ const isFrame = (url) => url.port === String(framePort) && /^[0-9a-f]{32}\.local
 const windowsWindow = { mode: "local", connection_id: "local", client_platform: "windows", server_platform: "windows", desktop_gateway: true, connection: { state: "connected" } };
 const checks = [];
 
-async function open({ mode, clientContext, claudeScience, csp = false, routes = null, contract = 2 }) {
+async function open({ mode, clientContext, claudeScience, csp = false, routes = null, contract = 3 }) {
   const native = [];
   // contract 0: an older window whose bridge has no capabilities op.
   const bridge = { backstop: false, proxy: "verified", contract };
@@ -115,7 +115,7 @@ async function walk(mode) {
     //    reload of the window, asked for, never armed.
     await toggle.click();
     await pane.getByText("本机渲染已开启，需要重新载入窗口一次才能生效。").waitFor({ timeout: 15000 });
-    assert.deepEqual(posts("/claude-science/host-render").map(request => request.body), [{ enabled: true, contract: 2 }]);
+    assert.deepEqual(posts("/claude-science/host-render").map(request => request.body), [{ enabled: true, contract: 3 }]);
     assert.deepEqual(ops(), ["capabilities", "prepare", "detach"]);
     assert.equal(posts("/claude-science/ticket").length, 0, "no ticket without the switches");
     await shot("2-restart");
@@ -132,7 +132,7 @@ async function walk(mode) {
     const ticket = posts("/claude-science/ticket").at(-1).body;
     assert.deepEqual(Object.keys(ticket.host).sort(), ["languages", "offset", "timezone"]);
     assert.equal(ticket.proxy, "verified");
-    assert.equal(ticket.contract, 2);
+    assert.equal(ticket.contract, 3);
     assert.equal(typeof ticket.host.offset, "number");
     assert.equal(native[2].url, await frame.getAttribute("src"));
     assert.equal(await frame.getAttribute("sandbox"), "allow-scripts allow-same-origin allow-forms");
