@@ -257,6 +257,9 @@ type attacher struct {
 	started bool // the first stream was accepted
 }
 
+// updateNeeded is the answer to a workload from before the viewer rules.
+const updateNeeded = "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"
+
 // TitlePush saves the window's title and icon name before anything else is
 // written: ResetSequence pops them back.
 const TitlePush = "\x1b[22;0t"
@@ -436,7 +439,7 @@ func attachFailure(err error) Exit {
 		case "state_conflict":
 			return Exit{1, "Super Cage 已切换到其他环境，这个终端所在的连接已断开。"}
 		case "unsupported_operation":
-			return Exit{1, "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"}
+			return Exit{1, updateNeeded}
 		}
 	}
 	return Exit{1, "无法连接 Super Cage：" + err.Error()}
@@ -459,9 +462,32 @@ func (a *attacher) request(ctx context.Context, method, path string, input, outp
 		return &attachHTTPError{status: status, text: strings.TrimSpace(string(data))}
 	}
 	if output != nil && json.Unmarshal(data, output) != nil {
-		return errors.New("Super Cage 的回答无法读取")
+		return errUnreadable
 	}
 	return nil
+}
+
+var errUnreadable = errors.New("Super Cage 的回答无法读取")
+
+// checkViewers asks the workload, before --new or --resume creates
+// anything, whether it applies the viewer rules. A server from before them
+// answers 404, 405 or its page, and gets no terminal it could not show.
+func (a *attacher) checkViewers(ctx context.Context) (Exit, bool) {
+	var answer struct {
+		Protocol int `json:"protocol"`
+	}
+	err := a.request(ctx, "GET", "/api/terminals/viewers", nil, &answer)
+	var refused *attachHTTPError
+	switch {
+	case err == nil && answer.Protocol >= ViewerProtocol:
+		return Exit{}, true
+	case err == nil, errors.Is(err, errUnreadable),
+		errors.As(err, &refused) && (refused.status == 404 || refused.status == 405):
+		return Exit{1, updateNeeded}, false
+	case errors.As(err, &refused):
+		return refused.exit(), false
+	}
+	return attachFailure(err), false
 }
 
 // attachHTTPError is a refusal from the workload, with its own sentence.
@@ -479,7 +505,7 @@ func (e *attachHTTPError) exit() Exit {
 	case 423: // locked
 		return Exit{3, "Super Cage 已锁定：先在 Super Cage 里解锁，再运行这条命令。"}
 	case 404:
-		return Exit{1, "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"}
+		return Exit{1, updateNeeded}
 	}
 	if e.text != "" && len(e.text) < 300 && !strings.HasPrefix(e.text, "{") {
 		return Exit{1, e.text}
@@ -497,6 +523,11 @@ func (a *attacher) chooseTerminal(ctx context.Context) (Exit, bool) {
 			return refused.exit(), false
 		}
 		return attachFailure(err), false
+	}
+	if a.cfg.Resume != "" || a.cfg.NewKind != "" {
+		if exit, ok := a.checkViewers(ctx); !ok {
+			return exit, false
+		}
 	}
 	switch {
 	case a.cfg.Resume != "":
@@ -571,7 +602,7 @@ func (a *attacher) dial(ctx context.Context) (*controlwire.Conn, Exit, bool) {
 		if err != nil && a.started {
 			return nil, Exit{1, "连接中断：" + err.Error()}, false
 		}
-		return nil, Exit{1, "需要更新 Super Cage：这个环境的 Super Cage 版本还不能在本机终端中打开。"}, false
+		return nil, Exit{1, updateNeeded}, false
 	}
 	_ = ws.SetReadDeadline(time.Time{})
 	a.started = true

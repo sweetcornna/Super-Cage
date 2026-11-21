@@ -57,16 +57,16 @@ func TestPlansPerApplication(t *testing.T) {
 		{"warp", func(string) [][]string {
 			return [][]string{{"/usr/bin/open", "warp://launch/super-cage-0123456789abcdef.yaml"}}
 		}},
-		{"wezterm", func(string) [][]string {
-			return [][]string{append([]string{"/Applications/WezTerm.app/Contents/MacOS/wezterm", "start", "--"}, attachCommand...)}
+		{"wezterm", func(s string) [][]string {
+			return [][]string{{"/Applications/WezTerm.app/Contents/MacOS/wezterm", "start", "--", "/bin/sh", s}}
 		}},
-		{"kitty", func(string) [][]string {
-			return [][]string{append([]string{"/Applications/kitty.app/Contents/MacOS/kitty", "--single-instance"}, attachCommand...)}
+		{"kitty", func(s string) [][]string {
+			return [][]string{{"/Applications/kitty.app/Contents/MacOS/kitty", "--single-instance", "/bin/sh", s}}
 		}},
-		{"alacritty", func(string) [][]string {
+		{"alacritty", func(s string) [][]string {
 			return [][]string{
-				append([]string{"/Applications/Alacritty.app/Contents/MacOS/alacritty", "msg", "create-window", "-e"}, attachCommand...),
-				append([]string{"/usr/bin/open", "-na", "/Applications/Alacritty.app", "--args", "-e"}, attachCommand...),
+				{"/Applications/Alacritty.app/Contents/MacOS/alacritty", "msg", "create-window", "-e", "/bin/sh", s},
+				{"/usr/bin/open", "-na", "/Applications/Alacritty.app", "--args", "-e", "/bin/sh", s},
 			}
 		}},
 	} {
@@ -82,7 +82,7 @@ func TestPlansPerApplication(t *testing.T) {
 		}
 		for _, f := range plan.Files {
 			if strings.HasSuffix(f.Path, ".command") {
-				if f.Mode != 0o700 || !strings.Contains(f.Content, "rm -f -- \"$0\"\nexec "+quotedCage+" attach --terminal 0123456789abcdef\n") {
+				if f.Mode != 0o700 || !strings.Contains(f.Content, "rm -f -- \"$0\"\n"+quotedCage+" attach --terminal 0123456789abcdef\nstatus=$?\n") || !strings.Contains(f.Content, "\t"+quotedCage+" attach --reset 2>/dev/null\n") {
 					t.Errorf("%s script %o %q", row.id, f.Mode, f.Content)
 				}
 			}

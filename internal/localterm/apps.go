@@ -106,6 +106,16 @@ func (c Command) Validate() error {
 	return nil
 }
 
+// ResetCommand is the same program asked only to reset the window:
+// cage-attach --reset, or cage attach --reset.
+func (c Command) ResetCommand() Command {
+	n := 1
+	if len(c) > 1 && c[1] == "attach" {
+		n = 2
+	}
+	return append(append(Command{}, c[:n]...), "--reset")
+}
+
 // ShellQuote quotes one word for /bin/sh.
 func ShellQuote(word string) string {
 	if word != "" && strings.Trim(word, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./=:,@+%") == "" {

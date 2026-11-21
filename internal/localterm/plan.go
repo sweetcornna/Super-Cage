@@ -61,11 +61,13 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 	if !in.App.Hosts {
 		return Plan{}, errors.New(in.App.Name + " 暂时不能在本机终端中打开 Super Cage 终端")
 	}
-	// Applications that take a command line rather than separate arguments
-	// run a one-shot script, so the command needs no quoting beyond the
-	// script's own. It removes itself before it starts cage attach.
+	// Every application runs a one-shot script, so the command needs no
+	// quoting beyond the script's own. It removes itself, then runs cage
+	// attach as a child: a clean exit closes the window at once, any other
+	// keeps cage attach's message on screen until a key is pressed.
 	script := filepath.Join(in.Scratch, ScriptPrefix+in.Name+".command")
-	scriptFile := PlanFile{Path: script, Mode: 0o700, Content: "#!/bin/sh\n# Super Cage: opens one terminal of the environment, then removes itself.\nrm -f -- \"$0\"\nexec " + in.Command.ShellLine() + "\n"}
+	scriptFile := PlanFile{Path: script, Mode: 0o700, Content: launchScript(in.Command)}
+	shScript := []string{"/bin/sh", script}
 	bundle := in.App.Path
 	binary := func(name string) string { return filepath.Join(bundle, "Contents", "MacOS", name) }
 	switch in.App.ID {
@@ -104,18 +106,42 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 			Steps: []Step{{Argv: []string{"/usr/bin/open", scheme + "://launch/" + config}}}}, nil
 	case "wezterm":
 		// wezterm start asks a running WezTerm for a new window, or starts one.
-		return Plan{Steps: []Step{{Argv: append([]string{binary("wezterm"), "start", "--"}, in.Command...), Detach: true}}}, nil
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: append([]string{binary("wezterm"), "start", "--"}, shScript...), Detach: true}}}, nil
 	case "kitty":
 		// --single-instance hands the window to a running kitty.
-		return Plan{Steps: []Step{{Argv: append([]string{binary("kitty"), "--single-instance"}, in.Command...), Detach: true}}}, nil
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: append([]string{binary("kitty"), "--single-instance"}, shScript...), Detach: true}}}, nil
 	case "alacritty":
 		// A running Alacritty opens a window over its socket; otherwise a new one.
-		return Plan{Steps: []Step{
-			{Argv: append([]string{binary("alacritty"), "msg", "create-window", "-e"}, in.Command...)},
-			{Argv: append([]string{"/usr/bin/open", "-na", bundle, "--args", "-e"}, in.Command...)},
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{
+			{Argv: append([]string{binary("alacritty"), "msg", "create-window", "-e"}, shScript...)},
+			{Argv: append([]string{"/usr/bin/open", "-na", bundle, "--args", "-e"}, shScript...)},
 		}}, nil
 	}
 	return Plan{}, errors.New("不支持这个本机终端应用")
+}
+
+// launchScript runs command in the new window. A clean exit (the terminal
+// ended, or the owner detached) closes it at once. Any other exit resets the
+// window (cage attach does too, unless it was killed), keeps cage attach's
+// message on screen, explains a signal, and waits for one key.
+func launchScript(command Command) string {
+	return "#!/bin/sh\n" +
+		"# Super Cage: opens one terminal of the environment, then removes itself.\n" +
+		"rm -f -- \"$0\"\n" +
+		command.ShellLine() + "\n" +
+		"status=$?\n" +
+		"if [ \"$status\" -ne 0 ]; then\n" +
+		"\t" + command.ResetCommand().ShellLine() + " 2>/dev/null\n" +
+		"\tif [ \"$status\" -gt 128 ]; then\n" +
+		"\t\tprintf '\\r\\n本机终端连接意外结束（退出码 %s）。\\r\\n' \"$status\"\n" +
+		"\tfi\n" +
+		"\tprintf '\\r\\n按任意键关闭'\n" +
+		"\tsaved=$(stty -g 2>/dev/null)\n" +
+		"\tstty -icanon -echo min 1 time 0 2>/dev/null\n" +
+		"\tdd bs=1 count=1 >/dev/null 2>&1\n" +
+		"\tif [ -n \"$saved\" ]; then stty \"$saved\" 2>/dev/null; fi\n" +
+		"fi\n" +
+		"exit \"$status\"\n"
 }
 
 // bundleID is the release channel that was found, else the main one.

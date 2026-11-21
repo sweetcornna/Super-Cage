@@ -503,6 +503,64 @@ func TestAttachEndsWithAPlainMessage(t *testing.T) {
 	}
 }
 
+// --new and --resume ask the workload whether it applies the viewer rules
+// before creating anything: an old server gets no terminal it cannot show.
+func TestAttachChecksTheServerBeforeCreating(t *testing.T) {
+	for _, old := range []string{"not found", "page"} {
+		var mu sync.Mutex
+		posts := 0
+		s := attachController(t, func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == "POST" && (r.URL.Path == "/api/terminals" || strings.HasPrefix(r.URL.Path, "/api/cli/sessions/")) {
+					mu.Lock()
+					posts++
+					mu.Unlock()
+				}
+				if r.URL.Path == "/api/terminals/viewers" {
+					// What a server from before the viewer rules answers.
+					if old == "page" {
+						w.Header().Set("Content-Type", "text/html")
+						_, _ = io.WriteString(w, "<!doctype html><title>Super Cage</title>")
+					} else {
+						http.NotFound(w, r)
+					}
+					return
+				}
+				if strings.HasSuffix(r.URL.Path, "/stream") {
+					query := r.URL.Query()
+					query.Del("viewer")
+					r.URL.RawQuery = query.Encode()
+				}
+				next.ServeHTTP(w, r)
+			})
+		})
+		before := len(s.terminals.snapshot())
+		for _, cfg := range []attach.Config{
+			{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, NewKind: "shell"},
+			{ConfigPath: s.configPath, Target: AgentTarget{Scope: "local"}, Resume: "session-1"},
+		} {
+			a := startAttach(t, cfg)
+			if result := a.exit(5 * time.Second); result.Code != 1 || !strings.HasPrefix(result.Message, "需要更新 Super Cage") {
+				t.Fatalf("%s: %+v", old, result)
+			}
+		}
+		mu.Lock()
+		if posts != 0 || len(s.terminals.snapshot()) != before {
+			t.Fatalf("%s: %d requests that create, %d terminals before, %d after", old, posts, before, len(s.terminals.snapshot()))
+		}
+		mu.Unlock()
+	}
+	// A current server answers the question itself.
+	s := attachController(t, nil)
+	w := request(s, "GET", "/api/terminals/viewers", s.origin, "", true)
+	var answer struct {
+		Protocol int `json:"protocol"`
+	}
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &answer) != nil || answer.Protocol != attach.ViewerProtocol {
+		t.Fatalf("%d %s", w.Code, w.Body)
+	}
+}
+
 func TestAttachRefusesAServerWithoutViewers(t *testing.T) {
 	// A server from before this change ignores the viewer identity.
 	s := attachController(t, func(next http.Handler) http.Handler {
@@ -1056,6 +1114,13 @@ func TestAttachThroughTheDesktopEndsOnLockAndSwitch(t *testing.T) {
 		a.typeText("hello")
 		a.waitFor("got:\"hello\"", 1)
 		return a
+	}
+	// --new through the desktop: the workload answers the viewer question
+	// itself, so the request reaches it (and the test workload, which has no
+	// environment, refuses it in its own words).
+	n := startAttach(t, attach.Config{ConfigPath: full, Target: AgentTarget{Scope: "selected", Connection: gateway.generation}, NewKind: "shell"})
+	if result := n.exit(10 * time.Second); result.Code != 1 || result.Message != errTerminalNotReady.Error() {
+		t.Fatalf("--new through the desktop: %+v", result)
 	}
 	// The workload locks: the window says so at once.
 	a := through(startChild(t, workload, "report"))

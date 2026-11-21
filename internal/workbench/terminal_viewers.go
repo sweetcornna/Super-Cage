@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"bytes"
+	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
@@ -31,6 +32,13 @@ var terminalViewerPattern = regexp.MustCompile("^[A-Za-z0-9_-]{8,64}$")
 // terminalViewerProtocol is announced to identified viewers in their first
 // frame, so a client can tell this server from one that ignores the identity.
 const terminalViewerProtocol = 1
+
+// terminalViewers tells a viewer, before it creates a terminal, that this
+// server applies the viewer rules; a server from before them answers 404,
+// 405 or its page. cage attach asks it ahead of --new and --resume.
+func (s *Server) terminalViewers(w http.ResponseWriter, r *http.Request) {
+	jsonReply(w, map[string]any{"protocol": terminalViewerProtocol})
+}
 
 // terminalOwnerGrace lets the owner reconnect (a network blip, a hidden tab
 // resuming) before its ownership passes to another viewer.

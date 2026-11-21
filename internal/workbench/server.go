@@ -500,6 +500,7 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/macos/exit-policy", s.bindMacOSExit)
 	}
 	mux.HandleFunc("GET /api/terminals", s.listTerminals)
+	mux.HandleFunc("GET /api/terminals/viewers", s.terminalViewers)
 	mux.HandleFunc("GET /api/audio", s.audio)
 	mux.HandleFunc("GET /api/clipboard", s.sharedClipboard)
 	mux.HandleFunc("POST /api/clipboard/copy", s.clipboardCopy)
