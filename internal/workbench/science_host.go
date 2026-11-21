@@ -165,7 +165,7 @@ func (s *Server) syncScienceFront() {
 		h.front = front
 		ctx, cancel := context.WithCancel(s.lifetimeContext())
 		h.stop = cancel
-		go s.watchScienceFront(ctx, front)
+		go s.watchScienceFront(ctx, front, scienceWatchInterval)
 		if err := s.publishScienceControl(port, nil, false); err != nil {
 			h.err = "无法记录本机渲染端口：" + err.Error()
 		}
@@ -202,7 +202,7 @@ var scienceWatchWakes atomic.Int64
 // It sleeps while there is no session and no credential (nothing runs when
 // the switch is on but the Science page is closed), and the front wakes it
 // when either appears.
-func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
+func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront, interval time.Duration) {
 	started := ""
 	for {
 		front.mu.Lock()
@@ -216,7 +216,7 @@ func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
 			}
 			continue
 		}
-		timer := time.NewTimer(scienceWatchInterval)
+		timer := time.NewTimer(interval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
