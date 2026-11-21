@@ -6,10 +6,11 @@
 // 然后在浏览器打开 http://cage.localhost:8787/
 
 import http from "node:http";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createPhoneFixture } from "./phone-fixture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STATIC = {
@@ -91,7 +92,12 @@ export async function startMockServer({
   registrationOpen = true,
   uiDir = HERE,
   workbenchDir,
+  // Answer the phone UI's /api/mobile/* routes from phone-fixture.mjs and serve
+  // mobile.html at "/" when the browser chose the phone layout (cookie only:
+  // the user-agent rule belongs to the gateway and is tested in Go).
+  phoneFixture = false,
 } = {}) {
+  const phoneApi = phoneFixture ? createPhoneFixture() : null;
   const state = {
     users: new Map(), // username -> { id, username, salt, hash }
     sessions: new Map(), // token -> { id, userId, revoked }
@@ -410,6 +416,12 @@ export async function startMockServer({
     const auth = vmAuth(req, id);
     if (!auth) return problem(res, 401, "unauthenticated", "需要从门户重新进入工作台。");
     if (url.pathname.startsWith("/api/client/virtual-machines")) return workbenchVMs(req, res, url.pathname, id, auth);
+    if (phoneApi && url.pathname.startsWith("/api/mobile/")) {
+      const input = req.method === "POST" ? await readJson(req).catch(() => ({})) : undefined;
+      const reply = phoneApi(req.method, url.pathname, input);
+      if (reply.status !== 200) return send(res, reply.status, reply.body, "text/plain; charset=utf-8");
+      return json(res, 200, reply.body);
+    }
     if (workbenchDir && req.method === "GET") {
       if (url.pathname === "/api/client/context") return json(res, 200, {
         mode: "local", connection_id: "local", server_platform: "linux",
@@ -421,15 +433,31 @@ export async function startMockServer({
       if (url.pathname === "/api/browser/tabs") return json(res, 200, { tabs: [] });
       if (url.pathname.startsWith("/api/")) return json(res, 200, {});
 
-      const asset = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-      if (/^(?:assets\/[\w.-]+|cage\.(?:png|svg)|index\.html)$/.test(asset)) {
-        const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2" };
+      const layout = parseCookies(req.headers.cookie)["cage-layout"];
+      const root = phoneApi && (layout === "phone" || layout === "phone-auto") ? "mobile.html" : "index.html";
+      const asset = url.pathname === "/" ? root : url.pathname.slice(1);
+      if (/^(?:assets\/[\w.-]+|cage\.(?:png|svg)|(?:index|mobile)\.html|favicon\.ico|apple-touch-icon\.png|manifest\.webmanifest|entry-guard\.js|icon-[\w-]+\.png)$/.test(asset)) {
+        const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2", ico: "image/x-icon", webmanifest: "application/manifest+json" };
         const type = types[asset.split(".").at(-1)];
         if (type) {
           const file = await readFile(join(workbenchDir, asset)).catch(() => null);
           if (!file) return problem(res, 404, "not_found", "未找到。");
           res.setHeader("Content-Security-Policy", `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'self'; ${ancestors}`);
-          if (asset === "index.html") state.served.push({ vmId: id, userId: auth.session.userId });
+          if (asset === "index.html" || url.pathname === "/") state.served.push({ vmId: id, userId: auth.session.userId, document: asset });
+          // Cache and encode as the workbench does (internal/workbench/static_assets.go, through the
+          // gateway): hashed assets are immutable, the rest revalidates by ETag; .br companions
+          // are served when accepted. Keeps load measurements against this mock realistic.
+          const hashed = /^assets\/(?:[^/]+\/)*[^/]+-[A-Za-z0-9_-]{8}(?:\.[A-Za-z0-9]+)+$/.test(asset);
+          const etag = `"${createHash("sha256").update(file).digest("hex").slice(0, 32)}"`;
+          res.setHeader("Cache-Control", hashed ? "private, max-age=31536000, immutable" : "no-cache");
+          res.setHeader("ETag", etag);
+          if (url.pathname === "/") res.setHeader("Vary", "Cookie, User-Agent, Sec-CH-UA-Mobile");
+          if (req.headers["if-none-match"] === etag) { res.writeHead(304); return res.end(); }
+          const brotli = /\bbr\b/.test(String(req.headers["accept-encoding"] || "")) ? await readFile(join(workbenchDir, asset + ".br")).catch(() => null) : null;
+          if (brotli) {
+            res.setHeader("Vary", [res.getHeader("Vary"), "Accept-Encoding"].filter(Boolean).join(", "));
+            return send(res, 200, brotli, type, { "Content-Encoding": "br" });
+          }
           return send(res, 200, file, type);
         }
       }
