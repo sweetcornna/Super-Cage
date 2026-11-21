@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"al.essio.dev/pkg/shellescape"
 	"golang.org/x/crypto/ssh"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
@@ -99,10 +100,22 @@ func defaultEntryPaths(profile, executable string) (entryPaths, error) {
 		ComputerDir: entryComputerProfile(profile),
 		HomeSSH:     true,
 		Proxy: func(environment string) string {
-			return entryQuote(executable) + " entry proxy " + environment
+			return entryProxyCommand(executable, environment)
 		},
 		Cage: executable,
 	}, nil
+}
+
+// entryProxyCommand is the ProxyCommand of a Host block. ssh takes the rest
+// of the line as it is, expands its % tokens and hands it to the user's
+// shell (on Windows it starts the command line directly), so the executable
+// is quoted for that and its % doubled.
+func entryProxyCommand(executable, environment string) string {
+	quoted := shellescape.Quote(executable)
+	if runtime.GOOS == "windows" {
+		quoted = "\"" + executable + "\""
+	}
+	return strings.ReplaceAll(quoted, "%", "%%") + " entry proxy " + environment
 }
 
 // entryComputerProfile is the default profile of a local VM's profile
@@ -410,7 +423,13 @@ func entryQuote(value string) string {
 }
 
 // entryConfigPath escapes ssh's % tokens in a path option and quotes it.
+// ssh_config reads a backslash before a quote or another backslash as an
+// escape, so Windows paths are written with forward slashes, which Windows'
+// OpenSSH accepts.
 func entryConfigPath(path string) string {
+	if runtime.GOOS == "windows" {
+		path = filepath.ToSlash(path)
+	}
 	return entryQuote(strings.ReplaceAll(path, "%", "%%"))
 }
 
@@ -531,10 +550,13 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 // environment owns its own two files, so two controllers never write the
 // same one.
 func entryWriteClient(paths entryPaths, environment, name string, hostKey ssh.PublicKey) (string, error) {
-	for _, value := range []string{paths.clientFile(), paths.deviceKey(), paths.Proxy(environment)} {
+	for _, value := range []string{paths.clientFile(), paths.deviceKey(), paths.knownHosts(environment)} {
 		if !validEntryConfigValue(value) {
 			return "", errors.New("路径里有 ssh 配置无法表示的字符")
 		}
+	}
+	if strings.ContainsAny(paths.Proxy(environment), "\r\n\x00") || strings.ContainsAny(paths.Cage, "\"\r\n\x00") {
+		return "", errors.New("cage 命令的路径里有 ssh 配置无法表示的字符")
 	}
 	if err := os.MkdirAll(paths.SSHDir, 0o700); err != nil {
 		return "", err

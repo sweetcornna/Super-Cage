@@ -243,8 +243,48 @@ func entryTestController(t *testing.T) *Server {
 	return s
 }
 
+// entryRealHomeGuard fails the test when anything of the entry's in the real
+// home of this computer's user changed while it ran. It only reads. OpenSSH
+// expands ~ from the user database, not from $HOME, so the guard does too.
+func entryRealHomeGuard(t *testing.T) {
+	t.Helper()
+	current, err := user.Current()
+	if err != nil || current.HomeDir == "" {
+		t.Fatal("no home directory", err)
+	}
+	home := current.HomeDir
+	watched := []string{
+		filepath.Join(home, ".ssh", "config"),
+		filepath.Join(home, ".ssh", "known_hosts"),
+		filepath.Join(home, ".ssh", entryClientDir),
+		filepath.Join(home, ".claude-cage", "entry"),
+		filepath.Join(home, ".claude-cage", "local-terminal.json"),
+		filepath.Join(home, ".local", "share", "super-cage"),
+		filepath.Join(home, "Library", "Application Support", "Super Cage", "entry"),
+	}
+	stamp := func(path string) string {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return "absent"
+		}
+		return fmt.Sprint(info.Mode(), info.ModTime().UnixNano(), info.Size())
+	}
+	before := map[string]string{}
+	for _, path := range watched {
+		before[path] = stamp(path)
+	}
+	t.Cleanup(func() {
+		for path, was := range before {
+			if now := stamp(path); now != was {
+				t.Errorf("the real %s changed during the test (%s -> %s)", path, was, now)
+			}
+		}
+	})
+}
+
 func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 	t.Helper()
+	entryRealHomeGuard(t)
 	s := entryTestController(t)
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -252,8 +292,10 @@ func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 	}
 	f := &entryFixture{t: t, s: s, dir: dir}
 	f.paths = entryPaths{
-		SSHDir:      filepath.Join(dir, "client", ".ssh"),
-		DeviceDir:   filepath.Join(dir, "client", "device"),
+		SSHDir: filepath.Join(dir, "client", ".ssh"),
+		// Like ~/Library/Application Support, with a space, and a % that
+		// ssh would expand: the system ssh tests connect through it.
+		DeviceDir:   filepath.Join(dir, "client", "Application Support", "Super Cage 100%", "entry"),
 		ComputerDir: s.profile,
 		Proxy: func(environment string) string {
 			return entryQuote(os.Args[0]) + " -test.run=^TestEntryProxyHelper$ -test.count=1"
