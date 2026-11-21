@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -117,5 +118,43 @@ func TestPromptStepsWaitForTheOwner(t *testing.T) {
 	}
 	if err := (ExecRunner{}).Run(context.Background(), Step{Argv: slow, Prompt: true}); err != nil {
 		t.Fatal("an AppleScript step was cut short:", err)
+	}
+}
+
+// kitty and WezTerm are started directly and may become the owner's running
+// application: they get the owner's session environment (an SSH agent,
+// what the owner set with launchctl setenv), as from the Dock, and nothing
+// of Super Cage's own.
+func TestDirectLaunchGetsTheSessionEnvironment(t *testing.T) {
+	wait := detachWait
+	detachWait = 300 * time.Millisecond
+	environ := launchdEnviron
+	launchdEnviron = func() []string { return []string{"SSH_AUTH_SOCK=/private/tmp/agent.sock", "OWNER_SETTING=1"} }
+	t.Cleanup(func() { detachWait, launchdEnviron = wait, environ })
+	t.Setenv("CAGE_OWN_SETTING", "cage")
+	out := filepath.Join(t.TempDir(), "env")
+	step := Step{Argv: []string{"/bin/sh", "-c", "env > " + out + "; sleep 1"}, Detach: true}
+	if err := (ExecRunner{}).Run(context.Background(), step); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := string(data)
+	for _, want := range []string{"SSH_AUTH_SOCK=/private/tmp/agent.sock\n", "OWNER_SETTING=1\n", "HOME="} {
+		if !strings.Contains(env, want) {
+			t.Errorf("missing %q in %q", want, env)
+		}
+	}
+	if strings.Contains(env, "CAGE_OWN_SETTING") {
+		t.Error("Super Cage's own environment reached the application")
+	}
+}
+
+func TestLaunchdEnvironmentNames(t *testing.T) {
+	sample := "gui/501 = {\n\ttype = gui\n\tenvironment = {\n\t\tSSH_AUTH_SOCK => /private/tmp/x/Listeners\n\t\tMY_VAR => a => b\n\t}\n\tservices = {\n\t\tFOO => 1\n\t}\n}\n"
+	if got := strings.Join(launchdNames(sample), ","); got != "SSH_AUTH_SOCK,MY_VAR" {
+		t.Fatal(got)
 	}
 }

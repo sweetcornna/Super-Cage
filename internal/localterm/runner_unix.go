@@ -44,7 +44,8 @@ func (ExecRunner) Run(ctx context.Context, step Step) error {
 		return nil
 	}
 	cmd := exec.Command(step.Argv[0], step.Argv[1:]...)
-	cmd.Env = LaunchEnvironment(os.Environ())
+	// It may become the owner's running application, with its later windows.
+	cmd.Env = SessionEnvironment(os.Environ(), launchdEnviron())
 	// Its own session: the application outlives Super Cage.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
