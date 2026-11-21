@@ -177,6 +177,11 @@ assertions = 0;
         Check(ScienceFrame.SeedPreferences(data, false), "preferences not restored");
         var restored = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(preferences))!;
         Check(restored["net"]!["network_prediction_options"] == null && restored["net"]!["other"]!.GetValue<bool>(), "prediction stayed off without the switches");
+        // Off, with nothing of ours in the file: the file is not rewritten.
+        var untouched = "{\"net\": {\"other\": true},  \"browser\": {}}";
+        File.WriteAllText(preferences, untouched);
+        var written = File.GetLastWriteTimeUtc(preferences);
+        Check(ScienceFrame.SeedPreferences(data, false) && File.ReadAllText(preferences) == untouched && File.GetLastWriteTimeUtc(preferences) == written, "preferences rewritten while off");
         File.WriteAllText(preferences, "{ broken");
         Check(!ScienceFrame.SeedPreferences(data, true) && File.ReadAllText(preferences) == "{ broken", "an unreadable preferences file was replaced");
     }

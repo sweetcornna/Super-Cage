@@ -514,14 +514,14 @@ func (s *scienceShell) close(t *testing.T) {
 	s.detach()
 }
 
-// reticket is the pane's one re-ticket: the frame is keyed on its URL, so
-// React replaces the element in one commit; the window stays armed.
+// reticket is the pane's one re-ticket (start() in claude-science.jsx):
+// the frame goes with its URL, prepare detaches, attach arms for the new
+// label, and only then is the new frame added.
 func (s *scienceShell) reticket(t *testing.T, url string) {
 	t.Helper()
-	s.mu.Lock()
-	s.origins[scienceSessionOrigin(url)] = true
-	s.mu.Unlock()
-	s.eval(t, "document.getElementById('science')?.remove(); "+scienceAddFrame(url))
+	s.eval(t, "document.getElementById('science')?.remove(); true")
+	s.detach()
+	s.open(t, url)
 }
 
 // navigateTop is the window's top document navigating. Its frame targets
