@@ -18,8 +18,8 @@ import (
 // session cookies. One NDJSON line in/out is {type:"text"|"binary",data:...};
 // binary data uses JSON's []byte base64 encoding.
 func AgentSocket(ctx context.Context, configPath string, target AgentTarget, path string, input io.ReadCloser, output io.Writer) (returned error) {
-	if !strings.HasPrefix(path, "/api/") || strings.ContainsAny(path, "\r\n\\") || strings.Contains(path, "#") || strings.Contains(path, "://") {
-		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
+	if refusal := agentSocketRefusal(path); refusal != nil {
+		return refusal
 	}
 	c, err := agentConnectTarget(ctx, configPath, target)
 	if err != nil {
