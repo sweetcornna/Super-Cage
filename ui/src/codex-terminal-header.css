@@ -1,0 +1,30 @@
+/* Actions in the header of a bound Codex terminal (codex-terminal-header.jsx). */
+.codex-terminal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+.codex-terminal-error {
+  max-width: 22rem;
+  margin-right: 6px;
+  overflow: hidden;
+  color: var(--error);
+  font-size: var(--fs-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* "正在打开 Codex…" in the middle of the still empty pane, like the other
+   terminal waiting lines (.terminal-startup); the terminal stays live under it
+   and its cursor keeps the top-left corner. */
+.codex-opening {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  pointer-events: none;
+}

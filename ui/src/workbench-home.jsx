@@ -15,6 +15,9 @@ import { GuestSystemPicker } from "./guest-system-picker";
 import { MacOSLogin } from "./macos-login";
 import { ProjectRecovery } from "./project-recovery";
 import { ProviderMark } from "./provider-mark";
+import { NetworkExplanation, networkTone } from "./network-explanation";
+import { explanationView } from "./safety-state.mjs";
+import { isCodexSession, ownerState } from "./session-provider.mjs";
 import { SafetyMessage } from "./safety-message";
 import { SetupProgress } from "./setup-progress";
 import { isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
@@ -47,6 +50,7 @@ export function WorkbenchHome({
   projectsAvailable, macGuest, editorAvailable, contentWorkspace, groups, projects, sessions, tabs,
   openingSession, onSessionOpen, onSettings, onDetails, onStop, onRetrySetup, onPrimary, primaryDisabled,
   onNewTerminal, onNewTerminalHere, onEditor, onOpenProject, terminalMenuAt,
+  sessionOpenError, canRecheck, onRechecked, onNetworkDetails, onResources,
 }) {
   const { account } = useAccount();
   const hour = new Date().getHours();
@@ -88,7 +92,12 @@ export function WorkbenchHome({
       : guestSystem?.activate ? "打开工作台" : guestSystem?.pending ? "继续安装"
       : guestSystem && guestSystem.guest_system !== "debian-13" ? "安装客户机" : "启动 Super Cage 环境"
     : !status.ready ? "恢复浏览器" : !workspace && projectsAvailable ? "打开项目" : "新建终端";
-  const statusLabel = busy ? runtimeLabel : running ? network.label : setupProxy ? "等待配置代理" : "环境已停止";
+  // The server's explanation of a closed or uncertain gate (calm unless the
+  // user must act); an older server sends none and the card stays as it was.
+  const gateTone = running && !busy ? networkTone(network) : "";
+  // Named as in the status bar once the gate explains itself.
+  const statusLabel = busy ? runtimeLabel : running ? gateTone && explanationView(network.explanation)?.label || network.label
+    : setupProxy ? "等待配置代理" : "环境已停止";
   const art = storageRecovery ? "plug" : ready ? null : "server";
   // A terminal can still be opened when the browser is down or no project is chosen.
   const terminalShortcut = running && (!status.ready || (!workspace && projectsAvailable));
@@ -121,6 +130,8 @@ export function WorkbenchHome({
                 disconnected={Boolean(connectionError)} />
             ) : <>
               <p className="welcome-subtitle"><SafetyMessage message={subtitle} /></p>
+              {gateTone && <NetworkExplanation compact explanation={network.explanation} canRecheck={canRecheck}
+                onRechecked={onRechecked} onDetails={onNetworkDetails} onResources={onResources} />}
               <p className="home-environment-meta">
                 Super Cage 隔离环境 · {running ? runtimeLabel
                   : setupProxy ? "自备代理订阅、YAML 配置或节点"
@@ -142,7 +153,7 @@ export function WorkbenchHome({
                 <button className="storage-entry text-button" disabled={busy} onClick={() => onSettings("project")}>选择环境存储位置</button>}
               <div className="start-project-footer">
                 <span className="home-status">
-                  <i className={`status-dot ${network.mode}`} />
+                  <i className={`status-dot ${gateTone && gateTone !== "alarm" ? "network-" + gateTone : network.mode}`} />
                   {statusLabel}
                 </span>
                 {terminalShortcut && (
@@ -220,25 +231,32 @@ export function WorkbenchHome({
               {recent.length ? (
                 <ul className="list home-recent">
                   {recent.map((session) => {
-                    const elsewhere = session.running && !session.active;
+                    // Codex rows never grey out: another device's session opens read-only.
+                    const codex = isCodexSession(session);
+                    const owner = codex ? ownerState(session) : null;
+                    const elsewhere = !codex && session.running && !session.active;
                     const opening = openingSession === session.id;
+                    const openError = sessionOpenError?.id === session.id ? sessionOpenError.message : "";
                     return (
                       <li key={session.id}>
                         <button className="home-row" aria-label={`继续会话「${session.title}」`}
                           disabled={busy || opening || elsewhere}
-                          title={elsewhere ? "其他窗口占用中，退出原会话后可接续" : session.title}
+                          title={elsewhere ? "其他窗口占用中，退出原会话后可接续" : owner?.muted ? `${session.title}\n${owner.tooltip}` : session.title}
+                          aria-describedby={openError ? "home-open-error-" + session.id : undefined}
                           onClick={() => onSessionOpen(session)}>
-                          <ProviderMark provider="claude" accountNumber={session.claudeAccountNumber} className="home-row-icon" />
+                          <ProviderMark provider={codex ? "codex" : "claude"} accountNumber={session.claudeAccountNumber} className="home-row-icon" />
                           <span className="list-row-text">
                             <span className="list-row-title">{session.title}</span>
                             <span className="list-row-meta">
-                              {[projectName(session.workspace, groups), relativeTime(session.updated_at)].filter(Boolean).join(" · ")}
+                              {[projectName(session.workspace, groups), session.codexAccountLabel, relativeTime(session.updated_at)].filter(Boolean).join(" · ")}
                             </span>
                           </span>
                           {opening ? <LoaderCircle size={14} className="spin" aria-hidden="true" />
+                            : owner?.muted ? <span className="home-owner">{owner.live && <i className="live-dot" />}<span className="chip">{owner.label}</span></span>
                             : session.active ? <span className="home-working"><i className="live-dot" />正在工作</span>
                             : elsewhere ? <span className="chip">其他窗口</span> : null}
                         </button>
+                        {openError && <p id={"home-open-error-" + session.id} className="home-row-error" role="alert">{openError}</p>}
                       </li>
                     );
                   })}
