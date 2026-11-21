@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/webfront"
@@ -116,75 +115,10 @@ func listenScienceFront(profile string) (net.Listener, int, error) {
 	return nil, 0, errors.New("无法在本机回环地址上找到 Claude Science 可用的端口")
 }
 
-// listenScienceLoopback listens on 127.0.0.1:port and, where the host has
-// IPv6 loopback, on [::1]:port as well.
-func listenScienceLoopback(port int) (net.Listener, error) {
-	v4, err := listenLoopback(port)
-	if err != nil {
-		return nil, err
-	}
-	v6, err := net.Listen("tcp6", net.JoinHostPort("::1", strconv.Itoa(port)))
-	if err != nil {
-		if errors.Is(err, syscall.EADDRINUSE) {
-			v4.Close()
-			return nil, err
-		}
-		// No IPv6 loopback: the browser cannot reach ::1 either.
-		return v4, nil
-	}
-	return newDualListener(v4, v6), nil
-}
-
-// dualListener accepts from both loopback listeners.
-type dualListener struct {
-	listeners []net.Listener
-	conns     chan net.Conn
-	done      chan struct{}
-	once      sync.Once
-}
-
-func newDualListener(listeners ...net.Listener) *dualListener {
-	d := &dualListener{listeners: listeners, conns: make(chan net.Conn), done: make(chan struct{})}
-	for _, listener := range listeners {
-		go func(listener net.Listener) {
-			for {
-				conn, err := listener.Accept()
-				if err != nil {
-					d.Close()
-					return
-				}
-				select {
-				case d.conns <- conn:
-				case <-d.done:
-					conn.Close()
-					return
-				}
-			}
-		}(listener)
-	}
-	return d
-}
-
-func (d *dualListener) Accept() (net.Conn, error) {
-	select {
-	case conn := <-d.conns:
-		return conn, nil
-	case <-d.done:
-		return nil, net.ErrClosed
-	}
-}
-
-func (d *dualListener) Close() error {
-	d.once.Do(func() {
-		close(d.done)
-		for _, listener := range d.listeners {
-			listener.Close()
-		}
-	})
-	return nil
-}
-
-func (d *dualListener) Addr() net.Addr { return d.listeners[0].Addr() }
+// listenScienceLoopback holds port on 127.0.0.1 and [::1] (listenLoopback):
+// Chrome resolves *.localhost to both, and a program of another user on the
+// [::1] twin would receive the session's label.
+func listenScienceLoopback(port int) (net.Listener, error) { return listenLoopback(port) }
 
 // scienceTicket is what an entry ticket was issued for.
 type scienceTicket struct {
