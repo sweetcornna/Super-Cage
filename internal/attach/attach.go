@@ -57,6 +57,9 @@ type Options struct {
 	// Check accepts the controller's build: the same executable for cage
 	// itself, the same release for cage-attach.
 	Check controlclient.Check
+	// FilterReport, when set, receives the output filter's report of what
+	// it dropped once the stream ends.
+	FilterReport func(report string)
 }
 
 const attachUsage = "用法：cage attach [--terminal ID | --new shell|claude|codex | --resume 会话ID] [--project 路径] [--claude-account ID | --codex-account ID] [--connection ID|current] [--observe] [--config 路径]"
@@ -72,6 +75,9 @@ type Config struct {
 	CodexAccount  string
 	Resume        string
 	Observe       bool
+	// FilterStats prints what the output filter dropped when the attach
+	// ends (the hidden --filter-stats).
+	FilterStats bool
 }
 
 // TTY is the local terminal. The real one is a raw-mode tty; tests use
@@ -118,9 +124,19 @@ func Main(args []string, stdin, stdout *os.File, stderr io.Writer, options Optio
 		case <-ctx.Done():
 		}
 	}()
+	var stats string
+	if cfg.FilterStats {
+		options.FilterReport = func(report string) { stats = report }
+	}
 	result := Run(ctx, cfg, tty, options)
 	if result.Message != "" {
 		fmt.Fprint(stderr, "\r\n"+result.Message+"\r\n")
+	}
+	if cfg.FilterStats {
+		if stats == "" {
+			stats = "没有丢弃任何序列。\n"
+		}
+		fmt.Fprint(stderr, "已丢弃的序列：\n"+stats)
 	}
 	return result.Code
 }
@@ -138,6 +154,7 @@ func ParseArgs(args []string) (Config, error) {
 	flags.StringVar(&cfg.CodexAccount, "codex-account", "", "")
 	flags.StringVar(&cfg.Resume, "resume", "", "")
 	flags.BoolVar(&cfg.Observe, "observe", false, "")
+	flags.BoolVar(&cfg.FilterStats, "filter-stats", false, "")
 	if err := flags.Parse(args); err != nil || flags.NArg() > 1 {
 		return cfg, errors.New(attachUsage)
 	}
@@ -271,6 +288,9 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 	}
 	exit = a.run(ctx, ws)
 	restore()
+	if options.FilterReport != nil {
+		options.FilterReport(a.filter.Report())
+	}
 	return exit
 }
 

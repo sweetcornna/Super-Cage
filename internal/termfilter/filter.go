@@ -6,12 +6,19 @@
 // Every byte it emits is either ground text (valid UTF-8 without C1 control
 // characters) or an escape sequence it parsed and allowed in full. A sequence
 // it cannot parse within HoldLimit bytes, or does not know, is dropped: the
-// filter fails closed. Long payloads it does allow (OSC 52 clipboard writes,
-// sixel images, kitty images with direct data) are classified on a bounded
-// header and then streamed through, restricted to their payload alphabet.
+// filter fails closed. Control sequences, escape sequences and modes pass
+// from allow-lists (allow.go): what real programs send that Cage's web
+// terminal (xterm.js) also acts on. The one long payload it allows, an OSC 52
+// clipboard write, is classified on a bounded header and then streamed
+// through, restricted to base64.
 package termfilter
 
-import "unicode/utf8"
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"unicode/utf8"
+)
 
 // HoldLimit bounds the one unfinished sequence the filter keeps between
 // chunks. A sequence still undecided at this size is dropped.
@@ -29,6 +36,9 @@ type Options struct {
 	// ClipboardWrite passes OSC 52 clipboard writes to the application,
 	// like Cage's web terminal does. Clipboard reads are always dropped.
 	ClipboardWrite bool
+	// ClipboardNow, when set, is asked as each clipboard write arrives: the
+	// write passes only while it says the owner is at this window.
+	ClipboardNow func() bool
 }
 
 type state uint8
@@ -55,14 +65,6 @@ const (
 	kindOther // PM, SOS: always dropped
 )
 
-// alphabet restricts the bytes of a streamed payload.
-type alphabet uint8
-
-const (
-	alphaBase64 alphabet = iota
-	alphaSixel
-)
-
 // Filter is the state of one stream. It is not safe for concurrent use.
 type Filter struct {
 	opts     Options
@@ -70,7 +72,6 @@ type Filter struct {
 	st       state
 	strState state      // the string state an ESC interrupted
 	kind     stringKind // of the current string
-	alpha    alphabet   // of the current streamed payload
 	header   bool       // the DCS header is complete
 	streamed int        // payload bytes streamed so far
 	limit    int        // payload bound of the current streamed string
@@ -79,6 +80,45 @@ type Filter struct {
 	u8need   int
 	n        int // held bytes
 	hold     [HoldLimit]byte
+
+	focus   bool           // the guest asked for focus reports (mode 1004)
+	resets  int            // full and soft resets passed to the application
+	dropped map[string]int // what was dropped, by kind
+}
+
+// GuestFocus reports whether the guest turned on focus reporting. The filter
+// never passes mode 1004: the viewer owns the host terminal's focus reports.
+func (f *Filter) GuestFocus() bool { return f.focus }
+
+// Resets counts the full (RIS) and soft (DECSTR) resets that passed; a reset
+// also turns off what the viewer itself set in the application.
+func (f *Filter) Resets() int { return f.resets }
+
+// Dropped returns how many sequences were dropped, by kind.
+func (f *Filter) Dropped() map[string]int { return f.dropped }
+
+// Report lists the drops one kind per line, most frequent first.
+func (f *Filter) Report() string {
+	kinds := make([]string, 0, len(f.dropped))
+	for kind := range f.dropped {
+		kinds = append(kinds, kind)
+	}
+	sort.Slice(kinds, func(i, j int) bool {
+		a, b := f.dropped[kinds[i]], f.dropped[kinds[j]]
+		return a > b || a == b && kinds[i] < kinds[j]
+	})
+	var b strings.Builder
+	for _, kind := range kinds {
+		fmt.Fprintf(&b, "%6d  %q\n", f.dropped[kind], kind)
+	}
+	return b.String()
+}
+
+func (f *Filter) count(kind string) {
+	if f.dropped == nil {
+		f.dropped = map[string]int{}
+	}
+	f.dropped[kind]++
 }
 
 // New returns a filter for one stream.
@@ -278,6 +318,7 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 		case '_':
 			return f.beginString(dst, b, kindAPC)
 		case '^', 'X':
+			f.count("PM/SOS")
 			f.n, f.kind, f.st = 0, kindOther, stStringDrop
 			return dst
 		}
@@ -290,13 +331,16 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 		f.st = stEscInter
 		return dst
 	}
-	// Final byte. ESC Z (DECID) asks for the primary attributes.
-	if f.st == stEsc && b == 'Z' && f.replay {
-		f.n, f.st = 0, stGround
-		return dst
-	}
 	f.push(b)
 	f.st = stGround
+	if !allowEscape(f.hold[1:f.n]) {
+		f.count("ESC " + string(f.hold[1:f.n]))
+		f.n = 0
+		return dst
+	}
+	if f.n == 2 && b == 'c' {
+		f.resets++
+	}
 	return f.emitHold(dst)
 }
 
@@ -329,6 +373,9 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 		if f.allowCSI(f.hold[2:f.n-1], b) {
 			return f.emitHold(dst)
 		}
+		if f.n > 0 {
+			f.count(csiName(f.hold[2:f.n-1], b))
+		}
 		f.n = 0
 		return dst
 	case b >= 0x30 && f.n > 2 && f.hold[f.n-1] < 0x30:
@@ -341,78 +388,6 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 		f.n, f.st = 0, stCSIDrop
 	}
 	return dst
-}
-
-// allowCSI decides a complete control sequence from its parameter and
-// intermediate bytes and its final byte.
-func (f *Filter) allowCSI(body []byte, final byte) bool {
-	var marker byte
-	if len(body) > 0 && body[0] >= '<' && body[0] <= '?' {
-		marker, body = body[0], body[1:]
-	}
-	params, inter := body, []byte(nil)
-	for i, c := range body {
-		if c < 0x30 {
-			params, inter = body[:i], body[i:]
-			break
-		}
-	}
-	switch {
-	case marker == '>' && (final == 'q' || final == 'c'): // XTVERSION, DA2
-		return false
-	case marker == '=' && final == 'c': // DA3: the unit id
-		return false
-	case marker == 0 && len(inter) == 0 && final == 't':
-		return f.allowWindowOp(params)
-	}
-	if f.replay && csiQuery(marker, params, inter, final) {
-		return false
-	}
-	return true
-}
-
-// allowWindowOp keeps the XTWINOPS a program needs to size its output and
-// its title stack, and drops the ones that move, resize, raise or iconify the
-// owner's window, or read the title back into the guest.
-func (f *Filter) allowWindowOp(params []byte) bool {
-	n := firstParam(params)
-	switch n {
-	case 22, 23: // push and pop the title
-		return true
-	case 14, 16, 18: // text area and cell size in pixels, size in characters
-		return !f.replay
-	}
-	return false
-}
-
-func firstParam(params []byte) int {
-	n := 0
-	for i, c := range params {
-		if c < '0' || c > '9' {
-			if i == 0 {
-				return 0
-			}
-			break
-		}
-		n = n*10 + int(c-'0')
-		if n > 1<<16 {
-			return -1
-		}
-	}
-	return n
-}
-
-// csiQuery reports control sequences that make the application answer.
-func csiQuery(marker byte, params, inter []byte, final byte) bool {
-	switch {
-	case final == 'c' || final == 'n' || final == 'x': // DA, DSR and CPR, DECREQTPARM
-		return true
-	case final == 'p' && len(inter) == 1 && inter[0] == '$': // DECRQM
-		return true
-	case marker == '?' && (final == 'u' || final == 'm' || final == 'S'): // kitty flags, XTQMODKEYS, XTSMGRAPHICS
-		return true
-	}
-	return false
 }
 
 // str handles the bytes of an OSC, DCS, APC, PM or SOS string.
@@ -436,10 +411,7 @@ func (f *Filter) str(dst []byte, b byte) []byte {
 	case stStringDrop:
 		return dst
 	case stStringPass:
-		if b < 0x20 && f.alpha == alphaSixel {
-			return dst // ignored inside sixel data by every application
-		}
-		if f.payloadByte(b) && f.streamed < f.limit {
+		if base64Byte(b) && f.streamed < f.limit {
 			f.streamed++
 			return append(dst, b)
 		}
@@ -457,22 +429,17 @@ func (f *Filter) str(dst []byte, b byte) []byte {
 	return f.classify(dst)
 }
 
-func (f *Filter) payloadByte(b byte) bool {
-	if f.alpha == alphaSixel {
-		return b >= 0x21 && b <= 0x7e
-	}
+func base64Byte(b byte) bool {
 	return b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || b >= '0' && b <= '9' || b == '+' || b == '/' || b == '='
 }
 
-// abortStream ends a streamed payload that broke its alphabet or bound, so
-// the application is not left inside a string, and drops the rest. An OSC 52
-// write is spoiled first so no application applies a truncated clipboard.
+// abortStream ends a streamed OSC 52 write that broke its alphabet or
+// bound, so the application is not left inside a string, and drops the
+// rest. The write is spoiled first so no application applies a truncated
+// clipboard.
 func (f *Filter) abortStream(dst []byte) []byte {
-	if f.kind == kindOSC {
-		dst = append(dst, '!', 0x07)
-	} else {
-		dst = append(dst, 0x1b, '\\')
-	}
+	dst = append(dst, '!', 0x07)
+	f.count("OSC 52 malformed")
 	f.n, f.st = 0, stStringDrop
 	return dst
 }
@@ -513,9 +480,8 @@ func (f *Filter) classify(dst []byte) []byte {
 		return f.classifyOSC(dst)
 	case kindDCS:
 		return f.classifyDCS(dst)
-	case kindAPC:
-		return f.classifyAPC(dst)
 	}
+	f.count("APC")
 	f.n, f.st = 0, stStringDrop
 	return dst
 }
@@ -534,6 +500,7 @@ func (f *Filter) classifyOSC(dst []byte) []byte {
 	}
 	if semi < 0 {
 		if len(body) > 0 && (body[len(body)-1] < '0' || body[len(body)-1] > '9' || len(body) > 5) {
+			f.count("OSC " + string(body))
 			f.n, f.st = 0, stStringDrop
 		}
 		return dst
@@ -541,10 +508,10 @@ func (f *Filter) classifyOSC(dst []byte) []byte {
 	switch string(body[:semi]) {
 	case "52":
 		return f.classifyClipboard(dst, body[semi+1:])
-	case "0", "1", "2", "4", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19",
-		"22", "99", "104", "105", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119", "133", "777":
+	case "0", "1", "2", "4", "8", "9", "10", "11", "12", "99", "104", "110", "111", "112", "133", "777":
 		return dst // decided at the terminator, within HoldLimit
 	}
+	f.count("OSC " + string(body[:semi]))
 	f.n, f.st = 0, stStringDrop
 	return dst
 }
@@ -561,6 +528,7 @@ func (f *Filter) classifyClipboard(dst []byte, rest []byte) []byte {
 	}
 	if semi < 0 {
 		if len(rest) > 1 || len(rest) == 1 && rest[0] != 'c' {
+			f.count("OSC 52")
 			f.n, f.st = 0, stStringDrop
 		}
 		return dst
@@ -570,11 +538,17 @@ func (f *Filter) classifyClipboard(dst []byte, rest []byte) []byte {
 		return dst
 	}
 	if !f.opts.ClipboardWrite || f.replay || data[0] == '?' || semi > 1 || semi == 1 && rest[0] != 'c' {
+		f.count("OSC 52")
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
-	f.alpha, f.limit = alphaBase64, ClipboardLimit
-	if !f.payloadByte(data[0]) {
+	if f.opts.ClipboardNow != nil && !f.opts.ClipboardNow() {
+		f.count("OSC 52 away") // not queued: the owner is not at this window
+		f.n, f.st = 0, stStringDrop
+		return dst
+	}
+	f.limit = ClipboardLimit
+	if !base64Byte(data[0]) {
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
@@ -582,110 +556,51 @@ func (f *Filter) classifyClipboard(dst []byte, rest []byte) []byte {
 	return f.emitHold(dst)
 }
 
+// classifyDCS keeps only DECRQSS, a query for one of the settings Cage's
+// web terminal reports; its reply is gated by the viewer rules. Sixel
+// images, synchronized update by DCS, tmux passthrough, XTGETTCAP, soft
+// fonts and key definitions are dropped.
 func (f *Filter) classifyDCS(dst []byte) []byte {
 	body := f.body()
-	c := body[len(body)-1]
 	if f.header {
-		return dst // data of an allowed request, held until its end
+		if len(body) > 6 {
+			f.count("DCS $q")
+			f.n, f.st = 0, stStringDrop
+		}
+		return dst // the setting asked for, decided at the end
 	}
+	c := body[len(body)-1]
 	if c < 0x40 {
-		if len(body) > 64 || len(body) > 1 && c >= 0x30 && body[len(body)-2] < 0x30 {
-			// Too long, or a parameter after an intermediate.
+		if string(body) != "$" {
+			f.count("DCS")
 			f.n, f.st = 0, stStringDrop
 		}
 		return dst
 	}
-	{
-		// c is the final byte of the header.
-		f.header = true
-		header := body[:len(body)-1]
-		var inter []byte
-		for i, h := range header {
-			if h < 0x30 {
-				inter = header[i:]
-				header = header[:i]
-				break
-			}
-		}
-		switch {
-		case c == 'q' && len(inter) == 0 && (len(header) == 0 || header[0] >= '0' && header[0] <= ';'): // sixel
-			f.alpha, f.limit, f.streamed, f.st = alphaSixel, int(^uint(0)>>1), 0, stStringPass
-			return f.emitHold(dst)
-		case c == 'q' && len(inter) == 1 && inter[0] == '$' && len(header) == 0: // DECRQSS
-			if f.replay {
-				f.n, f.st = 0, stStringDrop
-			}
-			return dst
-		case c == 's' && len(inter) == 0 && (string(header) == "=1" || string(header) == "=2"): // synchronized update
-			return dst
-		}
-		// XTGETTCAP (+q) answers with the application's terminfo name; tmux
-		// passthrough, soft fonts, key definitions and the rest are unknown.
+	if c != 'q' || string(body) != "$q" || f.replay {
+		f.count("DCS " + string(body))
 		f.n, f.st = 0, stStringDrop
 		return dst
 	}
-}
-
-func (f *Filter) classifyAPC(dst []byte) []byte {
-	body := f.body()
-	if body[0] != 'G' {
-		f.n, f.st = 0, stStringDrop
-		return dst
-	}
-	if body[len(body)-1] != ';' {
-		return dst // control data continues; decided at ';' or the end
-	}
-	if !f.allowGraphics(body[1 : len(body)-1]) {
-		f.n, f.st = 0, stStringDrop
-		return dst
-	}
-	f.alpha, f.limit, f.streamed, f.st = alphaBase64, int(^uint(0)>>1), 0, stStringPass
-	return f.emitHold(dst)
-}
-
-// allowGraphics reads kitty graphics control data: key=value pairs separated
-// by commas. Only direct data (t=d, the default) passes: the other
-// transmission media make the application read the owner's files or memory.
-func (f *Filter) allowGraphics(control []byte) bool {
-	for len(control) > 0 {
-		pair, rest := control, []byte(nil)
-		for i, c := range control {
-			if c == ',' {
-				pair, rest = control[:i], control[i+1:]
-				break
-			}
-		}
-		control = rest
-		if len(pair) < 3 || pair[1] != '=' || !letter(pair[0]) {
-			return false
-		}
-		for _, c := range pair[2:] {
-			if !letter(c) && (c < '0' || c > '9') && c != '-' {
-				return false
-			}
-		}
-		switch pair[0] {
-		case 't':
-			if string(pair[2:]) != "d" {
-				return false
-			}
-		case 'a':
-			if f.replay && string(pair[2:]) == "q" {
-				return false
-			}
-		}
-	}
-	return true
+	f.header = true
+	return dst
 }
 
 // decide is called with a complete held string. It may rewrite the hold.
 func (f *Filter) decide(_ bool) bool {
 	switch f.kind {
 	case kindDCS:
-		return f.header // only allowed requests are still held after their header
-	case kindAPC:
-		body := f.body()
-		return len(body) > 0 && body[0] == 'G' && f.allowGraphics(body[1:])
+		// DECRQSS for the settings xterm.js reports: SGR, scroll region,
+		// cursor style, protection and conformance level.
+		if !f.header {
+			return false
+		}
+		switch string(f.body()[2:]) {
+		case "m", "r", " q", "\"q", "\"p":
+			return true
+		}
+		f.count("DCS $q")
+		return false
 	case kindOSC:
 		return f.decideOSC()
 	}
@@ -707,7 +622,7 @@ func (f *Filter) decideOSC() bool {
 	if semi < 0 {
 		// Colour resets take no parameter.
 		switch string(body) {
-		case "104", "105", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119":
+		case "104", "110", "111", "112":
 			return true
 		}
 		return false
@@ -724,10 +639,8 @@ func (f *Filter) decideOSC() bool {
 		return !f.replay && len(text) <= NoticeLimit && hasPrefix(text, "notify;")
 	case "99":
 		return !f.replay && f.rewriteKittyNotification(semi)
-	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "104", "105", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119":
+	case "4", "10", "11", "12", "104", "110", "111", "112":
 		return !f.replay || !contains(text, '?')
-	case "22":
-		return true
 	case "133":
 		return allowMark(text)
 	}

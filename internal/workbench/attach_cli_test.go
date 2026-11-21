@@ -79,6 +79,9 @@ func TestAttachChild(t *testing.T) {
 		case strings.Contains(chunk, "?effects"):
 			// A query, a clipboard write, a notification and a bell.
 			fmt.Print("\x1b[c\x1b]52;c;aGk=\x07\x1b]9;done\x07\x07effects-shown\r\n")
+		case strings.Contains(chunk, "?dropped"):
+			// DA2, in-band resize reports and focus reports.
+			fmt.Print("\x1b[>c\x1b[?2048h\x1b[?1004hdropped-shown\r\n")
 		case strings.Contains(chunk, "?burst"):
 			for i := 1; i <= 3000; i++ {
 				fmt.Printf("line-%04d\r\n", i)
@@ -162,6 +165,11 @@ type attachClient struct {
 
 func startAttach(t *testing.T, cfg attach.Config) *attachClient {
 	t.Helper()
+	return startAttachWith(t, cfg, attach.Options{Check: agentSameBuild})
+}
+
+func startAttachWith(t *testing.T, cfg attach.Config, options attach.Options) *attachClient {
+	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +209,7 @@ func startAttach(t *testing.T, cfg attach.Config) *attachClient {
 			return func() { _ = term.Restore(int(slave.Fd()), state) }, err
 		},
 	}
-	go func() { c.result = attach.Run(ctx, cfg, tty, attach.Options{Check: agentSameBuild}); close(c.done) }()
+	go func() { c.result = attach.Run(ctx, cfg, tty, options); close(c.done) }()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -392,6 +400,26 @@ func TestAttachReplayActsOnce(t *testing.T) {
 	session.mu.Unlock()
 	if after != before {
 		t.Fatalf("re-attaching sent input: the program wrote %d more bytes", after-before)
+	}
+}
+
+func TestAttachFilterStats(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	var stats string
+	a := startAttachWith(t, attachTo(s, session.id), attach.Options{Check: agentSameBuild, FilterReport: func(report string) { stats = report }})
+	a.waitFor("ready", 1)
+	a.typeText("?dropped")
+	out := a.waitFor("dropped-shown", 1)
+	for _, seq := range []string{"\x1b[>c", "\x1b[?2048h", "\x1b[?1004h"} {
+		if strings.Contains(out, seq) {
+			t.Fatalf("passed %q: %q", seq, out)
+		}
+	}
+	a.cancel()
+	a.exit(5 * time.Second)
+	if !strings.Contains(stats, `"CSI >c"`) || !strings.Contains(stats, `"CSI ?2048h"`) || strings.Contains(stats, "1004") {
+		t.Fatalf("stats %q", stats)
 	}
 }
 

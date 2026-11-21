@@ -71,13 +71,14 @@ func TestFilterTable(t *testing.T) {
 		{name: "OSC 5113 kitty file transfer", in: esc + "]5113;ac=send;id=x\x07", out: ""},
 		// The inner ESC ends the passthrough in the application too; the lone ST
 		// left over is a no-op.
-		{name: "DCS tmux passthrough", in: "a" + esc + "Ptmux;" + esc + esc + "]52;c;?\x07" + esc + "\\b", out: "a" + esc + "\\b"},
+		{name: "DCS tmux passthrough", in: "a" + esc + "Ptmux;" + esc + esc + "]52;c;?\x07" + esc + "\\b", out: "ab"},
 		{name: "kitty graphics file", in: "a" + esc + "_Ga=T,t=f;L2V0Yy9wYXNzd2Q=" + esc + "\\b", out: "ab"},
 		{name: "kitty graphics temp file", in: esc + "_Gt=t,a=T;L3RtcC94" + esc + "\\", out: ""},
 		{name: "kitty graphics shared memory", in: esc + "_Ga=T,t=s;bmFtZQ==" + esc + "\\", out: ""},
-		{name: "kitty graphics direct", in: esc + "_Ga=T,f=100,t=d;iVBORw0KGgo=" + esc + "\\", out: esc + "_Ga=T,f=100,t=d;iVBORw0KGgo=" + esc + "\\"},
-		{name: "kitty graphics default medium", in: esc + "_Ga=T,f=24,s=1,v=1;AAAA" + esc + "\\", out: esc + "_Ga=T,f=24,s=1,v=1;AAAA" + esc + "\\"},
-		{name: "kitty graphics delete", in: esc + "_Ga=d,d=a" + esc + "\\", out: esc + "_Ga=d,d=a" + esc + "\\"},
+		// Images do not work in Cage's web terminal; none passes here.
+		{name: "kitty graphics direct", in: "a" + esc + "_Ga=T,f=100,t=d;iVBORw0KGgo=" + esc + "\\b", out: "ab"},
+		{name: "kitty graphics default medium", in: esc + "_Ga=T,f=24,s=1,v=1;AAAA" + esc + "\\", out: ""},
+		{name: "kitty graphics delete", in: esc + "_Ga=d,d=a" + esc + "\\", out: ""},
 		{name: "kitty graphics later key wins", in: esc + "_Gt=d,t=f;AAAA" + esc + "\\", out: ""},
 		{name: "kitty graphics BEL is no terminator", in: esc + "_Gt=d\x07,t=f;AAAA" + esc + "\\x", out: "x"},
 		{name: "OSC 9 notification", in: esc + "]9;Claude is done\x07", out: esc + "]9;Claude is done\x07"},
@@ -107,11 +108,13 @@ func TestFilterTable(t *testing.T) {
 		{name: "OSC 104 reset all", in: esc + "]104\x07", out: esc + "]104\x07"},
 		{name: "DA1", in: esc + "[c" + esc + "[0c", out: esc + "[c" + esc + "[0c"},
 		{name: "cursor position query", in: esc + "[6n", out: esc + "[6n"},
-		{name: "kitty keyboard", in: esc + "[>1u" + esc + "[?u" + esc + "[<u", out: esc + "[>1u" + esc + "[?u" + esc + "[<u"},
+		// The kitty keyboard protocol is not in xterm.js; programs fall back.
+		{name: "kitty keyboard", in: esc + "[>1u" + esc + "[?u" + esc + "[<u" + esc + "[=1;1u", out: ""},
 		{name: "bracketed paste mode", in: esc + "[?2004h", out: esc + "[?2004h"},
-		{name: "sixel", in: "a" + esc + "Pq#0;2;0;0;0#0~~@@vv-\r\n!14@" + esc + "\\b", out: "a" + esc + "Pq#0;2;0;0;0#0~~@@vv-!14@" + esc + "\\b"},
-		{name: "sixel with parameters", in: esc + "P0;1;0q\"1;1#0~" + esc + "\\", out: esc + "P0;1;0q\"1;1#0~" + esc + "\\"},
-		{name: "synchronized update", in: esc + "P=1s" + esc + "\\", out: esc + "P=1s" + esc + "\\"},
+		{name: "sixel", in: "a" + esc + "Pq#0;2;0;0;0#0~~@@vv-\r\n!14@" + esc + "\\b", out: "ab"},
+		{name: "sixel with parameters", in: esc + "P0;1;0q\"1;1#0~" + esc + "\\", out: ""},
+		{name: "synchronized update by DCS", in: esc + "P=1s" + esc + "\\", out: ""},
+		{name: "synchronized update mode", in: esc + "[?2026h" + esc + "[?2026l", out: esc + "[?2026h" + esc + "[?2026l"},
 		{name: "DECRQSS", in: esc + "P$q\"p" + esc + "\\", out: esc + "P$q\"p" + esc + "\\"},
 		{name: "charset and keypad", in: esc + "(B" + esc + "=" + esc + "7" + esc + "8", out: esc + "(B" + esc + "=" + esc + "7" + esc + "8"},
 		{name: "CJK text", in: "中文图表 ✓ 😀", out: "中文图表 ✓ 😀"},
@@ -128,7 +131,10 @@ func TestFilterTable(t *testing.T) {
 		{name: "unknown OSC", in: esc + "]7501;status\x07x", out: "x"},
 		{name: "PM and SOS", in: "a" + esc + "^private" + esc + "\\" + esc + "Xstring" + esc + "\\b", out: "ab"},
 		{name: "window resize", in: "a" + esc + "[8;100;200t" + esc + "[3;0;0t" + esc + "[2t" + esc + "[30tb", out: "ab"},
-		{name: "window size query", in: esc + "[18t" + esc + "[22;0t" + esc + "[23;0t", out: esc + "[18t" + esc + "[22;0t" + esc + "[23;0t"},
+		// Cage's web terminal sets no window options: xterm.js answers no size
+		// report and ignores the title stack. The viewer pushes and pops the
+		// title itself.
+		{name: "window operations", in: esc + "[18t" + esc + "[22;0t" + esc + "[23;0t" + esc + "[22;2t" + esc + "[23;0;0t", out: ""},
 		{name: "CSI aborted by ESC", in: esc + "[12" + esc + "[1mx", out: esc + "[1mx"},
 		{name: "CSI aborted by CAN", in: esc + "[12\x18x", out: "x"},
 		{name: "C0 inside CSI runs first", in: esc + "[1\n;2H", out: "\n" + esc + "[1;2H"},
@@ -149,7 +155,7 @@ func TestFilterTable(t *testing.T) {
 func TestFilterBounds(t *testing.T) {
 	on := Options{ClipboardWrite: true}
 	// A held sequence never grows past HoldLimit, and one that would is dropped.
-	for _, start := range []string{esc + "[", esc + "]0;", esc + "]8;;https://", esc + "P$q", esc + "_Ga=T"} {
+	for _, start := range []string{esc + "[", esc + "]0;", esc + "]8;;https://", esc + "P$q", esc + "_Ga=T", esc + "Pq"} {
 		f := New(on)
 		out := f.Append(nil, []byte(start+strings.Repeat("1", 3*HoldLimit)))
 		if f.Pending() > HoldLimit {
@@ -167,16 +173,15 @@ func TestFilterBounds(t *testing.T) {
 	if f.Pending() != 0 || !strings.HasSuffix(out, "!\x07after") || len(out) != len(esc+"]52;c;")+ClipboardLimit+len("!\x07after") {
 		t.Fatal(len(out), out[len(out)-20:])
 	}
-	// Long allowed payloads stream through without being held.
+	// A clipboard write streams through without being held.
 	f = New(on)
-	image := strings.Repeat("AAAA", 1<<16)
-	out = string(f.Append(nil, []byte(esc+"_Ga=T,f=100;"+image)))
-	if f.Pending() != 0 || len(out) != len(esc+"_Ga=T,f=100;")+len(image) {
+	text := strings.Repeat("AAAA", 1<<16)
+	out = string(f.Append(nil, []byte(esc+"]52;c;"+text)))
+	if f.Pending() != 0 || len(out) != len(esc+"]52;c;")+len(text) {
 		t.Fatal(f.Pending(), len(out))
 	}
-	out = string(f.Append(nil, []byte("A\x07z")))
-	if out != "A"+esc+"\\" {
-		t.Fatalf("image ended by BEL: %q", out)
+	if out = string(f.Append(nil, []byte("A\x07z"))); out != "A\x07z" {
+		t.Fatalf("clipboard write ended by BEL: %q", out)
 	}
 }
 
