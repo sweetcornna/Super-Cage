@@ -567,3 +567,32 @@ func TestManualTickAllocatesNothing(t *testing.T) {
 		t.Fatalf("manual tick allocates %v", allocs)
 	}
 }
+
+// M2: prepare-update names the attempt as soon as the environment stopped,
+// before the workload's exit or the release can fail, and a failure after
+// that is an abandonment that names the same attempt.
+func TestReviewStopIsToldFirstAndAbandonmentNamesTheAttempt(t *testing.T) {
+	reply := AppUpdatePrepared{Status: "prepared", Attempt: "0123456789abcdef"}
+	failure := errors.New("后台尚未退出")
+	for _, c := range []struct {
+		name           string
+		exit, release  error
+		status, events string
+	}{
+		{"exit fails", failure, nil, "abandoned", "stopped:0123456789abcdef,exit"},
+		{"release fails", nil, failure, "abandoned", "stopped:0123456789abcdef,exit,release"},
+		{"prepared", nil, nil, "prepared", "stopped:0123456789abcdef,exit,release"},
+	} {
+		var events []string
+		result, err := finishAppUpdateHandoff(reply,
+			func(attempt string) { events = append(events, "stopped:"+attempt) },
+			func() error { events = append(events, "exit"); return c.exit },
+			func() error { events = append(events, "release"); return c.release })
+		if got := strings.Join(events, ","); got != c.events {
+			t.Errorf("%s: events %s, want %s", c.name, got, c.events)
+		}
+		if result.Status != c.status || result.Attempt != reply.Attempt || (c.status == "abandoned") != (err != nil) {
+			t.Errorf("%s: %+v %v", c.name, result, err)
+		}
+	}
+}

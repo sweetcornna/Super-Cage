@@ -381,6 +381,8 @@ Never on the owner's account or `/Applications/Super Cage.app`. Use a separate m
 
 This is the run that lifts the gate for macOS. Everything happens in a separate macOS user created for it and deleted afterwards; never the owner's account, never `/Applications/Super Cage.app`.
 
+**It cannot start yet**: there is no build-time release-source override (the prerequisite of section 12), no published release contains this code, and the age, hold and input thresholds have no test override. Each needs a reviewed change first; until then the steps below are the plan.
+
 Builds: A and B as above, with the gate lifted only in these test builds:
 
 ```sh
@@ -397,10 +399,12 @@ Setup (in the throwaway user): copy A to `~/Applications/Super Cage.app`, open i
    - lid: close the lid with no external display → `lid_closed` (verify `ioreg -r -n IOPMrootDomain -d 1 -k AppleClamshellState` says Yes). With an external display connected and the lid closed, the code must not appear.
    - dark wake: let the Mac sleep with Power Nap on; after it wakes, `pmset -g log | grep -i darkwake` must not be followed by a `silent-request.json` timestamp inside that dark wake.
    - remote: open the workbench from another computer (a remote client or a browser, not the paired phone, which has its own blocker) → `有其他电脑正在远程连接` for 2 min after its last request.
-3. **Retry bound**: block the network to GitHub for the asset download only (e.g. a pf rule for the release CDN) → the ledger shows request entries at about +0, +1 h, +6 h, +24 h for that release and none after; unblock and replace the asset in the test release → one new attempt.
+3. **Retry bound**: block the network to GitHub for the asset download only (e.g. a pf rule for the release CDN) → the ledger shows request entries no earlier than +0, +1 h, +7 h and +31 h for that release (the waits 1 h, 6 h, 24 h are between requests, and each request still needs the idle hold) and none after; unblock and replace the asset in the test release → one new attempt.
 4. **Unattended install, background**: with everything idle, B is downloaded, verified and installed; the new window appears **behind** the frontmost app (no focus change, no Dock bounce), the environment comes back, `last-result.json` names the attempt with success, `attempts.json` has B ok only after the installer's confirmation, `chain.json` ends at done.
 5. **Sleep during install**: start a silent install and close the lid right after `stopped` appears in the CLI output (or `pmset sleepnow` from another account). Expect: `pmset -g assertions` shows the helper's PreventUserIdleSystemSleep from COMMIT; after wake the helper finishes (its 90/45/10 s waits do not count the sleep), and `last-result.json` is written either way.
-6. **45 s confirmation**: make B fail to start (e.g. remove its `cage` binary in a copy of the test release) → after 45 s of awake time the helper restores A **without an alert and in the background**, `last-result.json` says failed, B is recorded as failed and never retried.
+6. **45 s confirmation**: B must pass verification, so it cannot be a damaged copy (removing a file breaks the signature and stops the chain at verify, before the helper). Two variants:
+   - **B-silent**: a throwaway build of B whose window never sends `workbenchReady` (one line removed in a throwaway branch), signed like B and published as the newest test release → after 45 s of awake time the helper asks B to quit, restores A **without an alert and in the background**, `last-result.json` says failed for the attempt, B is recorded as failed and never retried.
+   - **suspended**: with the normal B, `kill -STOP` the relaunched Super Cage within 45 s (from a terminal of the same user, by the PID of the new process) → after 45 + 10 s the helper records "新版本未确认就绪…原应用备份已保留" and exits without restoring; `kill -CONT` it afterwards. This checks the branch where the new version does not quit.
 7. **Click takes over**: while a silent download runs, click 升级 → the same download continues as a click (confirmation shown, window activated after install).
 
 Duration: with the production thresholds the run needs B to be 24 h old before step 4, an hour of hold before each silent decision, and step 3 alone spans more than 24 h (requests at +0, +1 h, +6 h, +24 h). The release source override named in the prerequisite does not exist yet either.

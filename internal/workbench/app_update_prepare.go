@@ -99,27 +99,17 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 		if reply.Status != "prepared" {
 			return AppUpdatePrepared{}, errors.New("后台响应无效，未继续更新。")
 		}
-		if options.Stopped != nil {
-			options.Stopped(reply.Attempt)
-		}
-		abandon := func(err error) (AppUpdatePrepared, error) {
-			return AppUpdatePrepared{Status: "abandoned", Attempt: reply.Attempt, Message: "环境已停止，但升级没有继续：" + err.Error()}, err
-		}
-		if err = c.waitForExit(); err != nil {
-			return abandon(err)
-		}
-		gateway, err := connectController(filepath.Dir(desktopConfigPath(fullConfig)))
-		if errors.Is(err, errControllerUnavailable) {
-			return reply, nil
-		}
-		if err != nil {
-			return abandon(err)
-		}
-		defer gateway.close()
-		if err = gateway.releaseDesktopEntry(); err != nil {
-			return abandon(err)
-		}
-		return reply, nil
+		return finishAppUpdateHandoff(reply, options.Stopped, c.waitForExit, func() error {
+			gateway, err := connectController(filepath.Dir(desktopConfigPath(fullConfig)))
+			if errors.Is(err, errControllerUnavailable) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			defer gateway.close()
+			return gateway.releaseDesktopEntry()
+		})
 	case http.StatusConflict:
 		if reply.Status != "blocked" {
 			reply = appUpdateBlocked(policy.Busy, "本机后台拒绝了这次升级")
@@ -133,6 +123,23 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 		return fromDesktopResult(result), err
 	}
 	return AppUpdatePrepared{}, fmt.Errorf("本机后台未接受升级请求（HTTP %d）", status)
+}
+
+// finishAppUpdateHandoff runs what follows the workload's yes. The shell is
+// told the attempt first, before anything else can fail, so that a failure
+// or a kill afterwards is an abandonment it records; then the workload's
+// exit and the desktop entry's release. A failure after the stop is
+// "abandoned" with the attempt: the workbench restores the environment.
+func finishAppUpdateHandoff(reply AppUpdatePrepared, stopped func(attempt string), waitExit, release func() error) (AppUpdatePrepared, error) {
+	if stopped != nil {
+		stopped(reply.Attempt)
+	}
+	for _, step := range []func() error{waitExit, release} {
+		if err := step(); err != nil {
+			return AppUpdatePrepared{Status: "abandoned", Attempt: reply.Attempt, Message: "环境已停止，但升级没有继续：" + err.Error()}, err
+		}
+	}
+	return reply, nil
 }
 
 func (c *controllerClient) appUpdateHandoff(options AppUpdateOptions) (AppUpdatePrepared, int, error) {

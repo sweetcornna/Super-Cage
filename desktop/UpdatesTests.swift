@@ -268,6 +268,7 @@ enum UpdatesTests {
         try expect(CageUpdateDecision.launchesInBackground([CageUpdateDecision.backgroundKey: "1"]) && !CageUpdateDecision.launchesInBackground([:]) && !CageUpdateDecision.launchesInBackground([CageUpdateDecision.backgroundKey: "true"]), "background relaunch")
         for phase in ["checking", "downloading", "downloaded", "verifying"] { try expect(CageUpdateDecision.clickTakesOver(phase: phase, installerStarted: false), "click takes over \(phase)") }
         try expect(!CageUpdateDecision.clickTakesOver(phase: "installing", installerStarted: false) && !CageUpdateDecision.clickTakesOver(phase: "verifying", installerStarted: true), "click waits once installing")
+        try expect(CageUpdateDecision.dropsPrepared(version: "0.1.16", for: "0.1.17") && !CageUpdateDecision.dropsPrepared(version: "0.1.17", for: "0.1.17"), "a package of another version is dropped for a silent request")
         // Deadlines count awake time only: a sleep does not use them up.
         var uptime: TimeInterval = 100
         let awake = CageUptimeDeadline(after: 45) { uptime }

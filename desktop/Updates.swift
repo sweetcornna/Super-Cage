@@ -196,6 +196,11 @@ enum CageUpdateDecision {
     static func clickTakesOver(phase: String, installerStarted: Bool) -> Bool {
         !installerStarted && ["checking", "downloading", "downloaded", "verifying"].contains(phase)
     }
+    /// A silent request for one version never installs a package verified
+    /// for another: that package is removed and the requested one fetched.
+    static func dropsPrepared(version held: String, for requested: String) -> Bool {
+        held != requested
+    }
 }
 
 /// A deadline on the uptime clock, which stops while the Mac sleeps: a wait
@@ -783,7 +788,7 @@ final class CageAppUpdater {
               let request = CageUpdateDecision.silentRequest(try? Data(contentsOf: root.appendingPathComponent("silent-request.json")), current: current),
               request.id != silentRequest else { return }
         // A verified package of another version is not what was asked for.
-        if let held = prepared, held.version != request.version {
+        if let held = prepared, CageUpdateDecision.dropsPrepared(version: held.version, for: request.version) {
             try? FileManager.default.removeItem(at: held.directory)
             prepared = nil
         }
