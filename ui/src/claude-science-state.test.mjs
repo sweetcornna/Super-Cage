@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 import test from "node:test";
-import { formatMB, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
+import { formatMB, hostFrameStatus, hostRenderElsewhere, hostRenderExplanation, hostRenderView, jobFailureReason, readFailure, scienceView, signInNote } from "./claude-science-state.mjs";
 
 const fixtures = createRequire(import.meta.url)("../scripts/claude-science-fixtures.json");
 const body = (name) => fixtures[name].body;
@@ -18,6 +18,9 @@ test("every fixture maps to a state with its actions", () => {
     stopped: ["stopped", ["start"]],
     "running-signed-out": ["running", ["open", "stop"]],
     "running-signed-in": ["running", ["open", "stop"]],
+    "running-host-render-available": ["running", ["open", "stop"]],
+    "running-host-render": ["running", ["open", "stop"]],
+    "running-host-render-elsewhere": ["running", ["open", "stop"]],
     "update-required": ["running", ["open", "stop"]],
     error: ["failed", ["start"]],
   };
@@ -207,4 +210,47 @@ test("disk sizes read as GB or MB", () => {
   assert.equal(formatMB(512), "512 MB");
   assert.equal(formatMB(0), "");
   assert.equal(formatMB(undefined), "");
+});
+
+const windowsWindow = { desktop_gateway: true, mode: "local", client_platform: "windows" };
+const render = (name, extra = {}) => hostRenderView({ data: body(name), client: windowsWindow, bridge: true, running: true, ...extra });
+
+test("host rendering: off by default, a quiet switch where it can be used", () => {
+  for (const name of ["running-signed-in", "stopped", "not-installed"]) {
+    assert.deepEqual(render(name), { toggle: null, frame: false, fallback: "", notice: "" }, name);
+  }
+  const available = render("running-host-render-available");
+  assert.equal(available.frame, false);
+  assert.deepEqual(available.toggle, { label: "本机渲染（实验性）", checked: false, disabled: false, explanation: hostRenderExplanation });
+  // macOS, Linux, a browser, the phone, a remote host: nothing to switch on.
+  for (const client of [{ ...windowsWindow, client_platform: "darwin" }, { ...windowsWindow, mode: "remote" }, { mode: "local", client_platform: "windows" }]) {
+    assert.equal(hostRenderView({ data: body("running-host-render-available"), client, bridge: true, running: true }).toggle, null);
+  }
+  assert.equal(render("running-host-render-available", { bridge: false }).toggle, null);
+  assert.equal(render("running-host-render-elsewhere").toggle, null);
+});
+
+test("host rendering: the frame only while everything holds", () => {
+  assert.equal(render("running-host-render").frame, true);
+  assert.equal(render("running-host-render").toggle.checked, true);
+  for (const [why, extra] of Object.entries({ "environment stopped": { running: false }, locked: { locked: true }, "job running": { busy: true }, "fell back": { fallback: "身份核对未通过" }, "no bridge": { bridge: false }, "remote host": { client: { ...windowsWindow, mode: "remote" } } })) {
+    assert.equal(render("running-host-render", extra).frame, false, why);
+  }
+  const stopped = { ...body("running-host-render"), running: false, ready: false };
+  assert.equal(hostRenderView({ data: stopped, client: windowsWindow, bridge: true, running: true }).frame, false, "daemon stopped");
+  // On but unusable here: the switch stays so it can be turned off, and says why.
+  const elsewhere = render("running-host-render", { client: { ...windowsWindow, mode: "remote" } });
+  assert.deepEqual(elsewhere.toggle, { label: "本机渲染（实验性）", checked: true, disabled: false, explanation: hostRenderElsewhere });
+  assert.equal(render("running-host-render", { fallback: "身份核对未通过" }).fallback, "身份核对未通过");
+});
+
+test("host rendering: the toolbar says what the frame is doing", () => {
+  const data = body("running-host-render");
+  assert.deepEqual(hostFrameStatus(data, "preparing").text, "正在核对页面的时区与语言…");
+  const ready = hostFrameStatus(data, "ready");
+  assert.deepEqual(ready.chips.map((chip) => chip.text), ["v0.1.73", "已登录"]);
+  assert.equal(ready.tone, "ok");
+  const blocked = hostFrameStatus({ ...data, host_render: { ...data.host_render, blocked: "timezone", blocked_count: 1 } }, "ready");
+  assert.equal(blocked.tone, "warn");
+  assert.match(blocked.text, /拦截/);
 });

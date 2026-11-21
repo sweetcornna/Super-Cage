@@ -503,6 +503,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/claude-desktop/{action}", s.claudeDesktopAction)
 	mux.HandleFunc("GET /api/claude-science", s.claudeScienceStatus)
 	mux.HandleFunc("POST /api/claude-science/{action}", s.claudeScienceAction)
+	mux.HandleFunc("GET /api/claude-science/host-render", s.scienceHostRenderRead)
 	if s.macosGuest != nil {
 		mux.HandleFunc("POST /api/macos/first-setup", s.macOSLoginWindow)
 		mux.HandleFunc("POST /api/macos/login", s.macOSLoginWindow)

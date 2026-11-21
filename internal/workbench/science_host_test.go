@@ -573,3 +573,32 @@ func TestScienceEntryKeepsTheSwitchLocal(t *testing.T) {
 		t.Fatal("workload refused")
 	}
 }
+
+func TestScienceHostRenderReadAndTicketReset(t *testing.T) {
+	s := scienceWorkload(t)
+	s.scienceHost.vmRunning = func() bool { return true }
+	s.preferences.ScienceHostRender = true
+	s.scienceLast.set(&claudeScienceState{Installed: true, Running: true, Ready: true, StartedAt: "1"})
+	s.syncScienceFront()
+	front, _ := liveScienceFront(t, s)
+	read := func() scienceHostRenderState {
+		t.Helper()
+		w := (requestShape{method: "GET", path: "/api/claude-science/host-render", trusted: true}).send(s)
+		if w.Code != http.StatusOK {
+			t.Fatalf("read: %d %s", w.Code, w.Body)
+		}
+		var state scienceHostRenderState
+		if err := json.Unmarshal(w.Body.Bytes(), &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	if state := read(); !state.Enabled || !state.Running || !state.Session {
+		t.Fatalf("%+v", state)
+	}
+	// A new ticket: the pane waits for that document's session.
+	front.issue(scienceTicket{})
+	if state := read(); state.Session {
+		t.Fatalf("session survived a new ticket: %+v", state)
+	}
+}

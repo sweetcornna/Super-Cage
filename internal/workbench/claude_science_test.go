@@ -468,7 +468,7 @@ func TestClaudeScienceFixturesMatchContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	states := map[string]claudeScienceState{}
-	for _, name := range []string{"unsupported-architecture", "not-installed", "installing", "stopped", "running-signed-out", "running-signed-in", "update-required", "error", "unreachable"} {
+	for _, name := range []string{"unsupported-architecture", "not-installed", "installing", "stopped", "running-signed-out", "running-signed-in", "running-host-render-available", "running-host-render", "running-host-render-elsewhere", "update-required", "error", "unreachable"} {
 		fixture, ok := fixtures[name]
 		if !ok {
 			t.Fatalf("fixture %s missing", name)
@@ -507,6 +507,16 @@ func TestClaudeScienceFixturesMatchContract(t *testing.T) {
 	}
 	if s := states["error"]; !s.Failed || s.FailureReason == "" {
 		t.Fatalf("%+v", s)
+	}
+	// Host rendering (science_host.go): the pane's three cases.
+	if r := states["running-host-render-available"].HostRender; r == nil || !r.Available || r.Enabled || r.Running {
+		t.Fatalf("%+v", r)
+	}
+	if r := states["running-host-render"].HostRender; r == nil || !r.Available || !r.Enabled || !r.Running || !r.Session || !r.Audit.Known {
+		t.Fatalf("%+v", r)
+	}
+	if r := states["running-host-render-elsewhere"].HostRender; r == nil || r.Available || r.UnavailableCode != "platform" || r.UnavailableReason != scienceReasonHostPlatform {
+		t.Fatalf("%+v", r)
 	}
 	// The update fixture is exactly what the server says for that floor.
 	got := states["update-required"]

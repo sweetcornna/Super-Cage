@@ -221,7 +221,8 @@ func (f *scienceFront) reset(reason string) {
 // issue mints an entry ticket for a workbench session.
 func (f *scienceFront) issue(ticket scienceTicket) string {
 	f.mu.Lock()
-	f.state.Refused, f.state.RefusedAt = "", nil
+	// The pane waits for the session of the document this ticket opens.
+	f.state.Refused, f.state.RefusedAt, f.state.Session = "", nil, false
 	f.mu.Unlock()
 	return f.origin + "/_cage/enter#" + f.tickets.Issue(ticket)
 }

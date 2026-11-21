@@ -30,12 +30,16 @@ import (
 //	  unavailable_reason, enabled, running, error, audit_note, and the
 //	  front's refused / blocked / audit / session / signin fields. The
 //	  front port is never in it: the Windows shell reads it from control.json.
+//	GET /api/claude-science/host-render -> host_render alone, without
+//	  reading the guest: the pane polls it while its frame is open. A new
+//	  ticket clears session and refused, so session=true afterwards means
+//	  that ticket's document passed the probe.
 //	POST /api/claude-science/host-render {"enabled": bool} -> host_render
 //	  409 when turning on is unavailable here.
 //	POST /api/claude-science/ticket {"host": {timezone, offset, languages}}
 //	  -> {"url": "http://localhost:<port>/_cage/enter#<ticket>"}; 60 s, single
 //	  use, bound to this workbench session's account epoch. host is what the
-//	  shell measured before applying its overrides (for the audit).
+//	  page measured after the shell dropped its overrides (for the audit).
 //	  409 unavailable, off, environment or Claude Science not running, or the
 //	  guest browser's identity unreadable.
 //	POST /api/claude-science/release {} -> 204: the pane closed its frame;
@@ -506,6 +510,12 @@ func (s *Server) scienceHostRenderAction(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	s.syncScienceFront()
+	jsonReply(w, s.scienceHostRender(r))
+}
+
+// scienceHostRenderRead is the pane's poll while its frame is open: the
+// front's state only, without reading the guest.
+func (s *Server) scienceHostRenderRead(w http.ResponseWriter, r *http.Request) {
 	jsonReply(w, s.scienceHostRender(r))
 }
 

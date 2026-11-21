@@ -111,6 +111,105 @@
       "started_at": "2026-11-20T09:30:00.000Z"
     }
   },
+  "running-host-render-available": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": false,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": true,
+        "enabled": false,
+        "running": false,
+        "audit": {
+          "timezone": false,
+          "offset": false,
+          "locale": false,
+          "known": false
+        },
+        "session": false
+      }
+    }
+  },
+  "running-host-render": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": true,
+        "enabled": true,
+        "running": true,
+        "audit": {
+          "timezone": true,
+          "offset": true,
+          "locale": true,
+          "known": true
+        },
+        "session": true,
+        "transport": "in-process"
+      }
+    }
+  },
+  "running-host-render-elsewhere": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": false,
+        "unavailable_code": "platform",
+        "unavailable_reason": "本机渲染目前只在 Windows 版 Super Cage 窗口中提供：只有它的网页组件能把页面的时区、语言和浏览器标识换成环境的。",
+        "enabled": false,
+        "running": false,
+        "audit": {
+          "timezone": false,
+          "offset": false,
+          "locale": false,
+          "known": false
+        },
+        "session": false
+      }
+    }
+  },
   "update-required": {
     "status": 200,
     "body": {
