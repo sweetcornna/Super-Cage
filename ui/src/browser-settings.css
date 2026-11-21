@@ -40,13 +40,12 @@
 .browser-settings-no-results { padding: 28px 0; }
 .browser-setting-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 12px; }
 .browser-setting-heading > div { min-width: 0; overflow-wrap: anywhere; }
-.browser-settings-section .browser-cookies { margin: 0; font-size: 1rem; border: 0; border-radius: 0; padding: 0; }
+.browser-settings-section .browser-cookies { margin: 0; font-size: var(--fs-body); border: 0; border-radius: 0; padding: 0; background: transparent; }
 .browser-settings-section .cookie-list { max-height: 300px; }
 .browser-settings-section .cookie-toolbar { gap: 8px; }
 /* Installed extensions are hairline rows; previews and imports stay one
    soft card each because they hold a pending decision. */
 .extension-item { border-top: 1px solid var(--line); padding: 18px 0; min-width: 0; }
-.extension-item:last-of-type { border-bottom: 1px solid var(--line); }
 .extension-install-preview, .extension-import { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); padding: 18px; margin-top: 16px; min-width: 0; }
 .extension-item .browser-setting-heading { margin-top: 0; flex-wrap: wrap; }
 .extension-version { display: inline-block; margin-left: 8px; color: var(--muted); font-size: var(--fs-secondary); font-variant-numeric: tabular-nums; }

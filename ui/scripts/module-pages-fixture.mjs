@@ -340,4 +340,18 @@ export async function routeBrowserChrome(page, state, { now, variant }) {
     ];
     return json(route, { hostname: "linjian.example", cookies, total: cookies.length, page: 0 });
   });
+  await page.route("**/api/browser/info", (route) => json(route, { product: "Chromium 142.0.7444.59（Super Cage 环境内）" }));
+  await page.route("**/api/browser/extensions", (route) => {
+    const body = route.request().postDataJSON?.() || {};
+    if (body.mode && body.mode !== "list") return json(route, { items: extensionItems(variant()) });
+    return json(route, { items: extensionItems(variant()) });
+  });
+}
+
+export function extensionItems(variant) {
+  if (variant === "empty") return [];
+  return [
+    { id: "a".repeat(32), name: "阅读助手", version: "1.4.2", enabled: true, managed: true, description: "调整网页阅读体验：字号、行距和夜间配色。", permissions: ["storage", "activeTab"], hostPermissions: ["https://*/*"], optionsUrl: "chrome-extension://aaaa/options.html" },
+    { id: "b".repeat(32), name: "林间工作室 · 设计评审批注工具（夜间批处理与发布排期专用长名称）", version: "0.9.0", enabled: false, managed: true, description: "在网页上直接批注设计稿并同步到评审记录。", permissions: [], hostPermissions: [], error: variant === "error" ? "扩展未能加载：manifest.json 中的 service_worker 文件不存在。" : undefined },
+  ];
 }
