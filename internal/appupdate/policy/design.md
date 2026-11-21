@@ -254,8 +254,8 @@ Budget: the macOS shell kills `prepare-update` after 180 s; the handoff request 
 |---|---|
 | 更新方式 | ◉ **手动更新**（默认）：有新版本时显示升级按钮，只有点击后才会下载和安装。<br>○ **空闲时自动静默更新**：电脑空闲、没有任何任务时自动完成升级，并恢复原来的环境。 |
 | 说明 (manual) | 不会自动更新。Super Cage 只会检查是否有新版本，不会自行下载或安装。 |
-| 说明 (silent) | 只在没有运行中的任务、终端命令、下载、手机或远程连接，且电脑 30 分钟无人操作时升级；失败会恢复原版本，并且不会自动重试同一版本。 |
-| 不可用 (Linux / unsigned / unnotarized / per-machine Windows) | 此安装方式不支持静默更新：<reason> |
+| 说明 (silent) | 只在没有运行中的任务、终端命令、下载、手机或远程连接，电脑 30 分钟无人操作、没有通话或视频让屏幕常亮、接着电源或电量不低于一半时升级；失败会恢复原版本，并且不会自动重试同一版本。 |
+| 不可用 (Linux / unsigned / unnotarized / per-machine Windows / gate closed) | the reason itself, e.g. 静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级 (fallback: 此安装方式不支持静默更新) |
 | 等待中 | 新版本 x.y.z 已就绪，等待空闲：终端「dev」里还有命令在运行 |
 | 上次结果 | 上次升级：已升级到 0.1.17（11月21日 03:12） / 上次升级未完成：<reason>（不会自动重试） |
 
@@ -272,8 +272,10 @@ The window's `useAppUpdates` deliberately does nothing while the window is hidde
 - Source: only `sweetcornna/Super-Cage` releases (`catalog.Repository`, `allowedURL`), the same asset and digest rules as the click path, digest-pinned download.
 - Publisher: the same checks as the click path (macOS: Apple anchor, Developer ID, team OU equal to the running app's team, identifier, version, Gatekeeper; Windows: Authenticode and the same publisher rule). Silent is **not offered** where those checks cannot run: development builds without a team, unsigned Windows builds, client-only/trial/Intel builds, Linux.
 - Channel: never a prerelease unless the running version is a prerelease. Never a downgrade, never the running version.
-- Age: the release must have been published at least **24 h** before (catalog now parses `published_at`), so the owner can pull a bad release before unattended machines take it. The click path has no age limit.
-- No automatic retry of a version with a failed or unfinished attempt.
+- Age: the release must be at least **24 h** old, counted from the newest of `published_at` and every asset's `updated_at` (a replaced file restarts the clock; a missing, unreadable or future time counts as too new). The click path has no age limit.
+- No automatic retry of a version whose install was decided and failed, or that came back after an install (rolled back). A silent attempt that ends before the decision (download or verification) is recorded against the release: a verification failure is never retried; a transient download failure is retried after 1 h, 6 h and 24 h, then not until the release changes (section 15.4).
+- The real-machine gate: silent mode is offered only on platforms listed in `policy.verifiedPlatforms`, empty in this pass (section 15.1).
+- The host (macOS): not during a dark wake, not with the lid closed and no external display, not on battery below 50 %, not while another app keeps the display awake. A failure to read any of these means "not now" (section 15.3).
 
 ### 8.3 What silent mode adds to an attacker's reach, and how it is closed
 
@@ -375,6 +377,34 @@ Never on the owner's account or `/Applications/Super Cage.app`. Use a separate m
 5. **Cloud connection**: select a cloud workspace with a turn running there; click 升级 → the cloud turn is not listed and keeps running; after relaunch the window reconnects to the same workspace.
 6. **Windows specifics**: install per-user (default) and per-machine (Program Files): per-machine silent shows "此安装位置需要管理员权限，不能静默更新"; click shows UAC.
 
+### 12.1 Real-machine run of the silent chain (macOS, throwaway user)
+
+This is the run that lifts the gate for macOS. Everything happens in a separate macOS user created for it and deleted afterwards; never the owner's account, never `/Applications/Super Cage.app`.
+
+Builds: A and B as above, with the gate lifted only in these test builds:
+
+```sh
+# in the build of A and B (both), for the bundled cage binary
+go build -ldflags "-X github.com/sylvinus/agent-vm/internal/appupdate/policy.verifiedPlatforms=darwin" -o cage ./cmd/cage
+```
+
+Setup (in the throwaway user): copy A to `~/Applications/Super Cage.app`, open it once, create the account, start the environment, choose 设置 → 关于 → 空闲时自动静默更新. Keep a terminal open on `~/Library/Application Support/<profile>/updates/` and `log stream --predicate 'process == "Super Cage" OR process == "cage"'` in another user session if possible.
+
+1. **Gate**: in a normal A build (no flag) the silent option is disabled and the row reads "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级". In the test build it can be chosen.
+2. **Not now** (each one must leave `silent-request.json` absent and `GET /api/app-update` showing the code):
+   - battery: unplug at < 50 % → `low_battery`; plug in → cleared at the next tick.
+   - display held: play a video in a browser full screen (or `caffeinate -d` from another user's shell is not visible here; use a video call app) → `display_held`; `pmset -g assertions` must show PreventUserIdleDisplaySleep by that app.
+   - lid: close the lid with no external display → `lid_closed` (verify `ioreg -r -n IOPMrootDomain -d 1 -k AppleClamshellState` says Yes). With an external display connected and the lid closed, the code must not appear.
+   - dark wake: let the Mac sleep with Power Nap on; after it wakes, `pmset -g log | grep -i darkwake` must not be followed by a `silent-request.json` timestamp inside that dark wake.
+   - remote: open the workbench from another computer (a remote client or a browser, not the paired phone, which has its own blocker) → `有其他电脑正在远程连接` for 2 min after its last request.
+3. **Retry bound**: block the network to GitHub for the asset download only (e.g. a pf rule for the release CDN) → the ledger shows request entries at about +0, +1 h, +6 h, +24 h for that release and none after; unblock and replace the asset in the test release → one new attempt.
+4. **Unattended install, background**: with everything idle, B is downloaded, verified and installed; the new window appears **behind** the frontmost app (no focus change, no Dock bounce), the environment comes back, `last-result.json` names the attempt with success, `attempts.json` has B ok only after the installer's confirmation, `chain.json` ends at done.
+5. **Sleep during install**: start a silent install and close the lid right after `stopped` appears in the CLI output (or `pmset sleepnow` from another account). Expect: `pmset -g assertions` shows the helper's PreventUserIdleSystemSleep from COMMIT; after wake the helper finishes (its 90/45/10 s waits do not count the sleep), and `last-result.json` is written either way.
+6. **45 s confirmation**: make B fail to start (e.g. remove its `cage` binary in a copy of the test release) → after 45 s of awake time the helper restores A **without an alert and in the background**, `last-result.json` says failed, B is recorded as failed and never retried.
+7. **Click takes over**: while a silent download runs, click 升级 → the same download continues as a click (confirmation shown, window activated after install).
+
+Pass = every step as described. Then write `darwin` into `verifiedPlatforms` in a reviewed commit.
+
 ## 13. Adversarial review of this design (one round, recorded)
 
 | # | Attack / failure | Finding | Change made |
@@ -426,3 +456,39 @@ Second round (after the workbench wiring):
 - Windows still uses the old stop-and-handoff flow without the confirmation (patch plan 11.5).
 - The `tools` chain step is a deliberate no-op today (no version requires a tool update to work).
 - `-race` ran on the update subset only; eslint was not run on the new UI module (no node_modules in this worktree).
+
+
+## 15. Third review (security): what changed
+
+Findings from `review3-update/findings.md` (reviewed at 3e0da87), fixed on this branch with a failing test first for each.
+
+### 15.1 The real-machine gate
+`policy.verifiedPlatforms` (comma list of GOOS values, empty) closes silent mode on every platform until its unattended chain has been run on a real machine (12.1). `silentUnavailableReason` returns `policy.NotVerifiedReason` after the platform checks, so 设置 → 关于 shows that reason and the option cannot be chosen; a stale `silent-request.json` is removed while the gate is closed. Lift it per platform with `-ldflags -X …/policy.verifiedPlatforms=darwin` for a test build, then in a reviewed commit.
+
+### 15.2 Agents
+`cage agent` goes through the default-deny registry in `internal/workbench/agent_access.go` (landed from `agent-transport-allowlist`): `/api/app-update/` (policy, the confirmation list) and `/api/desktop-local/` (blockers, handoff) are window only; the native `appUpdate` action is open to agents only for `status` and `check`. The macOS bridge cannot tell a user gesture from a script message (a `WKScriptMessage` carries only the frame and the world), so the server-side refusal is the guard.
+
+### 15.3 Host conditions (darwin, silent only)
+Read after the idle hold in the tick and again in the handoff decision, with a 4 s bound: `pmset -g systemstate` (no Graphics capability = dark wake), `pmset -g batt` (on battery below `MinBattery` = 50 %), `pmset -g assertions` (PreventUserIdleDisplaySleep or NoDisplaySleepAssertion held by another process, powerd excluded = display held), `ioreg -r -n IOPMrootDomain -d 1 -k AppleClamshellState` (closed and `AppleClamshellCausesSleep` not No = lid closed). Any read or parse failure is `host_unknown`: not now. Camera and microphone are not read: the only cheap signal (coreaudiod's assertions) does not tell a call from playback.
+
+### 15.4 Attempts and retries
+`attempts.json` keeps decided attempts (by attempt id, `Finish`/`Undo`) and request entries (`Request`/`Report`: requested, download, verify, prepare, changed) apart, 20 of each. A request is charged when the tick writes `silent-request.json`; the shell reports a pre-decision failure in `updates/silent-outcome.json` {request, version, release, stage, code, message}, which the tick consumes. `RetrySchedule` = 1 h, 6 h, 24 h after the first, second and third request; after a fourth, the release (its key: tag, publish time and every asset's name, size, digest, update time) is not requested again until it changes. Verification failures are never retried. An unreadable `attempts.json` is kept aside as `attempts.unreadable-<UTC>.json` and silent mode waits for one successful update (`LostHistory`).
+
+### 15.5 The chain record across the replacement
+- An attempt is ok only after the installer's `last-result.json` confirms the launch for the same attempt id, written less than `ResultFresh` (15 min) ago; the new version waits for it up to `InstallerWait` (3 min, polling once a second, nothing afterwards).
+- A record is acted on only if it is younger than `ChainFresh` (24 h), not in the future, and its attempt id and version match the installer's result; otherwise it is retired with a note and nothing is done.
+- `stopping`: retired ("升级在停止环境时中断…"), never acted on. `installing` on the old version: restored only with a failure result for that attempt; held with a note during `InstallerGrace` (30 min); retired after.
+- A rollback after done (the old version runs a done record for the new one) fails that version (`Undo`): never installed again automatically.
+- A network pause the person set after the record was written is kept: the network step reads the current pause and is skipped.
+
+### 15.6 prepare-update and the shell
+`cage app-update prepare-update` prints NDJSON: `{"status":"stopped","attempt":ID}` as soon as the handoff stopped the environment, then the outcome. A failure after that prints `{"status":"abandoned","attempt":ID,…}` and exits 1; the shell records the abandonment, reports it and reconnects, and the workbench restores the environment. The shell waits 210 s for it (12 + 150 + 10 + 10 s of steps, plus margin). `silent-request.json` carries `release` and `decided_at`; the shell ignores a request older than 1 h or more than 5 min in the future, downloads with `--release KEY` (the CLI refuses a changed or too-new release), and a click during a silent download or verification takes it over.
+
+### 15.7 The installer helper
+From COMMIT until its result is written the helper holds `beginActivity(.idleSystemSleepDisabled, .suddenTerminationDisabled)`; its 90 s, 45 s and 10 s waits count awake time (`ProcessInfo.systemUptime`), with one last look at the confirmation file before giving up; every exit after COMMIT writes `last-result.json`. An unattended relaunch (`CAGE_UPDATE_BACKGROUND=1`) and its recovery open behind the person's windows (`orderBack`, no activation, no alert).
+
+### 15.8 Smaller items
+Guest blocker ids are made by the host (position and a digest of a plain, length-limited label; at most 16 terminal entries, the rest as one unknown); the seal is released on every path including a panic; a stop that times out keeps the operation lock until the stop job ends; a prepared package of another version is dropped for a silent request; tick and decision share one hold rule; the final look has its own time; remote connections (any non-window, non-phone request in the last 2 min) block silent mode.
+
+### 15.9 Cost
+Manual mode: the tick allocates nothing (benchmark 14.9 ns, 0 allocs); the window polls the status only while silent mode is on or a chain runs. Silent mode adds four short host reads per tick, and only after the 60 min hold has been met. After an update the new version polls one file once a second for at most 3 min.
