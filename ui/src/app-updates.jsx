@@ -1,14 +1,14 @@
-import React, { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowDownToLine, LoaderCircle, RefreshCw } from "lucide-react";
+import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
+import { ArrowDownToLine, RefreshCw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
-import { Modal } from "./modal";
-import { activeShellPhases, appUpdateButton, appUpdateConfirmation } from "./app-update-state.mjs";
+import { activeShellPhases, appUpdateButton, statusNeedsWatch } from "./app-update-state.mjs";
 import "./app-updates.css";
 
 const checkInterval = 6 * 60 * 60 * 1000;
 const retryInterval = 5 * 60 * 1000;
 // The workbench's view (mode, waiting, last attempt, post-update chain) is
-// read while the window is visible: once a minute and on every change.
+// read on focus, visibility and update events, and once a minute only while
+// it can change by itself (statusNeedsWatch): manual mode polls nothing.
 const statusInterval = 60 * 1000;
 
 // The existing environment actions a failed post-update step offers.
@@ -108,17 +108,23 @@ export function useAppUpdates() {
       if (live) void refreshStatus();
     })();
     const checkTimer = setInterval(check, 60 * 1000);
-    const statusTimer = setInterval(() => { if (visible()) void refreshStatus(); }, statusInterval);
     return () => {
       live = false;
       clearInterval(checkTimer);
-      clearInterval(statusTimer);
       window.removeEventListener("cage-app-update", receive);
       window.removeEventListener("focus", look);
       window.removeEventListener("cage-window-visibility", look);
       document.removeEventListener("visibilitychange", look);
     };
   }, [available, run, refreshStatus]);
+  const watch = statusNeedsWatch(status);
+  useEffect(() => {
+    if (!available || !watch) return;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== "hidden" && window.cageWindowVisible !== false) void refreshStatus();
+    }, statusInterval);
+    return () => clearInterval(timer);
+  }, [available, watch, refreshStatus]);
   useEffect(() => {
     if (!startupFailure) return;
     const timer = setTimeout(() => setStartupFailure(""), 8000);
@@ -127,54 +133,8 @@ export function useAppUpdates() {
   return { state, status, statusError, refreshStatus, run, available, startupFailure, coolingDown };
 }
 
-// The confirmation shown after the click and before anything stops: what
-// will be interrupted, what must finish first, which terminals will close.
-function AppUpdateConfirmation({ version, blocked, onCancel, onContinue }) {
-  const [interruptions, setInterruptions] = useState(null);
-  const [error, setError] = useState(null);
-  const [loading, setLoading] = useState(true);
-  useEffect(() => {
-    const controller = new AbortController();
-    api("/app-update/interruptions", undefined, undefined, {}, { signal: controller.signal })
-      .then(setInterruptions)
-      .catch(failure => { if (!controller.signal.aborted) setError(failure); })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, []);
-  const view = appUpdateConfirmation({ version, interruptions, error, blocked });
-  return (
-    <Modal
-      title={view.title}
-      onClose={onCancel}
-      footer={
-        <>
-          <span className="save-note">{loading ? "正在确认会被中断的任务…" : view.waitMessage || "不点击继续不会升级"}</span>
-          <button onClick={onCancel}>{view.cancelLabel}</button>
-          <button className="primary" disabled={loading || !view.canContinue} onClick={() => onContinue(view.confirmed)}>
-            {loading ? <LoaderCircle size={15} className="spin" /> : <ArrowDownToLine size={15} />}
-            {view.continueLabel}
-          </button>
-        </>
-      }
-    >
-      <div className="modal-body app-update-confirmation" aria-busy={loading}>
-        {!loading && <p>{view.body}</p>}
-        {!loading && view.items.length > 0 && (
-          <ul className="app-update-interruptions" aria-label="会被中断的任务">
-            {view.items.map(item => <li key={item.id} data-unknown={item.unknown || undefined}>{item.label}</li>)}
-          </ul>
-        )}
-        {!loading && view.mustWait.length > 0 && <p className="app-update-wait-heading">需要先完成：</p>}
-        {!loading && view.mustWait.length > 0 && (
-          <ul className="app-update-interruptions" aria-label="需要先完成的操作" data-kind="wait">
-            {view.mustWait.map(label => <li key={label}>{label}</li>)}
-          </ul>
-        )}
-        {!loading && view.note && <p className="footnote">{view.note}</p>}
-      </div>
-    </Modal>
-  );
-}
+// The confirmation is its own lazy chunk: it loads on the click.
+const AppUpdateConfirmation = lazy(() => import("./app-update-confirmation"));
 
 export function AppUpdateButton({ updates }) {
   const { state, status, run, available, startupFailure } = updates;
@@ -247,12 +207,12 @@ export function AppUpdateButton({ updates }) {
         ) : failed ? <RefreshCw size={20} /> : <ArrowDownToLine size={20} />}
       </button>}
       {(failure || startupFailure) && <div className="app-update-error" role="alert">{failure || startupFailure}{view.visible && !view.disabled ? "。可点击升级按钮重试。" : ""}</div>}
-      {confirming && version && <AppUpdateConfirmation
+      {confirming && version && <Suspense fallback={null}><AppUpdateConfirmation
         version={version}
         blocked={state.blocked}
         onCancel={() => setConfirming(false)}
         onContinue={confirmed => { setConfirming(false); void run("install", { confirmed }); }}
-      />}
+      /></Suspense>}
     </>
   );
 }

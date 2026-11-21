@@ -61,7 +61,7 @@ try {
   workbench.status = { ...workbench.status, mode: "manual", silent_available: false, silent_unavailable_reason: "Windows 版本暂不支持静默更新，可以点击升级" };
   await page.getByRole("navigation", { name: "设置分组" }).getByRole("button", { name: "通用", exact: true }).click().catch(() => {});
   await page.getByRole("navigation", { name: "设置分组" }).getByRole("button", { name: "关于", exact: true }).click();
-  await section.getByText("此安装方式不支持静默更新：Windows 版本暂不支持静默更新，可以点击升级").waitFor();
+  await section.getByText("Windows 版本暂不支持静默更新，可以点击升级").first().waitFor();
   assert.ok(await section.getByRole("radio", { name: /空闲时自动静默更新/ }).isDisabled());
   await page.keyboard.press("Escape");
 

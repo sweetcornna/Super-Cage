@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { appUpdateButton, appUpdateConfirmation, appUpdateSettings, formatWhen, readStatusFailure } from "./app-update-state.mjs";
+import { appUpdateButton, formatWhen, readStatusFailure, statusNeedsWatch } from "./app-update-state.mjs";
+import { appUpdateConfirmation, appUpdateSettings } from "./app-update-texts.mjs";
 
 const now = Date.parse("2026-11-21T03:00:00Z");
 const manualStatus = { mode: "manual", silent_available: true, pending: null, waiting: null, last_attempt: null, chain: null };
@@ -138,7 +139,7 @@ test("settings rows for every mode", () => {
   const waiting = appUpdateSettings({ status: silentStatus({ waiting: { code: "busy", message: "等待空闲", blockers: [terminal] }, last_attempt: { version: "0.1.15", result: "ok", finished_at: "2026-11-20T19:12:00Z" } }), timeZone: "Asia/Shanghai" });
   assert.equal(waiting.mode, "silent");
   assert.deepEqual(waiting.rows.map((r) => r.text), [
-    "只在没有运行中的任务、终端命令、下载、手机或远程连接，且电脑 30 分钟无人操作时升级；失败会恢复原版本，并且不会自动重试同一版本。",
+    "只在没有运行中的任务、终端命令、下载、手机或远程连接，电脑 30 分钟无人操作、没有通话或视频让屏幕常亮、接着电源或电量不低于一半时升级；失败会恢复原版本，并且不会自动重试同一版本。",
     "新版本 0.1.16 已就绪，等待空闲：终端里还有命令在运行（make）",
     "上次升级：已升级到 0.1.15（11月21日 03:12）",
   ]);
@@ -148,7 +149,10 @@ test("settings rows for every mode", () => {
 
   const unsupported = appUpdateSettings({ status: { ...manualStatus, silent_available: false, silent_unavailable_reason: "Linux 版本由系统安装包管理，不支持静默更新" } });
   assert.equal(unsupported.options[1].disabled, true);
-  assert.equal(unsupported.rows.find((r) => r.key === "unavailable").text, "此安装方式不支持静默更新：Linux 版本由系统安装包管理，不支持静默更新");
+  assert.equal(unsupported.rows.find((r) => r.key === "unavailable").text, "Linux 版本由系统安装包管理，不支持静默更新");
+  const gated = appUpdateSettings({ status: { ...manualStatus, silent_available: false, silent_unavailable_reason: "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级" } });
+  assert.equal(gated.rows.find((r) => r.key === "unavailable").text, "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级");
+  assert.equal(gated.options.find((o) => o.value === "silent").disabled, true);
 
   const corrupt = appUpdateSettings({ status: { ...manualStatus, mode_error: "更新方式记录无效，已按手动更新处理" } });
   assert.equal(corrupt.rows[0].text, "更新方式记录无效，已按手动更新处理");
@@ -176,4 +180,22 @@ test("settings when the workbench cannot answer", () => {
 test("dates read as 11月21日 03:12", () => {
   assert.equal(formatWhen("2026-11-20T19:12:00Z", "Asia/Shanghai"), "11月21日 03:12");
   assert.equal(formatWhen("not a date"), "");
+});
+
+test("the status is polled only while it can change by itself", () => {
+  assert.equal(statusNeedsWatch(null), false);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: null }), false);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "done" } }), false);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "failed" } }), false);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "attention" } }), false);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "restoring" } }), true);
+  assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "installing" } }), true);
+  assert.equal(statusNeedsWatch({ mode: "silent", chain: null }), true);
+});
+
+test("the host's power and display state reads as waiting, not as a fault", () => {
+  for (const code of ["dark_wake", "lid_closed", "low_battery", "display_held", "host_unknown", "retry_later"]) {
+    const view = appUpdateButton({ shell: { phase: "available", latestVersion: "0.1.16" }, status: { mode: "silent", pending: { version: "0.1.16", installable: true }, waiting: { code, message: "等一下" } } });
+    assert.equal(view.tone, "waiting", code);
+  }
 });

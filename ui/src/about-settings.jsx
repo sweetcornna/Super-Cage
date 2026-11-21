@@ -3,7 +3,7 @@ import { ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { getClientContext } from "./client-context.mjs";
 import { BrandMark } from "./brand";
-import { appUpdateSettings } from "./app-update-state.mjs";
+import { appUpdateSettings } from "./app-update-texts.mjs";
 import "./about-settings.css";
 
 const repository = "https://github.com/sweetcornna/Super-Cage";
