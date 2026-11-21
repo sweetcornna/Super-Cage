@@ -117,7 +117,7 @@ func Decide(r Request, f Facts) Decision {
 		return Decision{Code: Busy, Message: "等待空闲：" + f.Snapshot.Blockers[0].Label, Blockers: f.Snapshot.Blockers}
 	case r.Fingerprint != "" && r.Fingerprint != f.Snapshot.Fingerprint:
 		return Decision{Code: Changed, Message: "空闲期间有新的活动，等待下一次空闲"}
-	case f.Hold.HeldFor(f.Now, f.Snapshot.Fingerprint) < HoldPeriod:
+	case f.Hold.HeldFor(f.Now, f.Snapshot.Fingerprint) < HoldPeriod-HoldSlack:
 		return Decision{Code: NotHeld, Message: "等待电脑持续空闲"}
 	case !f.InputIdleKnown:
 		return Decision{Code: UserUnknown, Message: "无法确认电脑是否无人使用，暂不自动升级"}

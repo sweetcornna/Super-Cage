@@ -26,6 +26,8 @@ type ChainView struct {
 	Next       string     `json:"next,omitempty"`
 	NotesURL   string     `json:"notes_url,omitempty"`
 	Terminals  []Terminal `json:"terminals,omitempty"`
+	// Note explains a step that waits for the person, such as unlocking.
+	Note string `json:"note,omitempty"`
 }
 
 // Status is what GET /api/app-update answers.

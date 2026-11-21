@@ -99,6 +99,8 @@ type Server struct {
 	nativeDownloadSlots                              chan struct{}
 	nativeDownloadRevision                           uint64
 	windowsNetwork                                   *windowsHostNetwork
+	appUpdate                                        appUpdateState
+	appUpdateSealed                                  bool
 	op                                               sync.Mutex
 	profile, configPath, exe, origin, token, session string
 	mu                                               sync.Mutex
@@ -288,6 +290,9 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			_ = s.closeProxyGate("网络保持暂停，请手动恢复后再联网")
 		}
 		s.startMonitors()
+		// Continue an update chain the previous version began, or record a
+		// rollback and bring the environment back.
+		go s.resumeAppUpdateChain()
 		if err = s.restorePhone(); err != nil {
 			s.phones.status = "无法恢复手机配对，请移除旧记录后重试"
 		}
@@ -367,6 +372,8 @@ func (s *Server) handler() http.Handler {
 	} else {
 		mux.HandleFunc("POST /api/handoff", s.handoff)
 		mux.HandleFunc("POST /api/desktop-local/trusted-login", s.localTrustedLogin)
+		mux.HandleFunc("POST /api/desktop-local/app-update-handoff", s.appUpdateHandoff)
+		mux.HandleFunc("POST /api/desktop-local/app-update-blockers", s.appUpdateBlockers)
 		mux.HandleFunc("POST /api/desktop-local/{action}", s.desktopLocalControl)
 	}
 	if s.desktopEntry {
@@ -407,6 +414,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("GET /api/client/about", s.appAbout)
 	mux.HandleFunc("POST /api/client/about", s.appAbout)
+	mux.HandleFunc("GET /api/app-update", s.appUpdateStatus)
+	mux.HandleFunc("POST /api/app-update/policy", s.appUpdatePolicy)
+	mux.HandleFunc("GET /api/app-update/interruptions", s.appUpdateInterruptions)
 	mux.HandleFunc("POST /api/projects/open", s.openProject)
 	mux.HandleFunc("POST /api/projects/save", s.saveProject)
 	mux.HandleFunc("POST /api/projects/remove", s.removeProject)
@@ -614,6 +624,9 @@ func (s *Server) handler() http.Handler {
 		bootstrapRoute := r.URL.Path == "/api/session" || r.URL.Path == "/api/launch" || r.URL.Path == "/api/handoff" || r.URL.Path == "/api/remote/manifest"
 		trustedDesktop := s.hasTrustedView(r)
 		phoneRoom := s.pairedPhoneRoom(r)
+		if phoneRoom != nil {
+			s.notePhoneRequest()
+		}
 		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil && !s.hasRemoteWindowsView(r) {
 			http.Error(w, "请通过本机 Super Cage 窗口或当前配对手机打开客机", http.StatusForbidden)
 			return

@@ -41,6 +41,9 @@ const (
 	// fingerprint, before an unattended installation. It equals one tick of
 	// the workbench's existing hourly ticker, so two idle ticks prove it.
 	HoldPeriod = time.Hour
+	// HoldSlack absorbs the scheduling jitter between two ticks of that
+	// ticker; without it two looks 59m59.9s apart would wait a third hour.
+	HoldSlack = time.Minute
 	// UserIdle is the minimum time without keyboard or mouse input on the host.
 	UserIdle = 30 * time.Minute
 	// ReleaseAge is the minimum age of a release installed unattended, so a
@@ -89,6 +92,14 @@ func SaveSettings(profile string, s Settings) error {
 		return errors.New("更新方式无效")
 	}
 	return writePrivate(filepath.Join(Dir(profile), "policy.json"), s)
+}
+
+// WriteRecord stores v as name in the private update directory.
+func WriteRecord(profile, name string, v any) error {
+	if name == "" || filepath.Base(name) != name {
+		return errors.New("更新记录名称无效")
+	}
+	return writePrivate(filepath.Join(Dir(profile), name), v)
 }
 
 const maxRecord = 256 << 10

@@ -15,6 +15,10 @@ func (s *Server) submitJob(kind string, run func() error) (Job, error) {
 		s.mu.Unlock()
 		return Job{}, errJobsClosed
 	}
+	if s.appUpdateSealed {
+		s.mu.Unlock()
+		return Job{}, errAppUpdateSealed
+	}
 	if s.storageRecoveryError != "" && kind != "storage-recovery" {
 		err := fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
 		s.mu.Unlock()

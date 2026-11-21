@@ -87,7 +87,7 @@ func TestSilentAllowedOnlyWhenEverythingHolds(t *testing.T) {
 		}, Busy},
 		{"activity since the request", func(_ *Request, f *Facts) { f.Snapshot.Fingerprint = "f2"; f.Hold.Fingerprint = "f2" }, Changed},
 		{"idle not held long enough", func(_ *Request, f *Facts) { f.Hold.Since = now.Add(-HoldPeriod / 2) }, NotHeld},
-		{"hold of another fingerprint", func(r *Request, f *Facts) { r.Fingerprint = ""; f.Hold.Fingerprint = "f0" }, NotHeld},
+		{"idle held just short of the slack", func(_ *Request, f *Facts) { f.Hold.Since = now.Add(-HoldPeriod + HoldSlack + time.Second) }, NotHeld},		{"hold of another fingerprint", func(r *Request, f *Facts) { r.Fingerprint = ""; f.Hold.Fingerprint = "f0" }, NotHeld},
 		{"host input unknown", func(_ *Request, f *Facts) { f.InputIdleKnown = false }, UserUnknown},
 		{"someone at the keyboard", func(_ *Request, f *Facts) { f.InputIdle = UserIdle - time.Minute }, UserActive},
 		{"prerelease from a stable version", func(r *Request, _ *Facts) { r.Version = "0.1.16-rc.1" }, NotEligible},
@@ -103,6 +103,12 @@ func TestSilentAllowedOnlyWhenEverythingHolds(t *testing.T) {
 				t.Fatalf("got %+v, want %s", d, tc.want)
 			}
 		})
+	}
+	// Two looks of the hourly ticker a little less than an hour apart.
+	jr, jf := idleFacts()
+	jf.Hold.Since = jf.Now.Add(-HoldPeriod + time.Second)
+	if d := Decide(jr, jf); !d.Allowed() {
+		t.Fatalf("hourly ticker jitter refused: %+v", d)
 	}
 }
 

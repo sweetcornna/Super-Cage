@@ -22,11 +22,14 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 		return nil, errors.New("Codex 终端不能指定 Claude 账号或会话")
 	}
 	s.mu.Lock()
-	closing, componentUpdate := s.closing, s.guestUpdateRequired
+	closing, sealed, componentUpdate := s.closing, s.appUpdateSealed, s.guestUpdateRequired
 	command := codexTerminalCommand(s.preferences)
 	s.mu.Unlock()
 	if closing {
 		return nil, errTerminalsClosed
+	}
+	if sealed {
+		return nil, errAppUpdateSealed
 	}
 	if !s.vmRunning() || s.busy() {
 		return nil, errTerminalNotReady

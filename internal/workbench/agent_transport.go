@@ -84,6 +84,11 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 	if u.Path == "/api/agent/native/window" || u.Path == "/api/account/device-enroll" || u.Path == "/api/account/device-unlock" || u.Path == "/api/account/device-revoke" || u.Path == "/api/session" || u.Path == "/api/launch" || u.Path == "/api/handoff" || u.Path == "/api/desktop-owner" || strings.HasPrefix(u.Path, "/api/desktop-local/") {
 		return result, &AgentError{Code: "native_transport_required", Message: "Use native.submit with the same accountDevice or desktop action. Transport credentials are not exported.", NextAction: "native.submit"}
 	}
+	// The update mode decides whether the application may replace itself
+	// unattended. Only the person at the desktop window changes it.
+	if appUpdateRoute(u.Path) && method != "GET" && method != "HEAD" {
+		return result, &AgentError{Code: "native_transport_required", Message: "The application update policy is changed only in the desktop window.", NextAction: "open_desktop"}
+	}
 	// Local VM inventory carries private profile grants and is owned by the
 	// native desktop generation. Never export it through the agent transport.
 	if strings.HasPrefix(u.Path, "/api/client/virtual-machines") {
