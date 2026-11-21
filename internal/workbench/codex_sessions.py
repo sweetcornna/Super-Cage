@@ -243,20 +243,26 @@ def supervising(connection):
 
 def unreadable_recovery(connection, thread, home, users):
     """recover for state_file in a desktop open: an unreadable state is set
-    aside (renamed, never overwritten) when nothing it may record can still
-    run: it was written before this boot, or the open names a thread that no
-    process holds and no phone turn of this connection is supervised.
-    Otherwise the open is refused."""
+    aside (renamed, never overwritten) only when nothing it may record can
+    still run. That takes a process table showing no phone turn's supervisor
+    of this connection, and either the open naming a thread no process holds,
+    or a file written before this boot (it may have recorded a new session's
+    turn whose thread is unknown). The boot time alone is not enough: it moves
+    when the guest's clock is stepped. Otherwise the open is refused."""
     def recover(path):
         try:
             written = path.stat().st_mtime
         except OSError:
             return False
-        booted = boot_time()
-        if booted is None or written >= booted:
-            held = (find_rollout(home, thread) or compressed_path(home, thread)) if thread else None
-            running = supervising(connection)
-            if not thread or running is not False or held is not None and foreign(held, thread, users, set()):
+        if supervising(connection) is not False:
+            raise ValueError(STATE_UNREADABLE_BUSY)
+        if thread:
+            held = find_rollout(home, thread) or compressed_path(home, thread)
+            if held is not None and foreign(held, thread, users, set()):
+                raise ValueError(STATE_UNREADABLE_BUSY)
+        else:
+            booted = boot_time()
+            if booted is None or written >= booted:
                 raise ValueError(STATE_UNREADABLE_BUSY)
         os.replace(path, path.with_name("state.json.unreadable-%d" % int(time.time())))
         return True

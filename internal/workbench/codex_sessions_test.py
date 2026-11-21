@@ -694,8 +694,6 @@ class CodexSessionTests(unittest.TestCase):
         folder = sessions.ROOT / connection
         folder.mkdir(parents=True)
         (folder / "state.json").write_text("{not json")
-        # Written during this boot, with a process holding the thread: the
-        # desktop open is refused and the file stays as it is.
         proc = self.home / "proc"
         (proc / "4000001/fd").mkdir(parents=True)
         (proc / "4000001/cmdline").write_bytes(b"codex\0exec\0resume\0" + thread.encode() + b"\0")
@@ -704,22 +702,33 @@ class CodexSessionTests(unittest.TestCase):
         request = {"connection": connection, "lease": str(uuid.uuid4()), "thread": thread, "account": "default", "subject": "",
                    "cwd": str(self.project), "additional_directories": []}
         sessions.probe({})
-        with patch.object(sessions, "PROC", proc):
-            with self.assertRaisesRegex(ValueError, "状态无法读取"):
-                sessions.tui_launch(request)
-        self.assertEqual((folder / "state.json").read_text(), "{not json")
-        # A phone turn's supervisor of this connection blocks it as well.
+
+        def refused(request):
+            started = AssertionError("the terminal started")
+            with patch.object(sessions, "PROC", proc), patch.object(sessions.os, "execve", side_effect=started):
+                with self.assertRaisesRegex(ValueError, "状态无法读取"):
+                    sessions.tui_launch(request)
+            self.assertEqual((folder / "state.json").read_text(), "{not json")
+
+        # A process holds the thread: refused, the file stays as it is.
+        refused(request)
+        # A phone turn's supervisor of this connection runs: refused, also for
+        # a file from before this boot (the boot time moves when the clock is
+        # stepped).
         shutil.rmtree(proc / "4000001")
         (proc / "4000002").mkdir()
         (proc / "4000002/cmdline").write_bytes(b"/usr/bin/python3\0-I\0/home/x/codex.py\0supervise\0" + connection.encode() + b"\0")
-        with patch.object(sessions, "PROC", proc):
-            with self.assertRaisesRegex(ValueError, "状态无法读取"):
-                sessions.tui_launch(request)
-        self.assertEqual((folder / "state.json").read_text(), "{not json")
-        # Written before this boot, nothing it records can run: it is set
-        # aside, not overwritten, and the terminal starts.
+        refused(request)
         stamp = time.time() - 7200
         os.utime(folder / "state.json", (stamp, stamp))
+        refused(request)
+        # A new session (no thread) from this boot: what it recorded is
+        # unknown, refused.
+        shutil.rmtree(proc / "4000002")
+        os.utime(folder / "state.json", None)
+        refused({**request, "thread": ""})
+        # Nothing runs and the thread is free: set aside, not overwritten, and
+        # the terminal starts.
         launched = []
         cwd, umask = os.getcwd(), os.umask(0o077)
         os.umask(umask)
@@ -731,6 +740,35 @@ class CodexSessionTests(unittest.TestCase):
         self.assertEqual(len(launched), 1)
         self.assertEqual([item.read_text() for item in folder.glob("state.json.unreadable-*")], ["{not json"])
         self.assertEqual(self.state(connection)["lease"]["thread"], thread)
+
+    def test_admission_is_one_at_a_time_across_connections(self):
+        # Two records of one thread: a desktop open on one connection and a
+        # phone send on another each check the other's run or lease and
+        # record their own under the admission lock, never side by side.
+        thread, _ = self.rollout(self.turn_rows("shared", "ok"))
+        import fcntl
+        sessions.ROOT.mkdir(parents=True, exist_ok=True)
+        holder = (sessions.ROOT / "admission.lock").open("a")
+        self.addCleanup(holder.close)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        desktop, phone = str(uuid.uuid4()), str(uuid.uuid4())
+        os.environ["FAKE_CODEX_MODE"] = "sleep"
+        launch = self.launch(desktop, thread=thread, wait=False)
+        sender = subprocess.Popen([sys.executable, "-I", str(source), "send", json.dumps({"connection": phone, "request_id": str(uuid.uuid4()), "text": "x",
+                                   "account": "default", "thread": thread, "cwd": str(self.project)})], env=self.env_now(), stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.addCleanup(self.finish, sender)
+        time.sleep(1)
+        self.assertEqual((self.calls_of("tui"), self.calls_of("exec")), ([], []))
+        self.assertIsNone(sender.poll())
+        self.assertEqual((self.state(desktop), self.state(phone)), ({}, {}))
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        out, _ = sender.communicate(timeout=15)
+        deadline = time.monotonic() + 15
+        while not self.calls_of("tui") and launch.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        admitted = [bool(self.calls_of("tui")), b'"ok": true' in out]
+        self.assertEqual(sum(admitted), 1, (admitted, out))
 
     def test_help_options_match_whole_tokens(self):
         # A CLI whose help lists look-alike options only: none is taken for
