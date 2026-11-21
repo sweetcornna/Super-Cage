@@ -202,3 +202,24 @@ test("a plain request gets 35 s too", async () => {
   assert.equal(list.getSnapshot().error, "会话列表暂时没有回应，正在重试");
   list.stop();
 });
+
+test("the user's retry asks at once; an action's refresh keeps the 1 s spacing", async () => {
+  const h = harness();
+  const list = createSessionList(h.env);
+  list.start();
+  await h.advance(0);
+  answer(h.calls[0], { sessions: [], notice: "", revision: rev(1) });
+  await h.advance(200);
+  list.refresh();
+  await h.advance(799);
+  assert.equal(h.calls.length, 1, "an action's refresh waits for 1 s after the last start");
+  await h.advance(1);
+  assert.equal(h.calls.length, 2);
+  await h.advance(100);
+  list.refresh({ user: true });
+  assert.equal(h.calls[1].aborted, true);
+  await h.advance(0);
+  assert.equal(h.calls.length, 3, "the user's retry goes at once");
+  assert.equal(h.inFlight().length, 1);
+  list.stop();
+});

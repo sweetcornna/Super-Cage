@@ -175,9 +175,9 @@ for (const mode of ["light", "dark"]) {
     const restored = page.waitForRequest((request) => request.method() === "POST" && request.url().endsWith("000000000001/restore"));
     await idleRow.getByRole("button", { name: "取消归档" }).click();
     await restored;
+    // Escape closes the settings; wait for them to go rather than probing a button that may be leaving.
     await page.keyboard.press("Escape");
-    const back = page.getByRole("button", { name: "返回工作台", exact: true });
-    if (await back.count()) await back.first().click();
+    await archive.waitFor({ state: "detached" });
     await sidebar.getByRole("button", { name: rowName(title.idle) }).waitFor();
     checks.push(mode + ": restore and purge with the neutral copy");
 

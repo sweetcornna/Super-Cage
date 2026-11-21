@@ -101,13 +101,15 @@ export function createSessionList({ request, now = () => Date.now(), setTimer = 
       abort();
       if (snapshot.loading) publish({ loading: false });
     },
-    // Ask again now (after an action, or the user's retry): the held request
-    // in flight is dropped, so two never run at once.
+    // Ask again (after an action, or the user's retry): the held request in
+    // flight is dropped, so two never run at once. The user's retry goes at
+    // once (its button stays disabled until the answer); an action's refresh
+    // keeps the 1 s spacing.
     refresh({ user = false } = {}) {
       if (!running) return;
       if (user) publish({ loading: true });
       abort();
-      schedule(lastStart + 1000 - now());
+      schedule(user ? 0 : lastStart + 1000 - now());
     },
     get running() { return running; },
     get mode() { return poll.mode; },
