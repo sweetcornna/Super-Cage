@@ -41,6 +41,10 @@ type controlFile struct {
 	Token      string             `json:"token"`
 	PID        int                `json:"pid"`
 	Controller ControllerIdentity `json:"controller"`
+	// Auth and ProofKey let a client check who answers before it sends
+	// Token (control_proof.go). A record without them predates that check.
+	Auth     int    `json:"auth,omitempty"`
+	ProofKey string `json:"proof_key,omitempty"`
 }
 type Server struct {
 	desktopViews                                     displayViewDemand
@@ -101,6 +105,7 @@ type Server struct {
 	windowsNetwork                                   *windowsHostNetwork
 	op                                               sync.Mutex
 	profile, configPath, exe, origin, token, session string
+	proofKey                                         string
 	mu                                               sync.Mutex
 	preferences                                      Preferences
 	jobs                                             jobManager
@@ -203,6 +208,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	}
 	defer listener.Close()
 	s := &Server{profile: profile, configPath: configPath, exe: exe, clientOnly: clientOnly, origin: fmt.Sprintf("http://localhost:%d", port), token: randomToken(), session: randomToken(), preferences: Preferences{Keyboard: defaultKeyboard(), AutoTimezone: true, AutoLanguage: true, BalancedDisplay: true, ProjectFileCache: true}}
+	s.proofKey = randomToken()
 	s.desktopEntry = fullConfigPath != ""
 	s.appUpdateConfigPath = configPath
 	if fullConfigPath != "" {
@@ -298,7 +304,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	if err != nil {
 		return err
 	}
-	if err = writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity}); err != nil {
+	if err = writePrivate(filepath.Join(profile, "control.json"), s.controlRecord(port)); err != nil {
 		return err
 	}
 	s.controlPublished = true
@@ -540,6 +546,12 @@ func (s *Server) handler() http.Handler {
 				http.Error(w, "Origin refused", 403)
 				return
 			}
+		}
+		// The identity proof answers before any credential is sent, on this
+		// listener only, in every mode (control_proof.go).
+		if r.URL.Path == controllerProofPath {
+			s.controllerProof(w, r)
+			return
 		}
 		// Launcher-token routes are handled only by this listener, never by a
 		// selected workload. They perform their own authentication.

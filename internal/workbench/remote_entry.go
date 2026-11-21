@@ -88,6 +88,9 @@ func (s *Server) remoteManifest(w http.ResponseWriter, r *http.Request) {
 func ServerEntry(configPath string) (RemoteEntry, error) {
 	var result RemoteEntry
 	c, err := connectController(filepath.Dir(configPath))
+	if controllerIdentityError(err) {
+		return result, err
+	}
 	if err != nil {
 		return result, errors.New("云端 Super Cage 服务尚未运行或无法认证，请检查服务状态")
 	}

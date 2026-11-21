@@ -236,7 +236,10 @@ func agentCheckController(c *controllerClient, configPath string) error {
 }
 
 func agentConnect(ctx context.Context, configPath string) (*controllerClient, error) {
-	c, err := connectController(filepath.Dir(configPath))
+	c, err := connectProvenController(filepath.Dir(configPath))
+	if controllerIdentityError(err) {
+		return nil, &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
+	}
 	if err != nil {
 		return nil, &AgentError{Code: "service_unavailable", Message: "The local Super Cage controller is unavailable. Run service.start or doctor.", NextAction: "service.start"}
 	}
