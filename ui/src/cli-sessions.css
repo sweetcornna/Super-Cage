@@ -13,9 +13,10 @@
    title (the tooltip and the unpin action still say both); the live dot stays. */
 .sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) :is(.session-owner-chip, .tab-pin) { display: none; }
 .sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) .session-activity { margin-left: auto; }
-/* A Codex row's account label ("Codex · 工作") gives way the same way; the
-   pane header and the row's tooltip still name the account. */
-.sidebar-tab:has(.provider-mark-codex):is(:hover, :focus-within, :has([aria-expanded="true"])) .claude-tab-profile { display: none; }
+/* A Codex session row's account label ("Codex · 工作") gives way the same way;
+   the pane header and the row's tooltip still name the account. Plain Codex
+   terminal and login tabs keep theirs. */
+.sidebar-tab:has([data-codex-session]):is(:hover, :focus-within, :has([aria-expanded="true"])) .claude-tab-profile { display: none; }
 /* Home rows of Codex sessions (workbench-home.jsx). */
 .home-recent .home-owner { display: inline-flex; flex: none; align-items: center; gap: 8px; margin-right: 6px; }
 .home-recent .home-row-error { margin: -2px 16px 10px 44px; color: var(--error); font-size: var(--fs-caption); line-height: 1.5; overflow-wrap: anywhere; }

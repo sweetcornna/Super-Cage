@@ -345,6 +345,7 @@ export function WorkspaceTabs({
               <button
                 role={tab.historySession ? undefined : "tab"}
                 className={tab.historySession ? "sidebar-session" : undefined}
+                data-codex-session={tab.cli_session_id && terminalProvider(tab) === "codex" ? "" : undefined}
                 aria-busy={opening || undefined}
                 aria-describedby={openError ? errorID : undefined}
                 aria-description={runningElsewhere ? runningNotice : ownerChip ? ownerChip.tooltip : undefined}

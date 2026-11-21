@@ -208,8 +208,10 @@ test("a newer server's remaining lease decides open or closed on this client's c
   assert.equal(status.safety.gate.lease_remaining_ms, 90000, "the answer itself is not changed");
   assert.equal(networkState(read, now).mode, "open");
   assert.equal(networkState(read, Date.parse("2026-11-21T08:21:31Z")).mode, "closed");
-  // Two reads a few hundred ms apart that say the same give the same object content.
-  assert.deepEqual(withLeaseClock({ ...status, safety: { gate: { ...status.safety.gate, lease_remaining_ms: 89800 } } }, now + 200), read);
+  // Two reads a few hundred ms apart that say the same give the same object
+  // content, though the server projects until again on each read.
+  assert.deepEqual(withLeaseClock({ ...status, safety: { gate: { ...status.safety.gate, until: "2026-11-21T08:19:00.000000042+00:00", lease_remaining_ms: 89800 } } }, now + 200), read);
+  assert.equal(read.safety.gate.until, "2026-11-21T08:19:00.000Z");
   // Nothing left: closed at once, whatever until says.
   const ended = withLeaseClock({ vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T09:00:00Z", lease_remaining_ms: 0 } } }, now);
   assert.equal(networkState(ended, now + 1000).mode, "closed");

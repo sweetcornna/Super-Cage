@@ -10,18 +10,20 @@ export function isSafetyCheckMessage(message) {
 
 // The lease on this client's clock. A newer server sends
 // safety.gate.lease_remaining_ms beside until (its own wall clock, projected
-// so that a host sleep does not leave it in the past); a status read keeps
-// the remaining time as lease_end = when it arrived + remaining, in whole
-// seconds so that answers that say the same stay equal (no re-render), and
-// drops the field that changes on every read. An older server sends until
-// only, which is compared as before.
+// on every read so that a host sleep does not leave it in the past); a status
+// read keeps the remaining time as lease_end = when it arrived + remaining.
+// Both lease_end and until are kept in whole seconds and the remaining time
+// is dropped, so that answers that say the same stay equal (no re-render on
+// every poll). An older server sends until only, which is compared as before.
 export function withLeaseClock(status, receivedAt = Date.now()) {
   const gate = status?.safety?.gate;
   const remaining = gate?.lease_remaining_ms;
   if (!gate || typeof remaining !== "number" || !Number.isFinite(remaining)) return status;
   const { lease_remaining_ms: _remaining, ...rest } = gate;
   const lease_end = Math.round((receivedAt + Math.max(0, remaining)) / 1000) * 1000;
-  return { ...status, safety: { ...status.safety, gate: { ...rest, lease_end } } };
+  const until = Date.parse(gate.until);
+  return { ...status, safety: { ...status.safety, gate: { ...rest, lease_end,
+    ...(Number.isFinite(until) && { until: new Date(Math.round(until / 1000) * 1000).toISOString() }) } } };
 }
 
 const leaseEnd = (gate) => (Number.isFinite(gate?.lease_end) ? gate.lease_end : Date.parse(gate?.until));
