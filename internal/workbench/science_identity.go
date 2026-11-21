@@ -113,7 +113,7 @@ func identityFromGuestAudit(audit scienceGuestAudit, timezone, browserLanguage s
 	if audit.Device == nil || audit.Device.UserAgent == "" {
 		return scienceIdentity{}, errors.New("隔离浏览器没有返回它的浏览器标识，请更新环境组件后重试")
 	}
-	if timezone == "" || audit.Timezone != timezone || audit.ExpectedTimezone != timezone || !scienceZoneName.MatchString(timezone) {
+	if timezone == "" || !sameScienceZone(audit.Timezone, timezone) || !sameScienceZone(audit.ExpectedTimezone, timezone) || !scienceZoneName.MatchString(timezone) {
 		return scienceIdentity{}, errors.New("隔离浏览器的时区与已确认的环境时区不一致，请重新检测网络后再试")
 	}
 	if _, err := time.LoadLocation(timezone); err != nil {
@@ -187,6 +187,38 @@ func (s *Server) readScienceIdentity(ctx context.Context) (scienceIdentity, erro
 	return identityFromGuestAudit(audit, cfg.Timezone, cfg.BrowserLanguage)
 }
 
+// chromeZoneName is the name Chrome's Intl reports for zone (round-2 N8): an
+// override of Asia/Kolkata reads back as Asia/Calcutta.
+func chromeZoneName(zone string) string {
+	if name, ok := scienceChromeZone[zone]; ok {
+		return name
+	}
+	return zone
+}
+
+// sameScienceZone reports whether two names are one zone as Chrome sees it.
+// Chrome reports both names the same way, so a page cannot tell them apart.
+func sameScienceZone(a, b string) bool { return a != "" && chromeZoneName(a) == chromeZoneName(b) }
+
+// scienceZoneNames lists the names a page may use for zone, for the audit:
+// zone itself, Chrome's name for it and the other area/location names Chrome
+// reports the same way (bare names such as GMT or Zulu would match ordinary
+// text).
+func scienceZoneNames(zone string) []string {
+	names := []string{zone}
+	reported := chromeZoneName(zone)
+	if reported != zone {
+		names = append(names, reported)
+	}
+	for name, other := range scienceChromeZone {
+		if other == reported && name != zone && strings.Contains(name, "/") {
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names[1:])
+	return names
+}
+
 // jsOffset is new Date().getTimezoneOffset() in zone at now: minutes, positive
 // west of UTC.
 func jsOffset(zone string, now time.Time) (int, bool) {
@@ -242,7 +274,7 @@ func checkScienceProbe(guest scienceIdentity, reports []scienceProbeReport, now 
 		switch {
 		case !present:
 			return label + "没有完成身份核对"
-		case report.Timezone != guest.Timezone:
+		case !sameScienceZone(report.Timezone, guest.Timezone):
 			return label + "看到的时区不是环境时区"
 		case report.Offset != offset:
 			return label + "看到的 UTC 偏移不是环境的"
@@ -317,9 +349,11 @@ func newScienceAudit(host scienceHostIdentity, guest scienceIdentity, now time.T
 		return audit
 	}
 	audit.Distinct.Known = true
-	if host.Timezone != "" && host.Timezone != guest.Timezone {
+	if host.Timezone != "" && !sameScienceZone(host.Timezone, guest.Timezone) {
 		audit.Distinct.Timezone = true
-		audit.zone = []string{host.Timezone, strings.ReplaceAll(host.Timezone, "/", `\/`), strings.ReplaceAll(host.Timezone, "/", "%2F"), strings.ReplaceAll(host.Timezone, "/", "%2f")}
+		for _, name := range scienceZoneNames(host.Timezone) {
+			audit.zone = append(audit.zone, name, strings.ReplaceAll(name, "/", `\/`), strings.ReplaceAll(name, "/", "%2F"), strings.ReplaceAll(name, "/", "%2f"))
+		}
 	}
 	guestOffset, _ := jsOffset(guest.Timezone, now)
 	if host.Offset != nil && *host.Offset != guestOffset {
