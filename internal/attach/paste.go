@@ -277,8 +277,9 @@ func readImage(path string) ([]byte, error) {
 		err  error
 	}
 	done := make(chan result, 1)
+	load := loadImage // read here: the reader may start after a timeout
 	go func() {
-		data, err := loadImage(path)
+		data, err := load(path)
 		done <- result{data, err}
 	}()
 	timer := time.NewTimer(imageReadTimeout)
