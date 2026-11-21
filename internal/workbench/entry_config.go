@@ -516,6 +516,10 @@ func entryHostBlock(paths entryPaths, environment, name, alias string) string {
 		{"ObscureKeystrokeTiming", "no"},
 		{"ServerAliveInterval", "15"},
 		{"ServerAliveCountMax", "4"},
+		// A refused dial prints one Chinese line from the proxy; ssh's own
+		// "Connection closed by UNKNOWN port 65535" after it only confuses.
+		// ssh -v still raises the level, since the command line wins.
+		{"LogLevel", "ERROR"},
 	} {
 		fmt.Fprintf(&b, "  %s %s\n", option[0], option[1])
 	}
