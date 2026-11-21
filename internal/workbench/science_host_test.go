@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -583,25 +584,100 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 }
 
 func TestScienceEntryKeepsTheSwitchLocal(t *testing.T) {
-	workload := scienceWorkload(t)
+	workload := scienceWorkload(t) // scienceHostOS is "windows"
 	entry := scienceEntry(t, workload)
-	for _, path := range []string{"/api/claude-science/host-render", "/api/claude-science/ticket"} {
-		r := httptest.NewRequest("POST", entry.origin+path, strings.NewReader("{}"))
-		// No local environment is selected in this entry fixture: as for a
-		// remote host, the entry answers itself.
-		if !entry.scienceEntryRefuses(httptest.NewRecorder(), r) {
-			t.Fatalf("%s forwarded without a local selection", path)
+	refused := func(path string) bool {
+		t.Helper()
+		w := httptest.NewRecorder()
+		if !entry.scienceEntryRefuses(w, httptest.NewRequest("POST", entry.origin+path, strings.NewReader("{}"))) {
+			return false
+		}
+		if w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), scienceReasonHostClient) {
+			t.Fatalf("%s: %d %s", path, w.Code, w.Body)
+		}
+		return true
+	}
+	selectView := func(mode string) {
+		ctx, cancel := context.WithCancel(context.Background())
+		d := entry.remote.desktop
+		d.mu.Lock()
+		previous := d.active
+		d.generation, d.active = "view-"+mode, &desktopTarget{id: "view-" + mode, mode: mode, ctx: ctx, cancel: cancel}
+		d.mu.Unlock()
+		if previous != nil {
+			previous.cancel()
 		}
 	}
+	gated := []string{"/api/claude-science/host-render", "/api/claude-science/ticket"}
+	check := func(why string, want bool) {
+		t.Helper()
+		for _, path := range gated {
+			if got := refused(path); got != want {
+				t.Fatalf("%s: %s refused=%v", why, path, got)
+			}
+		}
+	}
+	check("nothing selected", true)
+	selectView("remote")
+	check("remote host selected", true)
+	selectView("local")
+	check("this computer's environment selected", false)
 	for _, path := range []string{"/api/claude-science", "/api/claude-science/release", "/api/claude-science/open"} {
-		r := httptest.NewRequest("POST", entry.origin+path, strings.NewReader("{}"))
-		if entry.scienceEntryRefuses(httptest.NewRecorder(), r) {
+		if refused(path) {
 			t.Fatalf("%s refused", path)
 		}
 	}
+	withScienceHostOS(t, "darwin")
+	check("macOS entry", true)
 	// A workload never refuses here.
 	if workload.scienceEntryRefuses(httptest.NewRecorder(), httptest.NewRequest("POST", workload.origin+"/api/claude-science/ticket", nil)) {
 		t.Fatal("workload refused")
+	}
+}
+
+// The shell finds a front by the pid next to science_port: publishing
+// must keep the workload's own record.
+func TestSciencePublishKeepsTheWorkloadRecord(t *testing.T) {
+	s := scienceWorkload(t)
+	s.preferences.ScienceHostRender = true
+	s.syncScienceFront()
+	front := s.scienceFrontRunning()
+	if front == nil {
+		t.Fatal("no front")
+	}
+	read := func() controlFile {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(s.profile, "control.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var record controlFile
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatal(err)
+		}
+		if record.PID != os.Getpid() || record.Port != 17777 || record.Token != s.token {
+			t.Fatalf("workload record lost: %+v", record)
+		}
+		return record
+	}
+	if record := read(); record.SciencePort != front.port || record.ScienceIdentity != nil {
+		t.Fatalf("after start: %+v", record)
+	}
+	identity, _ := json.Marshal(testScienceIdentity)
+	for _, keep := range []*scienceIdentity{&testScienceIdentity, nil} { // a ticket, then a restart of the front's watch
+		if err := s.publishScienceControl(front.port, keep, true); err != nil {
+			t.Fatal(err)
+		}
+		record := read()
+		published, _ := json.Marshal(record.ScienceIdentity)
+		if record.SciencePort != front.port || string(published) != string(identity) {
+			t.Fatalf("after a ticket: %+v", record)
+		}
+	}
+	s.preferences.ScienceHostRender = false
+	s.syncScienceFront()
+	if record := read(); record.SciencePort != 0 || record.ScienceIdentity != nil {
+		t.Fatalf("after off: %+v", record)
 	}
 }
 

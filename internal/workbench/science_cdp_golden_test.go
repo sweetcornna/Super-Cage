@@ -21,6 +21,9 @@ func TestScienceCDPGolden(t *testing.T) {
 		"arm":     scienceOverrideCalls(testScienceIdentity),
 		"worker":  scienceWorkerCalls(testScienceIdentity),
 		"disarm":  scienceDisarmCalls(),
+		// The shell's switches; the browser tests replace port 9 (nothing
+		// listens) with a recording proxy.
+		"backstop": scienceBackstopArgs(9),
 	}
 	want, err := json.MarshalIndent(golden, "", "  ")
 	if err != nil {

@@ -44,6 +44,12 @@
       }
     }
   ],
+  "backstop": [
+    "--proxy-server=http://127.0.0.1:9",
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--disable-shared-workers",
+    "--no-pings"
+  ],
   "control": {
     "port": 17777,
     "token": "",

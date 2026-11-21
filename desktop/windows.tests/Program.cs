@@ -80,8 +80,8 @@ assertions = 0;
         Check(ScienceFrame.Arguments(scienceRoot) == null, "switches while host rendering is off");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{\n  \"keyboard\": \"pc\",\n  \"science_host_render\": true\n}");
         Check(ScienceFrame.Arguments(scienceRoot) == ScienceFrame.BackstopArguments, "no switches with host rendering on in a named environment");
-        Check(ScienceFrame.BackstopArguments.Contains("--proxy-server=http://127.0.0.1:9") && ScienceFrame.BackstopArguments.Contains("--webrtc-ip-handling-policy=disable_non_proxied_udp") &&
-            ScienceFrame.BackstopArguments.Contains("--disable-shared-workers") && ScienceFrame.BackstopArguments.Contains("--no-pings"), "a network switch is missing");
+        Check(ScienceFrame.BackstopArguments == string.Join(' ', golden["backstop"]!.AsArray().Select(item => item!.GetValue<string>())),
+            "the window's switches differ from the ones the browser tests prove");
 
         var control = golden["control"]!.DeepClone().AsObject();
         control["pid"] = Environment.ProcessId; // the golden record names no process

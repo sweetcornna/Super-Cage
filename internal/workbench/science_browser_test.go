@@ -201,7 +201,7 @@ func newScienceWorkbenchPage(t *testing.T, frontOrigin string, ticket func() str
 		}
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+r.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frontOrigin+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<!doctype html><title>Super Cage</title><iframe id=\"science\" src=\"%s\" sandbox=\"allow-scripts allow-same-origin allow-forms\" allow=\"clipboard-write\" referrerpolicy=\"no-referrer\" style=\"width:1000px;height:700px\"></iframe>", ticket())
+		fmt.Fprintf(w, "<!doctype html><title>Super Cage</title><iframe id=\"science\" src=\"%s\" sandbox=\"allow-scripts allow-same-origin allow-forms allow-modals\" allow=\"clipboard-write\" referrerpolicy=\"no-referrer\" style=\"width:1000px;height:700px\"></iframe>", ticket())
 	}))
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
