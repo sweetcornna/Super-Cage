@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { categoryMeta, dayLabel, formatBytes, groupByDay, isClearShortcut, keptBy, keptDomain, relativeVisit, resultLine, siteOf, siteOfURL } from "./browser-data-state.mjs";
+import { categoryMeta, dayLabel, formatBytes, groupByDay, keptBy, keptDomain, relativeVisit, resultLine, siteOf, siteOfURL } from "./browser-data-state.mjs";
 
 test("sizes read like a browser's", () => {
   assert.equal(formatBytes(0), "0 B");
@@ -23,7 +23,7 @@ test("category lines say how much and, within a range, at most", () => {
 
 test("the result line names what was cleared and what came back", () => {
   assert.equal(resultLine({ cleared: ["history", "site", "cache"], freedBytes: 5 * 1024 * 1024, reloaded: 2, kept: ["https://github.com"] }),
-    "已清除浏览记录、Cookie 和网站数据、缓存的图片和文件，释放约 5 MB，2 个网页已重新加载，保留了 1 个保持登录的地址。");
+    "已清除浏览记录、Cookie 和网站数据、缓存的图片和文件，释放约 5 MB，2 个网页已重新加载，保持登录的网站和内置页面未受影响。");
   assert.equal(resultLine({ cleared: ["site"], sites: 3, freedBytes: 0, reloaded: 0 }), "已清除 3 个网站的数据。");
   assert.equal(resultLine({ cleared: [] }), "没有需要清除的内容。");
 });
@@ -43,7 +43,7 @@ test("history groups by local day, newest first", () => {
   assert.equal(relativeVisit(now - 3 * 3_600_000, now), "3 小时前访问");
 });
 
-test("sites, kept domains and the shortcut", () => {
+test("sites and kept domains", () => {
   assert.equal(siteOf("mail.google.com"), "google.com");
   assert.equal(siteOf("news.bbc.co.uk"), "bbc.co.uk");
   assert.equal(siteOfURL("http://127.0.0.1:18080/?folder=/w"), "127.0.0.1");
@@ -55,8 +55,4 @@ test("sites, kept domains and the shortcut", () => {
   assert.ok(keptBy("gist.github.com", [{ domain: "github.com" }]));
   assert.ok(keptBy("github.com", [{ domain: "gist.github.com" }]));
   assert.ok(!keptBy("notgithub.com", [{ domain: "github.com" }]));
-  assert.ok(isClearShortcut({ key: "Backspace", shiftKey: true }, true));
-  assert.ok(isClearShortcut({ key: "Delete", shiftKey: true }, true));
-  assert.ok(!isClearShortcut({ key: "Backspace", shiftKey: false }, true));
-  assert.ok(!isClearShortcut({ key: "Backspace", shiftKey: true }, false));
 });

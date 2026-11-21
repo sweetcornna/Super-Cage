@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Archive, ArrowLeft, ArrowRight, ArrowUpRight, ChevronRight, FolderOpen,
-  Globe2, Cookie, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, Plus, RefreshCw, X } from "lucide-react";
+  Globe2, Cookie, Eraser, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, Plus, RefreshCw, X } from "lucide-react";
 import { BrowserVaultBar } from "./password-vault";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { BrowserFavorites } from "./browser-favorites";
@@ -9,6 +9,7 @@ import { BrowserCookies } from "./browser-cookies";
 import { tabName } from "./workspace-state.mjs";
 import { shortcut } from "./platform.mjs";
 import { BrandMark } from "./brand";
+import { openBrowserData } from "./browser-data-launcher";
 
 export const ExpandSidebar = ({ onClick }) => <button className="icon-button sidebar-expand"
   aria-label="展开侧栏" onClick={onClick}>
@@ -183,7 +184,9 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
         </button>
       </div>
       <form className="address-bar" onSubmit={event => { event.preventDefault(); onNavigate(address); }}>
-        {tab.incognito ? <span className="browser-private-badge" title="关闭全部无痕标签后清理此会话"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}
+        {/^https?:/.test(url) && !tab.login ? <button type="button" className="address-site" aria-label="网站数据" title="此网站的 Cookie 和数据" disabled={!ready}
+          onClick={event => openBrowserData({ view: "popover", tab, anchor: event.currentTarget })}>{tab.incognito ? <span className="browser-private-badge"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}</button>
+          : tab.incognito ? <span className="browser-private-badge" title="关闭全部无痕标签后清理此会话"><ScanEye size={13} />无痕</span> : <Globe2 size={13} />}
         <input
           aria-label="网页地址或搜索"
           value={address}
@@ -229,7 +232,8 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
       <div className="browser-more-actions">
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewPrivate}><ScanEye size={16} />新建无痕标签</button>
         {tab.incognito && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewRegular}><Globe2 size={16} />新建普通标签</button>}
-        {!tab.login && tab.kind !== "browser-settings" && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => setCookiesOpen(true)}><Cookie size={16} />管理 Cookie</button>}
+        {!tab.login && tab.kind !== "browser-settings" && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => openBrowserData({ view: "site", tab, fallback: () => setCookiesOpen(true) })}><Cookie size={16} />管理 Cookie</button>}
+        {!tab.login && <button className="browser-menu-item" role="menuitem" title={shortcut("清除浏览数据 ⌘⇧⌫").replace("+⌫", "+Delete")} disabled={!ready || busy} onClick={() => openBrowserData({ view: "clear", tab })}><Eraser size={16} />清除浏览数据…</button>}
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => onSettings('extensions')}><Puzzle size={16} />扩展</button>
         <BrowserDownloads menu anchorRef={toolsTrigger} downloads={downloads} ready={ready && !busy} onStatus={onStatus} />
         {tab.kind === "editor" && <button className="browser-menu-item" role="menuitem" aria-label="恢复编辑器" title="单独重启编辑器"

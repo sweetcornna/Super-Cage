@@ -56,7 +56,7 @@ export function resultLine(result) {
   if (result.sites) parts[0] = `已清除 ${result.sites} 个网站的数据`;
   if (result.freedBytes > 0) parts.push(`释放约 ${formatBytes(result.freedBytes)}`);
   if (result.reloaded > 0) parts.push(`${result.reloaded} 个网页已重新加载`);
-  if (result.kept?.length) parts.push(`保留了 ${result.kept.length} 个保持登录的地址`);
+  if (result.kept?.length) parts.push("保持登录的网站和内置页面未受影响");
   return parts.join("，") + "。";
 }
 
@@ -130,11 +130,5 @@ export function keptDomain(value) {
 
 export const keptBy = (site, keep = []) => keep.find(entry => site === entry.domain || site.endsWith("." + entry.domain) || entry.domain.endsWith("." + site));
 
-// ⌘⇧⌫ on a Mac keyboard, Ctrl+Shift+Delete (or Backspace) elsewhere: the
-// browsers' own shortcut for this dialog.
-export function isClearShortcut(event, primary) {
-  const key = String(event.key || "").toLowerCase();
-  return Boolean(primary && event.shiftKey && !event.altKey && (key === "backspace" || key === "delete"));
-}
 
 export const builtInNote = "本机地址的 Cookie 不区分端口：保护文件编辑器和 Claude Science 时，127.0.0.1 和 localhost 上其他预览服务的 Cookie 也会保留，它们的网站存储仍会清除。";

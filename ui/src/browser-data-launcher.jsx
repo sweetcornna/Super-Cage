@@ -1,4 +1,5 @@
 import React, { Suspense, lazy, useEffect, useRef, useState } from "react";
+import "./browser-data-launcher.css";
 
 // Main-bundle wiring for browser data management; everything else loads with
 // browser-data.jsx on first use. Views: clear, site, popover, reset, and

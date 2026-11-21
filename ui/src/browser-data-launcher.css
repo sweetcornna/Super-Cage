@@ -1,0 +1,3 @@
+/* The address bar's site button opens the site menu (browser-data.jsx). */
+.address-site { display: inline-flex; flex: none; align-items: center; gap: 4px; min-height: 24px; margin-left: -6px; padding: 0 6px; border: 0; border-radius: var(--r-sm); background: transparent; color: inherit; }
+.address-site:hover:not(:disabled), .address-site[aria-expanded="true"] { background: var(--soft); }

@@ -200,12 +200,13 @@ export class BrowserData {
     const bytes = await this.usage(scope, list);
     const sites = new Map();
     const entry = site => {
-      if (!sites.has(site)) sites.set(site, { site, cookies: 0, cookieBytes: 0, bytes: 0, last: 0, origins: [] });
+      if (!sites.has(site)) sites.set(site, { site, cookies: 0, cookieBytes: 0, bytes: 0, last: 0, origins: [], stored: 0 });
       return sites.get(site);
     };
     list.forEach((origin, index) => {
       const item = entry(siteOf(originHost(origin)));
       item.bytes += bytes[index];
+      if (bytes[index] > 0) item.stored++;
       item.last = Math.max(item.last, origins.get(origin).last);
       item.origins.push(origin);
     });
@@ -232,7 +233,8 @@ export class BrowserData {
       bytes: list.reduce((sum, site) => sum + site.bytes + site.cookieBytes, 0),
       sites: list.slice(current * pageSize, (current + 1) * pageSize).map(site => ({
         site: site.site, cookies: site.cookies, bytes: site.bytes + site.cookieBytes, last: site.last,
-        origins: site.origins.length, protected: protectedSites.has(site.site),
+        // Origins that hold storage; the index also has guesses from cookie hosts.
+        origins: site.stored, protected: protectedSites.has(site.site),
       })),
     };
   }

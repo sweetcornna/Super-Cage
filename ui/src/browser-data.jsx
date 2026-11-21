@@ -133,7 +133,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
         </div>
         {!isPrivate && types.has("site") && <label className="check-line bd-keep">
           <input type="checkbox" checked={keepEnabled} disabled={phase === "clearing"} onChange={event => setKeepEnabled(event.target.checked)} />
-          <span>保留{kept ? ` ${kept} 个` : ""}保持登录的网站和 Super Cage 内置页面（文件编辑器、Claude Science）</span>
+          <span>跳过{kept ? ` ${kept} 个` : ""}保持登录的网站和 Super Cage 内置页面（文件编辑器、Claude Science）</span>
           <button type="button" className="text-button" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "kept" }); }}>管理</button>
         </label>}
         <ul className="bd-aside">
@@ -347,8 +347,9 @@ function HistoryView({ onOpenPage, onBack }) {
 // ── Kept sites, automatic cleaning, reset ────────────────────
 function KeptSites({ settings, onSettings, tabs }) {
   const [domain, setDomain] = useState(""), [error, setError] = useState(""), [busy, setBusy] = useState(false);
-  const current = (tabs || []).find(tab => tab.kind === "web" && !tab.incognito && !tab.login && hostOf(tab.url));
-  const currentSite = current ? siteOfURL(current.url) : "";
+  // Sites of the open regular pages, offered as one-click additions.
+  const open = [...new Set((tabs || []).filter(tab => !tab.incognito && !tab.login && hostOf(tab.url)).map(tab => siteOfURL(tab.url)))]
+    .filter(site => site && !keptBy(site, settings?.keep)).slice(0, 3);
   const change = async (action, value) => {
     setBusy(true); setError("");
     try { onSettings(await saveSettings({ action, domain: value })); if (action === "keep-add") setDomain(""); }
@@ -368,10 +369,10 @@ function KeptSites({ settings, onSettings, tabs }) {
     <form className="bd-add" onSubmit={event => { event.preventDefault(); if (typed) change("keep-add", typed); else setError("请输入网站域名，例如 github.com"); }}>
       <input aria-label="要保留的网站" placeholder="输入域名，例如 github.com" maxLength={300} value={domain} disabled={busy} onChange={event => { setDomain(event.target.value); setError(""); }} />
       <button className="compact" disabled={busy || !domain.trim()}><Plus size={15} />添加</button>
-      {currentSite && !keptBy(currentSite, settings?.keep) && <button type="button" className="compact" disabled={busy} onClick={() => change("keep-add", currentSite)}>添加 {currentSite}</button>}
     </form>
+    {open.length > 0 && <div className="bd-suggest"><span>从打开的网页添加：</span>{open.map(site => <button key={site} type="button" className="compact" disabled={busy} onClick={() => change("keep-add", site)}><Plus size={14} />{site}</button>)}</div>}
     {error && <p className="error-message" role="alert">{error}</p>}
-    <p className="field-help">{builtInNote} 取消清除对话框里的“保留”会一并清除内置页面的登录，文件编辑器可用编辑器菜单的“恢复编辑器”重新进入。</p>
+    <p className="field-help">{builtInNote} 清除时取消勾选“跳过…”会一并清除内置页面的登录，文件编辑器可用浏览器菜单的“恢复编辑器”重新进入。</p>
   </section>;
 }
 
@@ -450,7 +451,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   return <div className="bd-privacy">
     <div className="bd-entry-list">
       <button className="bd-entry" onClick={() => openBrowserData({ view: "clear" })}><Eraser size={18} />
-        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{shortcut("⌘⇧⌫").replace("Shift+⌫", "Shift+Delete").replace("Ctrl+Shift+⌫", "Ctrl+Shift+Delete")}</kbd><ChevronRight size={16} /></button>
+        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{shortcut("⌘⇧⌫").replace("+⌫", "+Delete")}</kbd><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("sites")}><Cookie size={18} />
         <span><strong>网站数据</strong><small>查看各网站的 Cookie 和存储，逐个或批量清除</small></span><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("history")}><History size={18} />
@@ -507,7 +508,7 @@ function SitePopover({ tab, anchor, onClose }) {
       <button className="compact danger" disabled={!detail} onClick={() => setPhase("confirm")}><Trash2 size={14} />清除此网站数据</button></>
     : <><button className="compact" disabled={phase === "clearing"} onClick={() => setPhase("view")}>取消</button>
       <button className="compact danger-fill" disabled={phase === "clearing"} onClick={clear}>{phase === "clearing" ? "正在清除…" : "确认清除"}</button></>;
-  return <Modal title={site} anchor={anchor} onClose={phase === "clearing" ? undefined : onClose} footer={footer}>
+  return <Modal title={site} anchor={anchor} align="start" onClose={phase === "clearing" ? undefined : onClose} footer={footer}>
     <div className="modal-body bd-popover" data-browser-dialog>
       {phase === "done" ? <p role="status">{resultLine(result)}</p> : phase === "view" ? <>
         <p className="bd-popover-meta">{session === "private" ? "无痕会话 · " : ""}{detail ? `${formatCount(detail.total)} 个 Cookie · 网站存储 ${formatBytes(storage)}` : error ? "" : "正在读取…"}</p>
@@ -524,7 +525,7 @@ function SiteDialog({ tab, onClose }) {
   const site = siteOfURL(tab?.url), session = tab?.incognito ? "private" : "normal";
   const [settings, setSettings] = useState(null);
   useEffect(() => { loadSettings().then(setSettings); }, []);
-  return <Modal title="网站数据" wide onClose={onClose} footer={<button className="compact" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "sites" }); }}>所有网站的数据<ChevronRight size={14} /></button>}>
+  return <Modal title="Cookie 和网站数据" wide onClose={onClose} footer={<button className="compact" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "sites" }); }}>所有网站的数据<ChevronRight size={14} /></button>}>
     <div className="modal-body bd-site-dialog" data-browser-dialog>
       {!available ? <p className="bd-loading">正在读取…</p> : !available.available ? <BrowserCookies tab={tab} onClose={onClose} /> :
         <SiteDetail site={site} session={session} settings={settings} onSettings={setSettings} compact />}
@@ -538,9 +539,11 @@ export default function BrowserDataApp({ request, onClose, tabs = [], onInternal
   const tab = request.tab;
   useEffect(() => {
     if (available && !available.available && request.view === "clear") { onClose(); onInternal?.("clear"); }
+    // The address bar's own cookie panel stays for servers and guests without browser data.
+    if (available && !available.available && request.fallback) { onClose(); request.fallback(); }
     if (available?.available && (request.view === "site" || request.view === "popover") && !siteOfURL(tab?.url)) { onClose(); openBrowserData({ view: "privacy", section: "sites" }); }
   }, [available]);
-  if (request.view === "site") return siteOfURL(tab?.url) || available?.available === false ? <SiteDialog tab={tab} onClose={onClose} /> : null;
+  if (request.view === "site") return available && (siteOfURL(tab?.url) || !available.available) && !(request.fallback && !available.available) ? <SiteDialog tab={tab} onClose={onClose} /> : null;
   if (!available?.available) return null;
   if (request.view === "clear") return <ClearDialog tab={tab} tabs={tabs} preset={request.preset} onClose={onClose} onInternal={onInternal} onVault={onVault} />;
   if (request.view === "popover" && siteOfURL(tab?.url)) return <SitePopover tab={tab} anchor={request.anchor} onClose={onClose} />;

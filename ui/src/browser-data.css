@@ -124,6 +124,8 @@
 .bd-add { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 12px 0 0; }
 .bd-add input { flex: 1 1 14em; min-width: 0; min-height: var(--h-compact); }
 .bd-add button { display: inline-flex; align-items: center; gap: 6px; }
+.bd-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; color: var(--muted); font-size: var(--fs-caption); }
+.bd-suggest button { display: inline-flex; align-items: center; gap: 4px; }
 .bd-block .field-help { margin-bottom: 0; }
 .bd-block .toggle-row { padding-top: 8px; }
 .bd-auto { padding-top: 14px; }

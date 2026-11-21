@@ -39,6 +39,7 @@ import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPan
 import { useDownloadNotifications, useDesktopFiles } from "./browser-downloads";
 import { BrowserUploads } from "./browser-uploads";
 import { BrowserSettingsPage } from "./browser-settings";
+import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
 import { AudioControls, useAudioOutput } from "./audio";
 import { EnvironmentClock } from "./environment-clock";
 import { ProjectDialog } from "./project-dialog";
@@ -1106,6 +1107,7 @@ function App() {
       if (k === "t" && !event.shiftKey) handle = newPage;
       if (k === "n" && event.shiftKey) handle = () => openBrowserPage(undefined, true);
       if (k === "d") handle = () => document.dispatchEvent(new Event("cage-add-favorite"));
+      if (event.shiftKey && (k === "backspace" || k === "delete") && browserAvailable && !terminal && !desktopOpen) handle = () => openBrowserData({ view: "clear", tab: liveBrowser });
       if (k === "enter" && event.shiftKey) handle = newTerminalHere;
       if (k === "l")
         handle = () => {
@@ -1440,6 +1442,7 @@ function App() {
     onRecover={() => recoverEditor(tab)} />;
   const dialogs = (
     <>
+      <BrowserDataHost tabs={browserTabs} onSettings={openBrowserSettings} onInternal={openInternalPage} onVault={() => openSettings("vault")} />
       {dialog && (
         <Modal
           title={dialog.title}
