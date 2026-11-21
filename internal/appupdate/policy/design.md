@@ -96,7 +96,7 @@ Actors: **S** shell, **C** `cage` CLI child of the shell, **W** local workload (
 | 12 | Sync components | W: if `environment_update_required` ⇒ `environment-update` job | native guests, or a still-running Linux VM. Failure ⇒ `failed(components)`, next step 更新环境组件. |
 | 13 | Tools (only if required) | W: pinned tool (gh, code-server, mise) below the new app's pin ⇒ `environment-tools` job | one version probe at this point only. Failure ⇒ `failed(tools)`, next step 更新环境工具. |
 | 14 | Gate check | W: the start job already runs `checkNetworkIfWanted`; W reads the published gate | gate open, or paused by the user's own saved intent ⇒ ok. Else `failed(network)`, next step 重新检查网络. |
-| 15 | "已升级到 x.y.z" | W chain `done`, attempt ok | UI shows the release notes link (`https://github.com/sweetcornna/Super-Cage/releases/tag/v<x.y.z>`) and reopens the recorded terminal tabs (Claude/Codex conversations resume by id). |
+| 15 | "已升级到 x.y.z" | W chain `done`, attempt ok | UI shows the release notes link (`https://github.com/sweetcornna/Super-Cage/releases/tag/v<x.y.z>`). The recorded terminal tabs are in the status (`chain.terminals`); offering to reopen them is not built yet (11.1, "Still open"). |
 
 ### 3.2 Silent path (macOS and Windows, local environment)
 Built for macOS. On Windows silent is reported unavailable until the shell changes in 11.5 land.
