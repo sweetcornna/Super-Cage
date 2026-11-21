@@ -9,7 +9,7 @@ import { BrowserCookies } from "./browser-cookies";
 import { tabName } from "./workspace-state.mjs";
 import { shortcut } from "./platform.mjs";
 import { BrandMark } from "./brand";
-import { openBrowserData } from "./browser-data-launcher";
+import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
 
 export const ExpandSidebar = ({ onClick }) => <button className="icon-button sidebar-expand"
   aria-label="展开侧栏" onClick={onClick}>
@@ -246,6 +246,10 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
     </div>
     </div>
     {cookiesOpen && <BrowserCookies key={`${tab.id}:${tab.url}`} tab={tab} onClose={() => { setCookiesOpen(false); toolsTrigger.current?.focus(); }} />}
+    <BrowserDataHost tabs={tabs} onSettings={onSettings} onVault={onManageVault} onInternal={async mode => {
+      const page = await action("/browser/internal-page", { mode });
+      if (page?.id) onSelect(page.id);
+    }} />
     {tab.incognito && <p className="browser-private-note">无痕会话 · 关闭全部无痕标签后清理网站数据；下载和主动保存的收藏会保留。</p>}
     {menu}
     {busy && <div className="progress-line" />}

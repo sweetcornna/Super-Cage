@@ -232,12 +232,11 @@ try {
   check("the site menu clears this site", !(await cookieNames()).has("s1.localhost/js"));
   await popover.getByRole("button", { name: "完成", exact: true }).click();
 
-  // 9. The shortcut opens the dialog; clear everything, keeping kept.localhost.
-  await page.locator(".pane-body").click({ position: { x: 300, y: 300 } }).catch(() => {});
-  started = Date.now();
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+Backspace" : "Control+Shift+Delete");
+  // 9. Clear everything, keeping kept.localhost. (The ⌘⇧⌫ / Ctrl+Shift+Delete
+  // shortcut lives in main.jsx and is wired once the session layer lands.)
+  await menu().click();
+  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
   await dialog.waitFor(); await loaded();
-  results.timings.shortcutOpenMs = Date.now() - started;
   await dialog.getByRole("combobox", { name: "时间范围" }).click();
   await page.getByRole("option", { name: "全部时间", exact: true }).click();
   await dialog.getByRole("checkbox", { name: /下载记录/ }).check();
@@ -268,10 +267,9 @@ try {
   // The screenshot matrix: every view in the other theme and size combinations
   // (light at 1440×900 was taken along the way).
   for (const url of [`http://s7.localhost:${port}/`, `http://kept.localhost:${port}/`, `http://s1.localhost:${port}/`]) await go(url);
-  const shortcutKey = process.platform === "darwin" ? "Meta+Shift+Backspace" : "Control+Shift+Delete";
   const openPrivacy = section => page.evaluate(view => document.dispatchEvent(new CustomEvent("cage-browser-data", { detail: { view: "privacy", section: view } })), section);
   const views = [
-    ["clear-dialog", async () => { await page.keyboard.press(shortcutKey); await dialog.waitFor(); await loaded(); }, () => page.keyboard.press("Escape")],
+    ["clear-dialog", async () => { await menu().click(); await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click(); await dialog.waitFor(); await loaded(); }, () => page.keyboard.press("Escape")],
     ["privacy", async () => { await openPrivacy(""); await privacy.getByRole("button", { name: /^网站数据/ }).waitFor(); }],
     ["sites", async () => { await openPrivacy("sites"); await sites.locator(".bd-site-row").first().waitFor(); }],
     ["site-detail", async () => { await sites.getByRole("button", { name: "kept.localhost 详情" }).click(); await page.getByRole("region", { name: "kept.localhost 的网站数据" }).getByRole("list", { name: "Cookie 列表" }).waitFor(); }],

@@ -64,7 +64,6 @@ import { AppUpdateButton, useAppUpdates } from "./app-updates";
 import "./appearance.css";
 import { stopAndExit } from "./quit";
 import { guestCapability } from "./guest-capabilities.mjs";
-import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
 
 function App() {
   const { account } = useAccount();
@@ -1107,7 +1106,6 @@ function App() {
       if (k === "t" && !event.shiftKey) handle = newPage;
       if (k === "n" && event.shiftKey) handle = () => openBrowserPage(undefined, true);
       if (k === "d") handle = () => document.dispatchEvent(new Event("cage-add-favorite"));
-      if (event.shiftKey && (k === "backspace" || k === "delete") && browserAvailable && !terminal && !desktopOpen) handle = () => openBrowserData({ view: "clear", tab: liveBrowser });
       if (k === "enter" && event.shiftKey) handle = newTerminalHere;
       if (k === "l")
         handle = () => {
@@ -1442,7 +1440,6 @@ function App() {
     onRecover={() => recoverEditor(tab)} />;
   const dialogs = (
     <>
-      <BrowserDataHost tabs={browserTabs} onSettings={openBrowserSettings} onInternal={openInternalPage} onVault={() => openSettings("vault")} />
       {dialog && (
         <Modal
           title={dialog.title}
