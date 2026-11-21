@@ -18,7 +18,12 @@ import {
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
 
-const terminalProvider = (tab) => /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
+const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
+// A Codex session another device or process writes: a quiet chip at the row's end.
+const ownerChips = {
+  phone: { label: "手机", tooltip: "手机上的一轮正在运行，点按以只读方式查看" },
+  external: { label: "外部", tooltip: "在其他 Codex 进程中打开" },
+};
 
 export function TabIcon({ kind, favicon, agent, provider = "claude", accountNumber, size = 16 }) {
   const [failed, setFailed] = useState("");
@@ -305,6 +310,7 @@ export function WorkspaceTabs({
             : "其他窗口占用中，退出原会话后可接续";
           const OwnerIcon = tab.sessionClaudeDesktop ? Monitor : TerminalSquare;
           const openError = tab.historySession && sessionOpenError?.id === tab.cli_session_id ? sessionOpenError.message : "";
+          const ownerChip = !horizontal && !vertical && ownerChips[tab.sessionOwner];
           const errorID = `session-open-error-${tab.cli_session_id}`;
           return (
             <React.Fragment key={tab.id}>
@@ -339,9 +345,10 @@ export function WorkspaceTabs({
               <button
                 role={tab.historySession ? undefined : "tab"}
                 className={tab.historySession ? "sidebar-session" : undefined}
+                data-codex-session={tab.cli_session_id && terminalProvider(tab) === "codex" ? "" : undefined}
                 aria-busy={opening || undefined}
                 aria-describedby={openError ? errorID : undefined}
-                aria-description={runningElsewhere ? runningNotice : undefined}
+                aria-description={runningElsewhere ? runningNotice : ownerChip ? ownerChip.tooltip : undefined}
                 aria-label={tab.claudeLabel ? `${title} · ${tab.claudeLabel}` : title}
                 aria-selected={tab.historySession ? undefined : tab.id === active}
                 tabIndex={
@@ -351,7 +358,7 @@ export function WorkspaceTabs({
                     : -1
                 }
                 disabled={tab.historySession ? busy || opening || runningElsewhere : !ready && tab.kind !== "terminal"}
-                title={runningElsewhere ? `${title}\n${runningNotice}` : tab.url ? `${title}\n${tab.url}` : [title, tab.claudeAccountNumber && `账号 ${tab.claudeAccountNumber}`, tab.claudeLabel].filter(Boolean).join(" · ")}
+                title={runningElsewhere ? `${title}\n${runningNotice}` : ownerChip ? `${title}\n${ownerChip.tooltip}` : tab.url ? `${title}\n${tab.url}` : [title, tab.claudeAccountNumber && `账号 ${tab.claudeAccountNumber}`, tab.claudeLabel].filter(Boolean).join(" · ")}
                 onClick={() => onSelect(tab.id)}
                 onContextMenu={(event) => showMenu(tab, event)}
                 onKeyDown={(event) => {
@@ -389,8 +396,10 @@ export function WorkspaceTabs({
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
                   provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
                 <span>{title}</span>
-                {tab.claudeLabel && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
+                {/* A phone or external row names its owner instead; the account is in the label and tooltip. */}
+                {tab.claudeLabel && !ownerChip && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
+                {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
                 {!horizontal && !vertical && (opening
                   ? <LoaderCircle size={13} className="spin session-activity" role="img" aria-label="正在打开会话" />
                   : tab.sessionActive && !runningElsewhere &&
