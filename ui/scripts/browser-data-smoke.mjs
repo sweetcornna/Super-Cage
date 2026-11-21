@@ -232,11 +232,12 @@ try {
   check("the site menu clears this site", !(await cookieNames()).has("s1.localhost/js"));
   await popover.getByRole("button", { name: "完成", exact: true }).click();
 
-  // 9. Clear everything, keeping kept.localhost. (The ⌘⇧⌫ / Ctrl+Shift+Delete
-  // shortcut lives in main.jsx and is wired once the session layer lands.)
-  await menu().click();
-  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
+  // 9. The shortcut opens the dialog; clear everything, keeping kept.localhost.
+  await page.locator(".pane-body").click({ position: { x: 300, y: 300 } }).catch(() => {});
+  started = Date.now();
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+Shift+Backspace" : "Control+Shift+Delete");
   await dialog.waitFor(); await loaded();
+  results.timings.shortcutOpenMs = Date.now() - started;
   await dialog.getByRole("combobox", { name: "时间范围" }).click();
   await page.getByRole("option", { name: "全部时间", exact: true }).click();
   await dialog.getByRole("checkbox", { name: /下载记录/ }).check();

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, ChevronRight, Clock3, Cookie, Eraser, ExternalLink, Globe2, History, KeyRound, Lock, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, X } from "lucide-react";
+import { shortcut } from "./platform.mjs";
+import { ArrowLeft, ChevronRight, Clock3, Cookie, ExternalLink, Globe2, KeyRound, LockKeyhole, Plus, RefreshCw, RotateCcw, Search, ShieldCheck, Trash2, X } from "lucide-react";
 import { api } from "./api";
 import { Modal } from "./modal";
 import { InlineSelect } from "./inline-select";
@@ -151,7 +152,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
           <button type="button" className="text-button" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "kept" }); }}>管理</button>
         </label>}
         <ul className="bd-aside">
-          <li><Lock size={14} /><span>网站权限不在这里清除。<button type="button" className="text-button" onClick={() => { onClose(); onInternal?.("permissions"); }}>查看网站权限</button></span></li>
+          <li><LockKeyhole size={14} /><span>网站权限不在这里清除。<button type="button" className="text-button" onClick={() => { onClose(); onInternal?.("permissions"); }}>查看网站权限</button></span></li>
           <li><KeyRound size={14} /><span>已保存的密码属于 Super Cage 密码保险箱。<button type="button" className="text-button" onClick={() => { onClose(); onVault?.(); }}>在设置中管理</button></span></li>
         </ul>
       </>}
@@ -335,7 +336,7 @@ function HistoryView({ onOpenPage, onBack }) {
     <header className="bd-view-head">
       {onBack && <button className="icon-button" aria-label="返回隐私与网站数据" onClick={onBack}><ArrowLeft size={16} /></button>}
       <div className="bd-view-title"><h3>浏览记录</h3><p>普通会话访问过的网页。无痕会话不保存浏览记录。</p></div>
-      <button className="compact" onClick={() => openBrowserData({ view: "clear", preset: { types: ["history"], range: "hour" } })}><Eraser size={15} />按时间清除…</button>
+      <button className="compact" onClick={() => openBrowserData({ view: "clear", preset: { types: ["history"], range: "hour" } })}><Trash2 size={15} />按时间清除…</button>
     </header>
     <div className="bd-toolbar"><label className="bd-search"><Search size={15} /><input aria-label="搜索浏览记录" placeholder="搜索标题或网址" maxLength={200} value={query} onChange={event => setQuery(event.target.value)} /></label></div>
     {confirm && <div className="bd-confirm" role="alert"><span>{confirm.text}</span>
@@ -380,7 +381,7 @@ function KeptSites({ settings, onSettings, tabs }) {
       {(settings?.keep || []).map(entry => <li key={entry.domain} className="list-row"><ShieldCheck size={16} className="bd-row-icon" />
         <span className="list-row-text"><span className="list-row-title">{entry.domain}</span><span className="list-row-meta">包含子域名</span></span>
         <button className="compact" disabled={busy} aria-label={`不再保留 ${entry.domain}`} onClick={() => change("keep-remove", entry.domain)}>移除</button></li>)}
-      <li className="list-row"><Lock size={16} className="bd-row-icon" /><span className="list-row-text"><span className="list-row-title">Super Cage 内置页面<span className="chip">内置</span></span>
+      <li className="list-row"><LockKeyhole size={16} className="bd-row-icon" /><span className="list-row-text"><span className="list-row-title">Super Cage 内置页面<span className="chip">内置</span></span>
         <span className="list-row-meta">文件编辑器、Claude Science 和浏览器组件使用的本机地址</span></span></li>
     </ul>
     <form className="bd-add" onSubmit={event => { event.preventDefault(); if (typed) change("keep-add", typed); else setError("请输入网站域名，例如 github.com"); }}>
@@ -470,13 +471,13 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   if (view === "history") return <HistoryView onOpenPage={onOpenPage} onBack={() => setView("")} />;
   return <div className="bd-privacy">
     <div className="bd-entry-list">
-      <button className="bd-entry" onClick={() => openBrowserData({ view: "clear" })}><Eraser size={18} />
-        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><ChevronRight size={16} /></button>
+      <button className="bd-entry" onClick={() => openBrowserData({ view: "clear" })}><Trash2 size={18} />
+        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{shortcut("⌘⇧⌫").replace("+⌫", "+Delete")}</kbd><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("sites")}><Cookie size={18} />
         <span><strong>网站数据</strong><small>查看各网站的 Cookie 和存储，逐个或批量清除</small></span><ChevronRight size={16} /></button>
-      <button className="bd-entry" onClick={() => setView("history")}><History size={18} />
+      <button className="bd-entry" onClick={() => setView("history")}><Clock3 size={18} />
         <span><strong>浏览记录</strong><small>按日期查看、搜索和删除访问过的网页</small></span><ChevronRight size={16} /></button>
-      <button className="bd-entry" onClick={() => onInternal("permissions")}><Lock size={18} />
+      <button className="bd-entry" onClick={() => onInternal("permissions")}><LockKeyhole size={18} />
         <span><strong>网站权限</strong><small>摄像头、麦克风、位置和通知等权限，在 Chromium 页面中调整</small></span><ExternalLink size={16} /></button>
     </div>
     {notice && <p className="bd-notice" role="status">{notice}</p>}

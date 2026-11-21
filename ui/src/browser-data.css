@@ -116,6 +116,7 @@
 .bd-entry > span { flex: 1; min-width: 0; }
 .bd-entry strong { display: block; font-weight: 500; }
 .bd-entry small { display: block; margin-top: 2px; color: var(--muted); font-size: var(--fs-caption); line-height: 1.5; }
+.bd-entry kbd { flex: none; }
 .bd-block { margin: 0 0 28px; }
 .bd-block > h3 { margin: 0 0 4px; }
 .bd-lead, .browser-settings-section .bd-lead { margin: 0 0 12px; color: var(--muted); font-size: var(--fs-secondary); line-height: 1.6; }
