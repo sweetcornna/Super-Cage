@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +157,55 @@ func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 	if !strings.Contains(output.String(), "P=xterm-256color|Asia/Tokyo") {
 		t.Fatalf("ssh -tt output %q", output.String())
 	}
+}
+
+// Design 7.1 row 18: a live connection's processes carry no secret on their
+// command lines: the ProxyCommand names an environment, nothing else.
+func TestEntryLiveConnectionArgumentsHoldNoSecret(t *testing.T) {
+	f := newEntryFixture(t, true)
+	f.on()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cmd := f.systemSSH(ctx, f.paths.clientFile(), "-tt", "cage-default")
+	stdin, _ := cmd.StdinPipe()
+	defer stdin.Close()
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	entryAwait(t, 10*time.Second, "the ssh terminal", func() bool { return f.s.entry.registry.counts().Shell == 1 })
+	out, err := exec.Command("ps", "-A", "-o", "pid=,ppid=,args=").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, _ := os.ReadFile(f.paths.deviceKey())
+	keyBody := strings.Split(strings.TrimSpace(string(key)), "\n")[1]
+	children := map[string]bool{strconv.Itoa(cmd.Process.Pid): true}
+	var seen []string
+	for range 4 {
+		for _, line := range strings.Split(string(out), "\n") {
+			fields := strings.Fields(line)
+			if len(fields) >= 3 && children[fields[1]] {
+				children[fields[0]] = true
+			}
+		}
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 || !children[fields[0]] {
+			continue
+		}
+		seen = append(seen, strings.Join(fields[2:], " "))
+		for _, secret := range []string{f.s.token, f.s.session, trustedViewProof(f.s.token), keyBody} {
+			if strings.Contains(line, secret) {
+				t.Fatalf("a secret is on the command line: %q", line)
+			}
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("found only %q", seen)
+	}
+	t.Logf("processes of the connection: %q", seen)
 }
 
 // socksConnect asks a SOCKS5 proxy for 127.0.0.1:22 and returns its reply code.

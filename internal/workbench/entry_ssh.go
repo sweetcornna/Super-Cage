@@ -63,7 +63,10 @@ type entryService struct {
 // (internal/termfilter, built on branch local-terminal-attach). Until it is
 // plugged in, the output of the entry's terminal sessions reaches the owner's
 // terminal application unfiltered, and
-// TestEntryTerminalOutputUsesEscapeFilter fails. To plug it in:
+// TestEntryTerminalOutputUsesEscapeFilter fails. To plug it in (API checked
+// against origin/local-terminal-attach 18ee611, where *termfilter.Filter has
+// this Append; the entry streams live output only, so SetReplay is not
+// needed):
 //
 //	entryNewOutputFilter = func(clipboardWrite bool) entryOutputFilter {
 //		return termfilter.New(termfilter.Options{ClipboardWrite: clipboardWrite})

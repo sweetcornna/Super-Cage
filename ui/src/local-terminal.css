@@ -1,0 +1,217 @@
+/*
+ * 本机终端 (design 6.2): one environment's local SSH entry, a settings
+ * sub-page. Scoped under .local-terminal inside .settings-subpage, so the
+ * shared settings-pages.css rules (group titles, hairlines) apply.
+ */
+
+.settings-subpage .local-terminal .empty-state {
+  padding-top: 24px;
+}
+
+.settings-subpage .local-terminal-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  margin: -12px 0 24px;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  line-height: 1.5;
+}
+.settings-subpage .local-terminal-state > button {
+  margin-left: auto;
+}
+.settings-subpage .local-terminal-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+.settings-subpage .local-terminal-state[data-tone="ok"] .local-terminal-dot {
+  background: var(--green);
+}
+.settings-subpage .local-terminal-state[data-tone="busy"] .local-terminal-dot {
+  background: var(--clay);
+}
+.settings-subpage .local-terminal-state[data-tone="warn"] .local-terminal-dot {
+  background: var(--amber);
+}
+
+.settings-subpage .local-terminal-error {
+  margin: 0 0 20px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line));
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--error) 7%, var(--surface));
+  color: var(--error);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+/* Commands: monospace on top, caption below, copy at the end; hairlines. */
+.settings-subpage .local-terminal-commands {
+  margin: 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+.settings-subpage .local-terminal-commands li {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-subpage .local-terminal-commands li > div {
+  display: grid;
+  flex: 1;
+  gap: 4px;
+  min-width: 0;
+}
+.settings-subpage .local-terminal-commands code {
+  justify-self: start;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-secondary);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.settings-subpage .local-terminal-commands span {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.5;
+}
+.settings-subpage .local-terminal :is(.local-terminal-copy, .local-terminal-icon) {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  color: var(--muted);
+}
+.settings-subpage .local-terminal-copy:hover:not(:disabled),
+.settings-subpage .local-terminal-icon:hover:not(:disabled) {
+  color: var(--ink);
+}
+
+.settings-subpage .local-terminal-include {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.settings-subpage .local-terminal-include[data-state="error"] {
+  color: var(--error);
+}
+
+/* Devices. */
+.settings-subpage .local-terminal-devices ul {
+  margin: 16px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  list-style: none;
+}
+.settings-subpage .local-terminal-device {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 3.6rem;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.settings-subpage .local-terminal-device[data-revoked] .local-terminal-device-title strong {
+  color: var(--muted);
+}
+.settings-subpage .local-terminal-device-main {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.settings-subpage .local-terminal-device-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+}
+.settings-subpage .local-terminal-device-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.settings-subpage .local-terminal-pill {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--clay-soft);
+  color: var(--clay-ink);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+.settings-subpage .local-terminal-pill[data-tone="muted"] {
+  background: var(--soft);
+  color: var(--muted);
+}
+.settings-subpage .local-terminal-device-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 12px;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.settings-subpage .local-terminal-device-meta > span:first-child {
+  font-family: var(--font-mono);
+  font-size: var(--fs-caption);
+}
+.settings-subpage .local-terminal-revoke {
+  flex: none;
+  color: var(--error);
+}
+.settings-subpage .local-terminal-rename {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.settings-subpage .local-terminal-rename input {
+  flex: 1;
+  min-width: 12em;
+}
+
+.settings-subpage .local-terminal-footer {
+  margin: 40px 0 0;
+  padding: 24px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.local-terminal-include-line {
+  display: block;
+  margin: 10px 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--soft);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-secondary);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

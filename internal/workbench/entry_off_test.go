@@ -51,13 +51,18 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 	if view.Enabled || view.State != "off" || len(view.Devices) != 0 || view.HostAlias != "" || view.Include != nil || view.Herdr {
 		t.Fatalf("status while off: %+v", view)
 	}
+	// The Include preview reads ~/.ssh/config for the dialog that turns
+	// the entry on; it writes nothing (checked by the snapshot below).
+	var include entryInclude
+	if err := f.call("GET", "/api/entry/include", nil, &include); err != nil || include.Present || include.Token == "" || include.Line == "" {
+		t.Fatalf("include preview while off: %+v %v", include, err)
+	}
 	device := strings.Repeat("ab", 16)
 	for _, route := range []struct {
 		method, path string
 		input        any
 	}{
 		{"POST", "/api/entry/off", map[string]any{}},
-		{"GET", "/api/entry/include", nil},
 		{"POST", "/api/entry/include", map[string]string{"token": "x"}},
 		{"POST", "/api/entry/devices/" + device + "/revoke", map[string]any{}},
 		{"POST", "/api/entry/devices/" + device + "/rename", map[string]string{"name": "x"}},

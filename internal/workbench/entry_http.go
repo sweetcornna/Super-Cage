@@ -6,10 +6,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"al.essio.dev/pkg/shellescape"
 )
 
 // The entry's routes sit behind the workbench's session, Origin and
@@ -56,7 +59,7 @@ type entryDeviceView struct {
 type entryCommands struct {
 	SSH     string `json:"ssh"`
 	CageSSH string `json:"cage_ssh"`
-	Attach  string `json:"attach"`
+	Attach  string `json:"attach,omitempty"`
 	// Cage is true when the cage command is on PATH; the commands then use
 	// its short name.
 	Cage bool `json:"cage_on_path"`
@@ -133,11 +136,15 @@ func (s *Server) entryView() entryStatusView {
 		onPath := false
 		if found, err := lookPathCage(); err == nil && sameFile(found, paths.Cage) {
 			cage, onPath = "cage", true
+		} else if runtime.GOOS == "windows" {
+			cage = "& " + entryQuote(cage)
 		} else {
-			cage = entryQuote(cage)
+			cage = shellescape.Quote(cage)
 		}
-		target := view.Environment
-		view.Commands = &entryCommands{SSH: "ssh " + view.HostAlias, CageSSH: cage + " ssh " + target, Attach: cage + " attach " + target, Cage: onPath}
+		// HOOK(attach): Attach stays empty, and the page hides its row,
+		// until cage attach (branch local-terminal-attach) is merged; then
+		// set it to cage + " attach " + view.Environment.
+		view.Commands = &entryCommands{SSH: "ssh " + view.HostAlias, CageSSH: cage + " ssh " + view.Environment, Cage: onPath}
 	}
 	return view
 }
@@ -257,11 +264,10 @@ func (s *Server) entryEnabled() bool {
 // entryIncludeRoute is the confirmation step for the Include line: GET shows
 // the exact line and the file it goes into, POST writes it with the token
 // that GET returned.
+//
+// The preview answers while the entry is off too: the dialog that turns it on
+// shows the line first, and reading ~/.ssh/config writes nothing.
 func (s *Server) entryIncludeRoute(w http.ResponseWriter, r *http.Request) {
-	if !s.entryEnabled() {
-		entryRefuse(w, errEntryOff)
-		return
-	}
 	paths, err := s.entryPaths()
 	if err != nil {
 		requestError(w, err)
@@ -269,6 +275,10 @@ func (s *Server) entryIncludeRoute(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet {
 		jsonReply(w, entryIncludePreview(paths))
+		return
+	}
+	if !s.entryEnabled() {
+		entryRefuse(w, errEntryOff)
 		return
 	}
 	var input struct {

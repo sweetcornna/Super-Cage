@@ -20,6 +20,7 @@ import {
   UserRound,
   Archive,
   Info,
+  SquareTerminal,
 } from "lucide-react";
 import { api } from "./api";
 import "./settings.css";
@@ -39,6 +40,8 @@ import { AccountSettings } from "./account";
 import { AboutSettings } from "./about-settings";
 import { EmptyState } from "./drawings";
 import "./settings-pages.css";
+// Loaded when its section opens (design 5.13: the UI costs nothing until then).
+const LocalTerminalPage = React.lazy(() => import("./local-terminal.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
@@ -46,6 +49,7 @@ const sections = [
   ["keyboard", "通用", Settings],
   ["appearance", "外观", Palette],
   ["mobile", "远程连接", Smartphone],
+  ["local-terminal", "本机终端", SquareTerminal],
   ["network", "网络与代理", Globe2],
   ["region", "时区与语言", Clock3],
   ["project", "环境与恢复", RotateCcw],
@@ -63,6 +67,9 @@ export function SettingsPanel({
   // Each VM runs its own workbench, so these settings belong to the VM shown here.
   const vmContext = getClientContext();
   const vmName = vmContext.virtual_machines && !isRemoteClient() ? vmContext.name || "" : "";
+  // 本机终端 writes this computer's ~/.ssh, so only the window on the
+  // environment's own computer manages it; the cloud path comes later.
+  const localTerminalAvailable = !isRemoteClient() && !isCloudWorkbench();
   const [accountDirty, setAccountDirty] = useState(false);
   const [proxyDirty, setProxyDirty] = useState(false);
   const [resourceDirty, setResourceDirty] = useState(false);
@@ -232,7 +239,7 @@ export function SettingsPanel({
         <h2>设置</h2>
         {vmName && <p className="settings-scope" title={vmName}>虚拟机 · {vmName}</p>}
         <nav aria-label="设置分组">
-          {sections.map(([id, label, Icon]) => (
+          {sections.filter(([id]) => id !== "local-terminal" || localTerminalAvailable).map(([id, label, Icon]) => (
             <button
               key={id}
               className={section === id ? "selected" : ""}
@@ -259,6 +266,11 @@ export function SettingsPanel({
           </>}
           {section === "vault" && <PasswordVaultSettings onConfirm={onConfirm} onDirty={setAccountDirty} />}
           {section === "account" && <AccountSettings busy={busy} onDirty={setAccountDirty} />}
+          {section === "local-terminal" && localTerminalAvailable && (
+            <React.Suspense fallback={<p className="field-help">正在加载…</p>}>
+              <LocalTerminalPage onConfirm={onConfirm} environmentReady={status.ready} />
+            </React.Suspense>
+          )}
           <fieldset className="settings-fields" disabled={busy && !(section === "project" && status.storage_recovery?.required)}>
             {section === "mobile" && (isRemoteClient()
               ? <section className="section-title"><h3>连接这台电脑</h3><p>请先切换到这台电脑的本机环境，再生成或管理手机配对码。</p></section>
