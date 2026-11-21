@@ -227,7 +227,9 @@ enum UpdatesTests {
         try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared","attempt":"0123456789abcdef"}"#.utf8), exitStatus: 0) == .prepared(attempt: "0123456789abcdef"), "prepared")
         try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared","attempt":"../x"}"#.utf8), exitStatus: 0) == .prepared(attempt: ""), "invalid attempt dropped")
         try expect(CageUpdateDecision.outcome(Data(#"{"status":"blocked","code":"must_wait","message":"以下操作完成后才能升级：「更新环境组件」正在进行"}"#.utf8), exitStatus: 0) ==
-            .blocked(code: "must_wait", message: "以下操作完成后才能升级：「更新环境组件」正在进行"), "blocked")
+            .blocked(code: "must_wait", message: "以下操作完成后才能升级：「更新环境组件」正在进行", blockers: []), "blocked")
+        try expect(CageUpdateDecision.outcome(Data(#"{"status":"blocked","code":"confirm_required","message":"m","blockers":[{"id":"terminal-command:7","label":"终端里还有命令在运行（make）","interruptible":true},{"id":"bad id","label":"x"},{"id":"unknown:terminals","label":"无法确认","interruptible":true,"unknown":true}]}"#.utf8), exitStatus: 0) ==
+            .blocked(code: "confirm_required", message: "m", blockers: [.init(id: "terminal-command:7", label: "终端里还有命令在运行（make）", interruptible: true, unknown: false), .init(id: "unknown:terminals", label: "无法确认", interruptible: true, unknown: true)]), "blocked names what to confirm and drops invalid ids")
         try expect(CageUpdateDecision.outcome(Data(#"{"status":"prepared"}"#.utf8), exitStatus: 1) == .failed("环境未能安全停止，更新未安装"), "prepared with a failed exit is not prepared")
         try expect(CageUpdateDecision.outcome(Data(#"{"status":"error","message":"后台尚未退出"}"#.utf8), exitStatus: 1) == .failed("后台尚未退出"), "error")
         try expect(CageUpdateDecision.outcome(Data("not json".utf8), exitStatus: 0) == .failed("无法确认环境已停止"), "garbage")

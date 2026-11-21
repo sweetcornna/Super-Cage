@@ -78,9 +78,13 @@ struct CageUpdatePlan: Codable {
 /// --app-update) and the files silent mode shares with it. Pure functions,
 /// so the decision path is tested without a workbench.
 enum CageUpdateDecision {
+    struct Blocker: Equatable {
+        let id: String, label: String, interruptible: Bool, unknown: Bool
+        var value: [String: Any] { ["id": id, "label": label, "interruptible": interruptible, "unknown": unknown] }
+    }
     enum Outcome: Equatable {
         case prepared(attempt: String)
-        case blocked(code: String, message: String)
+        case blocked(code: String, message: String, blockers: [Blocker])
         case failed(String)
     }
     static let attemptPattern = "^[0-9a-f]{16}$"
@@ -101,7 +105,13 @@ enum CageUpdateDecision {
             let attempt = value["attempt"] as? String ?? ""
             return .prepared(attempt: attempt.range(of: attemptPattern, options: .regularExpression) == nil ? "" : attempt)
         case "blocked" where exitStatus == 0:
-            return .blocked(code: value["code"] as? String ?? "busy", message: message.isEmpty ? "当前不能升级，请稍后再试" : message)
+            // What the workbench names is shown again in the confirmation.
+            let blockers = (value["blockers"] as? [[String: Any]] ?? []).prefix(32).compactMap { item -> Blocker? in
+                guard let id = item["id"] as? String, id.range(of: idPattern, options: .regularExpression) != nil,
+                      let label = item["label"] as? String, !label.isEmpty, label.count <= 200 else { return nil }
+                return Blocker(id: id, label: label, interruptible: item["interruptible"] as? Bool == true, unknown: item["unknown"] as? Bool == true)
+            }
+            return .blocked(code: value["code"] as? String ?? "busy", message: message.isEmpty ? "当前不能升级，请稍后再试" : message, blockers: blockers)
         default:
             return .failed(message.isEmpty ? "环境未能安全停止，更新未安装" : message)
         }
@@ -637,11 +647,11 @@ final class CageAppUpdater {
                             self.recordAbandoned("无法开始安装，原应用已保留", version: version, attempt: attempt)
                             self.failure("无法开始安装，原应用已保留"); self.reconnect()
                         }
-                    case .blocked(let code, let message):
+                    case .blocked(let code, let message, let blockers):
                         // Nothing was stopped and the verified package stays ready.
                         // Reported as a retryable failure so every view offers retry.
                         self.abortInstaller()
-                        self.change(["phase": "failed", "message": message, "blocked": ["code": code, "message": message], "retryable": true, "retryAt": ""])
+                        self.change(["phase": "failed", "message": message, "blocked": ["code": code, "message": message, "blockers": blockers.map(\.value)], "retryable": true, "retryAt": ""])
                     case .failed(let message):
                         self.abortInstaller(); self.failure(message); self.reconnect()
                     }

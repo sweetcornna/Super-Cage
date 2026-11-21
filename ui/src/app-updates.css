@@ -1,0 +1,10 @@
+/* The confirmation before an application upgrade: a hairline list of what
+   will be interrupted, and what must finish first in the clay accent. */
+.app-update-confirmation { display: grid; gap: 14px; }
+.app-update-confirmation > p { margin: 0; color: var(--ink); }
+.app-update-interruptions { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--line); }
+.app-update-interruptions li { display: flex; align-items: baseline; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); color: var(--ink); overflow-wrap: anywhere; }
+.app-update-interruptions li::before { content: ""; flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--faint); transform: translateY(-2px); }
+.app-update-interruptions li[data-unknown]::before { background: var(--amber); }
+.app-update-interruptions[data-kind="wait"] li::before { background: var(--clay); }
+.app-update-confirmation .footnote { margin: 0; }

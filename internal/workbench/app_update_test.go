@@ -587,6 +587,9 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		if c == nil || c.Step != policy.StepFailed || c.FailedStep != policy.StepNetwork || ledger.Last().Result != "failed" || policy.View(c).Next != "check_network" {
 			t.Fatalf("chain %+v attempt %+v", c, ledger.Last())
 		}
+		if env := f.s.appUpdateStatusView().Environment; env == nil || env.NetworkOK {
+			t.Fatalf("failed chain without the environment the window needs: %+v", env)
+		}
 	})
 	t.Run("installer rolled back", func(t *testing.T) {
 		f := newUpdateFixture(t)

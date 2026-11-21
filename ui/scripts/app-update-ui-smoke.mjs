@@ -5,17 +5,35 @@ import { createWorkbench } from "./workbench-fixture.mjs";
 const output = process.env.CAGE_UPDATE_QA_OUTPUT || "/tmp/cage-update-diagnosis/ui";
 await fs.mkdir(output, { recursive: true });
 const calls = [];
+const confirmations = [];
 const references = [];
 let update = { phase: "idle", currentVersion: "0.1.3-alpha.1" };
 const fixture = await createWorkbench({ nativeRequest: async body => {
   if (body.action === "appReference") { references.push(body.kind); return true; }
   if (body.action !== "appUpdate") return body.action === "workbenchReady" ? true : null;
   calls.push(body.operation);
+  if (body.operation === "install") confirmations.push(body.confirmed);
   if (body.operation === "check") update = { ...update, phase: "current", message: "已是最新版本" };
   if (body.operation === "install") update = { ...update, phase: "downloading", receivedBytes: 50, totalBytes: 100 };
   return update;
+}, beforeNavigate: async page => {
+  // The workbench's side: manual mode, and one terminal command a click
+  // would interrupt.
+  await page.route("**/api/app-update", route => route.fulfill({ json: { mode: "manual", silent_available: true, pending: null, waiting: null, last_attempt: null, chain: null } }));
+  await page.route("**/api/app-update/interruptions", route => route.fulfill({ json: {
+    blockers: [{ id: "terminal-command:7", kind: "terminal", label: "终端里还有命令在运行（make）", interruptible: true }],
+    must_wait: [], confirm: ["terminal-command:7"], reopen: [{ title: "dev", kind: "shell" }], environment_running: true,
+  } }));
 } });
 const { page, browser, errors } = fixture;
+const confirmUpgrade = async version => {
+  const dialog = page.getByRole("dialog", { name: `升级到 ${version}` });
+  await dialog.waitFor();
+  await dialog.getByText("终端里还有命令在运行（make）").waitFor();
+  await dialog.getByText(/升级会停止环境并重启 Super Cage/).waitFor();
+  await dialog.getByText("这些终端会关闭，升级后可以重新打开：dev").waitFor();
+  return dialog;
+};
 const publish = async value => {
   update = value;
   await page.evaluate(detail => window.dispatchEvent(new CustomEvent("cage-app-update", { detail })), value);
@@ -42,32 +60,44 @@ try {
   await page.waitForFunction(async () => await window.updateCheckCount() === 3);
   assert.equal(count("check"), 3, "a failed background check retries after the proxy can recover");
   await publish({ phase: "available", currentVersion: "0.1.3-alpha.1", latestVersion: "0.1.3-alpha.2" });
-  const button = page.getByRole("button", { name: "下载更新", exact: true });
+  const button = page.getByRole("button", { name: "升级到 0.1.3-alpha.2", exact: true });
   await button.waitFor();
-  assert.match(await button.getAttribute("title"), /0.1.3-alpha.2.*保存工作.*自动停止环境/);
+  assert.match(await button.getAttribute("title"), /会被中断的任务.*停止环境.*不点击不会升级/);
   await page.screenshot({ path: `${output}/available.png` });
   await button.click();
-  await page.getByRole("button", { name: "正在下载更新 50%", exact: true }).waitFor();
+  let dialog = await confirmUpgrade("0.1.3-alpha.2");
+  await page.screenshot({ path: `${output}/confirmation.png` });
+  await dialog.getByRole("button", { name: "稍后", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(count("install"), 0, "closing the confirmation installs nothing");
+  await button.click();
+  dialog = await confirmUpgrade("0.1.3-alpha.2");
+  await dialog.getByRole("button", { name: "继续升级", exact: true }).click();
+  await page.getByRole("button", { name: "正在下载 50%", exact: true }).waitFor();
   assert.equal(count("install"), 1);
+  assert.deepEqual(confirmations, [["terminal-command:7"]], "the click carries exactly what the person confirmed");
   assert.equal(await page.getByRole("progressbar", { name: "更新下载进度" }).getAttribute("aria-valuenow"), "50");
   assert.equal(await page.locator(".app-update-percent").innerText(), "50%");
-  assert.equal(await page.getByRole("dialog", { name: "Super Cage 更新" }).count(), 0);
-  assert.ok(await page.getByRole("button", { name: "正在下载更新 50%", exact: true }).isDisabled());
+  assert.ok(await page.getByRole("button", { name: "正在下载 50%", exact: true }).isDisabled());
   await page.screenshot({ path: `${output}/downloading.png` });
   await publish({ ...update, receivedBytes: 110 });
-  await page.getByRole("button", { name: "正在下载更新 100%", exact: true }).waitFor();
+  await page.getByRole("button", { name: "正在下载 100%", exact: true }).waitFor();
   await publish({ ...update, totalBytes: 0 });
   assert.equal(await page.getByRole("progressbar").getAttribute("aria-valuenow"), null, "unknown totals must stay indeterminate");
   await publish({ ...update, phase: "verifying" });
-  await page.getByRole("button", { name: "正在验证更新", exact: true }).waitFor();
-  await publish({ ...update, phase: "installing" });
-  await page.getByRole("button", { name: "正在安装更新，完成后自动重启", exact: true }).waitFor();
+  await page.getByRole("button", { name: "正在验证", exact: true }).waitFor();
+  await publish({ ...update, phase: "installing", message: "正在确认没有会被中断的任务，并停止环境" });
+  await page.getByRole("button", { name: "正在停止环境", exact: true }).waitFor();
+  await publish({ ...update, phase: "installing", message: "正在安装并重启 Super Cage" });
+  await page.getByRole("button", { name: "正在安装，完成后自动重启", exact: true }).waitFor();
   await publish({ ...update, phase: "failed", message: "下载中断，请检查代理后重试", retryable: true });
   await page.getByRole("alert").filter({ hasText: "下载中断" }).waitFor();
-  const retry = page.getByRole("button", { name: "重试更新", exact: true });
+  const retry = page.getByRole("button", { name: "重试升级", exact: true });
   await retry.waitFor();
   await retry.click();
-  await page.getByRole("button", { name: "正在下载更新 50%", exact: true }).waitFor();
+  dialog = await confirmUpgrade("0.1.3-alpha.2");
+  await dialog.getByRole("button", { name: "继续升级", exact: true }).click();
+  await page.getByRole("button", { name: "正在下载 50%", exact: true }).waitFor();
   assert.equal(count("install"), 2);
   await page.getByRole("button", { name: "收起侧栏", exact: true }).click();
   assert.equal(await page.locator(".app-update-button").count(), 1, "collapsed sidebar keeps one progress indicator");
@@ -87,7 +117,7 @@ try {
   assert.deepEqual(references, ["releases"], "a system package update opens the release page");
   assert.equal(count("install"), installs, "a system package update must not start an automatic installation");
   assert.deepEqual(errors, []);
-  const result = { checks: ["automatic startup and periodic checks", "failed background check retry", "latest version hidden", "single click without update dialog", "ring and percentage", "indeterminate progress", "verification and installation", "visible failure and retry", "collapsed sidebar", "Linux manual update remains separate", "Linux newer package opens the release page"], calls };
+  const result = { checks: ["automatic startup and periodic checks", "failed background check retry", "latest version hidden", "click opens the confirmation; nothing installs without 继续升级", "confirmed ids reach the shell", "ring and percentage", "indeterminate progress", "verification and installation", "visible failure and retry", "collapsed sidebar", "Linux manual update remains separate", "Linux newer package opens the release page"], calls };
   await fs.writeFile(`${output}/checks.json`, JSON.stringify(result, null, 2));
   console.log(JSON.stringify(result));
 } finally { await browser.close(); }

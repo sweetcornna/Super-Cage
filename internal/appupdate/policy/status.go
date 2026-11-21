@@ -40,6 +40,16 @@ type Status struct {
 	Waiting                 *Decision  `json:"waiting"`
 	LastAttempt             *Attempt   `json:"last_attempt"`
 	Chain                   *ChainView `json:"chain"`
+	// Environment is read only while a chain has failed, so the window can
+	// hide the follow-up action once the person has already done it.
+	Environment *EnvironmentNow `json:"environment,omitempty"`
+}
+
+// EnvironmentNow is the environment as the workbench sees it right now.
+type EnvironmentNow struct {
+	Running           bool `json:"running"`
+	NetworkOK         bool `json:"network_ok"`
+	ComponentsCurrent bool `json:"components_current"`
 }
 
 // ReleaseNotes is the public page of a version's release notes.

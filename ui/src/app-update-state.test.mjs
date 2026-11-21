@@ -105,6 +105,21 @@ test("the confirmation cannot continue past work that must finish", () => {
   assert.equal(appUpdateConfirmation({ version: "0.1.16", interruptions: { blockers: [], must_wait: [], confirm: [], reopen: [], environment_running: false } }).body, "升级会重启 Super Cage。");
 });
 
+test("the shell's refusal names what to confirm when the workbench cannot be asked", () => {
+  const blocked = { code: "confirm_required", message: "有新的任务正在进行，请确认后再升级", blockers: [terminal, { id: "job:x", label: "「更新环境组件」正在进行", interruptible: false }] };
+  const c = appUpdateConfirmation({ version: "0.1.16", error: { status: 409, message: "应用升级由本机管理，请切换到本机后查看" }, blocked });
+  assert.deepEqual(c.items.map((item) => item.id), ["terminal-command:7"]);
+  assert.deepEqual(c.confirmed, ["terminal-command:7"]);
+  assert.equal(c.canContinue, false);
+  assert.equal(c.waitMessage, "请等待「更新环境组件」完成后再升级");
+});
+
+test("a failed chain hides its action once the workbench reports it done", () => {
+  const chain = { step: "failed", to: "0.1.16", next: "start_environment", error: "已升级到 0.1.16，但环境未能启动" };
+  assert.equal(appUpdateButton({ shell: { phase: "current" }, status: { ...manualStatus, chain, environment: { running: false } } }).label, "启动环境");
+  assert.equal(appUpdateButton({ shell: { phase: "current" }, status: { ...manualStatus, chain, environment: { running: true, network_ok: true, components_current: true } } }).visible, false);
+});
+
 test("the confirmation still offers the click when the list cannot be read", () => {
   const cloud = appUpdateConfirmation({ version: "0.1.16", error: { status: 409, message: "应用升级由本机管理，请切换到本机后查看" } });
   assert.equal(cloud.canContinue, true);

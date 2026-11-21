@@ -67,14 +67,17 @@ const show = (fields) => ({ ...hidden, visible: true, disabled: false, ...fields
  * @param {object} input
  * @param {object} input.shell        native updater state
  * @param {object|null} input.status  GET /api/app-update body, null when unavailable
- * @param {object} [input.environment] {running, networkOk, componentsCurrent}; unknown fields keep a failure visible
+ * @param {object} [input.environment] {running, networkOk, componentsCurrent}; defaults to the
+ *   status's own "environment" (sent while a chain has failed); unknown fields keep a failure visible
  * @param {number} [input.now]
  * @returns {{visible, label, hint, disabled, busy, tone, percent, action}}
  *   action: "confirm" opens the confirmation; "releases" opens the release
  *   page; the rest are the existing environment actions.
  */
-export function appUpdateButton({ shell = {}, status = null, environment = {}, now = Date.now() } = {}) {
+export function appUpdateButton({ shell = {}, status = null, environment, now = Date.now() } = {}) {
   const chain = status?.chain;
+  const seen = status?.environment;
+  environment ??= seen ? { running: seen.running, networkOk: seen.network_ok, componentsCurrent: seen.components_current } : {};
   const version = versionOf(shell, status);
   // 1. After a relaunch: the new version is bringing the environment back.
   if (chain && chainBusyLabels[chain.step]) {
@@ -98,8 +101,9 @@ export function appUpdateButton({ shell = {}, status = null, environment = {}, n
   if (chain?.step === "attention" && !activeShellPhases.has(shell.phase)) {
     return show({ label: "升级需要处理", tone: "failed", action: version ? "confirm" : null, disabled: !version, hint: chain.error || "升级记录需要处理，可以重新点击升级" });
   }
-  // 2. The shell is downloading, verifying or installing.
-  if (activeShellPhases.has(shell.phase)) {
+  // 2. The shell is downloading, verifying or installing. A background check
+  // (no newer version known yet) shows nothing.
+  if (activeShellPhases.has(shell.phase) && version) {
     const percent = shell.phase === "downloading" ? percentOf(shell) : null;
     const label =
       shell.phase === "downloading" ? `正在下载${percent === null ? "" : ` ${percent}%`}`
@@ -126,7 +130,7 @@ export function appUpdateButton({ shell = {}, status = null, environment = {}, n
     return show({ label: "重试升级", tone: "failed", action: "confirm", hint: `${shell.message || "升级没有完成"}，点击重试` });
   }
   if (shell.phase === "manual" && version) {
-    return show({ label: "查看新版本", action: "releases", hint: `新版本 ${version} 已发布。${shell.message || ""}` });
+    return show({ label: "查看新版本", action: "releases", hint: `新版本 ${version} 已发布。${shell.message || ""}点击打开发布页面。` });
   }
   // 4. A newer version is ready to be installed with a click.
   if (version && (["available", "ready"].includes(shell.phase) || (status?.pending?.installable && !shell.phase))) {
@@ -150,12 +154,23 @@ export function appUpdateButton({ shell = {}, status = null, environment = {}, n
  * @param {object} input
  * @param {string} input.version
  * @param {object|null} input.interruptions  GET /api/app-update/interruptions body
- * @param {{status?: number, message?: string, body?: string}|null} [input.error]  failed GET
+ * @param {{status?: number, message?: string}|null} [input.error]  failed GET
+ * @param {object|null} [input.blocked]  the shell's last refusal ({code, message, blockers}); its
+ *   blockers stand in for the list when the workbench cannot be asked directly
  */
-export function appUpdateConfirmation({ version, interruptions = null, error = null }) {
+export function appUpdateConfirmation({ version, interruptions = null, error = null, blocked = null }) {
   const title = `升级到 ${version}`;
   const failure = readStatusFailure(error);
-  if (failure || !interruptions) {
+  if ((failure || !interruptions) && blocked?.blockers?.length) {
+    interruptions = {
+      blockers: blocked.blockers.filter((b) => b.interruptible),
+      must_wait: blocked.blockers.filter((b) => !b.interruptible),
+      confirm: blocked.blockers.filter((b) => b.interruptible).map((b) => b.id),
+      reopen: [],
+      environment_running: true,
+    };
+  }
+  if (!interruptions) {
     const note =
       failure?.kind === "local_required"
         ? "当前连接的是云端工作区。升级只重启本机的 Super Cage，云端任务不受影响。"

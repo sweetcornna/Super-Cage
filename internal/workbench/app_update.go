@@ -19,6 +19,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/appupdate"
 	"github.com/sylvinus/agent-vm/internal/appupdate/policy"
+	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
 	"github.com/sylvinus/agent-vm/internal/version"
@@ -304,6 +305,15 @@ func (s *Server) appUpdateStatusView() policy.Status {
 		st.Chain = &policy.ChainView{Step: policy.StepAttention, Error: "升级进度记录无法读取，可以重新点击升级"}
 	} else if st.Chain = policy.View(c); st.Chain != nil && c.Active() {
 		st.Chain.Note = note
+	}
+	if st.Chain != nil && st.Chain.Step == policy.StepFailed {
+		running := s.vmRunning()
+		s.mu.Lock()
+		gate := s.safety.Gate
+		networkOK := s.networkPaused || gate != nil && gate.Mode == cage.GateOpen
+		current := !s.guestUpdateRequired
+		s.mu.Unlock()
+		st.Environment = &policy.EnvironmentNow{Running: running, NetworkOK: running && networkOK, ComponentsCurrent: running && current}
 	}
 	return st
 }
