@@ -58,6 +58,11 @@ func (s *Server) agentNative(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Native action required", 400)
 			return
 		}
+		// Default deny: only what agentNativeAccess lists is queued.
+		if refusal := agentNativeRefusal(request); refusal != "" {
+			http.Error(w, refusal, http.StatusForbidden)
+			return
+		}
 		if s.remote != nil && s.remote.context().ConnectionID != in.Connection {
 			http.Error(w, "Connection changed", 409)
 			return

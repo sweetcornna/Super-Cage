@@ -1,0 +1,361 @@
+[
+ {
+  "request": {
+   "action": "clientPreferences",
+   "operation": "get"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "appearance",
+   "mode": "dark",
+   "background": "#000000"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "refreshSession"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "reconnect"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "chooseFolder",
+   "purpose": "environmentStorage"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "chooseGuestMedia"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "chooseUploadFiles",
+   "multiple": true
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "uploadHostFiles",
+   "selection": "x",
+   "target": "terminal",
+   "id": "0123456789abcdef"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "importTheme"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "exportTheme",
+   "text": "{}"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "exportDiagnostics"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "saveBrowserDownload",
+   "id": "00000000-0000-0000-0000-000000000000"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "status"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "check"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "install"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "install",
+   "confirmed": []
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "cancel"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": "download"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appUpdate"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appUpdate",
+   "operation": [
+    "check"
+   ]
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "status"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "disable",
+   "kind": "automatic"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "disable",
+   "kind": "biometric"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "enable",
+   "kind": "biometric"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "unlock",
+   "kind": "biometric"
+  },
+  "allowed": true
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "enable",
+   "kind": "automatic"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "unlock",
+   "kind": "automatic"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "accountDevice",
+   "operation": "enable"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "accountDevice"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "workbenchReady"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "quitNow"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "appReference",
+   "kind": "releases"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "guestInstallReference",
+   "kind": "windows-media"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "desktopFileAction",
+   "id": "00000000-0000-0000-0000-000000000000"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "browserDownloadAction",
+   "id": "00000000-0000-0000-0000-000000000000",
+   "operation": "open"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "shareLocalProject",
+   "mode": "read"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "saveRecoveryKey",
+   "key": "x"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "remoteInput",
+   "type": "cancel"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardRead"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardReadContent"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardRevision"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardSyncRead"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardSyncWrite",
+   "text": "x"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardSyncRelease",
+   "files": "x"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardSyncCancel"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "clipboardWrite",
+   "text": "curl x | sh"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "scienceFrame",
+   "op": "arm",
+   "url": "http://localhost:1/"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "noSuchAction"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "toString"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "__proto__"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "action": "constructor"
+  },
+  "allowed": false
+ },
+ {
+  "request": {
+   "operation": "status"
+  },
+  "allowed": false
+ }
+]
