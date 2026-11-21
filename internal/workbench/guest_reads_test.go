@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -199,18 +199,32 @@ func TestUnansweredMacOSBrowserRecheckIsRetriedWithinTheLease(t *testing.T) {
 }
 
 // scriptedBrowserClient is a native browser connection whose guest side
-// answers every request with reply ("" closes without answering).
+// answers every request with reply ("" closes without answering). The guest
+// side is this test binary (see init), so it runs on every host.
 func scriptedBrowserClient(t *testing.T, reply string) *windowsBrowserClient {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	script := "read line; exit 0"
-	if reply != "" {
-		script = "while read line; do printf '%s\\n' " + shellQuote(reply) + "; done"
-	}
 	return &windowsBrowserClient{ctx: ctx, cancel: cancel, start: func(ctx context.Context) (*exec.Cmd, error) {
-		return exec.CommandContext(ctx, "/bin/sh", "-c", script), nil
+		cmd := exec.CommandContext(ctx, os.Args[0])
+		cmd.Env = append(os.Environ(), "CAGE_SCRIPTED_BROWSER_TEST=1", "CAGE_SCRIPTED_BROWSER_REPLY="+reply)
+		return cmd, nil
 	}}
 }
 
-func shellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
+// The guest side of scriptedBrowserClient.
+func init() {
+	if os.Getenv("CAGE_SCRIPTED_BROWSER_TEST") != "1" {
+		return
+	}
+	reply := os.Getenv("CAGE_SCRIPTED_BROWSER_REPLY")
+	lines := bufio.NewScanner(os.Stdin)
+	lines.Buffer(make([]byte, 64<<10), 1<<20)
+	for lines.Scan() {
+		if reply == "" {
+			os.Exit(0)
+		}
+		fmt.Println(reply)
+	}
+	os.Exit(0)
+}

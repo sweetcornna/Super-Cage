@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -113,6 +114,9 @@ func TestLinuxBrowserDisplaySelectsASubprotocol(t *testing.T) {
 }
 
 func TestLinuxClaudeDesktopDisplaySelectsASubprotocol(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Linux guest's display runs over the host's OpenSSH client")
+	}
 	if _, err := os.Stat(sshExecutable()); err != nil {
 		t.Skip("no ssh client to start")
 	}
