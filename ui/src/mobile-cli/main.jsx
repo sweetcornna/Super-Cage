@@ -21,7 +21,7 @@ import { SessionAccount } from "../session-account";
 import "./mobile.css";
 import "./super.css";
 import { IconHints } from "../icon-hints.jsx";
-import { openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
+import { edgeSwipe, openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
 
 const labels = {
@@ -293,7 +293,7 @@ function App() {
     return () => window.removeEventListener("cage-open-archives", openArchives);
   }, [current.project]);
   const edge = useRef(null);
-  const swipe = phoneWorkspace && !drawer && !docked && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
+  const swipe = phoneWorkspace && edgeSwipe && !drawer && !docked && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
     onTouchStart: (event) => { const t = event.touches[0]; edge.current = t.clientX < 22 ? { x: t.clientX, y: t.clientY } : null; },
     onTouchMove: (event) => {
       const start = edge.current, t = event.touches[0];

@@ -277,6 +277,9 @@ html.web-phone { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-a
 .web-phone .sheet-actions { padding-bottom: max(14px, var(--safe-bottom)); }
 .web-phone .sheet-content { padding-inline: max(20px, var(--safe-left)) max(20px, var(--safe-right)); }
 .web-phone .tree-new, .web-phone .session-slide .session-more { width: 44px; }
+/* Room to scroll the last item off the home bar. A spacer, not padding: WebKit leaves a flex container's end
+   padding out of its scrollable overflow. */
+.web-phone .page-scroll::after { content: ""; display: block; flex: none; height: var(--safe-bottom); }
 html.portal-frame { --safe-top: 0px; --safe-right: 0px; --safe-bottom: 0px; --safe-left: 0px; }
 .mobile-app.docked { padding-left: calc(var(--dock) + var(--safe-left)); }
 .mobile-app.docked .menu-button { display: none; }

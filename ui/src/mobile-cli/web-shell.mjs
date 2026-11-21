@@ -10,6 +10,9 @@ export const webPhone = !nativeShell && globalThis.location?.pathname === "/" &&
   typeof globalThis.document?.querySelector === "function" && document.querySelector('meta[name="cage-entry"][content="phone"]') !== null;
 // Inside the portal's frame (tenant workspaces): the portal owns the window, the keyboard and the notch.
 export const portalFrame = webPhone && window.top !== window.self;
+// The swipe from the left edge that opens the side panel. In a phone browser that edge belongs to the
+// browser's own Back; only a home-screen app on iOS (navigator.standalone) has no Back gesture of its own.
+export const edgeSwipe = !webPhone || globalThis.navigator?.standalone === true;
 
 const ROUTE = "cage-phone-route";
 const load = Math.random().toString(36).slice(2, 8);

@@ -111,8 +111,27 @@ function inspect({ insets, keyboard }) {
     const outside = (!inRow && (rect.left < box.left - 0.5 || rect.right > box.right + 0.5)) || (!inScroller && (rect.top < box.top - 0.5 || rect.bottom > box.bottom + 0.5));
     if (outside) failures.push(`outside the safe viewport: ${describe(el)} at ${Math.round(rect.left)},${Math.round(rect.top)} ${Math.round(rect.width)}x${Math.round(rect.height)}`);
     const inlineLink = el.tagName === "A" && getComputedStyle(el).display === "inline" && el.closest("p, li, td");
-    // A framed document is content, not a tap target (its own controls are checked inside it).
-    if (!inlineLink && !el.matches("[role=option], iframe")) targets.push({ el, rect });
+    // A framed document is content, not a tap target (its own controls are checked inside it). Spacing is
+    // measured on the part a scroller shows (a tab half scrolled out of its strip is not next to its neighbour).
+    const shown = around.reduce((r, node) => {
+      const b = node.getBoundingClientRect();
+      return { left: Math.max(r.left, b.left), top: Math.max(r.top, b.top), right: Math.min(r.right, b.right), bottom: Math.min(r.bottom, b.bottom) };
+    }, { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
+    // A control mostly scrolled out of its row is scrolled into view before anyone taps it.
+    const mostlyShown = shown.right - shown.left >= rect.width / 2 && shown.bottom - shown.top >= rect.height / 2;
+    if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect: { ...shown, width: shown.right - shown.left, height: shown.bottom - shown.top } });
+  }
+  // A scroller that runs under the home bar must let its last control scroll clear of it.
+  const bottomEdge = viewport.height - insets.bottom;
+  for (const node of scope.querySelectorAll("*")) {
+    if (!/(auto|scroll)/.test(getComputedStyle(node).overflowY) || !visible(node) || node.scrollHeight <= node.clientHeight + 1) continue;
+    const box = node.getBoundingClientRect();
+    const overlap = box.bottom - bottomEdge;
+    const inside = interactive.filter((el) => node.contains(el));
+    if (overlap <= 0.5 || !inside.length) continue;
+    const last = Math.max(...inside.map((el) => el.getBoundingClientRect().bottom - box.top + node.scrollTop));
+    const room = node.scrollHeight - last;
+    if (room < overlap - 0.5) failures.push(`last control cannot scroll off the bottom inset: ${describe(node)} ${Math.round(room)}px < ${Math.round(overlap)}px`);
   }
   for (const { el, rect } of targets) {
     if (rect.width >= 43.5 && rect.height >= 43.5) continue;
