@@ -118,7 +118,7 @@ function inspect({ insets, keyboard }) {
       return { left: Math.max(r.left, b.left), top: Math.max(r.top, b.top), right: Math.min(r.right, b.right), bottom: Math.min(r.bottom, b.bottom) };
     }, { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom });
     const mostlyShown = shown.right - shown.left >= rect.width / 2 && shown.bottom - shown.top >= rect.height / 2;
-    if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect });
+    if (!inlineLink && mostlyShown && !el.matches("[role=option], iframe")) targets.push({ el, rect, shown });
   }
   // A scroller that runs under the home bar must let its last control scroll clear of it.
   const bottomEdge = viewport.height - insets.bottom;
@@ -132,13 +132,16 @@ function inspect({ insets, keyboard }) {
     const room = node.scrollHeight - last;
     if (room < overlap - 0.5) failures.push(`last control cannot scroll off the bottom inset: ${describe(node)} ${Math.round(room)}px < ${Math.round(overlap)}px`);
   }
-  for (const { el, rect } of targets) {
+  for (const { el, rect, shown } of targets) {
     if (rect.width >= 43.5 && rect.height >= 43.5) continue;
-    // Equivalent spacing: a 44 px square centred on the control touches no other control.
-    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    // Partly scrolled out (a key at the end of the key row): it is scrolled into view before it is tapped.
+    if (shown.right - shown.left < rect.width - 1 || shown.bottom - shown.top < rect.height - 1) continue;
+    // Equivalent spacing: a 44 px square centred on the control touches no other control. Both are taken as
+    // their scrollers show them (a code block scrolled under the top bar is not next to the menu button).
+    const cx = (shown.left + shown.right) / 2, cy = (shown.top + shown.bottom) / 2;
     const zone = { left: cx - 22, right: cx + 22, top: cy - 22, bottom: cy + 22 };
     const crowded = targets.find((other) => other.el !== el && !other.el.contains(el) && !el.contains(other.el) &&
-      other.rect.left < zone.right && other.rect.right > zone.left && other.rect.top < zone.bottom && other.rect.bottom > zone.top);
+      other.shown.left < zone.right && other.shown.right > zone.left && other.shown.top < zone.bottom && other.shown.bottom > zone.top);
     if (crowded) failures.push(`small target: ${describe(el)} ${Math.round(rect.width)}x${Math.round(rect.height)} next to ${describe(crowded.el)}`);
   }
   for (const el of document.querySelectorAll("input:not([type=hidden]):not([type=checkbox]):not([type=radio]):not([type=file]):not([type=range]), textarea, select, [contenteditable=true]")) {
@@ -435,7 +438,9 @@ try {
         insets: Object.fromEntries(Object.entries(device.insets).map(([side, value]) => [side, Math.round(value / variant.text)])),
         unfold: device.unfold && { width: Math.round(device.unfold.width / variant.text), height: Math.round(device.unfold.height / variant.text) },
       };
-      for (const run of device.kind === "phone" ? [portalScreens, phoneScreens] : [portalScreens, tabletScreens]) {
+      // A tablet zoomed below 740 CSS px is phone-sized: it gets the phone UI (ui/src/entry-layout.mjs).
+      if (scaled.kind === "tablet" && scaled.width < 740) scaled.kind = "phone";
+      for (const run of scaled.kind === "phone" ? [portalScreens, phoneScreens] : [portalScreens, tabletScreens]) {
         try { await run(scaled, variant, sheet); }
         catch (error) { results.push({ sheet, screen: run.name, failures: [`flow broke: ${error.message.split("\n")[0]}`] }); failed++; console.log(`  ${sheet} / ${run.name} broke: ${error.message.split("\n")[0]}`); }
       }

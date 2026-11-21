@@ -273,7 +273,7 @@ html.web-phone { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-a
 .web-phone input, .web-phone textarea, .web-phone select { font-size: max(16px, 1em); }
 .web-phone .workspace-drawer { padding: var(--safe-top) 0 0 var(--safe-left); width: min(calc(326px + var(--safe-left)), calc(100vw - 42px)); top: var(--mobile-top, 0px); }
 .web-phone .drawer-footer { padding-bottom: max(6px, var(--safe-bottom)); }
-.web-phone .sheet { margin-inline: auto; }
+.web-phone .sheet { margin-inline: auto; max-width: min(640px, calc(100% - var(--safe-left) - var(--safe-right))); }
 .web-phone .sheet-actions { padding-bottom: max(14px, var(--safe-bottom)); }
 .web-phone .sheet-content { padding-inline: max(20px, var(--safe-left)) max(20px, var(--safe-right)); }
 .web-phone .tree-new, .web-phone .session-slide .session-more { width: 44px; }

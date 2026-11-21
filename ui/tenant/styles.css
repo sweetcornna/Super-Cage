@@ -1635,6 +1635,11 @@ button {
   }
 }
 
+/* The list and the other pages over the stage keep clear of the side notches (a phone on its side) and the home bar. */
+.shell > .stage > .overlay {
+  padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
 /* A framed workspace cannot see the insets, so its frame stays clear of the home bar and the side notches. */
 .shell > .stage > .frame-host {
   right: var(--safe-right);
