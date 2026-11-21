@@ -141,7 +141,12 @@ try {
   await sites.locator(".bd-site-row").first().waitFor();
   results.timings.siteListMs = Date.now() - started;
   check("the site list shows the seeded sites", Number((await sites.locator(".bd-view-title p").textContent()).match(/^[\d,]+/)[0].replace(/,/g, "")) >= Math.min(count, 50));
+  const search = sites.getByRole("textbox", { name: "搜索网站" });
+  await search.fill("kept.localhost");
+  await page.waitForFunction(() => document.querySelectorAll(".bd-site-row").length === 1);
   check("the kept site is marked", await sites.locator(".bd-site-row", { hasText: "kept.localhost" }).getByText("保持登录").count() === 1);
+  await search.fill("");
+  await page.waitForFunction(() => document.querySelectorAll(".bd-site-row").length > 1);
   await shot("sites-1440-light");
   await sites.getByRole("textbox", { name: "搜索网站" }).fill("s2.localhost");
   await sites.locator(".bd-site-row").filter({ hasText: "s2.localhost" }).first().waitFor();
@@ -151,7 +156,6 @@ try {
   await page.getByRole("option", { name: "按名称", exact: true }).click();
   await page.waitForFunction(() => document.querySelector(".bd-site-row .list-row-title")?.textContent.startsWith("kept.localhost"));
   // A selection survives searching, so sites far down a long list can be picked.
-  const search = sites.getByRole("textbox", { name: "搜索网站" });
   for (const site of ["s3.localhost", "s4.localhost"]) {
     await search.fill(site);
     await sites.getByRole("checkbox", { name: `选择 ${site}`, exact: true }).check();

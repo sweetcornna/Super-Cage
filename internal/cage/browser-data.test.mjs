@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserData, builtInOrigins, cookieKey, siteOf, within } from "./browser-data.mjs";
-import { applyPendingReset, diskCacheBytes, requestReset, seedPreferences } from "./browser-data-profile.mjs";
+import { applyPendingReset, chromiumCacheBytes, diskCacheBytes, requestReset, seedPreferences } from "./browser-data-profile.mjs";
 
 const cookie = (domain, name, extra = {}) => ({ name, value: name + "-secret", domain, path: "/", size: 10, secure: true, ...extra });
 
@@ -198,11 +198,17 @@ test("one clear at a time; unknown modes are refused", async () => {
   await assert.rejects(async () => data.request({ mode: "clear", types: [] }), /请选择/);
 });
 
-test("the disk cache bound follows free space between 32 and 256 MiB", () => {
-  const MiB = 1 << 20;
-  assert.equal(diskCacheBytes("/", () => ({ bavail: 100 * 1024, bsize: 1024 * 1024 })), 256 * MiB);
-  assert.equal(diskCacheBytes("/", () => ({ bavail: 2000, bsize: 1024 * 1024 })), 100 * MiB);
-  assert.equal(diskCacheBytes("/", () => ({ bavail: 10, bsize: 1024 * 1024 })), 32 * MiB);
+test("the disk cache bound never exceeds Chromium's own size and stays under 256 MiB", () => {
+  const MiB = 1 << 20, free = mib => () => ({ bavail: mib, bsize: MiB });
+  for (const mib of [10, 90, 500, 1500, 2000, 4096, 10 * 1024, 30 * 1024, 100 * 1024]) {
+    const bytes = diskCacheBytes("/", free(mib));
+    assert.ok(bytes <= chromiumCacheBytes(mib * MiB) && bytes <= 256 * MiB && bytes >= MiB, `${mib} MiB free: ${bytes}`);
+  }
+  assert.equal(chromiumCacheBytes(30 * 1024 * MiB), 307 * MiB + Math.floor(0.2 * MiB));
+  assert.equal(diskCacheBytes("/", free(100 * 1024)), 256 * MiB);  // Chromium: 1 GiB
+  assert.equal(diskCacheBytes("/", free(10 * 1024)), 200 * MiB);   // Chromium: 200 MiB, unchanged
+  assert.equal(diskCacheBytes("/", free(2000)), 100 * MiB);        // Chromium: 200 MiB
+  assert.equal(diskCacheBytes("/", free(10)), MiB);                // Chromium: 8 MiB
   assert.equal(diskCacheBytes("/", () => { throw new Error("no statfs"); }), 256 * MiB);
 });
 
