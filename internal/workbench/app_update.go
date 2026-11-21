@@ -242,7 +242,11 @@ func silentUnavailableReason(goos, current, executable string, writable func(str
 	switch goos {
 	case "linux":
 		return "Linux 版本由系统安装包管理，不支持静默更新"
-	case "darwin", "windows":
+	case "windows":
+		// The Windows shell does not follow silent requests yet; offering the
+		// mode there would promise an update that never comes.
+		return "Windows 版本暂不支持静默更新，可以点击升级"
+	case "darwin":
 	default:
 		return "此平台不支持静默更新"
 	}

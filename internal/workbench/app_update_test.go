@@ -501,7 +501,7 @@ func TestSilentUnavailableReason(t *testing.T) {
 		{"darwin", "0.1.15", app, no, false},
 		{"darwin", "0.1.15", "/Users/me/go/bin/cage", yes, false},
 		{"darwin", "dev", app, yes, false},
-		{"windows", "0.1.15", `C:\Users\me\AppData\Local\Programs\Super Cage\cage.exe`, yes, true},
+		{"windows", "0.1.15", `C:\Users\me\AppData\Local\Programs\Super Cage\cage.exe`, yes, false},
 		{"windows", "0.1.15", `C:\Program Files\Super Cage\cage.exe`, no, false},
 		{"linux", "0.1.15", "/usr/bin/cage", yes, false},
 	} {
