@@ -106,25 +106,32 @@ func TestSplitTerminalReplies(t *testing.T) {
 		typing   bool
 	}{
 		{in: "ls\r", rest: "ls\r", typing: true},
-		{in: "\x1b[A", rest: "\x1b[A", typing: true, asked: true},                                             // arrow up
-		{in: "\x1bOP", rest: "\x1bOP", typing: true, asked: true},                                             // F1
-		{in: "\x1b", rest: "\x1b", typing: true, asked: true},                                                 // Escape key
-		{in: "\x1bx", rest: "\x1bx", typing: true, asked: true},                                               // Alt+x
-		{in: "\x1bP", rest: "\x1bP", typing: true, asked: true},                                               // Alt+P
-		{in: "\x1b]", rest: "\x1b]", typing: true, asked: true},                                               // Alt+]
-		{in: "\x1b_", rest: "\x1b_", typing: true, asked: true},                                               // Alt+_
-		{in: "\x1b]ls\r", rest: "\x1b]ls\r", typing: true, asked: true},                                       // Esc, then ] typed fast
-		{in: "\x1b[<0;10;5M", rest: "\x1b[<0;10;5M", typing: true, asked: true},                               // mouse press
-		{in: "\x1b[97;5u", rest: "\x1b[97;5u", typing: true, asked: true},                                     // kitty key
-		{in: "\x1b[?1;2c", rest: "", asked: true},                                                             // DA1 answer
-		{in: "\x1b[?1;2c", rest: "\x1b[?1;2c", typing: true},                                                  // the same, nothing asked
-		{in: "\x1b[>0;276;0c", rest: "", asked: true},                                                         // DA2 answer
-		{in: "\x1b[0n", rest: "", asked: true},                                                                // status report
-		{in: "\x1b[?2004;1$y", rest: "", asked: true},                                                         // DECRPM
-		{in: "\x1b]11;rgb:0000/0000/0000\x1b\\", rest: "", asked: true},                                       // OSC 11 answer
-		{in: "\x1b]10;rgb:ffff/ffff/ffff\x07", rest: "", asked: true},                                         // OSC 10 answer, BEL
-		{in: "\x1bP1$r0m\x1b\\", rest: "", asked: true},                                                       // DECRQSS answer
-		{in: "\x1b[12;40R", rest: "", asked: true},                                                            // cursor position answer
+		{in: "\x1b[A", rest: "\x1b[A", typing: true, asked: true},               // arrow up
+		{in: "\x1bOP", rest: "\x1bOP", typing: true, asked: true},               // F1
+		{in: "\x1b", rest: "\x1b", typing: true, asked: true},                   // Escape key
+		{in: "\x1bx", rest: "\x1bx", typing: true, asked: true},                 // Alt+x
+		{in: "\x1bP", rest: "\x1bP", typing: true, asked: true},                 // Alt+P
+		{in: "\x1b]", rest: "\x1b]", typing: true, asked: true},                 // Alt+]
+		{in: "\x1b_", rest: "\x1b_", typing: true, asked: true},                 // Alt+_
+		{in: "\x1b]ls\r", rest: "\x1b]ls\r", typing: true, asked: true},         // Esc, then ] typed fast
+		{in: "\x1b[<0;10;5M", rest: "\x1b[<0;10;5M", typing: true, asked: true}, // mouse press
+		{in: "\x1b[97;5u", rest: "\x1b[97;5u", typing: true, asked: true},       // kitty key
+		{in: "\x1b[?1;2c", rest: "", asked: true},                               // DA1 answer
+		{in: "\x1b[?1;2c", rest: "\x1b[?1;2c", typing: true},                    // the same, nothing asked
+		{in: "\x1b[>0;276;0c", rest: "", asked: true},                           // DA2 answer
+		{in: "\x1b[0n", rest: "", asked: true},                                  // status report
+		{in: "\x1b[?2004;1$y", rest: "", asked: true},                           // DECRPM
+		{in: "\x1b]11;rgb:0000/0000/0000\x1b\\", rest: "", asked: true},         // OSC 11 answer
+		{in: "\x1b]10;rgb:ffff/ffff/ffff\x07", rest: "", asked: true},           // OSC 10 answer, BEL
+		{in: "\x1bP1$r0m\x1b\\", rest: "", asked: true},                         // DECRQSS answer
+		{in: "\x1b[12;40R", rest: "", asked: true},                              // cursor position answer
+		// What xterm.js 6.0.0 (Cage's web terminal) answers by itself, captured
+		// from a real Terminal: every form is an answer.
+		{in: "\x1b[?1;1R", rest: "", asked: true},                                                             // to CSI ? 6 n
+		{in: "\x1b[?9999;0$y", rest: "", asked: true},                                                         // DECRQM, unknown mode
+		{in: "\x1bP0$r\x1b\\", rest: "", asked: true},                                                         // DECRQSS, unknown setting
+		{in: "\x1bP1$r61;1\"p\x1b\\", rest: "", asked: true},                                                  // DECRQSS "p
+		{in: "\x1b]10;rgb:ffff/ffff/ffff\x1b\\", rest: "", asked: true},                                       // OSC 10, ST
 		{in: "\x1b[1;2R", rest: "\x1b[1;2R", typing: true},                                                    // Shift+F3: nothing asked
 		{in: "\x1b[I", rest: ""},                                                                              // focus in
 		{in: "\x1b[?1;2ca", rest: "a", typing: true, asked: true},                                             // answer and a key together
@@ -502,6 +509,10 @@ func TestTerminalAnswersOnlyToQueriesAsked(t *testing.T) {
 		"\x1bP$qm\x1b\\":   "\x1bP1$r0m\x1b\\",
 		"\x1b]11;?\x07":    "\x1b]11;rgb:1e1e/1e1e/1e1e\x07",
 		"\x1b]4;1;?\x1b\\": "\x1b]4;1;rgb:cd/00/00\x1b\\",
+		// As xterm.js 6.0.0 answers them.
+		"\x1b[?9999$p":       "\x1b[?9999;0$y",
+		"\x1bP$qzz\x1b\\":    "\x1bP0$r\x1b\\",
+		"\x1b]4;1;?;2;?\x07": "\x1b]4;1;rgb:cccc/0000/0000\x1b\\\x1b]4;2;rgb:4e4e/9a9a/0606\x1b\\",
 	} {
 		output(session, query)
 		if data, _ := session.peerInput(other, answer); data != "" {
