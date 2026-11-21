@@ -28,7 +28,8 @@ const open = async title => {
   return trigger;
 };
 try {
-  await page.route("**/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
+  // The desktop list asks with ?providers=claude,codex (and later after/wait): match the path.
+  await page.route(url => url.pathname === "/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
   await page.route("**/api/cli/sessions/*/archive", async route => {
     archiveRequests++;
     if (holdArchive) await new Promise(resolve => { releaseArchive = resolve; });

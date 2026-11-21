@@ -296,7 +296,7 @@ export const RemoteView = forwardRef(function RemoteView(
   );
 });
 
-export function TerminalView({ session, visible, focused = true, onStatus, onControls, onAccountChanged, onLoginTab }) {
+export function TerminalView({ session, visible, focused = true, onStatus, onControls, onAccountChanged, onLoginTab, onOutput }) {
   const { appearance, theme, variant } = useAppearance();
   const box = useRef(),
     instance = useRef(),
@@ -317,6 +317,9 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
   visibleRef.current = visible;
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
+  // Told of every output frame (main.jsx: "正在打开 Codex…" until the first).
+  const outputRef = useRef(onOutput);
+  outputRef.current = onOutput;
   useEffect(() => {
     let disposed = false, emittingPaste = false, inputChain = Promise.resolve();
     const enqueue = (action) => {
@@ -462,6 +465,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         return;
       }
       const data = new Uint8Array(event.data);
+      if (data.byteLength) outputRef.current?.();
       const replay = replayFrame || replayRemaining > 0;
       replayFrame = false;
       replayRemaining = Math.max(0, replayRemaining - data.byteLength);
