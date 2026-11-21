@@ -1887,7 +1887,14 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         let link = null;
         try { link = new URL(String(url)); } catch { /* not a URL */ }
         if (link && (link.protocol === "https:" || link.protocol === "http:") && !link.username && !link.password) {
-          win.open(link.href, "_blank", "noopener,noreferrer");
+          // Open blank first: with "noopener" window.open reports nothing, and a blocked pop-up needs the notice.
+          const opened = win.open("", "_blank");
+          if (opened) {
+            opened.opener = null;
+            opened.location.replace(link.href);
+          } else {
+            showLinkNotice(link.href);
+          }
         }
         return true;
       }
@@ -1896,6 +1903,22 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     win.addEventListener("popstate", () => {
       if (phoneFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
     }, { signal: shellListeners.signal });
+    // The browser blocked the new tab (no tap reached the portal itself): one tap here opens it.
+    let linkNotice = null;
+    function showLinkNotice(href) {
+      if (!linkNotice) {
+        const anchor = h("a", { class: "btn btn-sm", target: "_blank", rel: "noopener noreferrer" }, "打开链接");
+        const close = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭提示" }, icon("close"));
+        linkNotice = { el: h("div", { class: "link-notice", role: "status" }, [h("span", { class: "link-notice-text" }, "浏览器拦截了新标签页。"), anchor, close]), anchor };
+        const hide = () => { linkNotice.el.hidden = true; };
+        anchor.addEventListener("click", () => setTimeout(hide, 0));
+        close.addEventListener("click", hide);
+        el.append(linkNotice.el);
+      }
+      linkNotice.anchor.href = href;
+      linkNotice.el.hidden = false;
+      linkNotice.anchor.focus({ preventScroll: true });
+    }
 
     function unmountFrame() {
       if (!mountedFrame) return;
