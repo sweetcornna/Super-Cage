@@ -24,7 +24,7 @@ import { AppearanceProvider } from "./appearance";
 import { WorkspaceSidebar } from "./workspace-sidebar";
 import { useCLISessions, sessionsChanged, SessionListView, useSessionSnapshot } from "./cli-sessions";
 import { archiveCopy, codexMenuLabel, codexSessionAccountLabel, codexSessionAction, isCodexSession, isCodexTab, READONLY_REASONS, SESSION_PROVIDERS } from "./session-provider.mjs";
-import { CodexTerminalActions, CodexTerminalDetail } from "./codex-terminal-header";
+import { CodexOpening, CodexTerminalActions, CodexTerminalDetail, codexOutputArrived } from "./codex-terminal-header";
 import { NetworkStatusButton } from "./network-explanation";
 import { TerminalMenu } from "./terminal-menu";
 import { InitializationGate } from "./initialization";
@@ -1842,8 +1842,10 @@ function App() {
                       <Suspense fallback={null}>
                       {tab.pending && <TerminalPending error={tab.error}
                         onRetry={() => createTerminal(tab.workspace, tab.terminalKind, undefined, tab)} />}
+                      {!tab.pending && isCodexTab(tab) && tab.cli_session_id && !tab.closed && visible && <CodexOpening id={tab.id} />}
                       {!tab.pending && <TerminalView
                         session={terminalSession(tab)}
+                        onOutput={isCodexTab(tab) && tab.cli_session_id ? () => codexOutputArrived(tab.id) : undefined}
                         onLoginTab={({ id }) => showBrowserResult({ id, kind: "web", login: true, incognito: true, title: "账号授权" })}
                         onControls={(control) =>
                           control

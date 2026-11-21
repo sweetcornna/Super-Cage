@@ -81,6 +81,8 @@ for (const mode of ["light", "dark"]) {
     assert.equal(await tab.getAttribute("aria-selected"), "true", "the bound tab is the active tab");
     await page.locator(".terminal-lane:not([hidden]) .xterm").first().waitFor();
     assert.equal(await page.locator(".terminal-startup").count(), 0, "no Claude startup veil on a Codex terminal");
+    await page.waitForTimeout(1700);
+    assert.equal(await page.locator(".codex-opening").count(), 0, "no opening line once Codex has drawn");
     await page.waitForTimeout(600);
     assert.equal(requests((r) => /\/cli\/sessions\/c0d3c0d3-0000-4000-8000-000000000001\/account$/.test(r.path)).length, 0, "no Claude account reads for a Codex tab");
     const detail = page.locator(".terminal-lane:not([hidden]) .terminal-detail");
@@ -186,6 +188,8 @@ for (const mode of ["light", "dark"]) {
     await sessionMenu.getByRole("menuitem", { name: "Codex 会话" }).waitFor();
     await shot("menu-session");
     const made = page.waitForRequest((request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/terminals");
+    // Codex draws its first screen after 4 s: from 1.5 s a quiet line says it is opening.
+    state.terminalDrawMs = 4000;
     await sessionMenu.getByRole("menuitem", { name: "Codex 会话" }).click();
     const making = await made;
     assert.equal(new URL(making.url()).searchParams.get("providers"), "claude,codex", "the menu opts in to sessions");
@@ -194,6 +198,11 @@ for (const mode of ["light", "dark"]) {
     await madeTab.waitFor();
     assert.equal(await madeTab.getAttribute("aria-selected"), "true");
     await page.locator(".terminal-lane:not([hidden]) .terminal-detail").filter({ hasText: /^Codex · / }).waitFor();
+    const opening = page.locator(".terminal-lane:not([hidden]) .codex-opening");
+    await opening.filter({ hasText: "正在打开 Codex…" }).waitFor();
+    await shot("codex-opening");
+    await opening.waitFor({ state: "detached" });
+    state.terminalDrawMs = 0;
     checks.push(mode + ": the menu makes a Codex session");
 
     // 8. An older server: no capabilities, no Codex rows, today's plain Codex terminal.
@@ -216,6 +225,7 @@ for (const mode of ["light", "dark"]) {
     checks.push(mode + ": older server keeps the plain Codex terminal");
     assert.deepEqual(errors, []);
   } catch (error) {
+    console.error(mode + ": failed after", checks.at(-1) || "the start");
     await page.screenshot({ path: `${output}/${mode}-FAILED.png` }).catch(() => {});
     throw error;
   } finally {

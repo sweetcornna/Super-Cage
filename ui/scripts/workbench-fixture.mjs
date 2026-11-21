@@ -116,11 +116,10 @@ export async function createWorkbench({
   if (mockWebSockets) await page.routeWebSocket("**/api/**", (socket) => {
     if (socket.url().includes("/terminals/")) {
       state.terminalConnections++;
-      socket.send(
-        Buffer.from(
-          "\r\n\u001b[1mCage\u001b[0m  ·  Linux terminal\r\n\r\n~/Projects/design-lab  $ ",
-        ),
-      );
+      const banner = Buffer.from("\r\n\u001b[1mCage\u001b[0m  ·  Linux terminal\r\n\r\n~/Projects/design-lab  $ ");
+      // A program that takes a while to draw its first screen (state.terminalDrawMs).
+      if (state.terminalDrawMs) setTimeout(() => { try { socket.send(banner); } catch { /* closed meanwhile */ } }, state.terminalDrawMs);
+      else socket.send(banner);
     } else socket.close();
   });
   await page.route("**/api/**", async (route) => {

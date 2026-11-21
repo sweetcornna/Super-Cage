@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { LoaderCircle, Pencil, Pin, PinOff, RotateCcw, Square } from "lucide-react";
 import { api } from "./api";
 import { useSessionSnapshot } from "./cli-sessions";
@@ -8,6 +8,28 @@ import "./codex-terminal-header.css";
 // Pieces of the header of a bound Codex terminal (a tab whose
 // cli_session_provider is "codex"). They read the session's row from the list
 // store themselves, so the workbench does not re-render for them.
+// "正在打开 Codex…": the TUI's own output is the progress, so the pane stays
+// blank unless nothing has arrived 1.5 s after it was shown (design 6.3).
+// Tabs whose terminal has written something, for this window's life.
+const outputSeen = new Set();
+const outputWatchers = new Map();
+export const OPENING_HINT_MS = 1500;
+export function codexOutputArrived(id) {
+  if (outputSeen.has(id)) return;
+  outputSeen.add(id);
+  outputWatchers.get(id)?.();
+}
+export function CodexOpening({ id }) {
+  const [waiting, setWaiting] = useState(false);
+  useEffect(() => {
+    if (outputSeen.has(id)) return;
+    const timer = setTimeout(() => setWaiting(!outputSeen.has(id)), OPENING_HINT_MS);
+    outputWatchers.set(id, () => { clearTimeout(timer); setWaiting(false); });
+    return () => { clearTimeout(timer); outputWatchers.delete(id); };
+  }, [id]);
+  return waiting ? <p className="codex-opening" role="status">正在打开 Codex…</p> : null;
+}
+
 const useRow = (store, id) => useSessionSnapshot(store, (list) => list.sessions.find((session) => session.id === id) || null);
 
 export function CodexTerminalDetail({ store, tab, label }) {
