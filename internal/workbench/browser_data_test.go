@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/cage"
 )
 
 type browserDataGuestCall struct {
@@ -676,6 +678,11 @@ func TestBrowserClearIsAHostJob(t *testing.T) {
 	if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"reset"}`, true); w.Code != http.StatusConflict {
 		t.Fatalf("reset during a clear: %d", w.Code)
 	}
+	for _, kind := range []string{"safety", "network-recovery"} {
+		if _, err := s.submitJob(kind, func() error { return nil }); !errors.Is(err, errJobBusy) {
+			t.Fatalf("%s started during a clear: %v", kind, err)
+		}
+	}
 	stopRan := make(chan time.Time, 1)
 	if _, err := s.submitJob("stop", func() error { stopRan <- time.Now(); return nil }); err != nil {
 		t.Fatal(err)
@@ -707,6 +714,54 @@ func TestBrowserClearIsAHostJob(t *testing.T) {
 	}
 	if clears != 1 {
 		t.Fatalf("two windows, one clear: %d", clears)
+	}
+}
+
+// Review 3, findings 9 and 10: when the guest stops answering in the middle
+// of a clear, the job and every window following it get the host's own
+// account instead of a guest error, and a network lease that runs out while
+// the clear waits is said in the job's message.
+func TestBrowserClearReportsWhatTheHostSaw(t *testing.T) {
+	const jobID = "6f1d2a7e-3c4b-4e8a-9b0c-5d6e7f8a9b0c"
+	var mu sync.Mutex
+	var server *Server
+	var messages []string
+	polls := 0
+	s, _ := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+		switch body["mode"] {
+		case "clear":
+			return 200, `{"job":{"id":"` + jobID + `","state":"running","step":1,"steps":4}}`
+		case "job":
+			mu.Lock()
+			defer mu.Unlock()
+			polls++
+			messages = append(messages, server.jobs.snapshot().Message)
+			if polls <= 4 {
+				return 200, `{"job":{"id":"` + jobID + `","state":"running","step":2,"steps":4}}`
+			}
+			return 502, `{"error":"down"}`
+		}
+		return 200, `{"ok":true}`
+	})
+	server = s
+	s.mu.Lock()
+	s.safety.Gate = &cage.GateStatus{Mode: cage.GateOpen, Until: time.Now().Add(300 * time.Millisecond)}
+	s.mu.Unlock()
+	if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["history"]}`, true); w.Code != 200 {
+		t.Fatalf("clear: %d %s", w.Code, w.Body.String())
+	}
+	job := awaitJobIdle(t, &s.jobs)
+	if !strings.Contains(job.Error, "清除结果未知") {
+		t.Fatalf("the job must end with the host's account: %+v", job)
+	}
+	poll := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"job","id":"`+jobID+`"}`, true)
+	if poll.Code != 200 || !strings.Contains(poll.Body.String(), `"failed"`) || !strings.Contains(poll.Body.String(), "清除结果未知") {
+		t.Fatalf("a window following the clear: %d %s", poll.Code, poll.Body.String())
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(messages, func(message string) bool { return strings.Contains(message, "联网授权已到期") }) {
+		t.Fatalf("the lapsed lease was not said: %q", messages)
 	}
 }
 

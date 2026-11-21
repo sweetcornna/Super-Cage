@@ -65,10 +65,10 @@ export function resultLine(result) {
 // The last automatic cleaning, from what the host stored: a failure shows
 // even before a first success.
 const autoFailures = { failed: "浏览器没有完成清除", timeout: "用时过长", unsupported: "需要更新环境组件" };
-export function autoLine(auto, format = time => new Date(time).toLocaleString("zh-CN")) {
+export function autoLine(auto, format = time => momentLabel(time)) {
   const failure = auto?.attempted && autoFailures[auto.result];
   if (failure && auto.last) return `上次成功清理：${format(auto.last)}。最近一次（${format(auto.attempted)}）没有完成（${failure}），下次再试。`;
-  if (failure) return `自动清理还没有成功过：${format(auto.attempted)}的一次没有完成（${failure}），下次再试。`;
+  if (failure) return `自动清理还没有成功过：最近一次（${format(auto.attempted)}）没有完成（${failure}），下次再试。`;
   if (auto?.last) return `上次自动清理：${format(auto.last)}${auto.freed > 0 ? `，释放约 ${formatBytes(auto.freed)}` : ""}。`;
   return "尚未自动清理过。";
 }
@@ -86,6 +86,13 @@ export function dayLabel(time, now = Date.now()) {
 }
 
 export const timeLabel = time => new Date(time).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+// A moment inside a sentence: 今天 14:04, 昨天 09:30, 11月20日 14:04, 2025年11月20日 14:04.
+export function momentLabel(time, now = Date.now()) {
+  const day = startOfDay(time), today = startOfDay(now), date = new Date(time);
+  const year = date.getFullYear() !== new Date(now).getFullYear() ? `${date.getFullYear()}年` : "";
+  return `${day === today ? "今天" : day === today - dayMs ? "昨天" : `${year}${date.getMonth() + 1}月${date.getDate()}日`} ${timeLabel(time)}`;
+}
 
 // Items arrive newest first; consecutive items of one day share a heading.
 export function groupByDay(items, now = Date.now()) {
