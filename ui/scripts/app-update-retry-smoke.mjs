@@ -25,8 +25,8 @@ for (const platform of ["darwin", "windows", "linux"]) {
       await page.clock.fastForward(7*60*60*1000);
       assert.deepEqual(calls, ["status"], "Linux must keep system package updates");
     } else {
-      await page.getByRole("button", { name: "等待重试更新", exact: true }).waitFor();
-      assert.ok(await page.getByRole("button", { name: "等待重试更新", exact: true }).isDisabled());
+      await page.getByRole("button", { name: "等待重试", exact: true }).waitFor();
+      assert.ok(await page.getByRole("button", { name: "等待重试", exact: true }).isDisabled());
       assert.deepEqual(calls, ["status"], "startup must respect the native retry deadline");
       await page.clock.fastForward(6*60*1000);
       await page.evaluate(() => window.dispatchEvent(new Event("focus")));

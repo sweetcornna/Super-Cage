@@ -27,7 +27,20 @@
 .about-result > .error-message { margin: 0; }
 .about-result a { display: inline-flex; align-items: center; gap: 6px; width: fit-content; color: var(--clay-ink); text-decoration: none; }
 .about-result a:hover { text-decoration: underline; text-underline-offset: 3px; }
+.about-updates { display: grid; grid-template-columns: 13.5em minmax(0, 1fr); column-gap: 24px; align-items: baseline; margin-top: 32px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.about-updates > * { grid-column: 2; margin: 0; }
+.settings-page .settings-content .about-updates h4 { grid-column: 1; grid-row: 1 / span 6; margin: 0; color: var(--ink); font-size: var(--fs-body); font-weight: 500; }
+.settings-page .settings-content .about-update-modes { margin: 0; }
+.about-update-modes .choice strong { display: inline-flex; align-items: center; gap: 6px; }
+.about-update-modes .about-update-reason { margin-top: 4px; }
+.about-update-modes .choice[data-disabled] { cursor: default; }
+.about-update-modes .choice[data-disabled] strong { color: var(--muted); }
+.about-updates > p, .settings-page .settings-content .about-updates > p { margin: 10px 0 0; }
+.about-updates > p[data-row="waiting"] { color: var(--ink); }
 @media (max-width: 720px) {
+  .about-updates { grid-template-columns: minmax(0, 1fr); }
+  .settings-page .settings-content .about-updates h4 { grid-row: auto; margin-bottom: 10px; }
+  .about-updates > * { grid-column: 1; }
   .about-result { grid-template-columns: minmax(0, 1fr); }
   .settings-page .settings-content .about-result h4 { grid-row: auto; margin-bottom: 6px; }
   .about-result > * { grid-column: 1; }

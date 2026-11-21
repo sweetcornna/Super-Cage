@@ -14,18 +14,30 @@ import (
 // ticket has been exchanged. It shares the SSH transport's cookie, origin,
 // redirect and stream cancellation rules. Closing it only closes this view.
 func LocalSession(ctx context.Context, origin string, manifest PublicManifest, jar http.CookieJar) (*Session, error) {
+	return LocalSessionDial(ctx, origin, manifest, jar, nil)
+}
+
+// LocalSessionDial is LocalSession with the caller's dialer for the
+// controller's address, which may prove the server's identity on every new
+// connection before a cookie is written on it. A nil dial uses 127.0.0.1.
+func LocalSessionDial(ctx context.Context, origin string, manifest PublicManifest, jar http.CookieJar, dial func(ctx context.Context, network, address string) (net.Conn, error)) (*Session, error) {
 	u, err := url.Parse(origin)
 	if err != nil || u.Scheme != "http" || u.Hostname() != "localhost" || u.Port() == "" || u.User != nil || origin != "http://"+u.Host || jar == nil || len(jar.Cookies(u)) == 0 {
 		return nil, errors.New("本机控制服务会话无效")
 	}
 	endpoint := net.JoinHostPort("127.0.0.1", u.Port())
-	dial := &net.Dialer{Timeout: 5 * time.Second}
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	if dial == nil {
+		dial = func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dialer.DialContext(ctx, "tcp4", endpoint)
+		}
+	}
 	life, cancel := context.WithCancel(ctx)
 	base := &http.Transport{MaxIdleConnsPerHost: 16, IdleConnTimeout: time.Minute, ResponseHeaderTimeout: 30 * time.Second, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
 		if network != "tcp" || address != u.Host {
 			return nil, errors.New("本机服务地址已改变")
 		}
-		conn, err := dial.DialContext(ctx, "tcp4", endpoint)
+		conn, err := dial(ctx, network, address)
 		if errors.Is(err, connectionRefused) {
 			cancel()
 		}

@@ -324,6 +324,12 @@ func run() int {
 		}
 		return relay(path, args[1])
 	}
+	if args[0] == "app-update" && len(args) == 2 && args[1] == "silent-available" {
+		// The native shell's question before it acts on a silent request.
+		reason := workbench.SilentUpdateUnavailable()
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"available": reason == "", "reason": reason})
+		return 0
+	}
 	if args[0] == "app-update" {
 		return appupdate.Run(path, args[1:], os.Stdout)
 	}
@@ -453,15 +459,60 @@ func run() int {
 	}
 	if args[0] == "prepare-update" {
 		stop, returnJSON := false, false
-		for _, argument := range args[1:] {
+		var update workbench.AppUpdateOptions
+		for i := 1; i < len(args); i++ {
+			argument := args[i]
 			switch argument {
 			case "--stop":
 				stop = true
 			case "--json":
 				returnJSON = true
+			case "--app-update", "--trigger", "--confirmed", "--request":
+				if i+1 >= len(args) {
+					return fail(fmt.Errorf("prepare-update option %s needs a value", argument))
+				}
+				i++
+				switch argument {
+				case "--app-update":
+					update.Version = args[i]
+				case "--trigger":
+					update.Trigger = args[i]
+				case "--confirmed":
+					for _, id := range strings.Split(args[i], ",") {
+						if id = strings.TrimSpace(id); id != "" {
+							update.Confirmed = append(update.Confirmed, id)
+						}
+					}
+				case "--request":
+					update.Request = args[i]
+				}
 			default:
 				return fail(fmt.Errorf("unknown prepare-update option: %s", argument))
 			}
+		}
+		if update.Version != "" {
+			// The native shell's decision path: the workload answers under its
+			// operation lock and stops the environment in the same operation.
+			if !stop || !returnJSON {
+				return fail(errors.New("prepare-update --app-update requires --stop --json"))
+			}
+			// One JSON line per event: "stopped" with the attempt as soon as
+			// the workload has stopped the environment, then the outcome.
+			update.Stopped = func(attempt string) {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "stopped", "attempt": attempt})
+			}
+			result, err := workbench.PrepareAppUpdate(path, update)
+			if err != nil {
+				diagnostics.Log("error", "command", err.Error())
+				if result.Status == "abandoned" {
+					_ = json.NewEncoder(os.Stdout).Encode(result)
+				} else {
+					_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "message": err.Error()})
+				}
+				return 1
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(result)
+			return 0
 		}
 		result, err := workbench.PrepareDesktopUpdate(path, stop)
 		if err != nil {

@@ -15,6 +15,16 @@ func (e *retryError) RetryAt() time.Time { return e.at }
 
 func (s *State) fail(err error) {
 	s.Phase, s.Message, s.Retryable, s.RetryAt = "failed", err.Error(), true, ""
+	var refusal *unattendedRefusal
+	var integrity *integrityError
+	switch {
+	case errors.As(err, &refusal):
+		s.Code = refusal.code
+	case errors.As(err, &integrity):
+		s.Code = "verification"
+	default:
+		s.Code = "transient"
+	}
 	var delayed interface{ RetryAt() time.Time }
 	if errors.As(err, &delayed) {
 		s.RetryAt = delayed.RetryAt().UTC().Format(time.RFC3339)

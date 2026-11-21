@@ -288,6 +288,13 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 		return true
 	}
+	// Updating this machine's application is decided by the local workload.
+	// A cloud workspace never learns or answers it.
+	if remote && appUpdateRoute(r.URL.Path) {
+		// Plain Chinese text survives the UI's error mapping unchanged.
+		http.Error(w, appUpdateLocalRequired, http.StatusConflict)
+		return true
+	}
 	if remote && (r.URL.Path == "/api/environment/storage" || r.URL.Path == "/api/environment/storage/recover") {
 		http.Error(w, "请在虚拟机所在电脑上调整环境存储", http.StatusForbidden)
 		return true
