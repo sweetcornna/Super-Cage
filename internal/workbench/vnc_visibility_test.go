@@ -245,15 +245,25 @@ func TestVNCMalformedControlFramesAreIgnored(t *testing.T) {
 	}
 }
 
-// A client that offers no subprotocol, like every client before this one,
-// gets the stream exactly as before.
+// A client that does not offer display control, like every client before
+// this one, gets the stream exactly as before. One that offers the plain
+// stream gets it selected, as Chrome requires of a handshake that offered
+// subprotocols; one that offers none gets none.
 func TestVNCClientWithoutDisplayControlIsUnchanged(t *testing.T) {
 	newGuestVNC(t)
 	s := testServer(t)
 	server, posts := displayServer(t, s, okAnswer)
+	if ws := dialDisplay(t, server); ws.Subprotocol() != "" {
+		t.Fatalf("subprotocol %q selected for a client that offered none", ws.Subprotocol())
+	} else {
+		readBanner(t, ws)
+		receive(t, posts, 3*time.Second, "the show")
+		ws.Close()
+		receive(t, posts, 3*time.Second, "the hide after disconnect")
+	}
 	ws := dialDisplay(t, server, "binary")
-	if ws.Subprotocol() != "" {
-		t.Fatalf("subprotocol %q selected for a client that did not ask", ws.Subprotocol())
+	if ws.Subprotocol() != "binary" {
+		t.Fatalf("subprotocol %q selected for a client that offered only binary", ws.Subprotocol())
 	}
 	readBanner(t, ws)
 	if post := receive(t, posts, 3*time.Second, "the show"); !post.Visible {

@@ -182,6 +182,10 @@ type simMachine struct {
 	nestedPressure bool
 	active         bool
 	swaps          int // seconds the machine itself was out of memory
+	// cache is the machine's own page cache (the nested guest's disk image,
+	// logs): it fills free memory, counts as available inside the machine
+	// and is resident on the gateway host, which cannot reclaim it.
+	cache uint64
 }
 
 func (m *simMachine) memTotal() uint64 { return uint64(m.limit) - 200*simMiB }
@@ -191,6 +195,12 @@ func (m *simMachine) available() uint64 {
 		return total - used
 	}
 	return 0
+}
+
+// settleCache grows the machine's page cache by rate toward its free memory
+// and drops what no longer fits.
+func (m *simMachine) settleCache(rate uint64) {
+	m.cache = min(m.cache+rate, m.available())
 }
 
 type simWorld struct {
@@ -203,6 +213,11 @@ type simWorld struct {
 	// per machine: seconds the control plane did not answer, minimum
 	// available, the last target
 	silent map[string]int
+	// cacheRate is how fast each machine's own page cache grows (bytes per
+	// second); zero leaves machines without page cache.
+	cacheRate uint64
+	// pressured counts gateway rounds that saw host pressure.
+	pressured int
 }
 
 func newSimGuest(maximum uint64, classes bool, want simClasses) *simGuest {
@@ -223,6 +238,7 @@ func (w *simWorld) run(seconds int, trace func(second int, m *simMachine)) {
 		for _, m := range w.machines {
 			trace(w.second, m)
 			m.guest.step()
+			m.settleCache(w.cacheRate)
 			if !m.guest.answers && w.second >= 30 {
 				w.silent[m.id]++
 			}
@@ -255,17 +271,22 @@ func (w *simWorld) allocate() {
 	var resident uint64
 	state := MemoryState{HostTotal: int64(w.host), Ceiling: w.ceiling, Instances: map[string]InstanceMemory{}}
 	for _, m := range w.machines {
-		resident += min(uint64(m.limit), m.used()+200*simMiB)
+		resident += min(uint64(m.limit), m.used()+m.cache+200*simMiB)
 		state.Instances[m.id] = InstanceMemory{Status: "Running", Limit: m.limit, GuestTotal: int64(m.memTotal()), GuestAvailable: int64(m.available()),
 			NestedShort: int64(m.short), NestedPressure: m.nestedPressure, Active: m.active}
 	}
 	state.HostAvailable = int64(w.host - min(w.host, w.hostOwn+resident))
 	result := allocateMemory(allocationInput{now: w.now, state: state, minimum: DefaultMemoryMin}, w.held)
 	w.held = result.held
+	if result.pressure {
+		w.pressured++
+	}
 	for _, change := range result.changes {
 		for _, m := range w.machines {
 			if m.id == change.id {
 				m.limit = change.to
+				// A smaller balloon target makes the machine drop cache first.
+				m.settleCache(0)
 			}
 		}
 	}
@@ -535,6 +556,195 @@ func TestReplayParkedMachineRegrowsQuickly(t *testing.T) {
 			ramp, parked>>20, elapsed, m.limit>>20, m.guest.target>>20, w.silent[m.id]-silent, m.swaps)
 		if elapsed > 40 || m.swaps != 0 || w.silent[m.id]-silent > 40 || ramp > 1 && w.silent[m.id]-silent > 10 {
 			t.Fatalf("regrowth over %d s took %d s (machine out of memory %d s, silent %d s)", ramp, elapsed, m.swaps, w.silent[m.id]-silent)
+		}
+	}
+}
+
+func TestReplayTwoMachinesGrowingWithPageCache(t *testing.T) {
+	// TestReplayTwoMachinesBothGrowing on machines whose own page cache
+	// fills their free memory (review 2, R2-5): the host's available memory
+	// then stays near its reserve, which is the plan, not a shortage. Both
+	// guests still get what they need, at once, and the gateway does not sit
+	// in pressure.
+	grow := func(second int, m *simMachine) {
+		m.guest.want = simClasses{control: 400 * simMiB, sessions: 300*simMiB + min(uint64(second), 900)*3*simMiB, browser: 500*simMiB + min(uint64(second), 900)*2*simMiB, cache: 500 * simMiB}
+	}
+	a := &simMachine{id: vmID(3), limit: 12 << 30, own: simGiB, active: true}
+	b := &simMachine{id: vmID(4), limit: 12 << 30, own: simGiB, active: true}
+	w := &simWorld{host: 20 * simGiB, hostOwn: 2 * simGiB, ceiling: 12 << 30, machines: []*simMachine{a, b}, now: time.Unix(1e9, 0), cacheRate: 64 * simMiB}
+	for _, m := range w.machines {
+		m.guest = newSimGuest(10*simGiB, true, m.guest0())
+	}
+	w.run(1800, grow)
+	report(t, "two growing machines with cache, A", w, a)
+	report(t, "two growing machines with cache, B", w, b)
+	t.Logf("rounds under host pressure: %d of %d", w.pressured, 1800/15)
+	if w.silent[a.id]+w.silent[b.id] != 0 || a.swaps+b.swaps != 0 || a.guest.target < 3*simGiB || b.guest.target < 3*simGiB || w.pressured > 1800/15/10 {
+		t.Fatalf("two machines with cache: limits %d/%d MiB, targets %d/%d MiB, silent %d/%d, out of memory %d/%d, pressure in %d rounds",
+			a.limit>>20, b.limit>>20, a.guest.target>>20, b.guest.target>>20, w.silent[a.id], w.silent[b.id], a.swaps, b.swaps, w.pressured)
+	}
+}
+
+// cacheHost is the reviewer's model of a gateway host whose VMs run no nested
+// guest (review 2, R2-5): a guest's working set is anonymous memory, its page
+// cache grows toward the balloon limit (Linux keeps file pages while memory is
+// free) and counts as available inside the guest, and everything the guest
+// touched stays resident on the host, which cannot reclaim guest memory: only
+// a smaller balloon limit makes the guest drop cache.
+type cacheHost struct {
+	total, own int64
+	ceiling    int64
+	vms        []*cacheVM
+	held       map[string]demandState
+	now        time.Time
+}
+
+type cacheVM struct {
+	id                    string
+	limit, working, cache int64
+}
+
+const cacheKernel = 200 * testMiB
+
+func (h *cacheHost) state() MemoryState {
+	state := MemoryState{HostTotal: h.total, Ceiling: h.ceiling, Instances: map[string]InstanceMemory{}}
+	resident := h.own
+	for _, vm := range h.vms {
+		total := vm.limit - cacheKernel
+		vm.cache = max(0, min(vm.cache, total-vm.working))
+		resident += vm.working + vm.cache + cacheKernel
+		state.Instances[vm.id] = InstanceMemory{Status: "Running", Limit: vm.limit, GuestTotal: total, GuestAvailable: max(0, total-vm.working), Active: true}
+	}
+	state.HostAvailable = max(0, h.total-resident)
+	return state
+}
+
+// round is one gateway round followed by 15 s of page cache growth.
+func (h *cacheHost) round(t *testing.T, cacheGrowth int64) (MemoryState, allocationResult) {
+	t.Helper()
+	if h.held == nil {
+		h.held = map[string]demandState{}
+	}
+	state := h.state()
+	result := allocateMemory(allocationInput{now: h.now, state: state, minimum: DefaultMemoryMin}, h.held)
+	h.held = result.held
+	for _, change := range result.changes {
+		fair := result.report[change.id].Fair
+		if change.to < change.from && change.from > fair && change.to < fair {
+			t.Fatalf("%s shrank from above its fair share %d MiB to below it: %+v", change.id, fair>>20, change)
+		}
+		for _, vm := range h.vms {
+			if vm.id == change.id {
+				vm.limit = change.to
+			}
+		}
+	}
+	for _, vm := range h.vms {
+		vm.cache += cacheGrowth
+	}
+	h.now = h.now.Add(15 * time.Second)
+	return state, result
+}
+
+// demandOf is the allocator's demand for a guest that is not short.
+func demandOf(working int64) int64 {
+	w := working + cacheKernel
+	return roundUpMemory(w + max(memoryHeadroom, w/4))
+}
+
+func TestReplayPageCacheDoesNotHoldGrowthBack(t *testing.T) {
+	// The reviewer's scenario: 17 GiB host, three VMs with a 3 GiB working
+	// set whose page cache fills their limits. Then vm0's working set grows
+	// by 128 MiB a round. While the host can back it, vm0 grows in the round
+	// its demand rises, never runs short, and the host is not in pressure.
+	h := &cacheHost{total: 17 * testGiB, own: 512 * testMiB, ceiling: 8 * testGiB, now: time.Unix(1e9, 0)}
+	for i := range 3 {
+		h.vms = append(h.vms, &cacheVM{id: vmID(20 + i), limit: 8 * testGiB, working: 3 * testGiB})
+	}
+	vm0 := h.vms[0]
+	capacity := h.total - memoryReserve(0, h.total)
+	for round := range 60 {
+		if round >= 14 && vm0.working < 4608*testMiB {
+			vm0.working += 128 * testMiB
+		}
+		state, result := h.round(t, 256*testMiB)
+		if round < 10 {
+			continue
+		}
+		var sum, demands int64
+		for _, vm := range h.vms {
+			sum += vm.limit
+			demands += demandOf(vm.working)
+		}
+		entry := state.Instances[vm0.id]
+		if entry.GuestAvailable < memoryMinHeadroom/2 {
+			t.Fatalf("round %d: vm0 ran short (%d MiB available, limit %d MiB, host available %d MiB, pressure %v)", round, entry.GuestAvailable>>20, entry.Limit>>20, state.HostAvailable>>20, result.pressure)
+		}
+		if demands <= capacity {
+			for _, vm := range h.vms {
+				if vm.limit < demandOf(vm.working) {
+					t.Fatalf("round %d: %s has %d MiB for a demand of %d MiB while the host backs every demand (host available %d MiB, pressure %v)",
+						round, vm.id, vm.limit>>20, demandOf(vm.working)>>20, state.HostAvailable>>20, result.pressure)
+				}
+			}
+		}
+		if result.pressure {
+			t.Fatalf("round %d: host pressure with %d MiB available and limits %d of %d MiB", round, state.HostAvailable>>20, sum>>20, capacity>>20)
+		}
+		if sum > capacity {
+			t.Fatalf("round %d: limits %d MiB exceed the capacity %d MiB", round, sum>>20, capacity>>20)
+		}
+	}
+}
+
+func TestReplayLongSteadyStateWithPageCache(t *testing.T) {
+	// Eight hours of constant working sets with page cache filling every
+	// limit, in the middle band (every demand met, limits below the
+	// capacity) and saturated (one guest wants more than its fair share, so
+	// the limits fill the capacity). After it settles nothing moves, the
+	// host is never in pressure, and every guest has its demand or its fair
+	// share.
+	for _, test := range []struct {
+		name    string
+		working []int64
+	}{
+		{"middle band", []int64{3 * testGiB, 3 * testGiB, 3 * testGiB}},
+		{"saturated", []int64{3 * testGiB, 3 * testGiB, 5 * testGiB}},
+	} {
+		h := &cacheHost{total: 17 * testGiB, own: 512 * testMiB, ceiling: 8 * testGiB, now: time.Unix(1e9, 0)}
+		for i, working := range test.working {
+			h.vms = append(h.vms, &cacheVM{id: vmID(30 + i), limit: 8 * testGiB, working: working})
+		}
+		capacity := h.total - memoryReserve(0, h.total)
+		moves, pressured := 0, 0
+		for round := range 8 * 240 {
+			state, result := h.round(t, 256*testMiB)
+			if round < 60 {
+				continue
+			}
+			moves += len(result.changes)
+			if result.pressure {
+				pressured++
+			}
+			var sum int64
+			for _, vm := range h.vms {
+				sum += vm.limit
+				if entry := state.Instances[vm.id]; entry.GuestAvailable < memoryMinHeadroom/2 && demandOf(vm.working) <= result.report[vm.id].Fair {
+					t.Fatalf("%s round %d: %s short below its fair share: %+v", test.name, round, vm.id, result.report[vm.id])
+				}
+			}
+			if sum > capacity || state.HostAvailable <= 0 {
+				t.Fatalf("%s round %d: limits %d MiB of %d, host available %d MiB", test.name, round, sum>>20, capacity>>20, state.HostAvailable>>20)
+			}
+		}
+		var limits []int64
+		for _, vm := range h.vms {
+			limits = append(limits, vm.limit>>20)
+		}
+		state := h.state()
+		t.Logf("%-12s limits %v MiB, host available %d MiB, moves after settling %d, rounds in pressure %d", test.name, limits, state.HostAvailable>>20, moves, pressured)
+		if moves != 0 || pressured != 0 {
+			t.Fatalf("%s: %d moves and %d rounds in pressure after settling (limits %v MiB)", test.name, moves, pressured, limits)
 		}
 	}
 }

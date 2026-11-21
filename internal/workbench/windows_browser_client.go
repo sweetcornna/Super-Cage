@@ -304,6 +304,9 @@ func (c *windowsBrowserClient) request(ctx context.Context, method, path string,
 			"frame_unavailable":           "浏览器画面流尚未就绪",
 			"transfer_changed":            "文件传递已经关闭，请重新选择文件",
 			"frame_limit":                 "浏览器画面过大，请缩小窗口后重试",
+			// The macOS browser service compared Chrome with the last full
+			// check and found it changed, or has nothing to compare.
+			"browser_recheck_needed": "Chrome 进程或浏览器设置发生变化，请打开 Chrome 后重新检测",
 		}
 		code := result.Code
 		if code == "" {

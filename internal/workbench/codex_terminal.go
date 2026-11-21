@@ -196,7 +196,7 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 		if err := s.codexConnection(record); err != nil {
 			return nil, err
 		}
-		if thread, err = s.checkCodexOpen(input.requestContext, record, root); err != nil {
+		if thread, err = s.checkCodexOpen(input.requestContext, record, root, input.codexProbed); err != nil {
 			return nil, err
 		}
 	}
@@ -253,12 +253,18 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 // checkCodexOpen asks the guest who holds a session's thread before a
 // terminal resumes it, so a refusal reaches the desktop as an answer instead
 // of a terminal that ends at once. It returns the thread to resume.
-func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root string) (string, error) {
+//
+// It runs under the operation lock, so it asks for the CLI's support only
+// when warmCodexProbe just had it read: reading the help of a CLI the guest
+// has not cached takes seconds. Without it the open goes on, and tui-launch,
+// which probes on its own outside the lock, refuses to resume on a CLI that
+// cannot.
+func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root string, probe bool) (string, error) {
 	if ctx == nil {
 		ctx = s.lifetimeContext()
 	}
 	var current codexConversation
-	input := map[string]any{"thread": record.codexThread(), "account": record.codexGuestAccount(), "connection": record.Connection, "workspace": root, "probe": true}
+	input := map[string]any{"thread": record.codexThread(), "account": record.codexGuestAccount(), "connection": record.Connection, "workspace": root, "probe": probe}
 	if err := s.runCodexSessions(ctx, "view", input, &current); err != nil {
 		return "", err
 	}
@@ -291,6 +297,23 @@ func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root 
 		return "", errors.New(current.ConnectionNotice)
 	}
 	return thread, nil
+}
+
+// warmCodexProbe has the guest read its Codex CLI's support before an open
+// takes the operation lock, and reports whether the answer was complete. The
+// guest caches it per CLI binary, so this is quick after the first time; the
+// first time (or after the CLI changed) it can take seconds, which the lock
+// would otherwise be held for.
+func (s *Server) warmCodexProbe(ctx context.Context) bool {
+	if !s.vmRunning() || !s.codexSessionsPossible() {
+		return false
+	}
+	var caps codexCLICaps
+	if err := s.runCodexSessions(ctx, "probe", map[string]any{}, &caps); err != nil || !caps.Complete {
+		return false
+	}
+	s.mobileCLI.noteCodexCLI(&caps)
+	return true
 }
 
 // codexSessionTerminalScript runs the Codex helper's tui-launch from the

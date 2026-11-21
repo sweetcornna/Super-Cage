@@ -43,7 +43,7 @@ func mobileNetwork(running bool, safety safetyState, now time.Time) map[string]a
 		if !gate.Until.IsZero() {
 			view["until"] = gate.Until
 		}
-		if running && gate.Until.After(now) && (gate.Mode == cage.GateOpen || gate.Mode == cage.GateChecking) {
+		if running && gate.Deadline().After(now) && (gate.Mode == cage.GateOpen || gate.Mode == cage.GateChecking) {
 			view["mode"] = gate.Mode
 		}
 	}
@@ -114,7 +114,7 @@ func (s *Server) mobileEnvironment(w http.ResponseWriter, r *http.Request) {
 		"ready": ready, "vm_running": running, "guest_system": system,
 		"workload_ready":              ready && running && system != "windows-remote",
 		"environment_update_required": s.guestUpdateRequired, "job": job,
-		"network": mobileNetwork(running, s.safety, time.Now()), "network_error": s.currentNetworkErrorLocked(),
+		"network": mobileNetwork(running, s.safetyViewLocked(time.Now()), time.Now()), "network_error": s.currentNetworkErrorLocked(),
 		"proxy": proxy,
 	}
 	s.mu.Unlock()
