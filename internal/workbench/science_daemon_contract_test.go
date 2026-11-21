@@ -22,6 +22,9 @@ import (
 //	CAGE_TEST_SCIENCE_DAEMON=127.0.0.1:47800   reaches the daemon (a forward)
 //	CAGE_TEST_SCIENCE_LINK='ssh guest claude-science url'
 //	CAGE_TEST_SCIENCE_PORT=47800               the daemon's port in the guest
+//	CAGE_TEST_SCIENCE_SIGNED_OUT=1             the account is signed out
+//
+// Run it twice, signed in and signed out (Q11).
 //
 // Skipped otherwise; everything else about the daemon in these tests rests
 // on science_fake_daemon_test.go.
@@ -74,16 +77,30 @@ func TestScienceDaemonContract(t *testing.T) {
 	if r := get("/api/projects", false); r.StatusCode != http.StatusUnauthorized && r.StatusCode != http.StatusForbidden {
 		t.Errorf("an API call without the bearer: %d (the fake answers 401)", r.StatusCode)
 	}
-	// The front reads a 401 as "the bearer was refused" and mints again, at
-	// most scienceMintCap times before ending the session (F10). A daemon
-	// that answers 401 to a valid bearer for another reason (a signed-out
-	// account, say) would end every session: run this both signed in and
-	// signed out.
-	for _, path := range []string{"/api/auth/status", "/api/projects"} {
-		if r := get(path, true); r.StatusCode == http.StatusUnauthorized {
-			t.Errorf("%s answers 401 to a valid bearer: the front would end the session (F10)", path)
-		} else {
-			t.Logf("%s with the bearer: %d", path, r.StatusCode)
+	// Round-2 N5: on a 401 the front asks scienceBearerCheckPath with the
+	// same bearer. It must answer 200 to a good bearer, signed in or not, and
+	// 401 to any other; then a 401 the app gives a signed-out account shows
+	// "需要登录" and mints nothing, and only a refused bearer is replaced.
+	if r := get(scienceBearerCheckPath, true); r.StatusCode != http.StatusOK {
+		t.Errorf("%s answers %d to a good bearer: the front could not tell a signed-out account from a refused credential", scienceBearerCheckPath, r.StatusCode)
+	}
+	forged, _ := http.NewRequestWithContext(ctx, http.MethodGet, upstream.origin()+scienceBearerCheckPath, nil)
+	forged.Host = upstream.hostPort()
+	forged.Header.Set("Authorization", "Bearer not-a-credential")
+	if r, err := upstream.transport.RoundTrip(forged); err != nil {
+		t.Fatal(err)
+	} else {
+		r.Body.Close()
+		if r.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s answers %d to a refused bearer: the front would never replace one", scienceBearerCheckPath, r.StatusCode)
+		}
+	}
+	signedOut := os.Getenv("CAGE_TEST_SCIENCE_SIGNED_OUT") == "1"
+	for _, path := range []string{"/api/projects"} {
+		r := get(path, true)
+		t.Logf("%s with the bearer (signed out: %v): %d", path, signedOut, r.StatusCode)
+		if r.StatusCode == http.StatusUnauthorized && !signedOut {
+			t.Errorf("%s answers 401 to a good bearer of a signed-in account", path)
 		}
 	}
 	// The document: HTML, a nonce-based CSP the front merges, the cookies

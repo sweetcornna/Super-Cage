@@ -265,8 +265,12 @@ type scienceFrontState struct {
 	Audit      scienceAuditDistinct `json:"audit"`
 	Session    bool                 `json:"session"`
 	Transport  string               `json:"transport,omitempty"`
-	SignIn     *scienceSignInEvent  `json:"signin,omitempty"`
-	Violations []scienceViolation   `json:"violations,omitempty"`
+	// SignInNeeded: the daemon answers the page's API calls with 401 to a
+	// good credential (a signed-out account, round-2 N5). The pane shows
+	// "需要登录"; nothing is minted for it.
+	SignInNeeded bool                `json:"signin_needed,omitempty"`
+	SignIn       *scienceSignInEvent `json:"signin,omitempty"`
+	Violations   []scienceViolation  `json:"violations,omitempty"`
 }
 
 type scienceSignInEvent struct {
@@ -355,7 +359,7 @@ func (f *scienceFront) reset(reason string) {
 	clear(f.issued)
 	clear(f.checking)
 	f.endGenerationLocked()
-	f.state.Session, f.state.Audit = false, scienceAuditDistinct{}
+	f.state.Session, f.state.Audit, f.state.SignInNeeded = false, scienceAuditDistinct{}, false
 	if reason != "" {
 		now := f.now()
 		f.state.Refused, f.state.RefusedAt = reason, &now
@@ -755,6 +759,13 @@ func (f *scienceFront) upstreamFor(generation uint64) (*scienceUpstream, error) 
 		return f.upstream, nil
 	}
 	f.upstream = created
+	created.watchSignIn(func(needed bool) {
+		f.mu.Lock()
+		if f.generation == generation {
+			f.state.SignInNeeded = needed
+		}
+		f.mu.Unlock()
+	})
 	f.wakeWatch()
 	return created, nil
 }

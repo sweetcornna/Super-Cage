@@ -401,10 +401,21 @@ type scienceUpstream struct {
 	mu     sync.Mutex
 	bearer string
 	mint   sync.Mutex
-	// F10: exchanges since the daemon last accepted a bearer, and the
-	// earliest time for the next one.
-	unaccepted int
-	notBefore  time.Time
+	// F10, round-2 N5: exchanges made because the daemon refused a bearer
+	// (never reset: an upstream lives for one session generation at most),
+	// and the earliest time for the next one.
+	refused   int
+	notBefore time.Time
+	// The last bearer check (checkBearer), shared by concurrent 401s.
+	check         sync.Mutex
+	checkedBearer string
+	checkedAt     time.Time
+	checkedResult scienceBearerVerdict
+	// signedOut holds the API paths that last answered a good bearer with
+	// 401 (a signed-out account); onSignIn hears when it becomes empty or
+	// not.
+	signedOut map[string]bool
+	onSignIn  func(needed bool)
 }
 
 func newScienceUpstream(dialer scienceDialer, port int, link func(context.Context) (string, error)) *scienceUpstream {
@@ -434,12 +445,13 @@ func (u *scienceUpstream) token(ctx context.Context) (string, error) {
 	if token != "" {
 		return token, nil
 	}
-	return u.remint(ctx, "")
+	return u.remint(ctx, "", false)
 }
 
 // remint replaces stale (or an absent bearer) once; concurrent callers share
-// one exchange.
-func (u *scienceUpstream) remint(ctx context.Context, stale string) (string, error) {
+// one exchange. refused says the daemon refused stale: only those exchanges
+// count against scienceMintCap.
+func (u *scienceUpstream) remint(ctx context.Context, stale string, refused bool) (string, error) {
 	u.mint.Lock()
 	defer u.mint.Unlock()
 	u.mu.Lock()
@@ -448,13 +460,15 @@ func (u *scienceUpstream) remint(ctx context.Context, stale string) (string, err
 		u.mu.Unlock()
 		return token, nil
 	}
-	if u.unaccepted >= scienceMintCap {
-		u.mu.Unlock()
-		return "", errScienceRefused
+	if refused {
+		if u.refused >= scienceMintCap {
+			u.mu.Unlock()
+			return "", errScienceRefused
+		}
+		u.refused++
+		u.notBefore = time.Now().Add(scienceMintBackoff << (u.refused - 1))
 	}
 	u.bearer = ""
-	u.unaccepted++
-	u.notBefore = time.Now().Add(scienceMintBackoff << (u.unaccepted - 1))
 	u.mu.Unlock()
 	token, err := u.exchange(ctx)
 	if err != nil {
@@ -467,25 +481,115 @@ func (u *scienceUpstream) remint(ctx context.Context, stale string) (string, err
 }
 
 // A daemon that refuses fresh credentials gets scienceMintCap exchanges,
-// scienceMintBackoff apart and doubling, then the session ends.
+// scienceMintBackoff apart and doubling, then the session ends. Successes in
+// between do not reset the count (round-2 N5).
 var scienceMintBackoff = time.Second
 
 const scienceMintCap = 3
 
 var errScienceRefused = errors.New("Claude Science 多次拒绝了本机渲染的访问凭证，本机渲染已停止。请回到工作台重新打开。")
 
-// mayMint reports whether a refused bearer may be replaced now: at once
-// after a success (a daemon restart rotates bearers), with back-off after a
-// fresh one was refused.
+// mayMint reports whether a refused bearer may be replaced now: within the
+// cap and after the back-off.
 func (u *scienceUpstream) mayMint() bool {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return u.unaccepted < scienceMintCap && !time.Now().Before(u.notBefore)
+	return u.refused < scienceMintCap && !time.Now().Before(u.notBefore)
 }
 
-func (u *scienceUpstream) accepted() {
+// exhausted reports whether the daemon refused scienceMintCap fresh bearers.
+func (u *scienceUpstream) exhausted() bool {
 	u.mu.Lock()
-	u.unaccepted, u.notBefore = 0, time.Time{}
+	defer u.mu.Unlock()
+	return u.refused >= scienceMintCap
+}
+
+type scienceBearerVerdict int
+
+const (
+	scienceBearerUnknown scienceBearerVerdict = iota
+	scienceBearerGood
+	scienceBearerRefused
+)
+
+// scienceBearerCheckPath answers 200 to a good bearer whether or not the
+// account is signed in, and 401 to any other (science_daemon_contract_test.go
+// states this for the real daemon).
+const scienceBearerCheckPath = "/api/auth/status"
+
+// scienceBearerCheckLife is how long a check's verdict serves further 401s.
+const scienceBearerCheckLife = 10 * time.Second
+
+// checkBearer asks the daemon whether token itself is refused, so that a
+// 401 the app gives a signed-out account is not mistaken for a refused
+// credential (round-2 N5, Q11). Concurrent callers share one check.
+func (u *scienceUpstream) checkBearer(ctx context.Context, token string) scienceBearerVerdict {
+	u.check.Lock()
+	defer u.check.Unlock()
+	u.mu.Lock()
+	if u.checkedBearer == token && time.Since(u.checkedAt) < scienceBearerCheckLife {
+		verdict := u.checkedResult
+		u.mu.Unlock()
+		return verdict
+	}
+	u.mu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.origin()+scienceBearerCheckPath, nil)
+	if err != nil {
+		return scienceBearerUnknown
+	}
+	request.Host = u.hostPort()
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("Authorization", "Bearer "+token)
+	response, err := u.transport.RoundTrip(request)
+	if err != nil {
+		return scienceBearerUnknown
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	response.Body.Close()
+	verdict := scienceBearerUnknown
+	switch {
+	case response.StatusCode == http.StatusUnauthorized:
+		verdict = scienceBearerRefused
+	case response.StatusCode < 300:
+		verdict = scienceBearerGood
+	}
+	if verdict != scienceBearerUnknown {
+		u.mu.Lock()
+		u.checkedBearer, u.checkedAt, u.checkedResult = token, time.Now(), verdict
+		u.mu.Unlock()
+	}
+	return verdict
+}
+
+// setSignedOut records whether path answered a good bearer with 401 and
+// tells the front when the daemon starts or stops asking for a sign-in. A
+// path clears only its own entry, so endpoints that work signed out do not
+// hide the ones that need the account.
+func (u *scienceUpstream) setSignedOut(path string, signedOut bool) {
+	u.mu.Lock()
+	before := len(u.signedOut) > 0
+	if signedOut && len(u.signedOut) < 64 {
+		if u.signedOut == nil {
+			u.signedOut = map[string]bool{}
+		}
+		u.signedOut[path] = true
+	} else if !signedOut {
+		delete(u.signedOut, path)
+	}
+	after := len(u.signedOut) > 0
+	notify := u.onSignIn
+	u.mu.Unlock()
+	if before != after && notify != nil {
+		notify(after)
+	}
+}
+
+// watchSignIn sets who hears setSignedOut.
+func (u *scienceUpstream) watchSignIn(notify func(needed bool)) {
+	u.mu.Lock()
+	u.onSignIn = notify
 	u.mu.Unlock()
 }
 
@@ -565,25 +669,39 @@ func (u *scienceUpstream) RoundTrip(request *http.Request) (*http.Response, erro
 		if err != nil {
 			return nil, err
 		}
+		api := strings.HasPrefix(request.URL.Path, "/api/") && !strings.HasPrefix(request.URL.Path, "/api/auth/")
 		if response.StatusCode != http.StatusUnauthorized {
-			u.accepted()
+			if api {
+				u.setSignedOut(request.URL.Path, false)
+			}
 			return response, nil
 		}
-		// One replacement per request, and only as often as mayMint allows;
-		// otherwise the page sees the daemon's 401 (F10).
-		if attempt > 0 || (request.Body != nil && request.Body != http.NoBody && request.GetBody == nil) || !u.mayMint() {
-			u.mu.Lock()
-			exhausted := u.unaccepted >= scienceMintCap && u.bearer == token
-			u.mu.Unlock()
-			if exhausted && attempt > 0 {
-				response.Body.Close()
-				return nil, errScienceRefused
+		// A 401 to a good bearer is the app's own answer (a signed-out
+		// account): the page gets it and nothing is minted. Only a refused
+		// bearer is replaced, once per request, within the cap.
+		verdict := scienceBearerRefused
+		if request.URL.Path != scienceBearerCheckPath {
+			verdict = u.checkBearer(request.Context(), token)
+		}
+		if verdict == scienceBearerGood {
+			if api {
+				u.setSignedOut(request.URL.Path, true)
 			}
+			return response, nil
+		}
+		if verdict == scienceBearerUnknown || attempt > 0 || (request.Body != nil && request.Body != http.NoBody && request.GetBody == nil) {
+			return response, nil
+		}
+		if u.exhausted() {
+			response.Body.Close()
+			return nil, errScienceRefused
+		}
+		if !u.mayMint() {
 			return response, nil
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 		response.Body.Close()
-		if token, err = u.remint(request.Context(), token); err != nil {
+		if token, err = u.remint(request.Context(), token, true); err != nil {
 			return nil, err
 		}
 	}

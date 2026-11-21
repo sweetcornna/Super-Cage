@@ -312,7 +312,11 @@ export function hostFrameStatus(data, phase) {
   const render = data?.host_render || {};
   const chips = [];
   if (data?.version) chips.push({ text: "v" + data.version, tone: "" });
-  if (data?.signed_in === true) chips.push({ text: "已登录", tone: "ok" });
+  // The daemon answers the page's API calls with 401 to a good credential
+  // (science_upstream.go setSignedOut): the account needs a sign-in, which
+  // happens in the isolated browser (the toolbar's 登录).
+  if (render.signin_needed) chips.push({ text: "需要登录", tone: "warn" });
+  else if (data?.signed_in === true) chips.push({ text: "已登录", tone: "ok" });
   if (data?.update_available) chips.push({ text: "有新版本", tone: "busy" });
   let text = "时区、语言与浏览器标识来自环境";
   if (phase === "preparing") text = "正在核对页面的时区与语言…";

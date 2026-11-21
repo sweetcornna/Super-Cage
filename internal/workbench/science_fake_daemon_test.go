@@ -41,6 +41,12 @@ type fakeScienceDaemon struct {
 	rootHeaders map[string]string
 	// refuseAll: every bearer is refused (a daemon that rejects the front).
 	refuseAll bool
+	// signedOut: the bearer is good but the account is signed out, so
+	// /api/projects answers 401 (as a daemon might for a signed-out user).
+	signedOut bool
+	// statusFails: /api/auth/status answers 500 (the front's bearer check
+	// learns nothing).
+	statusFails bool
 }
 
 type fakeScienceRequest struct {
@@ -109,7 +115,17 @@ func newFakeScienceDaemon(t *testing.T) *fakeScienceDaemon {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		d.mu.Lock()
+		signedOut, statusFails := d.signedOut, d.statusFails
+		d.mu.Unlock()
 		switch {
+		case statusFails && r.URL.Path == "/api/auth/status":
+			http.Error(w, "status", http.StatusInternalServerError)
+		case signedOut && r.URL.Path == "/api/projects":
+			http.Error(w, `{"error":"not signed in"}`, http.StatusUnauthorized)
+		case r.URL.Path == "/api/projects":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, "[]")
 		case r.URL.Path == "/":
 			nonce := webfront.Secret(12)
 			w.Header().Set("Content-Security-Policy", fmt.Sprintf(fakeScienceSPAPolicy, nonce))

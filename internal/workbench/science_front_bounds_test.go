@@ -3,6 +3,7 @@ package workbench
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -140,11 +141,82 @@ func TestScienceRefusedCredentialEndsTheSession(t *testing.T) {
 	env.daemon.mu.Unlock()
 	state := env.front.snapshot()
 	t.Logf("codes %v, %d exchanges, state %+v", codes, exchanges, state)
-	if exchanges > scienceMintCap {
+	// The first credential plus scienceMintCap replacements.
+	if exchanges > 1+scienceMintCap {
 		t.Fatalf("%d exchanges for a daemon that refuses every credential", exchanges)
 	}
 	if state.Session || state.Refused == "" {
 		t.Fatalf("the session outlived the refusals: %+v", state)
+	}
+}
+
+// N5 (round 2) and Q11: a 401 to a good bearer is the app's own answer (a
+// signed-out account): the page gets it, the session stays with a visible
+// "需要登录", and nothing is minted, however often it alternates with
+// successes.
+func TestScienceSignedOutKeepsTheSession(t *testing.T) {
+	previous := scienceMintBackoff
+	scienceMintBackoff = time.Millisecond
+	t.Cleanup(func() { scienceMintBackoff = previous })
+	env := newTestScienceFront(t)
+	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
+	env.daemon.mu.Lock()
+	env.daemon.signedOut = true
+	env.daemon.mu.Unlock()
+	var codes []int
+	for i := range 12 {
+		path := "/api/projects"
+		if i%2 == 1 {
+			path = "/api/echo"
+		}
+		codes = append(codes, env.do(t, client, "GET", path, "", "", nil).StatusCode)
+		time.Sleep(5 * time.Millisecond)
+	}
+	env.daemon.mu.Lock()
+	exchanges := env.daemon.exchange
+	env.daemon.mu.Unlock()
+	state, _ := json.Marshal(env.front.snapshot())
+	t.Logf("codes %v, %d exchanges, state %s", codes, exchanges, state)
+	if exchanges != 1 {
+		t.Errorf("%d credential exchanges for a signed-out account", exchanges)
+	}
+	if codes[0] != http.StatusUnauthorized || codes[1] != http.StatusOK {
+		t.Errorf("the page saw %v", codes)
+	}
+	if !strings.Contains(string(state), `"session":true`) || !strings.Contains(string(state), `"signin_needed":true`) {
+		t.Errorf("state %s", state)
+	}
+	// Signed in again: the next answer clears it.
+	env.daemon.mu.Lock()
+	env.daemon.signedOut = false
+	env.daemon.mu.Unlock()
+	if r := env.do(t, client, "GET", "/api/projects", "", "", nil); r.StatusCode != http.StatusOK {
+		t.Fatalf("signed in: %d", r.StatusCode)
+	}
+	if state, _ := json.Marshal(env.front.snapshot()); strings.Contains(string(state), "signin_needed") {
+		t.Errorf("still asking for a sign-in: %s", state)
+	}
+}
+
+// When the bearer check learns nothing, the 401 goes to the page as it is:
+// no credential is minted and no sign-in is asked for.
+func TestScienceUncheckedUnauthorizedPassesThrough(t *testing.T) {
+	env := newTestScienceFront(t)
+	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
+	env.daemon.mu.Lock()
+	env.daemon.signedOut, env.daemon.statusFails = true, true
+	env.daemon.mu.Unlock()
+	for range 4 {
+		if r := env.do(t, client, "GET", "/api/projects", "", "", nil); r.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("page saw %d", r.StatusCode)
+		}
+	}
+	env.daemon.mu.Lock()
+	exchanges := env.daemon.exchange
+	env.daemon.mu.Unlock()
+	state := env.front.snapshot()
+	if exchanges != 1 || state.SignInNeeded || !state.Session {
+		t.Fatalf("%d exchanges, %+v", exchanges, state)
 	}
 }
 
