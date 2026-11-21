@@ -20,11 +20,18 @@ func writeBrowserHeld(t *testing.T, s *Server, possible uint64) {
 	t.Helper()
 	now := time.Now()
 	status := cage.ResourceStatus{Version: 1, UpdatedAt: now, ObservedAt: now, Maximum: 4 * testGiB, Target: 4 * testGiB, CPUs: 3,
-		Pressure: false, BrowserPressure: true, Possible: possible,
+		Pressure: false, BrowserPressure: true, Possible: possible, Classes: heldBrowserClasses(),
 		Guest: &cage.ResourceSample{Total: 4 * testGiB, Available: 900 << 20, Stall: 0.4, Protected: true, ProtectedStall: 0.2, BrowserStall: 31}}
 	if err := writePrivate(filepath.Join(s.instanceDir(), "cage-resources.json"), status); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// heldBrowserClasses are the governor's classes with the browser at its
+// soft limit (memory.high), where it is throttled.
+func heldBrowserClasses() []cage.GuestClass {
+	return []cage.GuestClass{{Name: "control", Current: 400 << 20}, {Name: "sessions", Current: 900 << 20},
+		{Name: "browser", Current: 2*testGiB - 20<<20, Stall: 31, High: 2 * testGiB, Max: 2*testGiB + 512<<20}}
 }
 
 func joinedAdvice(advice []string) string { return strings.Join(advice, "\n") }
@@ -118,6 +125,7 @@ func TestUnconfirmedBrowserReadExplainsTheHeldBrowser(t *testing.T) {
 func TestMemoryNoteReadsTheAllocator(t *testing.T) {
 	now := time.Now()
 	guest := &cage.ResourceSample{Total: 4 * testGiB, Available: 300 << 20}
+	held := heldBrowserClasses()
 	linux := memorySizing{applies: true}
 	for _, tc := range []struct {
 		name          string
@@ -136,19 +144,22 @@ func TestMemoryNoteReadsTheAllocator(t *testing.T) {
 			cage.ResourceStatus{ObservedAt: now, Guest: guest, Short: true, LimitedBy: "machine", Maximum: 6 * testGiB, Possible: 6 * testGiB},
 			linux, memoryCauseEnvironment, "环境内存不足", []string{"这台机器暂时没有更多内存可给环境"}, "调到"},
 		{"browser held at its limit, automatic gives more",
-			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Maximum: 4 * testGiB, Possible: 6 * testGiB},
+			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 4 * testGiB, Possible: 6 * testGiB},
 			linux, memoryCauseBrowser, "隔离浏览器占用的内存超过了环境能分给它的上限",
 			[]string{"关闭或刷新占用内存较多的标签页", "可以把内存调到 6 GB"}, "结束环境里不需要的程序"},
 		{"browser held, manual allocation",
-			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Maximum: 4 * testGiB, Possible: 6 * testGiB},
+			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 4 * testGiB, Possible: 6 * testGiB},
 			memorySizing{applies: true, manual: true}, memoryCauseBrowser, "隔离浏览器",
 			[]string{"改为自动（推荐）后可以调到 6 GB"}, "可以把内存调到"},
 		{"browser held, older host agent: this machine's automatic size",
-			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Maximum: 3 * testGiB},
+			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 3 * testGiB},
 			memorySizing{applies: true, automatic: 6 * testGiB}, memoryCauseBrowser, "隔离浏览器", []string{"可以把内存调到 6 GB"}, "改为自动"},
 		{"browser held, nothing more to give",
-			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Maximum: 6 * testGiB, Possible: 6 * testGiB},
+			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 6 * testGiB, Possible: 6 * testGiB},
 			linux, memoryCauseBrowser, "隔离浏览器", []string{"关闭或刷新占用内存较多的标签页"}, "调到"},
+		{"browser stalls below its limit: short of memory, not held",
+			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: []cage.GuestClass{{Name: "browser", Current: testGiB, Stall: 2, High: 2 * testGiB}}, Maximum: 4 * testGiB, Possible: 6 * testGiB},
+			linux, memoryCauseBrowser, "隔离浏览器内存紧张", []string{"关闭或刷新占用内存较多的标签页"}, "上限"},
 		{"browser pressure from a stale reading is not shown",
 			cage.ResourceStatus{ObservedAt: now.Add(-time.Minute), Guest: guest, BrowserPressure: true, Error: "读取资源用量失败"},
 			linux, "", "", nil, ""},
@@ -165,6 +176,9 @@ func TestMemoryNoteReadsTheAllocator(t *testing.T) {
 			if note.Cause != tc.cause || note.Short != (tc.cause != "") || !strings.Contains(note.Reason, tc.reason) {
 				t.Fatalf("note: %+v", note)
 			}
+			if held := tc.status.Classes == nil || tc.status.Classes[len(tc.status.Classes)-1].Current+64<<20 >= tc.status.Classes[len(tc.status.Classes)-1].High; !held && strings.Contains(note.Reason, "上限") {
+				t.Fatalf("a browser below its limit is said to be held: %+v", note)
+			}
 			advice := joinedAdvice(note.Advice)
 			for _, want := range tc.advice {
 				if !strings.Contains(advice, want) {
@@ -175,5 +189,32 @@ func TestMemoryNoteReadsTheAllocator(t *testing.T) {
 				t.Fatalf("advice %q has %q", advice, tc.notAdvice)
 			}
 		})
+	}
+}
+
+func TestRecoveryDoesNotWaitForABrowserBelowItsLimit(t *testing.T) {
+	s, gate := failedMonitoringServer(t)
+	t.Cleanup(s.jobs.close)
+	checks := 0
+	replaceRecoveryCheck(t, func(s *Server) error {
+		checks++
+		return grantFreshCheck(s, gate)
+	})
+	s.recovery.Next = time.Now().Add(-time.Second)
+	now := time.Now()
+	status := cage.ResourceStatus{Version: 1, UpdatedAt: now, ObservedAt: now, Maximum: 4 * testGiB, Target: 4 * testGiB, BrowserPressure: true,
+		Classes: []cage.GuestClass{{Name: "browser", Current: testGiB, Stall: 2, High: 2 * testGiB}},
+		Guest:   &cage.ResourceSample{Total: 4 * testGiB, Available: 2 * testGiB, Protected: true, BrowserStall: 2}}
+	if err := writePrivate(filepath.Join(s.instanceDir(), "cage-resources.json"), status); err != nil {
+		t.Fatal(err)
+	}
+	s.op.Lock()
+	s.recoverNetwork()
+	s.op.Unlock()
+	for deadline := time.Now().Add(10 * time.Second); s.jobs.snapshot().Running && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if checks != 1 || gate.Status().Mode != cage.GateOpen {
+		t.Fatalf("a mild browser stall postponed the recheck: checks=%d recovery=%+v", checks, s.recovery)
 	}
 }

@@ -140,11 +140,11 @@ func (s *Server) recoverNetwork() {
 	// and only for recoveryPressureWait: a guest that stays short of memory
 	// would otherwise never get its network back.
 	// With the guest's governor, pressure is the protected classes'; a
-	// browser it holds at its limit (browser_pressure) fails the full
-	// check's browser stage the same way and waits within the same bound.
+	// browser it holds at its limit (browserHeld) fails the full check's
+	// browser stage the same way and waits within the same bound.
 	fresh := now.Sub(resources.ObservedAt) <= 10*time.Second
 	guestPressure := resources.Pressure && fresh
-	browserPressure := resources.BrowserPressure && fresh
+	browserPressure := browserHeld(resources) && fresh
 	if err == nil && (guestPressure || browserPressure || resources.HostPressure) {
 		s.mu.Lock()
 		current := s.recovery == r
@@ -333,7 +333,10 @@ func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing mem
 		note.Reason = "环境内存不足，资源读数也暂时超时"
 	case status.BrowserPressure && fresh:
 		note.Short, note.Cause = true, memoryCauseBrowser
-		note.Reason = "隔离浏览器占用的内存超过了环境能分给它的上限"
+		note.Reason = "隔离浏览器内存紧张"
+		if browserHeld(status) {
+			note.Reason = "隔离浏览器占用的内存超过了环境能分给它的上限"
+		}
 	case status.HostPressure:
 		note.Short, note.Cause = true, memoryCauseMachine
 		note.Reason = "运行环境的这台机器内存不足"
@@ -354,6 +357,26 @@ func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing mem
 		note.Advice = append(note.Advice, "在资源设置中查看环境内存；需要时调高内存上限（重启环境后生效）")
 	}
 	return note
+}
+
+// browserHeldSlack is how far below its soft limit (memory.high) the browser
+// class still counts as held there: the governor's hysteresis.
+const browserHeldSlack = 64 << 20
+
+// browserHeld reports whether the guest's governor holds the browser at its
+// limit: its class stalls (browser_pressure, a 1 % stall) while its use has
+// reached the soft limit, where the kernel throttles it. A browser that
+// stalls below its limit is short of memory like the rest of the guest.
+func browserHeld(status cage.ResourceStatus) bool {
+	if !status.BrowserPressure {
+		return false
+	}
+	for _, class := range status.Classes {
+		if class.Name == "browser" {
+			return class.High > 0 && class.Current+browserHeldSlack >= class.High
+		}
+	}
+	return false
 }
 
 // sizingAdvice is the allocator's own sentence about more memory when it
