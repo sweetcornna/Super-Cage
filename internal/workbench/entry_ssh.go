@@ -679,14 +679,15 @@ func (s *Server) entryRunHop(ctx context.Context, conn *entryConn, channel ssh.C
 		_, _ = io.WriteString(channel.Stderr(), "Super Cage："+err.Error()+"\n")
 		return
 	}
-	run := shellescape.Quote(s.entryRunPath()) + " " + mode
+	run := "exec " + shellescape.Quote(s.entryRunPath()) + " " + mode
 	if mode == "exec" {
 		run += " " + shellescape.Quote(command)
 	}
 	// Like guestControl: sshd hands the line to the guest user's login
 	// shell, which exec replaces at once with a bash that reads no profile
-	// or rc file, so nothing the guest wrote there runs before the run
-	// script or changes how its line is read.
+	// or rc file, and that bash with the run script: nothing the guest
+	// wrote in those files runs before it, and no shell stays between the
+	// guest's sshd and the command.
 	script := "exec /bin/bash --noprofile --norc -c " + shellescape.Quote(run)
 	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", script)
 	cmd.WaitDelay = entryHopWaitDelay
