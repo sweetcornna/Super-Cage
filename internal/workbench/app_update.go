@@ -71,7 +71,24 @@ type appUpdateState struct {
 	guest       func(context.Context) (policy.Reading, error)
 	check       func(context.Context) (*appupdate.Available, error)
 	stop        func() error
+	start       func() error
+	sync        func() error
 	unavailable func() string
+}
+
+// startRun and syncRun are the chain's environment steps.
+func (s *Server) appUpdateStartRun() func() error {
+	if s.appUpdate.start != nil {
+		return s.appUpdate.start
+	}
+	return s.startRun(nil, "")
+}
+
+func (s *Server) appUpdateSyncRun() func() error {
+	if s.appUpdate.sync != nil {
+		return s.appUpdate.sync
+	}
+	return s.synchronizeEnvironment
 }
 
 func (a *appUpdateState) now() time.Time {
@@ -498,7 +515,7 @@ func (s *Server) restoreEnvironmentAfterUpdate(id string) {
 	if err := s.waitAccountUnlocked(ctx); err != nil {
 		return
 	}
-	if _, err := s.appUpdateRunJob(ctx, "start", s.startRun(nil, "")); err != nil {
+	if _, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun()); err != nil {
 		diagnostics.Log("warn", "app-update", "environment not restored after update "+id+": "+err.Error())
 	}
 }
@@ -665,7 +682,7 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 				return
 			}
 			if !s.vmRunning() {
-				job, err := s.appUpdateRunJob(ctx, "start", s.startRun(nil, ""))
+				job, err := s.appUpdateRunJob(ctx, "start", s.appUpdateStartRun())
 				if err != nil || job.Error != "" {
 					reason := job.Error
 					if err != nil {
@@ -694,7 +711,7 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 			required := s.guestUpdateRequired
 			s.mu.Unlock()
 			if required {
-				job, err := s.appUpdateRunJob(ctx, "environment-update", s.synchronizeEnvironment)
+				job, err := s.appUpdateRunJob(ctx, "environment-update", s.appUpdateSyncRun())
 				if err != nil || job.Error != "" {
 					reason := job.Error
 					if err != nil {
