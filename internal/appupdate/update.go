@@ -16,12 +16,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/appupdate/catalog"
+	"github.com/sylvinus/agent-vm/internal/appupdate/policy"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/host"
@@ -60,7 +62,39 @@ type State struct {
 	RetryAt        string `json:"retryAt"`
 	ArchivePath    string `json:"archivePath,omitempty"`
 	SHA256         string `json:"sha256,omitempty"`
+	// Code classifies a failure for an unattended attempt: "transient"
+	// (worth another try later), "verification" (the files do not match
+	// their published size or digests), "changed" (not the release the
+	// request named) or "too_new" (younger than the unattended age).
+	Code string `json:"code,omitempty"`
 }
+
+// integrityError marks published files that contradict their own metadata.
+type integrityError struct{ error }
+
+func (e *integrityError) Unwrap() error { return e.error }
+
+// unattendedRefusal ends an unattended download before it starts.
+type unattendedRefusal struct{ code, message string }
+
+func (e *unattendedRefusal) Error() string { return e.message }
+
+// unattendedRelease checks, just before an unattended download, that the
+// release found now is the one the request named and that it is old enough
+// by the same rule the workbench applied: the files downloaded are the files
+// that were judged.
+func unattendedRelease(c candidate, release string, now time.Time) error {
+	if c.Release != release {
+		return &unattendedRefusal{"changed", "发行内容在自动升级请求之后有变化，等待下一次检查"}
+	}
+	if !policy.OldEnough(c.ChangedAt, now) {
+		return &unattendedRefusal{"too_new", "发行内容更新未满 24 小时，稍后再自动升级"}
+	}
+	return nil
+}
+
+// releaseKeyPattern is catalog.Release.Key's form.
+var releaseKeyPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 
 type proxyUnavailableError struct{ message string }
 
@@ -83,6 +117,12 @@ func Run(configPath string, args []string, output io.Writer) int {
 		state.fail(err)
 		emit()
 		return 1
+	}
+	// An unattended download names the release it was asked for:
+	// download --release KEY.
+	var release string
+	if len(args) == 3 && args[0] == "download" && args[1] == "--release" && releaseKeyPattern.MatchString(args[2]) {
+		release, args = args[2], args[:1]
 	}
 	if len(args) != 1 || (args[0] != "check" && args[0] != "download") {
 		return fail(errors.New("更新操作无效"))
@@ -119,6 +159,11 @@ func Run(configPath string, args []string, output io.Writer) int {
 	}
 	if runtime.GOOS == "linux" {
 		return fail(errors.New("Linux 版本使用系统安装包更新，请从发布页面下载新版 .deb"))
+	}
+	if release != "" {
+		if err = unattendedRelease(*c, release, time.Now()); err != nil {
+			return fail(err)
+		}
 	}
 	digest, err := releaseDigest(metadata, client, *c)
 	if err != nil {
@@ -302,6 +347,9 @@ func findRelease(ctx context.Context, client *http.Client, current string) (*can
 type Available struct {
 	Version     string
 	PublishedAt string
+	// ChangedAt and Release are the catalog's; set when Installable.
+	ChangedAt   string
+	Release     string
 	Installable bool
 	Reason      string
 }
@@ -322,7 +370,7 @@ func CheckLatest(ctx context.Context, configPath string) (*Available, error) {
 
 func available(c *candidate, releases []release, current, goos, goarch string) *Available {
 	if c != nil {
-		return &Available{Version: c.Version, PublishedAt: c.PublishedAt, Installable: true}
+		return &Available{Version: c.Version, PublishedAt: c.PublishedAt, ChangedAt: c.ChangedAt, Release: c.Release, Installable: true}
 	}
 	newer, err := catalog.Latest(releases, current, goos, goarch)
 	if err != nil || newer == nil {
@@ -337,7 +385,7 @@ func releaseDigest(ctx context.Context, client *http.Client, c candidate) (strin
 	}
 	u, err := url.Parse(c.Checksums.URL)
 	if err != nil || u.Hostname() != "github.com" || !strings.HasPrefix(u.Path, "/"+repository+"/releases/download/v"+c.Version+"/") {
-		return "", errors.New("校验清单不属于同一发行版本")
+		return "", &integrityError{errors.New("校验清单不属于同一发行版本")}
 	}
 	resp, err := request(ctx, client, c.Checksums.URL)
 	if err != nil {
@@ -347,7 +395,11 @@ func releaseDigest(ctx context.Context, client *http.Client, c candidate) (strin
 	if err != nil {
 		return "", err
 	}
-	return c.SHA256(b)
+	digest, err := c.SHA256(b)
+	if err != nil {
+		return "", &integrityError{err}
+	}
+	return digest, nil
 }
 
 // download continues a partial file of the same digest and retries dropped
@@ -444,7 +496,7 @@ func download(ctx context.Context, client *http.Client, a asset, digest, path st
 				err = restart()
 			}
 			if err == nil && resp.ContentLength > 0 && resp.ContentLength != expected {
-				err = errors.New("发行包大小与发布信息不一致")
+				err = &integrityError{errors.New("发行包大小与发布信息不一致")}
 			}
 			if err != nil {
 				resp.Body.Close()
@@ -473,7 +525,7 @@ func download(ctx context.Context, client *http.Client, a asset, digest, path st
 		}
 		if offset > a.Size {
 			discard = true
-			return errors.New("发行包下载中断或实际大小不匹配")
+			return &integrityError{errors.New("发行包下载中断或实际大小不匹配")}
 		}
 		var transient *transientError
 		if err != nil && !stalled && !errors.As(err, &transient) {
@@ -486,7 +538,7 @@ func download(ctx context.Context, client *http.Client, a asset, digest, path st
 	}
 	if offset != a.Size || hex.EncodeToString(hash.Sum(nil)) != digest {
 		discard = true
-		return errors.New("发行包 SHA-256 校验失败，请重新下载")
+		return &integrityError{errors.New("发行包 SHA-256 校验失败，请重新下载")}
 	}
 	if err := f.Sync(); err != nil {
 		return errors.New("无法保存更新文件")

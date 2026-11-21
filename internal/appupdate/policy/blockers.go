@@ -216,6 +216,14 @@ func (h HoldTracker) HeldFor(now time.Time, fingerprint string) time.Duration {
 	return now.Sub(h.Since)
 }
 
+// Held reports whether idle has held long enough, with fingerprint
+// unchanged, for an unattended installation. The hourly tick and the
+// decision both use it, so the tick never waits for a third look that the
+// decision would not need.
+func (h HoldTracker) Held(now time.Time, fingerprint string) bool {
+	return h.HeldFor(now, fingerprint) >= HoldPeriod-HoldSlack
+}
+
 // ConfirmationIDs lists the interruptible blockers a person must confirm.
 func ConfirmationIDs(blockers []Blocker) []string {
 	var ids []string

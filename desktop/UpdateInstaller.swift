@@ -10,6 +10,10 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
     private var originalVersion = ""
     // The workbench's record of this attempt, written back into the result.
     private var attempt = ""
+    // From COMMIT until the result is written, every way out writes
+    // last-result.json, and the Mac does not idle-sleep under the helper.
+    private var committed = false
+    private var installActivity: NSObjectProtocol?
 
     static func main() {
         CageProfile.pinEnvironment()
@@ -77,13 +81,18 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
                 let command = FileHandle.standardInput.readDataToEndOfFile()
                 guard let attempt = CageUpdateDecision.commitAttempt(command) else { self.exitHelper(); return }
                 self.attempt = attempt
-                let deadline = Date().addingTimeInterval(90)
-                while !self.parent.isTerminated && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
-                guard self.parent.isTerminated else { throw CageUpdateError("Super Cage 尚未退出，更新未安装") }
+                self.committed = true
+                // The app that held the Mac awake quits now; the helper holds
+                // it until the result is written. Deadlines count awake time.
+                self.installActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .suddenTerminationDisabled], reason: "Super Cage 正在安装更新")
+                let deadline = CageUptimeDeadline(after: 90)
+                while !self.parent.isTerminated && !deadline.expired { Thread.sleep(forTimeInterval: 0.1) }
+                guard self.parent.isTerminated else { throw CageUpdateError("Super Cage 尚未退出，更新未安装；环境会在下次打开 Super Cage 时恢复") }
                 try self.replace()
                 DispatchQueue.main.async { self.openInstalled() }
             } catch {
                 if self.parent?.isTerminated == true { self.recover(error.localizedDescription) }
+                else if self.committed { self.record(success: false, message: error.localizedDescription); self.exitHelper() }
                 else { self.finishBeforeCommit(error.localizedDescription) }
             }
         }
@@ -103,24 +112,30 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
         configuration.createsNewApplicationInstance = true
         let token = UUID().uuidString
         var environment = inheritedProfile(); environment["CAGE_UPDATE_CONFIRMATION"] = token
+        if plan.activates == false { environment[CageUpdateDecision.backgroundKey] = "1" }
         configuration.environment = environment
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: plan.target), configuration: configuration) { app, error in
             guard error == nil, let app else { self.recover("新版本未能启动，正在恢复原应用"); return }
             let acknowledgement = URL(fileURLWithPath: self.plan.resultPath).deletingLastPathComponent().appendingPathComponent("launch-\(token).json")
             DispatchQueue.global(qos: .utility).async {
-                let deadline = Date().addingTimeInterval(45)
-                while !app.isTerminated && Date() < deadline {
-                    if let data = try? Data(contentsOf: acknowledgement), data.count < 1024,
-                       let value = try? JSONSerialization.jsonObject(with: data) as? [String: String], value["version"] == self.plan.version {
-                        try? FileManager.default.removeItem(at: acknowledgement)
-                        self.record(success: true, message: "Super Cage 已更新至 \(self.plan.version)")
-                        self.cleanSuccessfulTask(); self.exitHelper(); return
-                    }
+                let acknowledged: () -> Bool = {
+                    guard let data = try? Data(contentsOf: acknowledgement), data.count < 1024,
+                          let value = try? JSONSerialization.jsonObject(with: data) as? [String: String], value["version"] == self.plan.version else { return false }
+                    try? FileManager.default.removeItem(at: acknowledgement)
+                    self.record(success: true, message: "Super Cage 已更新至 \(self.plan.version)")
+                    self.cleanSuccessfulTask(); self.exitHelper()
+                    return true
+                }
+                let deadline = CageUptimeDeadline(after: 45)
+                while !app.isTerminated && !deadline.expired {
+                    if acknowledged() { return }
                     Thread.sleep(forTimeInterval: 0.2)
                 }
+                // One last look before giving up on the new version.
+                if acknowledged() { return }
                 DispatchQueue.main.async { _ = app.terminate() }
-                let terminationDeadline = Date().addingTimeInterval(10)
-                while !app.isTerminated && Date() < terminationDeadline { Thread.sleep(forTimeInterval: 0.1) }
+                let terminationDeadline = CageUptimeDeadline(after: 10)
+                while !app.isTerminated && !terminationDeadline.expired { Thread.sleep(forTimeInterval: 0.1) }
                 if app.isTerminated { self.recover("新版本工作台未能就绪，正在恢复原应用") }
                 else {
                     self.record(success: false, message: "新版本未确认就绪，请退出 Super Cage 后重试；原应用备份已保留")
@@ -156,14 +171,21 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
                 canOpen = true
             } catch { message += "。自动恢复未完成，未启动未经验证的应用。备份位置：\(backup.path)" }
             self.record(success: false, message: message)
+            // After an unattended attempt nothing takes focus: no alert, and
+            // the previous version comes back behind the person's windows.
+            // The result above is what the app shows next time.
+            let background = self.plan.activates == false
             DispatchQueue.main.async {
                 guard canOpen else {
-                    let alert = NSAlert(); alert.messageText = "Super Cage 更新与自动恢复未完成"; alert.informativeText = message; alert.runModal()
+                    if !background { let alert = NSAlert(); alert.messageText = "Super Cage 更新与自动恢复未完成"; alert.informativeText = message; alert.runModal() }
                     self.exitHelper(); return
                 }
-                let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = true; configuration.createsNewApplicationInstance = true; configuration.environment = self.inheritedProfile()
+                let configuration = NSWorkspace.OpenConfiguration(); configuration.activates = !background; configuration.createsNewApplicationInstance = true
+                var environment = self.inheritedProfile()
+                if background { environment[CageUpdateDecision.backgroundKey] = "1" }
+                configuration.environment = environment
                 NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: self.plan.target), configuration: configuration) { app, _ in
-                    if app == nil {
+                    if app == nil && !background {
                         let alert = NSAlert(); alert.messageText = "Super Cage 更新未完成"; alert.informativeText = message; alert.runModal()
                     }
                     self.exitHelper()
@@ -185,5 +207,10 @@ final class CageUpdateInstaller: NSObject, NSApplicationDelegate {
     private func send(_ value: [String: Any]) {
         if var data = try? JSONSerialization.data(withJSONObject: value) { data.append(10); try? FileHandle.standardOutput.write(contentsOf: data) }
     }
-    private func exitHelper() { DispatchQueue.main.async { NSApp.terminate(nil) } }
+    private func exitHelper() {
+        DispatchQueue.main.async {
+            if let activity = self.installActivity { ProcessInfo.processInfo.endActivity(activity); self.installActivity = nil }
+            NSApp.terminate(nil)
+        }
+    }
 }

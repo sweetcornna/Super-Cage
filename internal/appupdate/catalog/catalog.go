@@ -5,7 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 )
@@ -25,6 +28,9 @@ type Asset struct {
 	Size   int64  `json:"size"`
 	Digest string `json:"digest"`
 	State  string `json:"state"`
+	// UpdatedAt is when the file was last uploaded. Replacing a file of an
+	// old release moves it, while the release's publication time stays.
+	UpdatedAt string `json:"updated_at"`
 }
 type Release struct {
 	Tag        string `json:"tag_name"`
@@ -38,8 +44,45 @@ type Release struct {
 type Candidate struct {
 	Version     string `json:"version"`
 	PublishedAt string `json:"published_at,omitempty"`
-	Archive     Asset  `json:"archive"`
-	Checksums   Asset  `json:"checksums"`
+	// ChangedAt and Release are Release.ChangedAt and Release.Key.
+	ChangedAt string `json:"changed_at,omitempty"`
+	Release   string `json:"release,omitempty"`
+	Archive   Asset  `json:"archive"`
+	Checksums Asset  `json:"checksums"`
+}
+
+// ChangedAt is the newest of the release's publication time and every
+// file's upload time, in RFC 3339: the moment the release last changed. It
+// is empty when any of them is missing or invalid, which the unattended age
+// rule reads as "too new".
+func (r Release) ChangedAt() string {
+	newest, err := time.Parse(time.RFC3339, r.PublishedAt)
+	if err != nil {
+		return ""
+	}
+	for _, a := range r.Assets {
+		t, err := time.Parse(time.RFC3339, a.UpdatedAt)
+		if err != nil {
+			return ""
+		}
+		if t.After(newest) {
+			newest = t
+		}
+	}
+	return newest.UTC().Format(time.RFC3339)
+}
+
+// Key identifies the published files of a release: it changes when any file
+// is added, removed or replaced.
+func (r Release) Key() string {
+	assets := append([]Asset(nil), r.Assets...)
+	sort.Slice(assets, func(i, j int) bool { return assets[i].Name < assets[j].Name })
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s\x00%s\n", r.Tag, r.PublishedAt)
+	for _, a := range assets {
+		fmt.Fprintf(hash, "%s\x00%d\x00%s\x00%s\x00%s\n", a.Name, a.Size, a.Digest, a.UpdatedAt, a.State)
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:32]
 }
 
 // Newer is the newest release on the current channel, whether or not it has a
@@ -154,7 +197,7 @@ func Select(releases []Release, current, goos, goarch string) (*Candidate, error
 		if best != nil && semver.Compare(r.Tag, "v"+best.Version) <= 0 {
 			continue
 		}
-		c := Candidate{Version: v, PublishedAt: r.PublishedAt}
+		c := Candidate{Version: v, PublishedAt: r.PublishedAt, ChangedAt: r.ChangedAt(), Release: r.Key()}
 		names, _ := archiveNames(v, goos, goarch)
 		rank := len(names)
 		for _, a := range r.Assets {

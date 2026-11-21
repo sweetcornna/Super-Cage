@@ -144,7 +144,7 @@ func (s *Server) registerAppUpdateFeeders(r *policy.Registry) {
 		s.mobileUploads.mu.Lock()
 		for id, upload := range s.mobileUploads.active {
 			reading.Activity = append(reading.Activity, "upload:"+id)
-			reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "upload:" + id, Kind: policy.KindTransfer, Interruptible: true, Label: "手机正在上传「" + upload.name + "」"})
+			reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "upload:" + id, Kind: policy.KindTransfer, Interruptible: true, Label: "手机正在上传「" + plainLabel(upload.name, 40) + "」"})
 		}
 		s.mobileUploads.mu.Unlock()
 		return reading, nil
@@ -153,6 +153,13 @@ func (s *Server) registerAppUpdateFeeders(r *policy.Registry) {
 		last := s.appUpdate.lastPhone.Load()
 		if last != 0 && time.Since(time.Unix(0, last)) < phoneActiveWindow {
 			return policy.Reading{Blockers: []policy.Blocker{{ID: "phone", Kind: policy.KindPhone, Interruptible: true, Label: "已配对的手机正在连接"}}}, nil
+		}
+		return policy.Reading{}, nil
+	})
+	r.Register("remote", "无法确认远程连接", func(context.Context) (policy.Reading, error) {
+		last := s.appUpdate.lastRemote.Load()
+		if last != 0 && time.Since(time.Unix(0, last)) < phoneActiveWindow {
+			return policy.Reading{Blockers: []policy.Blocker{{ID: "remote", Kind: policy.KindRemote, Interruptible: true, Label: "有其他电脑正在远程连接"}}}, nil
 		}
 		return policy.Reading{}, nil
 	})

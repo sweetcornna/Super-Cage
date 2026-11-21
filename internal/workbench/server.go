@@ -626,6 +626,8 @@ func (s *Server) handler() http.Handler {
 		phoneRoom := s.pairedPhoneRoom(r)
 		if phoneRoom != nil {
 			s.notePhoneRequest()
+		} else if !trustedDesktop && !bootstrapRoute && strings.HasPrefix(r.URL.Path, "/api/") {
+			s.noteRemoteRequest()
 		}
 		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil && !s.hasRemoteWindowsView(r) {
 			http.Error(w, "请通过本机 Super Cage 窗口或当前配对手机打开客机", http.StatusForbidden)

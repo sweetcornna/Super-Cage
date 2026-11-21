@@ -13,6 +13,11 @@ type Pending struct {
 	Reason      string `json:"reason,omitempty"`
 	// Requested is true once a silent request was written for the shell.
 	Requested bool `json:"requested,omitempty"`
+	// ChangedAt is the newest of the release's publication and its files'
+	// upload times; the unattended age rule counts from it.
+	ChangedAt string `json:"changed_at,omitempty"`
+	// Release identifies the published files.
+	Release string `json:"-"`
 }
 
 // ChainView is the chain as the UI shows it.

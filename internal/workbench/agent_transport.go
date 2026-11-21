@@ -85,9 +85,11 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 		return result, &AgentError{Code: "native_transport_required", Message: "Use native.submit with the same accountDevice or desktop action. Transport credentials are not exported.", NextAction: "native.submit"}
 	}
 	// The update mode decides whether the application may replace itself
-	// unattended. Only the person at the desktop window changes it.
-	if appUpdateRoute(u.Path) && method != "GET" && method != "HEAD" {
-		return result, &AgentError{Code: "native_transport_required", Message: "The application update policy is changed only in the desktop window.", NextAction: "open_desktop"}
+	// unattended, and the confirmation list is what the person accepts
+	// before an update interrupts work (reading it also reads the guest).
+	// Both belong to the person at the desktop window.
+	if appUpdateRoute(u.Path) && (u.Path == "/api/app-update/interruptions" || (method != "GET" && method != "HEAD")) {
+		return result, &AgentError{Code: "native_transport_required", Message: "Application updates are confirmed and configured only in the desktop window.", NextAction: "open_desktop"}
 	}
 	// Local VM inventory carries private profile grants and is owned by the
 	// native desktop generation. Never export it through the agent transport.

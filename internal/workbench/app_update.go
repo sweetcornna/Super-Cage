@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"golang.org/x/mod/semver"
 
@@ -42,19 +43,31 @@ const silentRequestFile = "silent-request.json"
 const silentRequestLifetime = time.Hour
 
 type silentRequest struct {
-	ID          string    `json:"id"`
-	Version     string    `json:"version"`
-	DecidedAt   time.Time `json:"decided_at"`
+	ID        string    `json:"id"`
+	Version   string    `json:"version"`
+	DecidedAt time.Time `json:"decided_at"`
+	// Release names the published files the decision was about; the shell
+	// passes it to the download, which refuses any other files.
+	Release     string `json:"release"`
 	fingerprint string
-	publishedAt string
+	changedAt   string
 }
+
+// silentOutcomeFile is where the native shell reports how an unattended
+// request ended before it reached the decision.
+const silentOutcomeFile = "silent-outcome.json"
 
 // appUpdateState is the workbench's part of application updates. Its mutex
 // is never held while feeders run: feeders take Server.mu and other locks.
 type appUpdateState struct {
-	once      sync.Once
-	registry  policy.Registry
-	lastPhone atomic.Int64
+	once       sync.Once
+	registry   policy.Registry
+	lastPhone  atomic.Int64
+	lastRemote atomic.Int64
+
+	// ledgerMu serializes every load-modify-save of attempts.json in this
+	// process: the decision, the chain and the hourly tick all write it.
+	ledgerMu sync.Mutex
 
 	mu      sync.Mutex
 	mode    policy.Mode // cached preference; empty until first read
@@ -77,6 +90,14 @@ type appUpdateState struct {
 	sync        func() error
 	network     func() error
 	unavailable func() string
+	host        func(context.Context) (*policy.HostState, error)
+	// stopRun is the update's stop job; nil selects s.stopEnvironment.
+	stopRun func() error
+	// Durations; zero selects the production value.
+	stopTimeout     time.Duration
+	decisionTimeout time.Duration
+	installerWait   time.Duration
+	installerPoll   time.Duration
 
 	unavailableOnce   sync.Once
 	unavailableReason string
@@ -121,37 +142,83 @@ func (s *Server) appUpdateNetworkRun() func() error {
 }
 
 // appUpdateStop stops a running environment with the stop button's own
-// steps, as a stop job inside the operation the caller holds.
-func (s *Server) appUpdateStop(running bool) error {
-	if s.appUpdate.stop != nil {
-		return s.appUpdate.stop()
+// steps, as a stop job inside the operation the caller holds. A stop that
+// outlives its time is reported with ended, which closes when the stop job
+// has finished: until then the caller keeps the operation, so that nothing
+// runs beside the stop.
+func (s *Server) appUpdateStop(running bool) (ended <-chan struct{}, err error) {
+	a := &s.appUpdate
+	if a.stop != nil {
+		return nil, a.stop()
 	}
 	if !running {
-		return nil
+		return nil, nil
 	}
 	if err := s.requireStorageReady(); err != nil {
-		return err
+		return nil, err
 	}
 	s.stopEnvironmentOwners()
 	s.pauseNetworkForStop()
+	run := a.stopRun
+	if run == nil {
+		run = s.stopEnvironment
+	}
 	s.mu.Lock()
-	job, err := s.jobs.submit(heldOperation{}, "stop", s.safety.pauseVersion, nil, nil, s.stopEnvironment)
+	job, err := s.jobs.submit(heldOperation{}, "stop", s.safety.pauseVersion, s.cancelMonitorLocked, nil, run)
 	s.mu.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	ctx, cancel := context.WithTimeout(s.lifetimeContext(), appUpdateStopTimeout)
+	timeout := a.stopTimeout
+	if timeout == 0 {
+		timeout = appUpdateStopTimeout
+	}
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), timeout)
 	defer cancel()
 	done, err := s.waitJob(ctx, job.ID)
 	switch {
 	case err != nil:
-		return errors.New("停止环境超时")
+		stopped := make(chan struct{})
+		go func() {
+			defer close(stopped)
+			_, _ = s.waitJob(s.lifetimeContext(), job.ID)
+		}()
+		return stopped, errors.New("停止环境超时")
 	case done.ID != job.ID || done.Canceled:
-		return errors.New("停止环境被中断")
+		return nil, errors.New("停止环境被中断")
 	case done.Error != "":
-		return errors.New(done.Error)
+		return nil, errors.New(done.Error)
+	}
+	return nil, nil
+}
+
+// releaseAfterStop gives back the operation the caller holds once a stop
+// that outlived its time (ended) has finished, or at once when there is
+// none, and then runs after. Nothing runs beside a stop that goes on.
+func (s *Server) releaseAfterStop(ended <-chan struct{}, after func()) {
+	go func() {
+		if ended != nil {
+			<-ended
+		}
+		s.op.Unlock()
+		after()
+	}()
+}
+
+// cancelMonitorLocked is the stop button's preparation, for jobs the update
+// submits itself: the network monitor ends before the job runs.
+func (s *Server) cancelMonitorLocked() error {
+	if s.monitorCancel != nil {
+		s.monitorCancel()
 	}
 	return nil
+}
+
+func (a *appUpdateState) duration(value, production time.Duration) time.Duration {
+	if value != 0 {
+		return value
+	}
+	return production
 }
 
 func (a *appUpdateState) now() time.Time {
@@ -201,6 +268,37 @@ func (s *Server) notePhoneRequest() {
 	s.appUpdate.registry.Touch()
 }
 
+// plainLabel makes text from outside this process (the guest, a result
+// file) fit for a dialog: printable characters only, no markup brackets,
+// at most limit characters.
+func plainLabel(text string, limit int) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range strings.TrimSpace(text) {
+		if n == limit {
+			b.WriteString("…")
+			break
+		}
+		switch {
+		case r == '<' || r == '>':
+			continue
+		case unicode.IsSpace(r):
+			r = ' '
+		case !unicode.IsPrint(r):
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// noteRemoteRequest is called for every API request of a session that is
+// neither the desktop's own view nor a paired phone: another computer.
+func (s *Server) noteRemoteRequest() {
+	s.appUpdate.lastRemote.Store(time.Now().UnixNano())
+}
+
 // dropSilentRequest forgets an unattended request that was refused or went
 // stale, so the next idle tick can decide afresh.
 func (s *Server) dropSilentRequest() {
@@ -243,6 +341,10 @@ func (s *Server) silentUnavailable() string {
 	return a.unavailableReason
 }
 
+// silentVerified is the real-machine gate (policy.SilentVerified); tests
+// open it to check the rules behind it.
+var silentVerified = policy.SilentVerified
+
 func silentUnavailableReason(goos, current, executable string, writable func(string) bool) string {
 	switch goos {
 	case "linux":
@@ -254,6 +356,9 @@ func silentUnavailableReason(goos, current, executable string, writable func(str
 	case "darwin":
 	default:
 		return "此平台不支持静默更新"
+	}
+	if !silentVerified(goos) {
+		return policy.NotVerifiedReason
 	}
 	if tag := "v" + current; !semver.IsValid(tag) || semver.Canonical(tag) != tag {
 		return "开发版本没有可核验的发布者，不支持静默更新"
@@ -469,14 +574,22 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	// Admission closes (closing) only after a successful stop, so a refusal
 	// clears the seal alone and never reopens a shutdown begun meanwhile.
+	// The deferred release also covers a panic on the way.
+	sealed := true
 	unseal := func() {
+		if !sealed {
+			return
+		}
+		sealed = false
 		s.mu.Lock()
 		s.appUpdateSealed = false
 		s.mu.Unlock()
 	}
+	defer unseal()
 	a := &s.appUpdate
 	profile := s.updateProfile()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*appUpdateGuestTimeout)
+	decisionTime := a.duration(a.decisionTimeout, 2*appUpdateGuestTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), decisionTime)
 	defer cancel()
 	now := a.now()
 	snapshot := s.updateRegistry().Snapshot(ctx, now, true)
@@ -490,18 +603,21 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 		pending, hold := a.request, a.hold
 		a.mu.Unlock()
 		if pending == nil || pending.ID == "" || pending.ID != input.Request || pending.Version != input.Version {
-			unseal()
+			if pending == nil {
+				// A request file no process stands behind any more.
+				_ = os.Remove(filepath.Join(policy.Dir(profile), silentRequestFile))
+			}
 			appUpdateRefuse(w, policy.Changed, "自动升级请求已过期，等待下一次空闲", nil)
 			return
 		}
-		request.Fingerprint, facts.PublishedAt, facts.Hold = pending.fingerprint, pending.publishedAt, hold
-		idle := a.inputIdle
-		if idle == nil {
-			idle = hostInputIdle
-		}
-		if d, err := idle(ctx); err == nil {
-			facts.InputIdle, facts.InputIdleKnown = d, true
-		}
+		// The shell reached the decision with this request: its download and
+		// verification worked, whatever the answer is now.
+		_ = s.changeLedger(func(l *policy.Ledger) bool {
+			return l.Report(pending.ID, policy.StageDecided, "", now)
+		})
+		request.Fingerprint, facts.PublishedAt, facts.Hold = pending.fingerprint, pending.changedAt, hold
+		facts.InputIdle, facts.InputIdleKnown = s.readInputIdle(ctx)
+		facts.Host = s.readHostConditions(ctx)
 	}
 	decision := policy.Decide(request, facts)
 	if !decision.Allowed() {
@@ -522,7 +638,10 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	environment := policy.Environment{Running: s.vmRunning(), NetworkPaused: paused, Workspace: s.workspace(), Terminals: tabs}
 	// Look once more at the work the seal does not cover (a viewer, a phone,
 	// a transfer already admitted). Anything new since the decision wins.
-	final := s.updateRegistry().Snapshot(ctx, a.now(), false)
+	// The look has its own time: a slow decision read cannot starve it.
+	finalCtx, finalCancel := context.WithTimeout(context.Background(), decisionTime)
+	final := s.updateRegistry().Snapshot(finalCtx, a.now(), false)
+	finalCancel()
 	if trigger == policy.SilentUpdate && (final.Fingerprint != snapshot.Fingerprint || !final.Idle()) {
 		unseal()
 		s.dropSilentRequest()
@@ -539,21 +658,27 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	ledger, err := policy.LoadLedger(profile)
-	if err != nil {
-		ledger = policy.Ledger{}
-	}
-	ledger.Begin(policy.Attempt{Version: input.Version, From: version.Version, Trigger: trigger, StartedAt: now})
 	chain := &policy.Chain{Schema: policy.ChainSchema, ID: randomToken()[:16], From: version.Version, To: input.Version, Trigger: trigger,
 		Step: policy.StepStopping, Environment: environment, StartedAt: now, UpdatedAt: now}
 	// The attempt and the record are durable before anything stops: a crash
 	// from here on reads as a failed attempt that silent mode never retries.
-	if err = errors.Join(policy.SaveLedger(profile, ledger), policy.SaveChain(profile, chain)); err != nil {
+	// An unreadable history is kept aside, never replaced.
+	a.ledgerMu.Lock()
+	ledger, err := policy.LoadLedger(profile)
+	if err != nil {
+		ledger, err = policy.SetLedgerAside(profile, now)
+	}
+	if err == nil {
+		ledger.Begin(policy.Attempt{ID: chain.ID, Version: input.Version, From: version.Version, Trigger: trigger, StartedAt: now})
+		err = errors.Join(policy.SaveLedger(profile, ledger), policy.SaveChain(profile, chain))
+	}
+	a.ledgerMu.Unlock()
+	if err != nil {
 		unseal()
 		appUpdateRefuse(w, policy.Unreadable, "无法保存升级记录，未停止环境："+err.Error(), nil)
 		return
 	}
-	stopErr := s.appUpdateStop(environment.Running)
+	ended, stopErr := s.appUpdateStop(environment.Running)
 	if stopErr == nil {
 		if owners, probeErr := controllerVMOwners(s.profile); probeErr != nil || len(owners) != 0 {
 			stopErr = errors.New("环境仍在运行")
@@ -579,14 +704,15 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	if stopErr != nil {
 		reason := "环境未能安全停止，未安装更新：" + stopErr.Error()
 		chain.Fail(policy.StepStopping, reason, a.now())
-		ledger.Finish(input.Version, false, policy.StepStopping, reason, a.now())
-		_ = errors.Join(policy.SaveChain(profile, chain), policy.SaveLedger(profile, ledger))
+		_ = policy.SaveChain(profile, chain)
+		s.finishAttempt(chain.ID, input.Version, false, policy.StepStopping, reason)
 		unseal()
-		s.op.Unlock()
 		locked = false
-		if environment.Running {
-			go s.restoreEnvironmentAfterUpdate(chain.ID, environment)
-		}
+		s.releaseAfterStop(ended, func() {
+			if environment.Running {
+				s.restoreEnvironmentAfterUpdate(chain.ID, environment)
+			}
+		})
 		appUpdateRefuse(w, policy.StopFailed, reason, nil)
 		return
 	}
@@ -594,6 +720,7 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.closing = true
 	s.mu.Unlock()
+	sealed = false // closing now refuses new work; the seal stays as it is.
 	diagnostics.Log("info", "app-update", "installing "+input.Version+" ("+string(trigger)+")")
 	// The attempt id travels with the installation so that the installer's
 	// result can be matched to this record. A fixed length keeps the reply
@@ -607,6 +734,51 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	s.op.Unlock()
 	locked = false
 	go s.shutdown()
+}
+
+// readInputIdle is one read of the host's time without keyboard or mouse
+// input; known is false when it cannot be read.
+func (s *Server) readInputIdle(ctx context.Context) (idle time.Duration, known bool) {
+	read := s.appUpdate.inputIdle
+	if read == nil {
+		read = hostInputIdle
+	}
+	if d, err := read(ctx); err == nil {
+		return d, true
+	}
+	return 0, false
+}
+
+// readHostConditions is one read of the host's power and display state; nil
+// when any part of it cannot be read.
+func (s *Server) readHostConditions(ctx context.Context) *policy.HostState {
+	read := s.appUpdate.host
+	if read == nil {
+		read = hostConditions
+	}
+	state, err := read(ctx)
+	if err != nil {
+		return nil
+	}
+	return state
+}
+
+// changeLedger is the one way this process changes attempts.json. change
+// reports whether it changed the history. An unreadable history is left
+// alone: only a decision sets it aside.
+func (s *Server) changeLedger(change func(*policy.Ledger) bool) error {
+	a := &s.appUpdate
+	a.ledgerMu.Lock()
+	defer a.ledgerMu.Unlock()
+	profile := s.updateProfile()
+	ledger, err := policy.LoadLedger(profile)
+	if err != nil {
+		return err
+	}
+	if !change(&ledger) {
+		return nil
+	}
+	return policy.SaveLedger(profile, ledger)
 }
 
 // restoreEnvironmentAfterUpdate starts the environment again after an update
@@ -642,31 +814,47 @@ func (s *Server) waitAccountUnlocked(ctx context.Context) error {
 }
 
 // appUpdateSubmit submits a chain step. A start keeps a network pause the
-// person set before the update; otherwise it resumes the network exactly
-// like the start button does.
-func (s *Server) appUpdateSubmit(kind string, run func() error, keepPause bool) (Job, error) {
-	if !keepPause {
-		return s.submitJob(kind, run)
-	}
+// person set, before the update or at any time since; otherwise it resumes
+// the network exactly like the start button does. The network check is
+// skipped (skipped is true) while the network is paused. The pause is read
+// under the lock that submits, so a pause set a moment earlier is kept.
+func (s *Server) appUpdateSubmit(kind string, run func() error, keepPause bool) (job Job, skipped bool, err error) {
 	s.mu.Lock()
+	keep := keepPause || s.networkPaused
+	if kind == "safety" && keep {
+		s.mu.Unlock()
+		return Job{}, true, nil
+	}
+	if !keep {
+		job, intentFailed, err := s.submitJobLocked(kind, run)
+		s.mu.Unlock()
+		if intentFailed {
+			_ = s.closeProxyGate("网络恢复意图无法保存，外网保持关闭")
+		}
+		return job, false, err
+	}
 	defer s.mu.Unlock()
-	if s.closing {
-		return Job{}, errJobsClosed
+	switch {
+	case s.closing:
+		return Job{}, false, errJobsClosed
+	case s.appUpdateSealed:
+		return Job{}, false, errAppUpdateSealed
+	case s.storageRecoveryError != "":
+		return Job{}, false, fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
 	}
-	if s.appUpdateSealed {
-		return Job{}, errAppUpdateSealed
-	}
-	if s.storageRecoveryError != "" {
-		return Job{}, fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
-	}
-	return s.jobs.submit(&s.op, kind, s.safety.pauseVersion, nil, nil, run)
+	job, err = s.jobs.submit(&s.op, kind, s.safety.pauseVersion, s.cancelMonitorLocked, nil, run)
+	return job, false, err
 }
 
 // appUpdateRunJob submits a job as the chain's own step and waits for it. A
 // job the person started first is waited for, then the step is decided again.
+// A skipped step returns an empty job.
 func (s *Server) appUpdateRunJob(ctx context.Context, kind string, run func() error, keepPause bool) (Job, error) {
 	for attempt := 0; attempt < 3; attempt++ {
-		job, err := s.appUpdateSubmit(kind, run, keepPause)
+		job, skipped, err := s.appUpdateSubmit(kind, run, keepPause)
+		if skipped {
+			return Job{}, nil
+		}
 		if errors.Is(err, errJobBusy) {
 			if _, err = s.waitJob(ctx, ""); err != nil {
 				return Job{}, err
@@ -697,19 +885,51 @@ func (s *Server) waitJob(ctx context.Context, id string) (Job, error) {
 }
 
 // resumeAppUpdateChain runs once when the workload starts. It continues a
-// chain the previous version began, or records that the installation rolled
-// back and brings the environment back.
+// chain the previous version began once the installer has confirmed it,
+// records an installation the installer rolled back and brings the
+// environment back, or retires a record it cannot prove. A silent request
+// file of an earlier process goes first: its fingerprint lived there.
 func (s *Server) resumeAppUpdateChain() {
 	a := &s.appUpdate
 	a.chain.Lock()
 	defer a.chain.Unlock()
 	profile := s.updateProfile()
+	_ = os.Remove(filepath.Join(policy.Dir(profile), silentRequestFile))
 	c, err := policy.LoadChain(profile)
 	if err != nil {
 		diagnostics.Log("warn", "app-update", "chain record unreadable: "+err.Error())
 		return
 	}
-	resumption := policy.Resume(c, version.Version)
+	if c == nil {
+		return
+	}
+	ctx := s.lifetimeContext()
+	// The new version waits for the installer's result naming this attempt,
+	// which it writes once this version's window has started. The wait is a
+	// file read per second, for at most a few minutes after an update.
+	waitUntil := time.Now().Add(a.duration(a.installerWait, policy.InstallerWait))
+	var resumption policy.Resumption
+	for {
+		resumption = policy.Resume(c, version.Version, a.now(), readInstallerResult(profile))
+		if !resumption.Wait {
+			break
+		}
+		if !time.Now().Before(waitUntil) {
+			resumption = policy.Resumption{Retire: "新版本没有收到安装程序的完成确认，没有据此恢复环境"}
+			break
+		}
+		a.mu.Lock()
+		a.note = "正在等待安装程序确认新版本已启动"
+		a.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(a.duration(a.installerPoll, time.Second)):
+		}
+	}
+	a.mu.Lock()
+	a.note = resumption.Hold
+	a.mu.Unlock()
 	now := a.now()
 	switch {
 	case resumption.Attention:
@@ -720,32 +940,30 @@ func (s *Server) resumeAppUpdateChain() {
 			_ = policy.SaveChain(profile, c)
 		}
 		return
-	case resumption.RolledBack && c.Step == policy.StepStopping:
-		// The record never reached installing, so nothing was installed:
-		// the previous process ended during its stop.
-		reason := "升级在停止环境时中断，未安装更新"
-		c.Fail(policy.StepStopping, reason, now)
+	case resumption.Retire != "":
+		c.Retire(resumption.Retire, now)
 		_ = policy.SaveChain(profile, c)
-		s.finishAttempt(c.To, false, policy.StepStopping, reason)
-		if c.Environment.Running {
-			s.restoreEnvironmentAfterUpdate(c.ID, c.Environment)
-		}
+		s.finishAttempt(c.ID, c.To, false, c.FailedStep, resumption.Retire)
+		diagnostics.Log("warn", "app-update", "update record "+c.ID+" retired: "+resumption.Retire)
+		return
+	case resumption.Hold != "":
+		diagnostics.Log("warn", "app-update", "update "+c.ID+" left as it is: "+resumption.Hold)
+		return
+	case resumption.Undone:
+		reason := "升级到 " + c.To + " 后又回到了 " + c.From + "，不会再自动安装 " + c.To + "；可以点击升级"
+		c.Fail(c.Step, reason, now)
+		_ = policy.SaveChain(profile, c)
+		_ = s.changeLedger(func(l *policy.Ledger) bool { return l.Undo(c.ID, c.To, reason, now) })
+		diagnostics.Log("warn", "app-update", "update "+c.ID+" to "+c.To+" was rolled back")
 		return
 	case resumption.RolledBack:
-		reason, proven := installerFailure(profile, c)
-		if !proven {
-			// The old version runs but nothing says the installer finished:
-			// it may still be running, or the shell stopped before it. Leave
-			// the record and the stopped environment as they are.
-			a.mu.Lock()
-			a.note = "升级没有完成，环境保持停止；可以重新点击升级，或手动启动环境"
-			a.mu.Unlock()
-			diagnostics.Log("warn", "app-update", "update "+c.ID+" unfinished without an installer result")
-			return
+		reason := "安装没有完成，已恢复原应用"
+		if result := readInstallerResult(profile); result != nil && strings.TrimSpace(result.Message) != "" {
+			reason = plainLabel(result.Message, 200)
 		}
 		c.Fail(policy.StepInstalling, reason, now)
 		_ = policy.SaveChain(profile, c)
-		s.finishAttempt(c.To, false, policy.StepInstalling, reason)
+		s.finishAttempt(c.ID, c.To, false, policy.StepInstalling, reason)
 		if c.Environment.Running {
 			s.restoreEnvironmentAfterUpdate(c.ID, c.Environment)
 		}
@@ -762,52 +980,30 @@ func (s *Server) resumeAppUpdateChain() {
 	s.runAppUpdateChain(c)
 }
 
-// installerFailure is the installer's own report that this attempt failed
-// and the previous application was kept: last-result.json naming the
-// attempt, or, from shells that do not pass the attempt on yet, the target
-// version written after the record reached installing.
-func installerFailure(profile string, c *policy.Chain) (string, bool) {
+// readInstallerResult reads the installer's last-result.json; nil when
+// there is none or it cannot be read.
+func readInstallerResult(profile string) *policy.InstallerResult {
 	path := filepath.Join(policy.Dir(profile), "last-result.json")
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 16384 {
-		return "", false
+		return nil
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", false
+		return nil
 	}
-	var result struct {
-		Success bool   `json:"success"`
-		Message string `json:"message"`
-		Version string `json:"version"`
-		Attempt string `json:"attempt"`
+	var result policy.InstallerResult
+	if json.Unmarshal(data, &result) != nil {
+		return nil
 	}
-	if json.Unmarshal(data, &result) != nil || result.Success {
-		return "", false
-	}
-	matches := result.Attempt == c.ID
-	if result.Attempt == "" {
-		matches = result.Version == c.To && !info.ModTime().Before(c.UpdatedAt.Add(-time.Second))
-	}
-	if !matches {
-		return "", false
-	}
-	reason := strings.TrimSpace(result.Message)
-	if reason == "" {
-		reason = "安装没有完成，已恢复原应用"
-	}
-	return reason, true
+	result.WrittenAt = info.ModTime()
+	return &result
 }
 
-func (s *Server) finishAttempt(version string, ok bool, step policy.Step, reason string) {
-	profile := s.updateProfile()
-	ledger, err := policy.LoadLedger(profile)
-	if err != nil {
-		return
-	}
-	if ledger.Finish(version, ok, step, reason, s.appUpdate.now()) {
-		_ = policy.SaveLedger(profile, ledger)
-	}
+func (s *Server) finishAttempt(id, version string, ok bool, step policy.Step, reason string) {
+	_ = s.changeLedger(func(l *policy.Ledger) bool {
+		return l.Finish(id, version, ok, step, reason, s.appUpdate.now())
+	})
 }
 
 // runAppUpdateChain brings the environment back as it was on the new
@@ -826,7 +1022,7 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 	fail := func(step policy.Step, reason string) {
 		c.Fail(step, reason, s.appUpdate.now())
 		_ = policy.SaveChain(profile, c)
-		s.finishAttempt(c.To, false, step, reason)
+		s.finishAttempt(c.ID, c.To, false, step, reason)
 		diagnostics.Log("warn", "app-update", "update chain stopped at "+string(step)+": "+reason)
 	}
 	for ctx.Err() == nil {
@@ -894,30 +1090,78 @@ func (s *Server) runAppUpdateChain(c *policy.Chain) {
 				return
 			}
 		case policy.StepNetwork:
-			// A network the person paused before the update stays paused.
-			// Otherwise run 检查联网条件 once, like the button would.
-			if !c.Environment.NetworkPaused {
-				job, err := s.appUpdateRunJob(ctx, "safety", s.appUpdateNetworkRun(), false)
-				if err != nil || job.Error != "" {
-					reason := job.Error
-					if err != nil {
-						reason = err.Error()
-					}
-					fail(policy.StepNetwork, "已升级到 "+c.To+"，环境已恢复，但联网检查未通过："+reason)
-					return
+			// A network the person paused, before the update or since, stays
+			// paused. Otherwise run 检查联网条件 once, like the button would.
+			job, err := s.appUpdateRunJob(ctx, "safety", s.appUpdateNetworkRun(), c.Environment.NetworkPaused)
+			if err != nil || job.Error != "" {
+				reason := job.Error
+				if err != nil {
+					reason = err.Error()
 				}
+				fail(policy.StepNetwork, "已升级到 "+c.To+"，环境已恢复，但联网检查未通过："+reason)
+				return
 			}
 			if !save(policy.StepDone) {
 				return
 			}
 		case policy.StepDone:
-			s.finishAttempt(c.To, true, policy.StepDone, "")
+			s.finishAttempt(c.ID, c.To, true, policy.StepDone, "")
 			diagnostics.Log("info", "app-update", "updated to "+c.To)
 			return
 		default:
 			return
 		}
 	}
+}
+
+// consumeSilentOutcome records what the native shell reported about an
+// unattended request that ended before the decision, then removes the
+// report. Only a request this workbench handed out can be reported on.
+func (s *Server) consumeSilentOutcome(profile string, now time.Time) {
+	path := filepath.Join(policy.Dir(profile), silentOutcomeFile)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return
+	}
+	defer os.Remove(path)
+	if !info.Mode().IsRegular() || info.Size() > 4096 {
+		return
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var outcome struct {
+		Request string `json:"request"`
+		Stage   string `json:"stage"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(data, &outcome) != nil || outcome.Request == "" {
+		return
+	}
+	stage := policy.StageDownload
+	switch {
+	case outcome.Code == "changed" || outcome.Code == "too_new":
+		stage = policy.StageChanged
+	case outcome.Stage == "verify" || outcome.Code == "verification":
+		stage = policy.StageVerify
+	case outcome.Stage == "prepare":
+		stage = policy.StagePrepare
+	}
+	_ = s.changeLedger(func(l *policy.Ledger) bool {
+		return l.Report(outcome.Request, stage, plainLabel(outcome.Message, 200), now)
+	})
+	a := &s.appUpdate
+	a.mu.Lock()
+	if a.request != nil && a.request.ID == outcome.Request {
+		a.request = nil
+	}
+	if stage == policy.StageChanged {
+		// The release moved under the request: look at it again.
+		a.checked = time.Time{}
+	}
+	a.mu.Unlock()
 }
 
 // appUpdateTick runs on the workload's existing hourly ticker. In manual mode
@@ -934,9 +1178,12 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 	}
 	if reason := s.silentUnavailable(); reason != "" {
 		setWaiting(policy.SilentUnavailable, reason, nil)
+		s.dropSilentRequest()
 		return
 	}
 	now := a.now()
+	profile := s.updateProfile()
+	s.consumeSilentOutcome(profile, now)
 	a.mu.Lock()
 	pending, checked, request := a.pending, a.checked, a.request
 	a.mu.Unlock()
@@ -957,7 +1204,8 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 		}
 		pending = nil
 		if available != nil && policy.Eligible(available.Version, version.Version) == nil {
-			pending = &policy.Pending{Version: available.Version, PublishedAt: available.PublishedAt, Installable: available.Installable, Reason: available.Reason}
+			pending = &policy.Pending{Version: available.Version, PublishedAt: available.PublishedAt, ChangedAt: available.ChangedAt,
+				Release: available.Release, Installable: available.Installable, Reason: available.Reason}
 		}
 		a.mu.Lock()
 		a.pending = pending
@@ -974,10 +1222,23 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 		return
 	}
 	if request != nil {
-		if request.Version == pending.Version && now.Sub(request.DecidedAt) < silentRequestLifetime {
+		if request.Version == pending.Version && request.Release == pending.Release && now.Sub(request.DecidedAt) < silentRequestLifetime {
 			return
 		}
 		s.dropSilentRequest()
+	}
+	// A request that ended before the decision is retried on a schedule,
+	// and files that failed verification are never fetched again unattended.
+	if ledger, err := policy.LoadLedger(profile); err == nil {
+		next, ok := ledger.SilentRetry(pending.Version, pending.Release, now)
+		if !ok {
+			setWaiting(policy.FailedBefore, pending.Version+" 的自动升级没有完成，不会再自动下载；可以点击升级", nil)
+			return
+		}
+		if now.Before(next) {
+			setWaiting(policy.RetryLater, "上次自动升级没有完成，稍后再试", nil)
+			return
+		}
 	}
 	snapshot := s.updateRegistry().Snapshot(ctx, now, false)
 	a.mu.Lock()
@@ -988,22 +1249,16 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 		setWaiting(policy.Busy, "等待空闲："+snapshot.Blockers[0].Label, snapshot.Blockers)
 		return
 	}
-	if hold.HeldFor(now, snapshot.Fingerprint) < policy.HoldPeriod {
+	if !hold.Held(now, snapshot.Fingerprint) {
 		setWaiting(policy.NotHeld, "等待电脑持续空闲", nil)
 		return
 	}
 	full := s.updateRegistry().Snapshot(ctx, now, true)
-	profile := s.updateProfile()
-	facts := policy.Facts{Current: version.Version, Snapshot: full, Hold: hold, PublishedAt: pending.PublishedAt, Now: now, SilentUnavailable: ""}
+	facts := policy.Facts{Current: version.Version, Snapshot: full, Hold: hold, PublishedAt: pending.ChangedAt, Now: now, SilentUnavailable: ""}
 	facts.Settings, facts.SettingsErr = policy.LoadSettings(profile)
 	facts.Ledger, facts.LedgerErr = policy.LoadLedger(profile)
-	idle := a.inputIdle
-	if idle == nil {
-		idle = hostInputIdle
-	}
-	if d, err := idle(ctx); err == nil {
-		facts.InputIdle, facts.InputIdleKnown = d, true
-	}
+	facts.InputIdle, facts.InputIdleKnown = s.readInputIdle(ctx)
+	facts.Host = s.readHostConditions(ctx)
 	decision := policy.Decide(policy.Request{Trigger: policy.SilentUpdate, Version: pending.Version}, facts)
 	a.mu.Lock()
 	a.waiting = &decision
@@ -1011,8 +1266,18 @@ func (s *Server) appUpdateTick(ctx context.Context) {
 	if !decision.Allowed() {
 		return
 	}
-	next := &silentRequest{ID: randomToken()[:16], Version: pending.Version, DecidedAt: now, fingerprint: full.Fingerprint, publishedAt: pending.PublishedAt}
-	if err := policy.WriteRecord(profile, silentRequestFile, next); err != nil {
+	next := &silentRequest{ID: randomToken()[:16], Version: pending.Version, DecidedAt: now, Release: pending.Release,
+		fingerprint: full.Fingerprint, changedAt: pending.ChangedAt}
+	// The request counts against the retry schedule from now on, whether or
+	// not the shell ever reports on it.
+	err := s.changeLedger(func(l *policy.Ledger) bool {
+		l.Request(next.ID, next.Version, version.Version, next.Release, now)
+		return true
+	})
+	if err == nil {
+		err = policy.WriteRecord(profile, silentRequestFile, next)
+	}
+	if err != nil {
 		setWaiting(policy.Unreadable, "无法写入自动升级请求："+err.Error(), nil)
 		return
 	}

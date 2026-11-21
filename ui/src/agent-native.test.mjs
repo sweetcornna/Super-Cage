@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentClientPreferences, clientPreferences, createAgentNativeConsumer, executeAgentNative } from "./agent-native.js";
+import { agentClientPreferences, agentNativeAllowed, clientPreferences, createAgentNativeConsumer, executeAgentNative } from "./agent-native.js";
 
 const context = { mode: "remote", connection_id: "generation-a", instance_id: "server-one" };
 function storage() {
@@ -94,7 +94,7 @@ test("native operations retain their production checks and never return the refr
   assert.deepEqual(result, { refreshed: true });
   assert.deepEqual(received, { action: "refreshSession", input: {} });
   deps.native = async () => { throw new Error("macOS 要求 Touch ID"); };
-  await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request: { action: "accountDevice", operation: "unlock" } }, deps), /Touch ID/);
+  await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request: { action: "accountDevice", operation: "unlock", kind: "biometric" } }, deps), /Touch ID/);
 });
 
 test("lost completion response retries the receipt without repeating a native action", async () => {
@@ -103,7 +103,7 @@ test("lost completion response retries the receipt without repeating a native ac
     ...timers, getContext: () => context, storage: storage(), reload: () => {}, nativeAvailable: () => true,
     native: async () => { actions++; return { ok: true }; },
     api: async path => {
-      if (path.includes("consumer=window")) { claims++; return claims === 1 ? { id: "request-1", connection_id: context.connection_id, request: { action: "clipboardRead" } } : {}; }
+      if (path.includes("consumer=window")) { claims++; return claims === 1 ? { id: "request-1", connection_id: context.connection_id, request: { action: "chooseFolder" } } : {}; }
       completes++; if (completes === 1) throw new Error("lost acknowledgement"); return { ok: true };
     },
   });
@@ -205,4 +205,34 @@ test("independent desktop consumers retain distinct private window proofs", asyn
   }
   await flush(); consumers.forEach(consumer => consumer.stop());
   assert.equal(registrations, 2); assert.equal(proofs.size, 2);
+});
+
+test("an agent never reaches the application update or anything off the list", async () => {
+  let calls = 0;
+  const deps = { storage: storage(), getContext: () => context, native: async () => { calls++; return true; } };
+  for (const request of [
+    { action: "appUpdate", operation: "install", confirmed: ["job"] },
+    { action: "appUpdate", operation: "status" },
+    { action: "workbenchReady" },
+    { action: "quitNow" },
+    { action: "clipboardRead" },
+    { action: "clipboardWrite", text: "rm -rf ~" },
+    { action: "browserDownloadAction", id: "x", operation: "open" },
+    { action: "shareLocalProject", connection_id: "c", mode: "write" },
+    { action: "remoteInput", operation: "activate", owner: "00000000-0000-0000-0000-000000000000" },
+    { action: "accountDevice", operation: "unlock", kind: "automatic" },
+    { action: "accountDevice", operation: "enable", kind: "automatic" },
+    { action: "frobnicate" },
+  ]) {
+    assert.equal(agentNativeAllowed(request), false, request.action);
+    await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request }, deps), /桌面窗口/);
+  }
+  assert.equal(calls, 0);
+  for (const request of [
+    { action: "accountDevice", operation: "status" },
+    { action: "accountDevice", operation: "unlock", kind: "biometric" },
+    { action: "accountDevice", operation: "disable", kind: "automatic" },
+    { action: "chooseFolder" },
+    { action: "appearance", mode: "light", background: "#ffffff" },
+  ]) assert.equal(agentNativeAllowed(request), true, request.action);
 });

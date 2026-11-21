@@ -2,11 +2,12 @@ package workbench
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
-	"strings"
 
 	"github.com/sylvinus/agent-vm/internal/appupdate/policy"
 	"github.com/sylvinus/agent-vm/internal/cage"
@@ -78,6 +79,10 @@ for unit in ("cage-claude-desktop.service", "` + cage.ClaudeScienceUnit + `"):
 print(json.dumps(out))
 CAGE_UPDATE_PROBE`
 
+// appUpdateGuestTerminalLimit bounds the terminal blockers one guest answer
+// can produce, however many shells it reports.
+const appUpdateGuestTerminalLimit = 16
+
 type appUpdateGuestReport struct {
 	Shells []struct {
 		SID        int    `json:"sid"`
@@ -95,36 +100,47 @@ func appUpdateGuestBlockers(data []byte, live int) (policy.Reading, error) {
 	if err := json.Unmarshal(data, &report); err != nil || report.Services == nil {
 		return policy.Reading{}, errors.New("guest update probe answered invalid JSON")
 	}
+	// The guest's answer is data: it never chooses a blocker id or how many
+	// there are, and its text reaches the dialog as short plain text. Ids
+	// are made here from a terminal's position (by session id) and its
+	// command, so confirming one command never covers another that took its
+	// place. At most one blocker per terminal the host holds.
 	var reading policy.Reading
-	for _, shell := range report.Shells {
+	shells := report.Shells
+	sort.Slice(shells, func(i, j int) bool { return shells[i].SID < shells[j].SID })
+	busy := 0
+	for position, shell := range shells {
 		if shell.Foreground == "" {
 			continue
 		}
-		command := strings.TrimSpace(shell.Foreground)
-		if command == "?" {
+		if busy == live || busy == appUpdateGuestTerminalLimit {
+			reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "unknown:terminals", Kind: policy.KindUnknown, Unknown: true, Interruptible: true, Label: "无法确认终端里是否还有命令在运行"})
+			break
+		}
+		busy++
+		command := plainLabel(shell.Foreground, 24)
+		if command == "?" || command == "" {
 			command = "未知程序"
 		}
+		digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s", position, command)))
 		reading.Blockers = append(reading.Blockers, policy.Blocker{
-			ID: fmt.Sprintf("terminal-command:%d", shell.SID), Kind: policy.KindTerminal, Interruptible: true,
+			ID: "terminal-command:" + hex.EncodeToString(digest[:6]), Kind: policy.KindTerminal, Interruptible: true,
 			Label: "终端里还有命令在运行（" + command + "）",
 		})
 	}
-	if live > len(report.Shells) {
+	if live > len(report.Shells) && (len(reading.Blockers) == 0 || reading.Blockers[len(reading.Blockers)-1].ID != "unknown:terminals") {
 		reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "unknown:terminals", Kind: policy.KindUnknown, Unknown: true, Interruptible: true, Label: "无法确认终端里是否还有命令在运行"})
 	}
-	agents := map[string]bool{}
+	agents := map[string]string{"claude": "Claude", "codex": "Codex"}
+	seen := map[string]bool{}
 	for _, name := range report.Agents {
-		agents[name] = true
+		seen[name] = true
 	}
-	names := make([]string, 0, len(agents))
-	for name := range agents {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		label := map[string]string{"claude": "Claude", "codex": "Codex"}[name]
-		reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "agent:" + name, Kind: policy.KindAgent, Interruptible: true,
-			Label: "工作台终端之外有 " + label + " 进程在运行"})
+	for _, name := range []string{"claude", "codex"} {
+		if seen[name] {
+			reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "agent:" + name, Kind: policy.KindAgent, Interruptible: true,
+				Label: "工作台终端之外有 " + agents[name] + " 进程在运行"})
+		}
 	}
 	if report.Services["cage-claude-desktop.service"] {
 		reading.Blockers = append(reading.Blockers, policy.Blocker{ID: "app:claude-desktop", Kind: policy.KindApp, Interruptible: true, Label: "Claude Desktop 正在运行"})

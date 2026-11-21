@@ -85,10 +85,21 @@ enum CageUpdateDecision {
     enum Outcome: Equatable {
         case prepared(attempt: String)
         case blocked(code: String, message: String, blockers: [Blocker])
+        /// The workbench stopped the environment for attempt, but the
+        /// handoff did not complete: nothing is installed, and the record is
+        /// closed so that the next workbench brings the environment back.
+        case abandoned(attempt: String, message: String)
         case failed(String)
     }
     static let attemptPattern = "^[0-9a-f]{16}$"
     private static let idPattern = "^[A-Za-z0-9:._-]{1,128}$"
+    private static let releasePattern = "^[0-9a-f]{32}$"
+    /// How long a silent request may wait for the shell; the workbench uses
+    /// the same hour.
+    static let requestLifetime: TimeInterval = 3600
+    /// Set by the installer for a relaunch that must stay behind the
+    /// person's windows (an unattended update and its recovery).
+    static let backgroundKey = "CAGE_UPDATE_BACKGROUND"
 
     static func arguments(version: String, silentRequest: String?, confirmed: [String]) -> [String] {
         var arguments = ["prepare-update", "--stop", "--json", "--app-update", version, "--trigger", silentRequest == nil ? "click" : "silent"]
@@ -97,13 +108,27 @@ enum CageUpdateDecision {
         if let silentRequest { arguments += ["--request", silentRequest] }
         return arguments
     }
+    /// prepare-update prints one JSON line per event: "stopped" with the
+    /// attempt as soon as the workbench has stopped the environment, then
+    /// the outcome. A known attempt without a "prepared" outcome (an error
+    /// later, or the command killed) is an abandoned installation.
     static func outcome(_ data: Data, exitStatus: Int32) -> Outcome {
-        guard data.count <= 262144, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return .failed("无法确认环境已停止") }
+        guard data.count <= 262144, let text = String(data: data, encoding: .utf8) else { return .failed("无法确认环境已停止") }
+        var attempt = ""
+        var last: [String: Any]?
+        for line in text.split(separator: "\n") {
+            guard let value = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if ["stopped", "prepared", "abandoned"].contains(value["status"] as? String ?? ""), let id = value["attempt"] as? String,
+               id.range(of: attemptPattern, options: .regularExpression) != nil { attempt = id }
+            last = value
+        }
+        guard let value = last else { return attempt.isEmpty ? .failed("无法确认环境已停止") : .abandoned(attempt: attempt, message: "环境已停止，但升级没有继续") }
         let message = value["message"] as? String ?? ""
         switch value["status"] as? String {
         case "prepared" where exitStatus == 0:
-            let attempt = value["attempt"] as? String ?? ""
-            return .prepared(attempt: attempt.range(of: attemptPattern, options: .regularExpression) == nil ? "" : attempt)
+            return .prepared(attempt: attempt)
+        case _ where !attempt.isEmpty:
+            return .abandoned(attempt: attempt, message: message.isEmpty ? "环境已停止，但升级没有继续" : message)
         case "blocked" where exitStatus == 0:
             // What the workbench names is shown again in the confirmation.
             let blockers = (value["blockers"] as? [[String: Any]] ?? []).prefix(32).compactMap { item -> Blocker? in
@@ -134,14 +159,55 @@ enum CageUpdateDecision {
         guard let data, data.count <= 262144, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
         return value["mode"] as? String == "silent"
     }
-    /// updates/silent-request.json, written by the workbench's idle tick.
-    static func silentRequest(_ data: Data?, current: String) -> (id: String, version: String)? {
+    /// updates/silent-request.json, written by the workbench's idle tick. A
+    /// request older than its lifetime (or from the future) is ignored: the
+    /// workbench that made it has moved on.
+    static func silentRequest(_ data: Data?, current: String, now: Date = Date()) -> (id: String, version: String, release: String)? {
         guard let data, data.count <= 4096, let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let id = value["id"] as? String, id.range(of: attemptPattern, options: .regularExpression) != nil,
               let version = value["version"] as? String, CageUpdateVersion.isNewer(version, than: current),
-              !version.contains("-") || current.contains("-") else { return nil }
-        return (id, version)
+              !version.contains("-") || current.contains("-"),
+              let release = value["release"] as? String, release.range(of: releasePattern, options: .regularExpression) != nil,
+              let decided = (value["decided_at"] as? String).flatMap(date),
+              now.timeIntervalSince(decided) < requestLifetime, decided.timeIntervalSince(now) < 300 else { return nil }
+        return (id, version, release)
     }
+    private static func date(_ text: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        if let value = formatter.date(from: text) { return value }
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter.date(from: text)
+    }
+    /// updates/silent-outcome.json: how an unattended request ended before
+    /// it reached the workbench's decision. stage is download, verify or
+    /// prepare; code is the download's own class when it has one.
+    static func silentOutcome(request: String, version: String, release: String, stage: String, code: String, message: String) -> Data {
+        let value: [String: String] = ["request": request, "version": version, "release": release, "stage": stage, "code": code, "message": String(message.prefix(200))]
+        return (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data()
+    }
+    /// A relaunch by the installer for an unattended update (or its
+    /// recovery) stays behind the person's windows. Read once at launch.
+    static func launchesInBackground(_ environment: [String: String]) -> Bool {
+        environment[backgroundKey] == "1"
+    }
+    /// A click during an unattended download or verification takes it over:
+    /// the same files, installed as the person's click (in front, with the
+    /// confirmation). Once the installer runs, the click waits.
+    static func clickTakesOver(phase: String, installerStarted: Bool) -> Bool {
+        !installerStarted && ["checking", "downloading", "downloaded", "verifying"].contains(phase)
+    }
+}
+
+/// A deadline on the uptime clock, which stops while the Mac sleeps: a wait
+/// that spans a sleep is not cut short by it, unlike one on Date().
+struct CageUptimeDeadline {
+    private let end: TimeInterval
+    private let clock: () -> TimeInterval
+    init(after seconds: TimeInterval, clock: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
+        self.clock = clock
+        end = clock() + seconds
+    }
+    var expired: Bool { clock() >= end }
 }
 
 enum CageUpdateVersion {
@@ -353,6 +419,11 @@ final class CageAppUpdater {
     // confirmed, or the workbench's unattended request.
     private var confirmed: [String] = []
     private var silentRequest: String?
+    // The unattended request's version and release, and how far it got
+    // (download, verify, prepare) before the workbench's decision.
+    private var silentVersion = ""
+    private var silentRelease = ""
+    private var silentStage: String?
     // A page that predates the confirmation sends no confirmed list; its
     // click keeps the earlier stop-and-handoff path.
     private var askWorkbench = false
@@ -374,7 +445,15 @@ final class CageAppUpdater {
     /// confirmed lists the interruption ids the person accepted in the
     /// confirmation. A page can never ask for an unattended install.
     func handle(_ operation: String, confirmed: [String]? = nil) -> [String: Any] {
-        if operation == "install" && !busyInstalling { self.confirmed = confirmed ?? []; askWorkbench = confirmed != nil; silentRequest = nil }
+        if operation == "install" && silentRequest != nil && CageUpdateDecision.clickTakesOver(phase: state["phase"] as? String ?? "", installerStarted: installer != nil) {
+            // The person's click takes over the unattended download: the
+            // same files, then the confirmation and a relaunch in front.
+            self.confirmed = confirmed ?? []; askWorkbench = confirmed != nil
+            silentRequest = nil; silentStage = nil
+            endSilentActivity()
+            return state
+        }
+        if operation == "install" && !busyInstalling { self.confirmed = confirmed ?? []; askWorkbench = confirmed != nil; silentRequest = nil; silentStage = nil }
         return dispatch(operation)
     }
     private var busyInstalling: Bool {
@@ -473,7 +552,15 @@ final class CageAppUpdater {
         for (key, value) in values { state[key] = value }
         onChange(state)
     }
-    private func failure(_ message: String, retryAt: String = "") {
+    private func failure(_ message: String, retryAt: String = "", code: String = "transient") {
+        // An unattended request that ends before the workbench's decision
+        // is reported, so that the workbench does not hand out the same
+        // files again and again.
+        if let request = silentRequest, let stage = silentStage {
+            try? CageUpdateFiles.write(CageUpdateDecision.silentOutcome(request: request, version: silentVersion, release: silentRelease, stage: stage, code: code, message: message),
+                                       to: root.appendingPathComponent("silent-outcome.json"))
+            silentStage = nil
+        }
         endSilentActivity()
         change(["phase": "failed", "message": message, "retryable": true, "retryAt": retryAt])
     }
@@ -481,7 +568,10 @@ final class CageAppUpdater {
     private func startDownload(checkOnly: Bool) {
         generation += 1; let operation = generation
         change(["phase": "checking", "message": "正在检查更新，优先使用主机网络", "receivedBytes": 0, "totalBytes": 0, "retryable": false, "retryAt": ""])
-        let process = Process(); process.executableURL = cage; process.arguments = ["app-update", checkOnly ? "check" : "download"]
+        let process = Process(); process.executableURL = cage
+        // An unattended download names the files the workbench judged.
+        if silentRequest != nil && !checkOnly { silentStage = "download" }
+        process.arguments = ["app-update", checkOnly ? "check" : "download"] + (silentStage == "download" ? ["--release", silentRelease] : [])
         let pipe = Pipe(); process.standardOutput = pipe; process.standardError = FileHandle.nullDevice
         worker = process
         do { try process.run() } catch { worker = nil; failure("无法启动更新检查，请确认应用组件完整"); return }
@@ -506,7 +596,7 @@ final class CageAppUpdater {
                 if self.worker === process { self.worker = nil }
                 guard self.generation == operation else { return }
                 if process.terminationStatus != 0 {
-                    self.failure(result?["message"] as? String ?? "更新请求未完成，请重试", retryAt: result?["retryAt"] as? String ?? "")
+                    self.failure(result?["message"] as? String ?? "更新请求未完成，请重试", retryAt: result?["retryAt"] as? String ?? "", code: result?["code"] as? String ?? "transient")
                 } else if !checkOnly, let result, result["phase"] as? String == "downloaded" {
                     self.verifyDownload(result, operation: operation)
                 }
@@ -519,6 +609,7 @@ final class CageAppUpdater {
         let archive = URL(fileURLWithPath: path).resolvingSymlinksInPath()
         guard archive.path.hasPrefix(root.resolvingSymlinksInPath().path + "/download-"), archive.lastPathComponent == "Cage.dmg" else { failure("安装包路径不属于本次私有下载"); return }
         change(["phase": "verifying", "message": "正在验证 Apple 签名和应用内容", "retryable": false])
+        if silentStage != nil { silentStage = "verify" }
         let task = CageUpdateValidation()
         validationTask = task
         DispatchQueue.global(qos: .userInitiated).async {
@@ -543,12 +634,13 @@ final class CageAppUpdater {
             } catch {
                 try? FileManager.default.removeItem(at: directory)
                 try? FileManager.default.removeItem(at: archive.deletingLastPathComponent())
-                DispatchQueue.main.async { if self.generation == operation { self.failure(error.localizedDescription) } }
+                DispatchQueue.main.async { if self.generation == operation { self.failure(error.localizedDescription, code: "verification") } }
             }
         }
     }
     private func beginInstallation() {
         guard let prepared, installer == nil else { return }
+        if silentRequest != nil { silentStage = "prepare" }
         change(["phase": "installing", "message": "正在准备安装更新", "retryable": false])
         let operation = generation
         let task = CageUpdateValidation()
@@ -614,6 +706,8 @@ final class CageAppUpdater {
     /// a refusal leaves everything running and nothing installed.
     private func prepareEnvironment() {
         guard let version = prepared?.version else { abortInstaller(); failure("更新任务已失效"); return }
+        // From here the workbench decides and records the outcome itself.
+        silentStage = nil
         change(["phase": "installing", "message": "正在确认没有会被中断的任务，并停止环境"])
         let arguments = CageUpdateDecision.arguments(version: version, silentRequest: silentRequest, confirmed: confirmed)
         DispatchQueue.global(qos: .userInitiated).async {
@@ -621,8 +715,10 @@ final class CageAppUpdater {
                 let process = Process(); process.executableURL = self.cage; process.arguments = arguments
                 let output = Pipe(); process.standardOutput = output; process.standardError = FileHandle.nullDevice
                 try process.run()
+                // Connecting (12 s), the workbench's decision and stop (150 s),
+                // its exit (10 s) and releasing the gateway (10 s) fit inside.
                 let expiration = DispatchWorkItem { if process.isRunning { process.terminate() } }
-                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 180, execute: expiration)
+                DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 210, execute: expiration)
                 let data = output.fileHandleForReading.readDataToEndOfFile(); process.waitUntilExit(); expiration.cancel()
                 let outcome = CageUpdateDecision.outcome(data, exitStatus: process.terminationStatus)
                 DispatchQueue.main.async {
@@ -652,6 +748,12 @@ final class CageAppUpdater {
                         // Reported as a retryable failure so every view offers retry.
                         self.abortInstaller()
                         self.change(["phase": "failed", "message": message, "blocked": ["code": code, "message": message, "blockers": blockers.map(\.value)], "retryable": true, "retryAt": ""])
+                    case .abandoned(let attempt, let message):
+                        // The environment was stopped for this attempt: close
+                        // the record so that the workbench brings it back.
+                        self.abortInstaller()
+                        self.recordAbandoned(message, version: version, attempt: attempt)
+                        self.failure(message); self.reconnect()
                     case .failed(let message):
                         self.abortInstaller(); self.failure(message); self.reconnect()
                     }
@@ -680,7 +782,13 @@ final class CageAppUpdater {
               let current = state["currentVersion"] as? String,
               let request = CageUpdateDecision.silentRequest(try? Data(contentsOf: root.appendingPathComponent("silent-request.json")), current: current),
               request.id != silentRequest else { return }
+        // A verified package of another version is not what was asked for.
+        if let held = prepared, held.version != request.version {
+            try? FileManager.default.removeItem(at: held.directory)
+            prepared = nil
+        }
         confirmed = []; silentRequest = request.id
+        silentVersion = request.version; silentRelease = request.release; silentStage = nil
         // Keep the Mac awake for the unattended install; released on any failure.
         silentActivity = ProcessInfo.processInfo.beginActivity(options: [.idleSystemSleepDisabled, .suddenTerminationDisabled], reason: "Super Cage 正在空闲时自动升级")
         _ = dispatch("install")

@@ -34,6 +34,9 @@ type updateFixture struct {
 	mu       sync.Mutex
 }
 
+// fixtureRelease is the release key of the fixture's newer version.
+const fixtureRelease = "0123456789abcdef0123456789abcdef"
+
 func newUpdateFixture(t *testing.T) *updateFixture {
 	t.Helper()
 	previous := version.Version
@@ -54,10 +57,13 @@ func newUpdateFixture(t *testing.T) *updateFixture {
 	}
 	a.check = func(context.Context) (*appupdate.Available, error) {
 		f.checks.Add(1)
-		return &appupdate.Available{Version: "0.1.16", PublishedAt: f.now.Add(-48 * time.Hour).Format(time.RFC3339), Installable: true}, nil
+		published := f.now.Add(-48 * time.Hour).Format(time.RFC3339)
+		return &appupdate.Available{Version: "0.1.16", PublishedAt: published, ChangedAt: published, Release: fixtureRelease, Installable: true}, nil
 	}
 	a.stop = func() error { f.stops.Add(1); return nil }
 	a.unavailable = func() string { return "" }
+	a.host = func(context.Context) (*policy.HostState, error) { return &policy.HostState{}, nil }
+	a.installerWait, a.installerPoll = 300*time.Millisecond, 10*time.Millisecond
 	return f
 }
 
@@ -123,7 +129,9 @@ func (f *updateFixture) assertNothingInstalled(t *testing.T) {
 	if sealed || closing {
 		t.Fatalf("refusal left admission closed: sealed=%t closing=%t", sealed, closing)
 	}
-	if ledger, err := policy.LoadLedger(f.s.updateProfile()); err != nil || len(ledger.Attempts) != 0 {
+	// A silent request that reached the decision is noted as decided; no
+	// installation attempt is recorded for a refusal.
+	if ledger, err := policy.LoadLedger(f.s.updateProfile()); err != nil || ledger.Last() != nil {
 		t.Fatalf("refusal recorded an attempt: %+v %v", ledger, err)
 	}
 	if c, err := policy.LoadChain(f.s.updateProfile()); err != nil || c != nil {
@@ -473,7 +481,8 @@ func TestAppUpdateGuestProbeAnswer(t *testing.T) {
 			t.Fatalf("blocker %+v", b)
 		}
 	}
-	if strings.Join(ids, ",") != "terminal-command:11,terminal-command:12,agent:claude,agent:codex,app:claude-desktop" {
+	if len(ids) != 5 || !strings.HasPrefix(ids[0], "terminal-command:") || !strings.HasPrefix(ids[1], "terminal-command:") || ids[0] == ids[1] ||
+		strings.Join(ids[2:], ",") != "agent:claude,agent:codex,app:claude-desktop" || reading.Blockers[1].Label != "终端里还有命令在运行（未知程序）" {
 		t.Fatalf("blockers %v", ids)
 	}
 	// A terminal the host holds that the guest does not report is unknown.
@@ -489,6 +498,10 @@ func TestAppUpdateGuestProbeAnswer(t *testing.T) {
 }
 
 func TestSilentUnavailableReason(t *testing.T) {
+	// The rules behind the real-machine gate (TestReviewSilentGateClosedEverywhere).
+	saved := silentVerified
+	silentVerified = func(string) bool { return true }
+	t.Cleanup(func() { silentVerified = saved })
 	yes := func(string) bool { return true }
 	no := func(string) bool { return false }
 	app := "/Applications/Super Cage.app/Contents/Resources/cage"
@@ -512,15 +525,24 @@ func TestSilentUnavailableReason(t *testing.T) {
 	}
 }
 
-func writeChain(t *testing.T, s *Server, c policy.Chain) {
+func writeChain(t *testing.T, f *updateFixture, c policy.Chain) {
 	t.Helper()
-	c.Schema, c.ID, c.StartedAt, c.UpdatedAt = policy.ChainSchema, "c1", time.Now(), time.Now()
-	if err := policy.SaveChain(s.updateProfile(), &c); err != nil {
+	c.Schema, c.ID, c.StartedAt, c.UpdatedAt = policy.ChainSchema, "c1", f.now, f.now
+	if err := policy.SaveChain(f.s.updateProfile(), &c); err != nil {
 		t.Fatal(err)
 	}
 	ledger := policy.Ledger{}
-	ledger.Begin(policy.Attempt{Version: c.To, From: c.From, Trigger: c.Trigger, StartedAt: time.Now()})
-	if err := policy.SaveLedger(s.updateProfile(), ledger); err != nil {
+	ledger.Begin(policy.Attempt{ID: c.ID, Version: c.To, From: c.From, Trigger: c.Trigger, StartedAt: f.now})
+	if err := policy.SaveLedger(f.s.updateProfile(), ledger); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// confirmLaunch is the installer's result once the new version's window
+// has started: the chain may go on.
+func confirmLaunch(t *testing.T, f *updateFixture, attempt, version string) {
+	t.Helper()
+	if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": true, "message": "Super Cage 已更新至 " + version, "version": version, "attempt": attempt}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -529,7 +551,8 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 	t.Run("environment was stopped", func(t *testing.T) {
 		f := newUpdateFixture(t)
 		version.Version = "0.1.16"
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling})
+		confirmLaunch(t, f, "c1", "0.1.16")
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		ledger, _ := policy.LoadLedger(f.s.updateProfile())
@@ -550,7 +573,8 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		}
 		f.s.appUpdate.sync = func() error { synced.Add(1); return nil }
 		f.s.appUpdate.network = func() error { checked.Add(1); return nil }
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		confirmLaunch(t, f, "c1", "0.1.16")
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		ledger, _ := policy.LoadLedger(f.s.updateProfile())
@@ -565,7 +589,8 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		var checked atomic.Int32
 		f.s.appUpdate.start = func() error { return nil }
 		f.s.appUpdate.network = func() error { checked.Add(1); return nil }
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true, NetworkPaused: true}})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true, NetworkPaused: true}})
+		confirmLaunch(t, f, "c1", "0.1.16")
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		f.s.mu.Lock()
@@ -580,7 +605,7 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		version.Version = "0.1.16"
 		f.s.appUpdate.start = func() error { return nil }
 		f.s.appUpdate.network = func() error { return errors.New("节点不可用") }
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepRelaunched, Environment: policy.Environment{Running: true}})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepRelaunched, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		ledger, _ := policy.LoadLedger(f.s.updateProfile())
@@ -595,8 +620,8 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		f := newUpdateFixture(t)
 		var started atomic.Int32
 		f.s.appUpdate.start = func() error { started.Add(1); return nil }
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
-		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "签名校验失败，已恢复原应用", "version": "0.1.16"}); err != nil {
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "签名校验失败，已恢复原应用", "version": "0.1.16", "attempt": "c1"}); err != nil {
 			t.Fatal(err)
 		}
 		f.s.resumeAppUpdateChain()
@@ -614,7 +639,7 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 		if err := policy.WriteRecord(f.s.updateProfile(), "last-result.json", map[string]any{"success": false, "message": "旧结果", "version": "0.1.14"}); err != nil {
 			t.Fatal(err)
 		}
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepInstalling, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
 		ledger, _ := policy.LoadLedger(f.s.updateProfile())
@@ -622,15 +647,32 @@ func TestAppUpdateChainResumesAfterReplacement(t *testing.T) {
 			t.Fatalf("chain %+v attempt %+v started=%d", c, ledger.Last(), started.Load())
 		}
 	})
-	t.Run("interrupted while stopping", func(t *testing.T) {
+	t.Run("interrupted while stopping: retired, never acted on", func(t *testing.T) {
 		f := newUpdateFixture(t)
 		var started atomic.Int32
 		f.s.appUpdate.start = func() error { started.Add(1); return nil }
-		writeChain(t, f.s, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepStopping, Environment: policy.Environment{Running: true}})
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepStopping, Environment: policy.Environment{Running: true}})
 		f.s.resumeAppUpdateChain()
 		c, _ := policy.LoadChain(f.s.updateProfile())
-		if c == nil || c.Step != policy.StepFailed || c.FailedStep != policy.StepStopping || started.Load() != 1 {
-			t.Fatalf("chain %+v started=%d", c, started.Load())
+		ledger, _ := policy.LoadLedger(f.s.updateProfile())
+		if c == nil || c.Step != policy.StepAttention || c.FailedStep != policy.StepStopping || c.Error == "" || started.Load() != 0 || ledger.Last().Result != "failed" {
+			t.Fatalf("chain %+v started=%d attempt %+v", c, started.Load(), ledger.Last())
+		}
+	})
+	t.Run("the installer's success for the new version", func(t *testing.T) {
+		f := newUpdateFixture(t)
+		version.Version = "0.1.16"
+		writeChain(t, f, policy.Chain{From: "0.1.15", To: "0.1.16", Trigger: policy.SilentUpdate, Step: policy.StepInstalling})
+		// The result appears while the new version waits for it.
+		go func() {
+			time.Sleep(50 * time.Millisecond)
+			confirmLaunch(t, f, "c1", "0.1.16")
+		}()
+		f.s.resumeAppUpdateChain()
+		c, _ := policy.LoadChain(f.s.updateProfile())
+		ledger, _ := policy.LoadLedger(f.s.updateProfile())
+		if c == nil || c.Step != policy.StepDone || ledger.Last().Result != "ok" {
+			t.Fatalf("chain %+v attempt %+v", c, ledger.Last())
 		}
 	})
 }

@@ -490,10 +490,19 @@ func run() int {
 			if !stop || !returnJSON {
 				return fail(errors.New("prepare-update --app-update requires --stop --json"))
 			}
+			// One JSON line per event: "stopped" with the attempt as soon as
+			// the workload has stopped the environment, then the outcome.
+			update.Stopped = func(attempt string) {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "stopped", "attempt": attempt})
+			}
 			result, err := workbench.PrepareAppUpdate(path, update)
 			if err != nil {
 				diagnostics.Log("error", "command", err.Error())
-				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "message": err.Error()})
+				if result.Status == "abandoned" {
+					_ = json.NewEncoder(os.Stdout).Encode(result)
+				} else {
+					_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "message": err.Error()})
+				}
 				return 1
 			}
 			_ = json.NewEncoder(os.Stdout).Encode(result)

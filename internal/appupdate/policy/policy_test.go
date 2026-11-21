@@ -55,7 +55,13 @@ func idleFacts() (Request, Facts) {
 		InputIdleKnown: true,
 		PublishedAt:    now.Add(-2 * ReleaseAge).Format(time.RFC3339),
 		Now:            now,
+		Host:           &HostState{},
 	}
+}
+
+func silentFacts() Facts {
+	_, f := idleFacts()
+	return f
 }
 
 func TestSilentAllowedOnlyWhenEverythingHolds(t *testing.T) {
@@ -75,7 +81,7 @@ func TestSilentAllowedOnlyWhenEverythingHolds(t *testing.T) {
 		{"unreadable ledger", func(_ *Request, f *Facts) { f.LedgerErr = errors.New("bad") }, Unreadable},
 		{"failed before", func(_ *Request, f *Facts) {
 			f.Ledger.Begin(Attempt{Version: "0.1.16"})
-			f.Ledger.Finish("0.1.16", false, StepTools, "x", now)
+			f.Ledger.Finish("", "0.1.16", false, StepTools, "x", now)
 		}, FailedBefore},
 		{"unfinished attempt (crash mid-install) counts as failed", func(_ *Request, f *Facts) { f.Ledger.Begin(Attempt{Version: "0.1.16"}) }, FailedBefore},
 		{"release younger than a day", func(_ *Request, f *Facts) { f.PublishedAt = now.Add(-time.Hour).Format(time.RFC3339) }, TooNew},
@@ -167,10 +173,10 @@ func TestLedgerKeepsUnfinishedAttemptsAsFailures(t *testing.T) {
 	if err != nil || !read.FailedBefore("0.1.16") || read.FailedBefore("0.1.17") {
 		t.Fatalf("unfinished attempt: %+v %v", read, err)
 	}
-	if !read.Finish("0.1.16", true, StepDone, "", now) || read.FailedBefore("0.1.16") {
+	if !read.Finish("", "0.1.16", true, StepDone, "", now) || read.FailedBefore("0.1.16") {
 		t.Fatalf("finished ok: %+v", read)
 	}
-	if read.Finish("0.1.16", false, StepTools, "x", now) {
+	if read.Finish("", "0.1.16", false, StepTools, "x", now) {
 		t.Fatal("finished an attempt twice")
 	}
 	for i := 0; i < ledgerLimit+5; i++ {
@@ -329,37 +335,59 @@ func TestChainResumeAfterReplacementRollbackAndCrash(t *testing.T) {
 	if err != nil || read.Step != StepInstalling || !read.Environment.Running {
 		t.Fatalf("read back: %+v %v", read, err)
 	}
+	success := &InstallerResult{Success: true, Version: "0.1.16", Attempt: "1", WrittenAt: now}
+	failure := &InstallerResult{Success: false, Version: "0.1.16", Attempt: "1", WrittenAt: now}
+	versionOnly := &InstallerResult{Success: false, Version: "0.1.16", WrittenAt: now}
+	other := &InstallerResult{Success: true, Version: "0.1.16", Attempt: "2", WrittenAt: now}
+	stale := &InstallerResult{Success: true, Version: "0.1.16", Attempt: "1", WrittenAt: now.Add(-ResultFresh - time.Minute)}
 	for _, tc := range []struct {
 		name    string
 		step    Step
 		running string
+		at      time.Time
+		result  *InstallerResult
 		want    Resumption
 	}{
-		{"new version relaunched", StepInstalling, "0.1.16", Resumption{Continue: StepRelaunched}},
-		{"rollback: old version again", StepInstalling, "0.1.15", Resumption{RolledBack: true}},
-		{"crash while stopping, old version", StepStopping, "0.1.15", Resumption{RolledBack: true}},
-		{"a third version", StepInstalling, "0.1.17", Resumption{Attention: true}},
-		{"restart during restore continues", StepRestoring, "0.1.16", Resumption{Continue: StepRestoring}},
-		{"restore step under another version", StepRestoring, "0.1.15", Resumption{Attention: true}},
-		{"done", StepDone, "0.1.16", Resumption{}},
-		{"failed", StepFailed, "0.1.15", Resumption{}},
-		{"unknown step", "teleporting", "0.1.16", Resumption{Attention: true}},
+		{"new version, installer confirmed", StepInstalling, "0.1.16", now, success, Resumption{Continue: StepRelaunched}},
+		{"new version waits for the installer", StepInstalling, "0.1.16", now, nil, Resumption{Wait: true}},
+		{"another attempt's result proves nothing", StepInstalling, "0.1.16", now, other, Resumption{Wait: true}},
+		{"a result from an earlier start", StepInstalling, "0.1.16", now, stale, Resumption{Retire: "安装程序的结果来自更早的启动，没有据此恢复环境"}},
+		{"new version while the installer rolls back", StepInstalling, "0.1.16", now, failure, Resumption{Hold: "安装程序正在恢复原版本"}},
+		{"rollback reported for this attempt", StepInstalling, "0.1.15", now, failure, Resumption{RolledBack: true}},
+		{"rollback without the attempt id", StepInstalling, "0.1.15", now, versionOnly, Resumption{Hold: "升级没有完成，环境保持停止；可以重新点击升级，或手动启动环境"}},
+		{"no result after the grace", StepInstalling, "0.1.15", now.Add(-InstallerGrace - time.Minute), nil, Resumption{Retire: "升级没有完成，也没有安装程序的结果；环境保持停止，可以重新点击升级或手动启动环境"}},
+		{"confirmed, then the old version again", StepInstalling, "0.1.15", now, success, Resumption{Undone: true}},
+		{"crash while stopping", StepStopping, "0.1.15", now, nil, Resumption{Retire: "升级在停止环境时中断，没有安装更新；环境保持现状，需要时请手动启动"}},
+		{"a 30-day-old record", StepInstalling, "0.1.16", now.Add(-30 * 24 * time.Hour), success, Resumption{Retire: "升级记录已过期，没有据此改动环境"}},
+		{"a record from the future", StepRestoring, "0.1.16", now.Add(time.Hour), nil, Resumption{Retire: "升级记录已过期，没有据此改动环境"}},
+		{"a third version", StepInstalling, "0.1.17", now, success, Resumption{Attention: true}},
+		{"restart during restore continues", StepRestoring, "0.1.16", now, nil, Resumption{Continue: StepRestoring}},
+		{"restore step under the old version", StepRestoring, "0.1.15", now, nil, Resumption{Undone: true}},
+		{"done", StepDone, "0.1.16", now, nil, Resumption{}},
+		{"done, then rolled back", StepDone, "0.1.15", now.Add(-30 * 24 * time.Hour), nil, Resumption{Undone: true}},
+		{"failed", StepFailed, "0.1.15", now, nil, Resumption{}},
+		{"unknown step", "teleporting", "0.1.16", now, nil, Resumption{Attention: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			record := *read
-			record.Step = tc.step
-			if got := Resume(&record, tc.running); got != tc.want {
+			record.Step, record.UpdatedAt = tc.step, tc.at
+			if got := Resume(&record, tc.running, now, tc.result); got != tc.want {
 				t.Fatalf("got %+v want %+v", got, tc.want)
 			}
 		})
 	}
 	future := *read
 	future.Schema = 2
-	if got := Resume(&future, "0.1.16"); !got.Attention || View(&future).Step != StepAttention {
+	if got := Resume(&future, "0.1.16", now, success); !got.Attention || View(&future).Step != StepAttention {
 		t.Fatalf("unknown schema acted on: %+v", got)
 	}
-	if got := Resume(nil, "0.1.16"); got != (Resumption{}) {
+	if got := Resume(nil, "0.1.16", now, success); got != (Resumption{}) {
 		t.Fatal("no record must do nothing")
+	}
+	retired := *read
+	retired.Retire("升级记录已过期，没有据此改动环境", now)
+	if v := View(&retired); v.Step != StepAttention || v.Error == "" || v.FailedStep != StepInstalling {
+		t.Fatalf("retired view: %+v", v)
 	}
 	read.Fail(StepRestoring, "环境未能启动", now)
 	v := View(read)

@@ -14,6 +14,29 @@ export const agentClientPreferences = Object.freeze([
 ]);
 
 const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+// What an agent may ask this window to do. The server refuses everything
+// else before it is queued (internal/workbench/agent_native.go, whose test
+// keeps the two lists equal); the window checks again here. Application
+// updates and their launch confirmation, quitting, the host clipboard,
+// opening host files, sharing folders and keyboard capture are never on it.
+export const agentNativeActionNames = Object.freeze([
+  "clientPreferences", "appearance", "refreshSession", "reconnect",
+  "chooseFolder", "chooseGuestMedia", "importTheme", "exportTheme", "accountDevice",
+]);
+
+export function agentNativeAllowed(request) {
+  if (!object(request) || !agentNativeActionNames.includes(request.action)) return false;
+  if (request.action !== "accountDevice") return true;
+  // Quick login: its state and turning it off are fine; a new key or an
+  // unlock must go through Touch ID, which the person does.
+  switch (request.operation) {
+    case "status": return true;
+    case "disable": return ["automatic", "biometric"].includes(request.kind);
+    case "enable": case "unlock": return request.kind === "biometric";
+    default: return false;
+  }
+}
 function validPreference(key, raw) {
   if (raw === null) return true;
   if (typeof raw !== "string") return false;
@@ -82,6 +105,7 @@ export async function executeAgentNative(item, { native, getContext, storage }) 
   if (!item.connection_id || item.connection_id !== context.connection_id) throw connectionChanged();
   const request = item.request;
   if (!object(request) || typeof request.action !== "string") throw new Error("原生请求格式无效。");
+  if (!agentNativeAllowed(request)) throw new Error("这个原生操作只能在桌面窗口中由用户进行。");
   let result;
   if (request.action === "clientPreferences") result = clientPreferences(request, context, storage);
   else {

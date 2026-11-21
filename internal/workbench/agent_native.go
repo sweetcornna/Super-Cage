@@ -22,6 +22,52 @@ type agentNativeQueue struct {
 	windows map[string]time.Time
 }
 
+// agentNativeActions is what an agent may ask the desktop window to do
+// through native.submit: an action and, where it matters, its operation and
+// kind. Anything else is refused before it is queued (fail closed); the
+// window's consumer checks the same list again (ui/src/agent-native.js).
+// Application updates and their launch confirmation, quitting, the host
+// clipboard, opening host files, sharing folders with a cloud host and
+// keyboard capture are never on it.
+var agentNativeActions = map[string]func(request map[string]json.RawMessage) bool{
+	"clientPreferences": anyNativeRequest,
+	"appearance":        anyNativeRequest,
+	"refreshSession":    anyNativeRequest,
+	"reconnect":         anyNativeRequest,
+	"chooseFolder":      anyNativeRequest,
+	"chooseGuestMedia":  anyNativeRequest,
+	"importTheme":       anyNativeRequest,
+	"exportTheme":       anyNativeRequest,
+	// Quick login: reading its state and turning it off are always fine; a
+	// new key or an unlock must go through Touch ID, which the person does.
+	"accountDevice": func(request map[string]json.RawMessage) bool {
+		kind := nativeField(request, "kind")
+		switch nativeField(request, "operation") {
+		case "status":
+			return true
+		case "disable":
+			return kind == "automatic" || kind == "biometric"
+		case "enable", "unlock":
+			return kind == "biometric"
+		}
+		return false
+	},
+}
+
+func anyNativeRequest(map[string]json.RawMessage) bool { return true }
+
+func nativeField(request map[string]json.RawMessage, name string) string {
+	var value string
+	_ = json.Unmarshal(request[name], &value)
+	return value
+}
+
+// agentNativeAllowed reports whether an agent may queue request.
+func agentNativeAllowed(action string, request map[string]json.RawMessage) bool {
+	allowed, ok := agentNativeActions[action]
+	return ok && allowed(request)
+}
+
 // This queue belongs to the window listener, not the selected workload. It
 // invokes the exact installed native bridge, including its platform checks.
 func (s *Server) agentNativeRoutes(mux routeRegistrar) {
@@ -56,6 +102,10 @@ func (s *Server) agentNative(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(request["action"], &action)
 		if action == "" {
 			http.Error(w, "Native action required", 400)
+			return
+		}
+		if !agentNativeAllowed(action, request) {
+			http.Error(w, "This native action is only available in the desktop window", http.StatusForbidden)
 			return
 		}
 		if s.remote != nil && s.remote.context().ConnectionID != in.Connection {

@@ -23,10 +23,16 @@ type AppUpdateOptions struct {
 	Trigger   string
 	Confirmed []string
 	Request   string
+	// Stopped is told the attempt as soon as the workload has agreed and
+	// stopped the environment, before the rest of the handoff: whatever goes
+	// wrong after this, the shell knows which record to close.
+	Stopped func(attempt string)
 }
 
 // AppUpdatePrepared is the answer printed by "cage prepare-update --app-update".
-// Status is "prepared" (stop done, install now) or "blocked".
+// Status is "prepared" (stop done, install now), "blocked", or "abandoned"
+// (the workload stopped the environment for Attempt, but the handoff did
+// not complete: nothing will be installed and the record must be closed).
 type AppUpdatePrepared struct {
 	Status string `json:"status"`
 	// Attempt identifies the update record; the installer writes it back
@@ -93,19 +99,25 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 		if reply.Status != "prepared" {
 			return AppUpdatePrepared{}, errors.New("后台响应无效，未继续更新。")
 		}
+		if options.Stopped != nil {
+			options.Stopped(reply.Attempt)
+		}
+		abandon := func(err error) (AppUpdatePrepared, error) {
+			return AppUpdatePrepared{Status: "abandoned", Attempt: reply.Attempt, Message: "环境已停止，但升级没有继续：" + err.Error()}, err
+		}
 		if err = c.waitForExit(); err != nil {
-			return AppUpdatePrepared{}, err
+			return abandon(err)
 		}
 		gateway, err := connectController(filepath.Dir(desktopConfigPath(fullConfig)))
 		if errors.Is(err, errControllerUnavailable) {
 			return reply, nil
 		}
 		if err != nil {
-			return AppUpdatePrepared{}, err
+			return abandon(err)
 		}
 		defer gateway.close()
 		if err = gateway.releaseDesktopEntry(); err != nil {
-			return AppUpdatePrepared{}, err
+			return abandon(err)
 		}
 		return reply, nil
 	case http.StatusConflict:
