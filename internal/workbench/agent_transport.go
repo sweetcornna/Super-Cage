@@ -78,16 +78,10 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 	default:
 		return result, &AgentError{Code: "invalid_input", Message: "Unsupported HTTP method.", NextAction: "capabilities"}
 	}
-	// These endpoints are internal transports, not user actions. Device
-	// enrollment/unlock must run inside the same native credential store and
-	// biometric policy as the desktop; never return its wrapping secret.
-	if u.Path == "/api/agent/native/window" || u.Path == "/api/account/device-enroll" || u.Path == "/api/account/device-unlock" || u.Path == "/api/account/device-revoke" || u.Path == "/api/session" || u.Path == "/api/launch" || u.Path == "/api/handoff" || u.Path == "/api/desktop-owner" || strings.HasPrefix(u.Path, "/api/desktop-local/") {
-		return result, &AgentError{Code: "native_transport_required", Message: "Use native.submit with the same accountDevice or desktop action. Transport credentials are not exported.", NextAction: "native.submit"}
-	}
-	// Local VM inventory carries private profile grants and is owned by the
-	// native desktop generation. Never export it through the agent transport.
-	if strings.HasPrefix(u.Path, "/api/client/virtual-machines") {
-		return result, &AgentError{Code: "native_transport_required", Message: "Local virtual machines are managed only by the native desktop window; profile grants are not exported through the agent transport.", NextAction: "open_desktop"}
+	// Window-only routes and state-changing routes nobody classified are
+	// refused before anything is sent (agent_access.go).
+	if refusal := agentRouteRefusal(method, u.Path); refusal != nil {
+		return result, refusal
 	}
 	// Client-only operations must address the desktop explicitly. Ordinary
 	// business routes on that listener require the selected target's generation.
