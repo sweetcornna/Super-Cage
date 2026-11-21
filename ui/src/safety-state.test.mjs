@@ -9,6 +9,8 @@ import {
   needsEnvironmentRestart,
   countdownText,
   explanationView,
+  withLeaseClock,
+  adviceAction,
 } from "./safety-state.mjs";
 
 test("check failures and incomplete evidence link to the checklist without tagging unrelated errors", () => {
@@ -162,7 +164,8 @@ test("each explained state reads calmly, with its countdown and the advice as gi
   assert.equal(memory.tone, "warn");
   assert.equal(memory.title, "外网已暂停：环境内存不足");
   assert.equal(memory.countdown.text, "最迟约 1 分钟后自动完整重检。");
-  assert.deepEqual(memory.advice, advice, "later advice (\"可以调到 N GB\") is shown as given");
+  assert.deepEqual(memory.advice.map((item) => item.text), advice, "later advice (\"可以调到 N GB\") is shown as given");
+  assert.deepEqual(memory.advice.map((item) => item.action), ["", "resources"], "advice about the memory setting links there");
   assert.equal(memory.recheck, true);
   assert.equal(memory.memoryShort, true);
 
@@ -192,4 +195,80 @@ test("each explained state reads calmly, with its countdown and the advice as gi
   assert.equal(explanationView(networkState(status(undefined), now).explanation, now), null);
   assert.equal(countdownText(59), "约 59 秒后");
   assert.equal(countdownText(120), "约 2 分钟后");
+});
+
+test("a newer server's remaining lease decides open or closed on this client's clock", () => {
+  const now = Date.parse("2026-11-21T08:20:00.300Z");
+  // After a host sleep, or with this client's clock ahead, until can read as
+  // past while the lease still runs; the remaining time says it runs.
+  const status = { vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T08:19:00Z", lease_remaining_ms: 90000 } } };
+  const read = withLeaseClock(status, now);
+  assert.equal(read.safety.gate.lease_end, Date.parse("2026-11-21T08:21:30Z"));
+  assert.equal("lease_remaining_ms" in read.safety.gate, false, "the field that changes on every read is not kept");
+  assert.equal(status.safety.gate.lease_remaining_ms, 90000, "the answer itself is not changed");
+  assert.equal(networkState(read, now).mode, "open");
+  assert.equal(networkState(read, Date.parse("2026-11-21T08:21:31Z")).mode, "closed");
+  // Two reads a few hundred ms apart that say the same give the same object content.
+  assert.deepEqual(withLeaseClock({ ...status, safety: { gate: { ...status.safety.gate, lease_remaining_ms: 89800 } } }, now + 200), read);
+  // Nothing left: closed at once, whatever until says.
+  const ended = withLeaseClock({ vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T09:00:00Z", lease_remaining_ms: 0 } } }, now);
+  assert.equal(networkState(ended, now + 1000).mode, "closed");
+  // An older server (no remaining time): until against this clock, as before.
+  const older = { vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T08:21:00Z" } } };
+  assert.equal(withLeaseClock(older, now), older);
+  assert.equal(networkState(older, now).mode, "open");
+  assert.equal(networkState(older, Date.parse("2026-11-21T08:21:01Z")).mode, "closed");
+  // Closed (no remaining time sent): unchanged.
+  const closed = { vm_running: true, safety: { gate: { mode: "closed", until: "0001-01-01T00:00:00Z" } } };
+  assert.equal(withLeaseClock(closed, now), closed);
+  assert.equal(withLeaseClock(null, now), null);
+});
+
+test("the unconfirmed countdown follows the remaining lease when the server sends it", () => {
+  const now = Date.parse("2026-11-21T08:20:00Z");
+  const explanation = { state: "unconfirmed", reason: "r", next: "n", lease_until: "2026-11-21T08:19:50Z" };
+  const read = withLeaseClock({ vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T08:19:50Z", lease_remaining_ms: 40000 }, explanation } }, now);
+  const view = explanationView(networkState(read, now).explanation, now);
+  assert.equal(view.countdown.seconds, 40);
+  // Older server: lease_until as before.
+  const older = { vm_running: true, safety: { gate: { mode: "open", until: "2026-11-21T08:20:45Z" }, explanation: { ...explanation, lease_until: "2026-11-21T08:20:45Z" } } };
+  assert.equal(explanationView(networkState(older, now).explanation, now).countdown.seconds, 45);
+});
+
+test("the memory cause names what is short; the server's reason and advice stay as given", () => {
+  const now = Date.parse("2026-11-21T08:20:00Z");
+  const view = (fields) => explanationView(networkState({ vm_running: true, safety: { gate: { mode: "closed", until: "0001-01-01T00:00:00Z" },
+    explanation: { state: "waiting_memory", reason: "隔离浏览器占用的内存超过了环境能分给它的上限", next: "n", recheck_at: "2026-11-21T08:21:00Z", ...fields } } }, now).explanation, now);
+  const browser = view({ memory_short: true, memory_cause: "browser", advice: ["在隔离浏览器中关闭或刷新占用内存较多的标签页", "在资源设置中可以把内存调到 6 GB，需要重启环境"] });
+  assert.equal(browser.memoryCause, "browser");
+  assert.equal(browser.title, "外网已暂停：隔离浏览器内存不足");
+  assert.equal(browser.label, "外网未放行 · 内存不足");
+  assert.equal(browser.reason, "隔离浏览器占用的内存超过了环境能分给它的上限");
+  assert.deepEqual(browser.advice, [
+    { text: "在隔离浏览器中关闭或刷新占用内存较多的标签页", action: "" },
+    { text: "在资源设置中可以把内存调到 6 GB，需要重启环境", action: "resources" },
+  ]);
+  assert.equal(view({ memory_short: true, memory_cause: "environment" }).title, "外网已暂停：环境内存不足");
+  assert.equal(view({ memory_short: true, memory_cause: "machine" }).title, "外网已暂停：这台机器内存不足");
+  // Absent (an older server) or unknown: the title as before, no cause.
+  assert.equal(view({ memory_short: true }).title, "外网已暂停：环境内存不足");
+  assert.equal(view({ memory_short: true, memory_cause: "gpu" }).memoryCause, "");
+  assert.equal(view({ memory_short: false, memory_cause: "browser" }).memoryCause, "", "a cause only while memory is short");
+});
+
+test("advice about the memory setting links to 计算资源; other advice does not", () => {
+  for (const text of [
+    "环境内存已用满手动设置的 4 GB。改为自动（推荐）后可以调到 6 GB，需要重启环境。",
+    "在资源设置中改为自动（推荐）后可以调到 6 GB，需要重启环境",
+    "在资源设置中可以把内存调到 8 GB，需要重启环境",
+    "在资源设置中查看环境内存；需要时调高内存上限（重启环境后生效）",
+    "可以把内存调到 5.5 GB",
+  ]) assert.equal(adviceAction(text), "resources", text);
+  for (const text of [
+    "在隔离浏览器中关闭或刷新占用内存较多的标签页",
+    "这台机器暂时没有更多内存可给环境；关闭这台机器上不用的程序后会自动增加",
+    "在网络设置中换到美国的代理节点",
+    "",
+    undefined,
+  ]) assert.equal(adviceAction(text), "", String(text));
 });

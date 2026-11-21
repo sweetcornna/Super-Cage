@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { RefreshCw } from "lucide-react";
+import { Globe2, Laptop, MemoryStick, RefreshCw } from "lucide-react";
 import { api } from "./api";
 import { EnvironmentShield } from "./environment-shield";
 import { explanationView } from "./safety-state.mjs";
@@ -48,15 +48,28 @@ export const networkTone = (network) => {
   return view ? view.tone : "";
 };
 
-export function NetworkExplanation({ explanation, compact = false, canRecheck = false, onRechecked, onDetails, titleId }) {
+// What is short of memory, beside the title: the environment, the isolated
+// browser (the sidebar's browser icon) or the machine itself.
+const memoryIcons = { environment: MemoryStick, browser: Globe2, machine: Laptop };
+const memoryNames = { environment: "环境内存", browser: "隔离浏览器内存", machine: "这台机器的内存" };
+
+// onResources opens 设置 → 环境与恢复 → 计算资源; advice about the memory
+// setting offers it (adviceAction in safety-state.mjs).
+export function NetworkExplanation({ explanation, compact = false, canRecheck = false, onRechecked, onDetails, onResources, titleId }) {
   const now = useNow(Boolean(explanation?.recheckAt || explanation?.leaseUntil));
   const recheck = useRecheck(onRechecked);
   const view = explanationView(explanation, now);
   if (!view) return null;
   const offerRecheck = canRecheck && view.recheck;
+  const MemoryIcon = memoryIcons[view.memoryCause];
   return (
-    <div className={`network-explanation tone-${view.tone}${compact ? " compact" : ""}`} data-state={view.state}>
-      {!compact && <p className="network-explanation-title" id={titleId}>{view.title}</p>}
+    <div className={`network-explanation tone-${view.tone}${compact ? " compact" : ""}`} data-state={view.state} data-memory-cause={view.memoryCause || undefined}>
+      {!compact && (
+        <p className="network-explanation-title" id={titleId}>
+          {MemoryIcon && <MemoryIcon size={16} className="network-memory-icon" aria-hidden="true" data-cause={memoryNames[view.memoryCause]} />}
+          {view.title}
+        </p>
+      )}
       {view.reason && <p className="network-explanation-reason">{view.reason}</p>}
       {(view.next || view.countdown) && (
         <p className="network-explanation-next">
@@ -66,7 +79,14 @@ export function NetworkExplanation({ explanation, compact = false, canRecheck = 
       )}
       {view.advice.length > 0 && (
         <ul className="network-explanation-advice" aria-label="你可以">
-          {view.advice.map((item, index) => <li key={index}>{item}</li>)}
+          {view.advice.map((item, index) => (
+            <li key={index}>
+              {item.text}
+              {item.action === "resources" && onResources && (
+                <> <button type="button" className="text-button network-advice-link" onClick={onResources}>打开计算资源设置</button></>
+              )}
+            </li>
+          ))}
         </ul>
       )}
       {(offerRecheck || onDetails) && (
@@ -88,7 +108,7 @@ export function NetworkExplanation({ explanation, compact = false, canRecheck = 
 // The status bar's gate item. With an explanation it opens a small popover
 // above itself; without one it opens the checklist, as before. A blocked
 // navigation asks it to open through the "cage-network-explain" event.
-export function NetworkStatusButton({ network, running, healthy, canRecheck, onRechecked, onDetails }) {
+export function NetworkStatusButton({ network, running, healthy, canRecheck, onRechecked, onDetails, onResources }) {
   const view = explanationView(network?.explanation);
   const [open, setOpen] = useState(false);
   const [place, setPlace] = useState(null);
@@ -151,7 +171,8 @@ export function NetworkStatusButton({ network, running, healthy, canRecheck, onR
           style={place ? { left: place.left, bottom: place.bottom, width: place.width } : { visibility: "hidden" }}>
           <NetworkExplanation explanation={network.explanation} canRecheck={canRecheck} titleId="network-popover-title"
             onRechecked={() => { setOpen(false); onRechecked?.(); }}
-            onDetails={() => { setOpen(false); onDetails?.(); }} />
+            onDetails={() => { setOpen(false); onDetails?.(); }}
+            onResources={onResources && (() => { setOpen(false); onResources(); })} />
         </div>,
         document.body,
       )}

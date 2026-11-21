@@ -94,3 +94,19 @@
     animation: none;
   }
 }
+/* What is short of memory (explanation.memory_cause), before the title. */
+.network-explanation-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.network-memory-icon {
+  flex: none;
+  color: var(--amber);
+}
+/* "打开计算资源设置" after advice about the memory setting. */
+.network-advice-link {
+  padding: 0;
+  font-size: inherit;
+  white-space: nowrap;
+}

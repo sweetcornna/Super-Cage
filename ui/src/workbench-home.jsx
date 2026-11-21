@@ -50,7 +50,7 @@ export function WorkbenchHome({
   projectsAvailable, macGuest, editorAvailable, contentWorkspace, groups, projects, sessions, tabs,
   openingSession, onSessionOpen, onSettings, onDetails, onStop, onRetrySetup, onPrimary, primaryDisabled,
   onNewTerminal, onNewTerminalHere, onEditor, onOpenProject, terminalMenuAt,
-  sessionOpenError, canRecheck, onRechecked, onNetworkDetails,
+  sessionOpenError, canRecheck, onRechecked, onNetworkDetails, onResources,
 }) {
   const { account } = useAccount();
   const hour = new Date().getHours();
@@ -131,7 +131,7 @@ export function WorkbenchHome({
             ) : <>
               <p className="welcome-subtitle"><SafetyMessage message={subtitle} /></p>
               {gateTone && <NetworkExplanation compact explanation={network.explanation} canRecheck={canRecheck}
-                onRechecked={onRechecked} onDetails={onNetworkDetails} />}
+                onRechecked={onRechecked} onDetails={onNetworkDetails} onResources={onResources} />}
               <p className="home-environment-meta">
                 Super Cage 隔离环境 · {running ? runtimeLabel
                   : setupProxy ? "自备代理订阅、YAML 配置或节点"

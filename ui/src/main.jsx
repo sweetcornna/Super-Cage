@@ -47,7 +47,7 @@ import {
   tabName,
 } from "./workspace-state.mjs";
 import { EnvironmentRestartContext, SafetyChecklistContext, SafetyMessage } from "./safety-message";
-import { networkState, isGuestLocalURL, needsEnvironmentRestart } from "./safety-state.mjs";
+import { networkState, isGuestLocalURL, needsEnvironmentRestart, withLeaseClock } from "./safety-state.mjs";
 import { needsProxySetup } from "./onboarding-state.mjs";
 import { NetworkLatency } from "./network-latency";
 import { WorkbenchHome } from "./workbench-home";
@@ -388,6 +388,18 @@ function App() {
     setSafetyOpen(false);
     setSettingsSection(section);
     setSettingsOpen(true);
+  };
+  // 设置 → 环境与恢复, scrolled to 计算资源 (the gate's advice can point there).
+  // The settings load on first use, so the section is looked for a little while.
+  const openResourceSettings = () => {
+    openSettings("project");
+    let tries = 0;
+    const reveal = () => {
+      const section = document.querySelector('.settings-content section[aria-label="计算资源"]');
+      if (section) section.scrollIntoView({ block: "start" });
+      else if (++tries < 40) setTimeout(reveal, 50);
+    };
+    setTimeout(reveal, 0);
   };
   const select = async (id, focusContent = true) => {
     setTailnetLogin(null);
@@ -760,9 +772,11 @@ function App() {
       if (internal) { await openBrowserSettings(internal[1] || "general"); return; }
       const url = normalizeURL(address);
       if (network.mode !== "open" && !isGuestLocalURL(url)) {
+        // With the server's explanation the status bar's popover says why; the
+        // toast only says what did not happen.
         if (network.explanation) window.dispatchEvent(new Event("cage-network-explain"));
         else setSafetyOpen(true);
-        notify("请先完成关键检查，再访问外部网站。");
+        notify(network.explanation ? "外网暂未放行，暂时不能打开外部网站。" : "请先完成关键检查，再访问外部网站。");
         return;
       }
       await action("/browser/navigate", { id, url });
@@ -799,7 +813,7 @@ function App() {
     try {
       await stopAndExit({
         stop: () => api("/stop", {}),
-        readStatus: () => api("/status"),
+        readStatus: async () => withLeaseClock(await api("/status")),
         exit: () => startEnvironment(),
         isCancelled: () => false,
         onStatus: setStatus,
@@ -821,7 +835,7 @@ function App() {
     try {
       await stopAndExit({
         stop: () => api("/stop", {}),
-        readStatus: () => api("/status"),
+        readStatus: async () => withLeaseClock(await api("/status")),
         exit: () => native("quitNow"),
         isCancelled: () => quitAfterStop.current !== request,
         onStatus: setStatus,
@@ -845,7 +859,8 @@ function App() {
       clearTimeout(timer);
       let jobRunning = false;
       try {
-        const next = await api("/status");
+        // The lease is kept on this window's clock (safety-state.mjs withLeaseClock).
+        const next = withLeaseClock(await api("/status"));
         if (!live) return;
         jobRunning = next.job.running;
         setStatus(previous => keepSame(previous, next));
@@ -1892,6 +1907,7 @@ function App() {
                 canRecheck={Boolean(status.ready && status.safety?.gate && !busy)}
                 onRechecked={() => refreshStatus.current?.()}
                 onNetworkDetails={() => setSafetyOpen(true)}
+                onResources={openResourceSettings}
                 onSessionOpen={openSessionTerminal}
                 onSettings={openSettings}
                 onDetails={() => setDetails(true)}
@@ -1925,7 +1941,7 @@ function App() {
             {sidebarCollapsed && <AppUpdateButton updates={appUpdates} />}
             <NetworkStatusButton network={network} running={running} healthy={status.ready && network.mode === "open"}
               canRecheck={Boolean(status.ready && status.safety?.gate && !busy)} onRechecked={() => refreshStatus.current?.()}
-              onDetails={() => setSafetyOpen(true)} />
+              onDetails={() => setSafetyOpen(true)} onResources={openResourceSettings} />
             <span className="status-divider" />
             <button onClick={() => openSettings("network")}>
               <MapPin size={12} />

@@ -8,16 +8,37 @@ export function isSafetyCheckMessage(message) {
   return typeof message === "string" && /关键(?:检查|检测)(?:尚未|未|失败|证据不完整)|完成关键检查|外网(?:未放行|保持关闭)|浏览器配置检查未通过/.test(message);
 }
 
+// The lease on this client's clock. A newer server sends
+// safety.gate.lease_remaining_ms beside until (its own wall clock, projected
+// so that a host sleep does not leave it in the past); a status read keeps
+// the remaining time as lease_end = when it arrived + remaining, in whole
+// seconds so that answers that say the same stay equal (no re-render), and
+// drops the field that changes on every read. An older server sends until
+// only, which is compared as before.
+export function withLeaseClock(status, receivedAt = Date.now()) {
+  const gate = status?.safety?.gate;
+  const remaining = gate?.lease_remaining_ms;
+  if (!gate || typeof remaining !== "number" || !Number.isFinite(remaining)) return status;
+  const { lease_remaining_ms: _remaining, ...rest } = gate;
+  const lease_end = Math.round((receivedAt + Math.max(0, remaining)) / 1000) * 1000;
+  return { ...status, safety: { ...status.safety, gate: { ...rest, lease_end } } };
+}
+
+const leaseEnd = (gate) => (Number.isFinite(gate?.lease_end) ? gate.lease_end : Date.parse(gate?.until));
+
 // Gate state plus, when it describes that state, the server's explanation
 // (status.safety.explanation): why networking is closed or at risk, what
 // happens next and what the user can do. Older servers send none.
 export function networkState(status, now = Date.now()) {
   const state = gateState(status, now);
-  const explanation = networkExplanation(status?.safety?.explanation, state.mode, now);
+  const explanation = networkExplanation(status?.safety?.explanation, state.mode, now, status?.safety?.gate);
   return explanation ? { ...state, explanation } : state;
 }
 
-function networkExplanation(value, mode, now) {
+// What is short of memory when the explanation says so (round 2 field).
+const MEMORY_CAUSES = ["environment", "browser", "machine"];
+
+function networkExplanation(value, mode, now, gate) {
   if (!value || typeof value !== "object" || typeof value.state !== "string") return null;
   const fits =
     value.state === "unconfirmed"
@@ -32,13 +53,16 @@ function networkExplanation(value, mode, now) {
   };
   const seconds = (time) => (time === null ? null : Math.max(0, Math.ceil((time - now) / 1000)));
   const recheckAt = at(value.recheck_at);
-  const leaseUntil = at(value.lease_until);
+  // The unconfirmed lease is the gate's own: its remaining time when the
+  // server sent it, else lease_until as before.
+  const leaseUntil = value.state === "unconfirmed" && Number.isFinite(gate?.lease_end) ? gate.lease_end : at(value.lease_until);
   return {
     state: value.state,
     reason: typeof value.reason === "string" ? value.reason : "",
     next: typeof value.next === "string" ? value.next : "",
     advice: Array.isArray(value.advice) ? value.advice.filter((item) => typeof item === "string") : [],
     memoryShort: value.memory_short === true,
+    memoryCause: value.memory_short === true && MEMORY_CAUSES.includes(value.memory_cause) ? value.memory_cause : "",
     recheckAt,
     recheckInSeconds: seconds(recheckAt),
     leaseUntil,
@@ -58,6 +82,21 @@ const EXPLAINED = {
   check_required: { tone: "alarm", label: "外网未放行 · 需要重新检测", title: "外网需要重新检测", countdown: "", recheck: true },
   paused: { tone: "warn", label: "外网已手动暂停", title: "外网已手动暂停", countdown: "", recheck: true },
 };
+
+// The title says what is short; the server's reason and advice say how.
+const MEMORY_TITLES = {
+  environment: "外网已暂停：环境内存不足",
+  browser: "外网已暂停：隔离浏览器内存不足",
+  machine: "外网已暂停：这台机器内存不足",
+};
+
+// Advice that points at the environment's memory setting ("在资源设置中…",
+// "改为自动（推荐）后可以调到 N GB", "可以把内存调到 N GB", "调高内存上限")
+// gets a link to 设置 → 环境与恢复 → 计算资源. Advice about tabs, programs or
+// the machine itself does not.
+export function adviceAction(text) {
+  return typeof text === "string" && /资源设置|调到\s*\d+(?:\.\d+)?\s*GB|内存上限/.test(text) ? "resources" : "";
+}
 
 export function countdownText(seconds) {
   if (!Number.isFinite(seconds)) return "";
@@ -86,11 +125,12 @@ export function explanationView(explanation, now = Date.now()) {
     state: EXPLAINED[explanation.state] ? explanation.state : "check_required",
     tone: kind.tone,
     label: kind.label,
-    title: kind.title,
+    title: explanation.state === "waiting_memory" && MEMORY_TITLES[explanation.memoryCause] || kind.title,
     reason: explanation.reason,
     next: explanation.next,
-    advice: explanation.advice,
+    advice: explanation.advice.map((text) => ({ text, action: adviceAction(text) })),
     memoryShort: explanation.memoryShort,
+    memoryCause: explanation.memoryCause || "",
     countdown,
     recheck: kind.recheck,
   };
@@ -100,7 +140,7 @@ function gateState(status, now) {
   if (!status?.vm_running) return { mode: "stopped", label: "环境已停止" };
   const gate = status.safety?.gate;
   if (!gate) return { mode: "unknown", label: "外网状态待确认" };
-  const until = Date.parse(gate.until);
+  const until = leaseEnd(gate);
   if (gate.mode === "open" && Number.isFinite(until) && until > now)
     return { mode: "open", label: "外网已放行" };
   if (gate.mode === "checking" && Number.isFinite(until) && until > now)
