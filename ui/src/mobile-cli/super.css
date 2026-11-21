@@ -262,3 +262,27 @@ body { background: var(--paper); -webkit-font-smoothing: antialiased; }
 .jump-latest { position: absolute; z-index: 4; left: 50%; bottom: 128px; transform: translateX(-50%); display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid var(--line); border-radius: 50%; background: var(--surface); color: var(--ink); box-shadow: var(--shadow); }
 .mobile-app { position: relative; }
 .page-lede { margin: 4px 2px 0; }
+
+/* Phone browsers (html.web-phone, see web-shell.mjs): the page is the app. The document never scrolls,
+   pulls to refresh or zooms on a double tap; the app sits on the visual viewport (above the keyboard);
+   the notch and the home bar are kept clear through the --safe-* insets; inputs are 16 px so iOS does
+   not zoom into them. From 720 px wide the side panel is docked beside the page (two panes). */
+html.web-phone, html.web-phone body { height: 100%; overflow: hidden; overscroll-behavior: none; }
+html.web-phone { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; touch-action: manipulation; --dock: clamp(280px, 30vw, 340px); }
+.web-phone .mobile-app { position: fixed; left: 0; right: 0; top: var(--mobile-top, 0px); }
+.web-phone input, .web-phone textarea, .web-phone select { font-size: max(16px, 1em); }
+.web-phone .workspace-drawer { padding: var(--safe-top) 0 0 var(--safe-left); width: min(calc(326px + var(--safe-left)), calc(100vw - 42px)); top: var(--mobile-top, 0px); }
+.web-phone .drawer-footer { padding-bottom: max(6px, var(--safe-bottom)); }
+.web-phone .sheet { margin-inline: auto; }
+.web-phone .sheet-actions { padding-bottom: max(14px, var(--safe-bottom)); }
+.web-phone .sheet-content { padding-inline: max(20px, var(--safe-left)) max(20px, var(--safe-right)); }
+.web-phone .tree-new, .web-phone .session-slide .session-more { width: 44px; }
+html.portal-frame { --safe-top: 0px; --safe-right: 0px; --safe-bottom: 0px; --safe-left: 0px; }
+.mobile-app.docked { padding-left: calc(var(--dock) + var(--safe-left)); }
+.mobile-app.docked .menu-button { display: none; }
+.mobile-app.docked .workspace-topbar { padding-left: 16px; }
+.workspace-drawer.docked { position: fixed; z-index: 2; left: 0; margin: 0; width: calc(var(--dock) + var(--safe-left)); max-width: none;
+  height: min(100dvh, var(--mobile-height, 100dvh)); transform: none; transition: none; box-shadow: none; border-right: 1px solid var(--line); }
+.workspace-drawer.docked .drawer-heading { min-height: 54px; }
+.mobile-app.docked .transcript, .mobile-app.docked .page-scroll, .mobile-app.docked .compose, .mobile-app.docked .chat-header {
+  padding-inline: max(24px, calc((100% - 760px) / 2)); }

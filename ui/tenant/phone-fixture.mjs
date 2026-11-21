@@ -57,7 +57,7 @@ export function createPhoneFixture() {
   const readme = Buffer.from("# Super Cage\n\n手机网页版测试项目。\n").toString("base64");
   const ok = (body) => ({ status: 200, body });
 
-  return function answer(method, path, body) {
+  return function answer(method, path, body, query = "") {
     const cli = path.replace(/^\/api\/mobile\/cli/, "");
     if (path === "/api/mobile/cli/projects") return ok({ host: "开发环境", ready: true, shared_sessions: true,
       projects: [{ path: project, name: "super-cage" }, { path: longProject, name: "数据清洗与可视化-一个名字很长的研究项目" }] });
@@ -79,6 +79,7 @@ export function createPhoneFixture() {
     if (path === "/api/mobile/environment/proxy") return ok({ sources: [{ id: "s1", name: "订阅", nodes: [{ id: "n1", name: "东京 01" }, { id: "n2", name: "新加坡 02" }] }] });
     if (path === "/api/mobile/terminals") return ok({ terminals });
     const output = /^\/api\/mobile\/terminals\/([0-9a-f]{16})\/output$/.exec(path);
+    if (output && Number(new URL("http://x" + (query || "")).searchParams.get("after") || 0) > 0) return ok({ data: "", next: 1, closed: output[1] === terminals[1].id, exit_code: 0 });
     if (output) return ok({ data: Buffer.from("\u001b[1m~/super-cage\u001b[0m $ git status\r\nOn branch mobile-web\r\nnothing to commit, working tree clean\r\n$ ").toString("base64"), next: 1, closed: output[1] === terminals[1].id, exit_code: 0 });
     if (/^\/api\/mobile\/terminals\/[0-9a-f]{16}\/(input|resize)$/.test(path)) return ok({});
     if (path === "/api/mobile/files/list") return ok({ entries: body?.path ? entries.filter((e) => e.type !== "dir") : entries, truncated: false });

@@ -297,7 +297,7 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request) {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(5 * time.Second))
 	}
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-src "+s.site.scheme+"://*."+s.site.name+s.site.portSuffix+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; frame-src "+s.site.scheme+"://*."+s.site.name+s.site.portSuffix+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 	if !ownSource(r, s.site.origin, !safeMethod(r.Method)) {
 		refuseOrigin(w)
 		return
@@ -311,6 +311,9 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request) {
 			name, contentType = "app.mjs", "text/javascript; charset=utf-8"
 		case "/styles.css":
 			name, contentType = "styles.css", "text/css; charset=utf-8"
+		}
+		if name == "" && servePortalIcon(w, r) {
+			return
 		}
 		if name != "" {
 			body, err := fs.ReadFile(s.cfg.UI, name)

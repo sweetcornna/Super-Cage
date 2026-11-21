@@ -1269,7 +1269,10 @@ describe("静态约束", () => {
     // must resolve to a symbol in this same file; every other reference is still only the two same-origin files.
     const symbols = new Set([...html.matchAll(/<symbol\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1]));
     for (const ref of refs.filter((value) => value.startsWith("#"))) assert.ok(symbols.has(ref.slice(1)), `${ref} 指向本文件中的 symbol`);
-    assert.deepEqual(refs.filter((value) => !value.startsWith("#")), ["/styles.css", "/app.mjs"]);
+    // Besides the two files, only the gateway's fixed icons and web manifest (internal/tenant/portal_icons.go).
+    assert.deepEqual(refs.filter((value) => !value.startsWith("#")), [
+      "/favicon.ico", "/icon.svg", "/apple-touch-icon.png", "/manifest.webmanifest", "/styles.css", "/app.mjs",
+    ]);
     assert.equal(/<image\b|<foreignObject\b/i.test(html), false, "内联 SVG 不加载图像或嵌入 HTML");
     assert.equal(/https?:\/\//.test(html), false);
     assert.match(html, /<html lang="zh-CN">/);

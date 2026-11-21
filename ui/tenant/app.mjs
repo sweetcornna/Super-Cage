@@ -1709,6 +1709,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         void portal.refreshList();
         return;
       }
+      if (phoneMessage(frame, event.data || {})) return;
       if (type !== "cage:open-virtual-machine" || !isValidVmId(id)) return;
       const request = ++frameRequest;
       if (!current.vms.some((vm) => vm.id === id)) await portal.refreshList();
@@ -1853,8 +1854,55 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       }
     }
 
+    // The workspace's phone UI (served to phones, see ui/src/mobile-cli/web-shell.mjs) says so once it has
+    // loaded; on a phone-sized window the portal then steps back and the workspace fills the screen.
+    // Back (the system button or swipe) leaves the workspace for the list once the workspace has no
+    // screen of its own left to go back to.
+    let phoneFrame = null;
+    let lastReentry = 0;
+    function phoneMessage(frame, { type, url }) {
+      if (type === "cage:phone-ui") {
+        if (phoneFrame === frame) return true;
+        phoneFrame = frame;
+        el.dataset.phoneUi = "true";
+        if (!win.history.state?.cagePortal) win.history.pushState({ ...win.history.state, cagePortal: "workspace" }, "");
+        return true;
+      }
+      if (type === "cage:portal-home") {
+        if (win.history.state?.cagePortal) win.history.back();
+        else portal.goHome();
+        return true;
+      }
+      if (type === "cage:workspace-unauthenticated") {
+        // The workspace's sign-in lapsed. Check the portal's own; when it holds, enter the workspace again.
+        if (Date.now() - lastReentry < 10000) return true;
+        lastReentry = Date.now();
+        void portal.checkSession().then(() => {
+          if (portal.getState().phase === "signed-in" && mountedFrame === frame) portal.reconnect();
+        });
+        return true;
+      }
+      if (type === "cage:open-link") {
+        // Links from the workspace open outside the sandboxed frame, http(s) only, with no opener or referrer.
+        let link = null;
+        try { link = new URL(String(url)); } catch { /* not a URL */ }
+        if (link && (link.protocol === "https:" || link.protocol === "http:") && !link.username && !link.password) {
+          win.open(link.href, "_blank", "noopener,noreferrer");
+        }
+        return true;
+      }
+      return false;
+    }
+    win.addEventListener("popstate", () => {
+      if (phoneFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
+    }, { signal: shellListeners.signal });
+
     function unmountFrame() {
       if (!mountedFrame) return;
+      if (phoneFrame === mountedFrame) {
+        phoneFrame = null;
+        delete el.dataset.phoneUi;
+      }
       mountedFrame.listeners.abort(); // 释放 load/error 回调
       mountedFrame.el.remove(); // 移除即销毁浏览上下文，断开其中的流和 WebSocket
       mountedFrame = null;
@@ -2327,6 +2375,23 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
 /* 浏览器启动                                                          */
 /* ------------------------------------------------------------------ */
 
+// The visible area above an on-screen keyboard, for the full-screen workspace and bottom sheets on phones:
+// iOS pans the page instead of resizing it, so fixed layers follow the visual viewport.
+function trackViewport(doc, win) {
+  const viewport = win.visualViewport;
+  if (!viewport) return;
+  const style = doc.documentElement.style;
+  const update = () => {
+    if (Math.abs(viewport.scale - 1) > 0.01) return;
+    style.setProperty("--vv-top", `${Math.max(0, viewport.offsetTop)}px`);
+    style.setProperty("--vv-height", `${viewport.height}px`);
+    style.setProperty("--vv-bottom", `${Math.max(0, win.innerHeight - viewport.offsetTop - viewport.height)}px`);
+  };
+  viewport.addEventListener("resize", update);
+  viewport.addEventListener("scroll", update);
+  update();
+}
+
 export function start(doc = globalThis.document, win = globalThis) {
   const root = doc?.getElementById("app");
   if (!root || root.dataset.mounted === "1") return null;
@@ -2354,6 +2419,7 @@ export function start(doc = globalThis.document, win = globalThis) {
     isHidden: () => doc.visibilityState === "hidden",
     broadcast,
   });
+  trackViewport(doc, win);
   mountPortal(root, portal, { doc, win, theme });
   channel?.addEventListener("message", (event) => {
     if (event.data?.type === "session") void portal.checkSession();

@@ -1,4 +1,5 @@
 import { httpErrorMessage, connectionErrorMessage } from "../error-message.mjs";
+import { signInExpired } from "./web-shell.mjs";
 
 // A desktop tab is bound to the workload selected when it was opened. The
 // native phone bridge serves its UI at / and authenticates its own peer.
@@ -25,7 +26,7 @@ async function requestAPI(path, { body, signal, keepalive, frame } = {}) {
   if (!response.ok) {
     let message;
     const isPlainText = (response.headers.get("Content-Type") || "").startsWith("text/plain");
-    if (response.status === 401) message = "连接授权已失效，请从 Super Cage 重新打开此页面。";
+    if (response.status === 401) { message = "连接授权已失效，请从 Super Cage 重新打开此页面。"; signInExpired(); }
     else if (response.status === 423) {
       const detail = isPlainText ? (await response.text()).trim().slice(0, 1200) : "";
       message = detail && !/^(?:(?:Super )?Cage 已锁定，请先登录|请先解锁 (?:Super )?Cage)$/.test(detail)

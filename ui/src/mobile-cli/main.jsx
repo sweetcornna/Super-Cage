@@ -21,6 +21,7 @@ import { SessionAccount } from "../session-account";
 import "./mobile.css";
 import "./super.css";
 import { IconHints } from "../icon-hints.jsx";
+import { openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
 
 const labels = {
@@ -47,7 +48,7 @@ function route() {
     terminal, path: typeof value?.path === "string" ? value.path : ""};
 }
 function saveRoute(next, push) {
-  history[push ? "pushState" : "replaceState"]({ ...history.state, cageCLI: next }, "");
+  writeRoute(next, push);
 }
 
 function Status({ value, awaitingApproval }) {
@@ -102,12 +103,14 @@ function App() {
   // A virtual machine on a Super Cage server keeps its portal name. Its remote browser
   // and Claude Desktop need a paired computer, so links open on the phone.
   const device = devices.devices.find(d => d.id === devices.current);
-  const serverVM = device?.kind === "tenant";
+  const webTenant = useWebTenant();
+  const docked = useDocked();
+  const serverVM = device?.kind === "tenant" || webTenant;
   useEffect(() => {
     if (catalog?.host && devices.current && !serverVM) deviceCommand("name", { id: devices.current, name: catalog.host });
   }, [catalog?.host, devices.current, serverVM]);
   const openWeb = useCallback((url, tool) => {
-    if (serverVM) { if (!deviceCommand("open-url", { url })) window.open(url, "_blank", "noopener"); }
+    if (serverVM) { if (!deviceCommand("open-url", { url })) openExternal(url); }
     else tool(url);
   }, [serverVM]);
   const restricted = useCallback((error) => {
@@ -123,7 +126,7 @@ function App() {
     setGate(error.message); setCatalog(null); setError("");
   }, []);
   useEffect(() => {
-    const goBack = () => { openBrowserRequest.current = null; pageGeneration.current++; setCurrent(route()); setDrawer(false); setError(""); };
+    const goBack = () => { if (overlayPop()) return; openBrowserRequest.current = null; pageGeneration.current++; setCurrent(route()); setDrawer(false); setError(""); };
     const visibility = () => setVisible(!document.hidden);
     const viewport = window.visualViewport;
     const resize = () => {
@@ -290,7 +293,7 @@ function App() {
     return () => window.removeEventListener("cage-open-archives", openArchives);
   }, [current.project]);
   const edge = useRef(null);
-  const swipe = phoneWorkspace && !drawer && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
+  const swipe = phoneWorkspace && !drawer && !docked && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
     onTouchStart: (event) => { const t = event.touches[0]; edge.current = t.clientX < 22 ? { x: t.clientX, y: t.clientY } : null; },
     onTouchMove: (event) => {
       const start = edge.current, t = event.touches[0];
@@ -299,7 +302,7 @@ function App() {
       if (t.clientX - start.x > 56) { edge.current = null; haptic("light"); setDrawer(true); }
     },
   } : {};
-  return <main {...swipe} className={["mobile-app", phoneWorkspace && "phone-workspace", nativePhone && "native-phone", current.tool === "terminal" && current.terminal && "immersive"].filter(Boolean).join(" ")}>
+  return <main {...swipe} className={["mobile-app", phoneWorkspace && "phone-workspace", nativePhone && "native-phone", webPhone && "web-phone", docked && "docked", current.tool === "terminal" && current.terminal && "immersive"].filter(Boolean).join(" ")}>
     <header className="topbar workspace-topbar">
       {phoneWorkspace
         ? <button type="button" className="icon-button menu-button" aria-haspopup="dialog" aria-expanded={drawer} aria-label="展开侧栏"
@@ -347,7 +350,7 @@ function App() {
           onSession={(path, id) => open(path, id, true)} onTool={chooseTool} environment={env.status}
           onEnvironment={() => goTool("environment")} serverVM={serverVM} formatTime={displayTime} />
         : <section className="page-scroll">{error && <Notice onRetry={refreshAll}>{error}</Notice>}{codeNavigation}</section>}
-    {phoneWorkspace && <WorkspaceDrawer open={drawer} active={current.tool === "code" && !session ? "home" : current.tool} name={serverVM ? device.name : catalog?.host || device?.name}
+    {phoneWorkspace && <WorkspaceDrawer open={drawer || docked} docked={docked} active={current.tool === "code" && !session ? "home" : current.tool} name={serverVM ? device?.name || catalog?.host : catalog?.host || device?.name}
       tools={serverVM ? [] : workspaceTools} coreTools={workspaceCoreTools} envTone={envTone} onHome={goHome}
       onClose={() => setDrawer(false)} onTool={chooseTool} onSettings={() => settingsPage("settings")} nativePhone={nativePhone} onExit={exitWorkspace}>
       {error && <Notice onRetry={refreshAll}>{error}</Notice>}
@@ -669,4 +672,4 @@ function Approval({ approval, busy, feedback, onDecide }) {
   </section>;
 }
 
-createRoot(document.getElementById("root")).render(<><IconHints /><App /></>);
+createRoot(document.getElementById("root")).render(<><IconHints focusVisibleOnly={webPhone} /><App /></>);

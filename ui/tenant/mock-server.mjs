@@ -19,6 +19,21 @@ const STATIC = {
   "/app.mjs": ["app.mjs", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
 };
+// The gateway serves these from its embedded copy (internal/tenant/portal_icons.go).
+const ICONS = join(HERE, "../../internal/tenant/portal-icons");
+const PORTAL_ICONS = {
+  "/favicon.ico": "image/x-icon", "/icon.svg": "image/svg+xml", "/apple-touch-icon.png": "image/png",
+  "/icon-192.png": "image/png", "/icon-512.png": "image/png", "/icon-maskable-512.png": "image/png",
+};
+const PORTAL_MANIFEST = JSON.stringify({
+  name: "Super Cage", short_name: "Super Cage", lang: "zh-CN", start_url: "/", scope: "/", display: "standalone",
+  background_color: "#faf9f5", theme_color: "#faf9f5",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  ],
+});
 const USERNAME = /^[a-z0-9][a-z0-9._-]{2,31}$/;
 const SYSTEM_ID = /^[a-z0-9-]{1,32}$/;
 const SESSION_COOKIE = "cage_tenant_session";
@@ -256,8 +271,13 @@ export async function startMockServer({
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-src http://*.${portalHost}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+      `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; frame-src http://*.${portalHost}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     );
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/manifest.webmanifest") return send(res, 200, req.method === "HEAD" ? "" : PORTAL_MANIFEST, "application/manifest+json");
+    if ((req.method === "GET" || req.method === "HEAD") && PORTAL_ICONS[url.pathname]) {
+      const body = await readFile(join(ICONS, url.pathname.slice(1))).catch(() => null);
+      if (body) return send(res, 200, req.method === "HEAD" ? "" : body, PORTAL_ICONS[url.pathname]);
+    }
     if ((req.method === "GET" || req.method === "HEAD") && STATIC[url.pathname]) {
       const [name, type] = STATIC[url.pathname];
       const body = await readFile(join(uiDir, name));
@@ -418,7 +438,7 @@ export async function startMockServer({
     if (url.pathname.startsWith("/api/client/virtual-machines")) return workbenchVMs(req, res, url.pathname, id, auth);
     if (phoneApi && url.pathname.startsWith("/api/mobile/")) {
       const input = req.method === "POST" ? await readJson(req).catch(() => ({})) : undefined;
-      const reply = phoneApi(req.method, url.pathname, input);
+      const reply = phoneApi(req.method, url.pathname, input, url.search);
       if (reply.status !== 200) return send(res, reply.status, reply.body, "text/plain; charset=utf-8");
       return json(res, 200, reply.body);
     }
@@ -433,8 +453,14 @@ export async function startMockServer({
       if (url.pathname === "/api/browser/tabs") return json(res, 200, { tabs: [] });
       if (url.pathname.startsWith("/api/")) return json(res, 200, {});
 
+      // The gateway's rule (internal/webentry): the layout cookie, else the browser's claim to be a phone.
       const layout = parseCookies(req.headers.cookie)["cage-layout"];
-      const root = phoneApi && (layout === "phone" || layout === "phone-auto") ? "mobile.html" : "index.html";
+      const agent = String(req.headers["user-agent"] || "");
+      const hint = String(req.headers["sec-ch-ua-mobile"] || "");
+      const phoneAgent = hint === "?1" || (hint !== "?0" && !agent.includes("iPad") &&
+        (/iPhone|iPod/.test(agent) || (agent.includes("Android") ? agent.includes("Mobile") : agent.includes("Mobi"))));
+      const phone = layout === "phone" || layout === "phone-auto" || (layout !== "desktop" && phoneAgent);
+      const root = phoneApi && phone ? "mobile.html" : "index.html";
       const asset = url.pathname === "/" ? root : url.pathname.slice(1);
       if (/^(?:assets\/[\w.-]+|cage\.(?:png|svg)|(?:index|mobile)\.html|favicon\.ico|apple-touch-icon\.png|manifest\.webmanifest|entry-guard\.js|icon-[\w-]+\.png)$/.test(asset)) {
         const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2", ico: "image/x-icon", webmanifest: "application/manifest+json" };
