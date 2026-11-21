@@ -267,13 +267,16 @@ const TitlePush = "\x1b[22;0t"
 // only defaults, so it is harmless when nothing was changed.
 const ResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, end a string
 	"\x1b[?2026l" + // end a synchronized update
-	"\x1b[?1049l" + // leave the alternate screen
+	// Back to the main screen with a whole-screen scroll region, the cursor
+	// where it was: both the main screen's restore (when in the alternate
+	// screen) and the region reset move it, and the saved cursor is per
+	// screen.
+	"\x1b7\x1b[?1049l\x1b[r\x1b8" +
 	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // every mouse mode
 	"\x1b[?1004l\x1b[?2004l\x1b[?2048l\x1b[?2031l" + // focus, bracketed paste, in-band resize, colour scheme reports
 	"\x1b[<99u" + // pop every kitty keyboard level
 	"\x1b[?1l\x1b[?66l\x1b>" + // normal cursor keys and keypad
-	"\x1b7\x1b[r\x1b8" + // whole-screen scroll region, cursor kept where it is
-	"\x1b[?6l\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // origin, wrap, reverse wrap, insert and new line modes
+	"\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // wrap, reverse wrap, insert and new line modes
 	"\x1b(B\x1b)B\x0f" + // US ASCII in G0 and G1, G0 in use
 	"\x1b[m\x1b[0 q\x1b[?25h" + // character attributes, cursor style, visible cursor
 	"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07" + // palette and dynamic colours

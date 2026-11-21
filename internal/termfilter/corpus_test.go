@@ -30,6 +30,7 @@ var corpusDropped = map[string][]string{
 	},
 	"top":  {"\x1b[?1034h"}, // meta key mode: not in xterm.js
 	"less": {},
+	"pico": {},
 	"ink": {
 		"\x1b[>1u", "\x1b[<u", // kitty keyboard: not in xterm.js
 		"\x1b[?1004h", "\x1b[?1004l", // focus reports

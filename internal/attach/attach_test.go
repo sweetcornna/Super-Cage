@@ -30,13 +30,16 @@ func TestResetSequenceCoversEveryMode(t *testing.T) {
 		"UTF-8 mouse": "\x1b[?1005l", "SGR mouse": "\x1b[?1006l", "urxvt mouse": "\x1b[?1015l", "SGR pixel mouse": "\x1b[?1016l",
 		"focus": "\x1b[?1004l", "bracketed paste": "\x1b[?2004l", "in-band resize": "\x1b[?2048l", "colour scheme": "\x1b[?2031l",
 		"kitty keyboard": "\x1b[<99u", "cursor keys": "\x1b[?1l", "keypad mode": "\x1b[?66l", "keypad": "\x1b>",
-		"scroll region": "\x1b[r", "SGR": "\x1b[m", "cursor style": "\x1b[0 q", "cursor visible": "\x1b[?25h",
+		"main screen and scroll region, cursor kept": "\x1b7\x1b[?1049l\x1b[r\x1b8", "SGR": "\x1b[m", "cursor style": "\x1b[0 q", "cursor visible": "\x1b[?25h",
 		"palette": "\x1b]104\x07", "foreground": "\x1b]110\x07", "background": "\x1b]111\x07", "cursor colour": "\x1b]112\x07",
 		"title": "\x1b[23;0t", "character set": "\x1b(B", "wrap": "\x1b[?7h",
 	} {
 		if !strings.Contains(ResetSequence, seq) {
 			t.Errorf("%s: %q missing", name, seq)
 		}
+	}
+	if strings.Contains(ResetSequence, "[?6l") || strings.Contains(ResetSequence, "[?6h") {
+		t.Fatal("changing origin mode would move the cursor")
 	}
 	if !strings.HasSuffix(ResetSequence, "\x1b[23;0t") || TitlePush != "\x1b[22;0t" {
 		t.Fatal("the title pop is not last, or does not match the push")

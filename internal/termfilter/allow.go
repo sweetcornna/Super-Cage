@@ -11,12 +11,18 @@ import "strconv"
 // history. DA2 and XTVERSION are dropped although their replies are gated:
 // they name the owner's emulator and its version.
 
-// privateModes are the DEC private modes (CSI ? Pm h/l) that pass: the
-// intersection of xterm.js's setModePrivate and what programs set. Mode 1004
+// privateModes are the DEC private modes (CSI ? Pm h/l) that pass: what
+// programs set that xterm.js's setModePrivate also handles. Cursor keys (1),
+// wrap (7), cursor blink (12) and visibility (25), the mouse (1000, 1002,
+// 1003 with the 1005, 1006 and 1015 encodings), the alternate screen (1049,
+// and the 47, 1047 and 1048 forms other terminfo entries use), bracketed
+// paste (2004) and synchronized output (2026). Origin mode (6) is dropped:
+// no program here uses it, and setting or resetting it moves the cursor, so
+// the viewer could not reset it without moving the owner's cursor. Mode 1004
 // (focus reports) is the viewer's own and never passes; see Filter.GuestFocus.
 var privateModes = map[int]bool{
-	1: true, 6: true, 7: true, 9: true, 12: true, 25: true, 45: true, 47: true, 66: true,
-	1000: true, 1002: true, 1003: true, 1005: true, 1006: true, 1015: true, 1016: true,
+	1: true, 7: true, 12: true, 25: true, 47: true,
+	1000: true, 1002: true, 1003: true, 1005: true, 1006: true, 1015: true,
 	1047: true, 1048: true, 1049: true, 2004: true, 2026: true,
 }
 

@@ -8,6 +8,11 @@ program, use it briefly, quit.
 - less.bin: less on a long file, scroll, search, q
 - top.bin: top -l 0 style refresh, q
 - tmux.bin: tmux on a private socket, split, type, exit
+- pico.bin: /usr/bin/nano (UW PICO 5.09 on macOS) with mouse support,
+  type a line, cursor up, ^X, do not save
+
+htop is not installed on the recording machine; top and pico stand in
+for curses programs.
 
 Stand-ins, built from the sequences the libraries write (no network
 program was run):

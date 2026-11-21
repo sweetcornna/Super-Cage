@@ -115,6 +115,14 @@ func TestFilterTable(t *testing.T) {
 		{name: "sixel with parameters", in: esc + "P0;1;0q\"1;1#0~" + esc + "\\", out: ""},
 		{name: "synchronized update by DCS", in: esc + "P=1s" + esc + "\\", out: ""},
 		{name: "synchronized update mode", in: esc + "[?2026h" + esc + "[?2026l", out: esc + "[?2026h" + esc + "[?2026l"},
+		// Modes no program here sets are dropped; origin mode moves the
+		// cursor whenever it changes.
+		{name: "origin mode", in: esc + "[?6h" + esc + "[?6l", out: ""},
+		{name: "unused mouse and keypad modes", in: esc + "[?9h" + esc + "[?1016h" + esc + "[?66h" + esc + "[?45h", out: ""},
+		{name: "a dropped mode drops the sequence", in: esc + "[?1000;6h", out: ""},
+		// Focus reports belong to the viewer: taken out, the rest passes.
+		{name: "focus alone", in: "a" + esc + "[?1004h" + "b", out: "ab"},
+		{name: "focus with others", in: esc + "[?1004;1006h" + esc + "[?1000;1004l", out: esc + "[?1006h" + esc + "[?1000l"},
 		{name: "DECRQSS", in: esc + "P$q\"p" + esc + "\\", out: esc + "P$q\"p" + esc + "\\"},
 		{name: "charset and keypad", in: esc + "(B" + esc + "=" + esc + "7" + esc + "8", out: esc + "(B" + esc + "=" + esc + "7" + esc + "8"},
 		{name: "CJK text", in: "中文图表 ✓ 😀", out: "中文图表 ✓ 😀"},
@@ -356,5 +364,23 @@ func TestFilterOSCNotificationsAndMarks(t *testing.T) {
 		if got := filterAll(t, Options{}, false, row.in); got != row.out {
 			t.Errorf("%s: %q -> %q, want %q", row.name, row.in, got, row.out)
 		}
+	}
+}
+
+func TestFilterRemembersGuestFocusAndResets(t *testing.T) {
+	f := New(Options{})
+	f.Append(nil, []byte(esc+"[?1004h"))
+	if !f.GuestFocus() {
+		t.Fatal("focus request not remembered")
+	}
+	f.Append(nil, []byte(esc+"[?1006;1004l"))
+	if f.GuestFocus() {
+		t.Fatal("focus reset not remembered")
+	}
+	if f.Append(nil, []byte(esc+"c"+esc+"[!p")); f.Resets() != 2 {
+		t.Fatal("resets", f.Resets())
+	}
+	if len(f.Dropped()) != 0 {
+		t.Fatal(f.Report())
 	}
 }
