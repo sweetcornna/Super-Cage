@@ -5,8 +5,9 @@ import "./browser-data-launcher.css";
 // Main-bundle wiring for browser data management; everything else loads with
 // browser-data.jsx on first use. Views: clear, site, popover, reset, and
 // privacy (the settings section, optionally at "sites", "history" or "kept").
-const loadApp = () => lazy(() => import("./browser-data.jsx"));
-const loadPrivacy = () => lazy(() => import("./browser-data.jsx").then(module => ({ default: module.BrowserPrivacySection })));
+const load = () => import("./browser-data.jsx");
+const loadApp = () => lazy(load);
+const loadPrivacy = () => lazy(() => load().then(module => ({ default: module.BrowserPrivacySection })));
 let BrowserDataApp = loadApp(), Privacy = loadPrivacy();
 let pending = "", sections = 0;
 export const takePendingPrivacyView = () => { const view = pending; pending = ""; return view; };
