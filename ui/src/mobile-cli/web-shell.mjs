@@ -31,13 +31,13 @@ function settlePhoneEntry() {
 }
 // A native desktop window (its shell injects the bridge before any page script) never runs the phone UI.
 // Its web view shares cookies across every localhost port, so a choice made on another port could ask
-// for it; this window takes the desktop workbench for its session instead, before drawing (once per tab,
-// so a server that ignored the cookie could not make it loop).
+// for it; this window takes the desktop workbench for its session instead, before drawing (at most every
+// ten seconds in a tab, so a server that ignored the cookie could not make it loop).
 const nativeDesktopWindow = webPhone && Boolean(window.cageNativeBridge || window.webkit?.messageHandlers?.cage);
 if (nativeDesktopWindow) {
   try {
-    if (!sessionStorage.getItem("cage-native-desktop")) {
-      sessionStorage.setItem("cage-native-desktop", "1");
+    if (!(Date.now() - Number(sessionStorage.getItem("cage-native-desktop")) < 10000)) {
+      sessionStorage.setItem("cage-native-desktop", String(Date.now()));
       document.documentElement.style.visibility = "hidden";
       layoutCookie("desktop");
       location.reload();

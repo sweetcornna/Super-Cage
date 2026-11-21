@@ -1285,3 +1285,70 @@ describe("静态约束", () => {
     assert.match(css, /\[data-theme="dark"\]/);
   });
 });
+
+describe("手机上的工作台：门户自己判断", () => {
+  const device = ({ agent = "", mobile, coarse = true, hover = false, width = 390, height = 844, screen = [390, 844] } = {}) => ({
+    navigator: { userAgent: agent, userAgentData: mobile === undefined ? undefined : { mobile } },
+    matchMedia: (query) => ({ matches: query === "(pointer: coarse)" ? coarse : query === "(hover: hover)" ? hover : false }),
+    innerWidth: width,
+    innerHeight: height,
+    screen: { width: screen[0], height: screen[1] },
+  });
+  const iPhone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+  const iPad = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  const pixel = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+  const mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+
+  test("phoneDevice 与网关（internal/webentry）和页面守卫（entry-layout）的规则一致", () => {
+    assert.equal(app.phoneDevice(device({ agent: iPhone })), true);
+    assert.equal(app.phoneDevice(device({ agent: pixel, mobile: true })), true);
+    assert.equal(app.phoneDevice(device({ agent: pixel, mobile: false, width: 980, height: 2000 })), false, "Client Hints 说不是手机，且是电脑版网页");
+    assert.equal(app.phoneDevice(device({ agent: iPad, width: 820, height: 1180, screen: [820, 1180] })), false, "平板");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 375, height: 667, screen: [375, 667] })), true, "报告为电脑的触屏小窗口");
+    assert.equal(app.phoneDevice(device({ agent: mac, coarse: false, hover: true, width: 375, height: 667 })), false, "缩窄的电脑浏览器");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 980, height: 450 })), false, "横屏请求电脑版网页");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 900, height: 450 })), false, "布局视口宽于屏幕");
+  });
+
+  test("externalLink 只接受 http(s)、无凭据、有长度上限、没有控制和方向字符", () => {
+    assert.deepEqual(app.externalLink("https://example.com/a?b=1#c"), { href: "https://example.com/a?b=1#c", host: "example.com" });
+    assert.deepEqual(app.externalLink("http://example.com:8080/"), { href: "http://example.com:8080/", host: "example.com:8080" });
+    assert.equal(app.externalLink("https://bücher.example/").host, "xn--bcher-kva.example", "国际化域名显示为 punycode");
+    for (const bad of [
+      "javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "blob:https://example.com/x", "about:blank",
+      "https://user:pass@example.com/", "https://user@example.com/", "not a url", "", null, 42, { toString: () => "https://example.com/" },
+      "https://example.com/" + "a".repeat(app.LINK_MAX_LENGTH),
+      "https://exa\tmple.com/", "https://example.com/\n", "https://example.com/\u0000", "https://example.com/\u0085",
+      "https://example.com/\u202egnp.exe", "https://example.com/\u2066x\u2069", "https://exa\u200bmple.com/", "https://example.com/\u061c", "\ufeffhttps://example.com/",
+    ]) assert.equal(app.externalLink(bad), null, JSON.stringify(String(bad)).slice(0, 60));
+    assert.ok(app.externalLink("https://example.com/" + "a".repeat(app.LINK_MAX_LENGTH - 20)));
+  });
+
+  test("重新进入：每台虚拟机每分钟最多一次，持续请求时间隔翻倍，安静后恢复", () => {
+    let now = 0;
+    const allow = app.createReentryLimiter(() => now);
+    const minute = app.REENTRY_MIN_GAP_MS;
+    assert.equal(allow("a"), true);
+    assert.equal(allow("a"), false);
+    assert.equal(allow("b"), true, "另一台虚拟机各自计数");
+    now = minute - 1;
+    assert.equal(allow("a"), false);
+    const allowed = [];
+    for (now = minute; now < 40 * minute; now += 1000) if (allow("a")) allowed.push(now / minute);
+    assert.deepEqual(allowed, [1, 3, 7, 15, 31], "一直请求：间隔 1、2、4、8、16 分钟");
+    now = 31 * minute + 2 * app.REENTRY_MAX_GAP_MS;
+    assert.equal(allow("a"), true, "安静一段时间后");
+    now += minute - 1;
+    assert.equal(allow("a"), false);
+    now += 1;
+    assert.equal(allow("a"), true, "又回到一分钟");
+  });
+
+  test("门户不替工作台打开标签页，也不接受工作台给出的深度", async () => {
+    const source = await readFile(join(HERE, "app.mjs"), "utf8");
+    assert.equal(/\bwin\.open\(|window\.open\(/.test(source), false, "门户代码里没有 window.open");
+    const handler = source.slice(source.indexOf("function phoneMessage("), source.indexOf("win.addEventListener(\"popstate\""));
+    assert.equal(/depth/.test(handler), false);
+    assert.match(handler, /type === "cage:phone-ui"\) return true/);
+  });
+});

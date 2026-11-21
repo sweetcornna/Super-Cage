@@ -3,11 +3,14 @@
 // (CAGE_TEST_BROWSER=webkit; CAGE_PLAYWRIGHT_MODULE as for the other smokes).
 //   - which document "/" serves: a phone gets the phone UI; an iPad in Split View is handed over by the
 //     desktop page; a narrow desktop window (fine pointer) keeps the desktop workbench;
+//   - a native desktop window (its bridge injected) never runs the phone UI, whatever the cookie says;
 //   - in the portal: Back walks sheet -> screen -> VM list; "返回门户" goes straight to the list;
-//     an expired workspace sign-in (HTTP 401) re-enters the VM on the same screen; links open in a new tab;
+//     an expired workspace sign-in (HTTP 401) re-enters the VM on the same screen; a link is offered with
+//     its host and opens only from the portal's own button; the portal's strip stays above the frame;
 //   - "电脑版" and "手机版" round trip in the portal frame, kept across a reload, with the portal's bars
-//     coming back for the desktop workbench.
-// Build first: npm --prefix ui run build.
+//     coming back for the desktop workbench;
+//   - what a frame cannot do: hide the portal's bar, set how far 返回门户 goes back, re-enter in a loop.
+// Build first: npm --prefix ui run build. MOBILE_WEB_SHOTS=<dir> also saves the strip at 320 and 390 px.
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { startMockServer } from "../tenant/mock-server.mjs";
@@ -89,6 +92,33 @@ try {
     assert(!(await isPhoneDocument(page)), "a full-width iPad should get the desktop workbench again");
     await ctx.close();
   });
+  await step("a native desktop window never runs the phone UI, whatever the cookie says", async () => {
+    const ctx = await context({});
+    // What the Linux shell injects before any page script (the macOS and Windows ones use webkit.messageHandlers).
+    await ctx.addInitScript(() => Object.defineProperty(window, "cageNativeBridge", { value: { postMessage: async () => null } }));
+    const page = await ctx.newPage();
+    const post = await account(page);
+    await page.goto(await workspaceURL(post));
+    await page.waitForURL((url) => url.pathname === "/");
+    await page.waitForLoadState();
+    await sleep(1500);
+    assert(!(await isPhoneDocument(page)), "a phone agent in a native window got the phone UI");
+    const origin = new URL(page.url()).origin;
+    const layout = async () => (await ctx.cookies(origin)).find((c) => c.name === "cage-layout");
+    assert((await layout())?.value === "desktop" && (await layout()).expires === -1, "expected a session cookie desktop");
+    assert(!(await page.locator(".layout-switch").count()), "no 手机版 switch in a native window");
+    // A phone choice in the jar (another port, an older build): refused again in a new window.
+    await ctx.addCookies([{ name: "cage-layout", value: "phone", url: origin, expires: Math.floor(Date.now() / 1000) + 3600 }]);
+    const again = await ctx.newPage();
+    let documents = 0;
+    again.on("framenavigated", (f) => { if (f === again.mainFrame()) documents++; });
+    await again.goto(origin + "/");
+    await again.waitForLoadState();
+    await sleep(1500);
+    assert(!(await isPhoneDocument(again)), "the phone cookie put the phone UI in a native window");
+    assert(documents <= 2, `${documents} loads: the refusal must not loop`);
+    await ctx.close();
+  });
   await step("a narrow desktop window keeps the desktop workbench", async () => {
     const ctx = await browser.newContext({ viewport: { width: 480, height: 900 }, userAgent: iPad, hasTouch: false });
     const page = await ctx.newPage();
@@ -112,6 +142,13 @@ try {
   }
   const ctx = await context({});
   await ctx.route("https://example.com/**", (route) => route.fulfill({ status: 200, contentType: "text/html", body: "<title>外部页面</title>ok" }));
+  // The portal must never call window.open for a frame (only its own link, pressed by the person, opens a tab).
+  await ctx.addInitScript(() => {
+    if (window.top !== window) return;
+    const open = window.open;
+    window.portalOpens = 0;
+    window.open = function (...args) { window.portalOpens++; return open.apply(this, args); };
+  });
   const page = await ctx.newPage();
   page.setDefaultTimeout(15000);
   const post = await account(page);
@@ -165,14 +202,55 @@ try {
     await sleep(300);
     assert(!(await page.evaluate(() => history.state?.cagePortal)), "the portal's history entry is still there");
   });
-  await step("portal: links in a reply open in a new tab without an opener", async () => {
-    const inner = await enter();
+  await step("portal: the portal's strip stays above the workspace and brings its bar back", async () => {
+    await enter();
+    for (const size of [{ width: 320, height: 568 }, { width: 390, height: 844 }]) {
+      await page.setViewportSize(size);
+      await sleep(300);
+      const layout = await page.evaluate(() => {
+        const strip = document.querySelector(".portal-strip").getBoundingClientRect();
+        const frame = document.querySelector("iframe.workspace-frame").getBoundingClientRect();
+        const hit = document.elementFromPoint(strip.left + strip.width / 2, strip.top + strip.height / 2);
+        return { strip: strip.toJSON(), frameTop: frame.top, top: hit?.closest(".portal-strip") !== null, bar: getComputedStyle(document.querySelector(".topbar")).display };
+      });
+      assert(layout.strip.top === 0 && layout.strip.height >= 24 && layout.strip.width === size.width, `strip at ${size.width}: ${JSON.stringify(layout.strip)}`);
+      assert(layout.strip.bottom <= layout.frameTop + 0.5, `the frame reaches under the strip at ${size.width}`);
+      assert(layout.top && layout.bar === "none", `strip covered or bar shown at ${size.width}`);
+      if (process.env.MOBILE_WEB_SHOTS) await page.screenshot({ path: `${process.env.MOBILE_WEB_SHOTS}/strip-${size.width}.png` });
+      await page.locator(".portal-strip").click();
+      await page.locator(".topbar").waitFor();
+      assert(await page.locator(".portal-strip").getAttribute("aria-expanded") === "true", "aria-expanded");
+      if (process.env.MOBILE_WEB_SHOTS) await sleep(300);
+      if (process.env.MOBILE_WEB_SHOTS) await page.screenshot({ path: `${process.env.MOBILE_WEB_SHOTS}/strip-${size.width}-open.png` });
+      await page.mouse.click(size.width / 2, size.height - 24);
+      await page.locator(".topbar").waitFor({ state: "hidden" });
+    }
+  });
+  await step("portal: a link is offered with its host, and only the person opens it", async () => {
+    const inner = await frame();
     await inner.getByRole("button", { name: "展开侧栏", exact: true }).click();
     await inner.getByRole("dialog", { name: "工作区侧栏" }).getByRole("button", { name: "整理发布说明" }).first().click();
-    const [popup] = await Promise.all([ctx.waitForEvent("page"), inner.getByRole("link", { name: "发布说明" }).click()]);
+    const pages = ctx.pages().length;
+    await inner.getByRole("link", { name: "发布说明" }).click();
+    const notice = page.locator(".link-notice");
+    await notice.waitFor();
+    assert(await notice.locator(".link-notice-host").textContent() === "example.com", "the notice must name the host");
+    await sleep(300);
+    assert(ctx.pages().length === pages && (await page.evaluate(() => window.portalOpens)) === 0, "the portal opened a tab by itself");
+    await notice.locator("summary").click();
+    assert((await notice.locator(".link-notice-url").textContent()).startsWith("https://example.com/"), "the whole address on request");
+    await sleep(400);
+    const [popup] = await Promise.all([ctx.waitForEvent("page"), notice.getByRole("link", { name: "打开", exact: true }).click()]);
     await popup.waitForURL("https://example.com/**");
     assert(await popup.evaluate(() => window.opener === null), "the new tab has an opener");
     await popup.close();
+    await notice.waitFor({ state: "hidden" });
+    for (const url of ["javascript:alert(1)", "https://example.com/\u202egnp.exe", "https://user:pw@example.com/", "https://example.com/" + "a".repeat(2100)]) {
+      await inner.evaluate((value) => parent.postMessage({ type: "cage:open-link", url: value }, "*"), url);
+    }
+    await sleep(300);
+    assert(await notice.isHidden(), "an invalid link was offered");
+    assert((await page.evaluate(() => window.portalOpens)) === 0, "window.open was called");
   });
   await step("portal: an expired workspace sign-in re-enters the VM on the same screen", async () => {
     const inner = await frame();
@@ -199,6 +277,12 @@ try {
     inner = await frame();
     await inner.locator(".layout-switch").waitFor();
     assert(!(await isPhoneDocument(inner)), "expected the desktop document in the frame");
+    // The portal re-reads the frame after the load and keeps its bar for the desktop workbench.
+    await sleep(800);
+    assert(await page.locator(".topbar").isVisible(), "the bar went away again over the desktop workbench");
+    await inner.evaluate(() => parent.postMessage({ type: "cage:phone-ui" }, "*"));
+    await sleep(800);
+    assert(await page.locator(".topbar").isVisible(), "a frame message hid the portal's bar");
     await page.reload();
     await page.waitForLoadState();
     inner = await frame();
@@ -207,6 +291,34 @@ try {
     await phoneUI();
     inner = await frame();
     await inner.locator(".mobile-app").waitFor();
+  });
+  await step("portal: a frame cannot re-enter in a loop or set how far 返回门户 goes back", async () => {
+    let inner = await frame();
+    // The portal was reloaded above, so this VM's one check for the minute is still unused: a burst of reports
+    // makes one check and one re-entry, and the re-entered workspace reporting again makes none.
+    let checks = 0;
+    const count = (request) => { if (new URL(request.url()).pathname === "/api/tenant/session") checks++; };
+    const burst = (target) => target.evaluate(() => { for (let i = 0; i < 5; i++) parent.postMessage({ type: "cage:workspace-unauthenticated" }, "*"); });
+    page.on("request", count);
+    await burst(inner);
+    await page.waitForFunction(() => document.querySelectorAll("iframe.workspace-frame").length === 1);
+    await sleep(1500);
+    inner = await frame();
+    await inner.locator(".mobile-app").waitFor();
+    const mounted = await page.locator("iframe.workspace-frame").elementHandle();
+    await burst(inner);
+    await sleep(1000);
+    page.off("request", count);
+    assert(checks <= 1 && (await mounted.evaluate((el) => el.isConnected)), `repeated reports: ${checks} checks, frame replaced`);
+    for (const depth of [0, 999]) {
+      await tool(inner, "文件");
+      await inner.getByRole("button", { name: /^README\.md/ }).waitFor();
+      await inner.evaluate((value) => parent.postMessage({ type: "cage:portal-home", depth: value }, "*"), depth);
+      await list();
+      await sleep(300);
+      assert(!(await page.evaluate(() => history.state?.cagePortal)), `depth ${depth}: the portal's history entry is still there`);
+      if (depth === 0) inner = await enter();
+    }
   });
   await ctx.close();
 } catch (error) {

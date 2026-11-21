@@ -74,11 +74,18 @@ export function mountPhoneSwitch() {
   document.body.append(button);
 }
 
-// Desktop page inside the portal's frame on a phone: tell the portal, which hides its bars for the phone UI,
-// that this workspace now shows the desktop workbench (the message carries nothing else).
+// Desktop page inside the portal's frame on a phone: tell the portal, which steps back on a phone for the phone
+// UI, that this workspace shows the desktop workbench, now and whenever it asks (after each page the frame
+// loads). The message carries nothing else and can only bring the portal's bar back.
 export function announceDesktopInFrame() {
   if (window.top === window.self || !phoneSized()) return;
-  try { window.parent.postMessage({ type: "cage:desktop-ui" }, "*"); } catch { /* no portal */ }
+  const announce = () => {
+    try { window.parent.postMessage({ type: "cage:desktop-ui" }, "*"); } catch { /* no portal */ }
+  };
+  window.addEventListener("message", (event) => {
+    if (event.source === window.parent && event.data?.type === "cage:which-ui") announce();
+  });
+  announce();
 }
 
 // The phone page's side of this (dropping phone-auto on a device that no longer warrants it, and its 电脑版

@@ -23,6 +23,62 @@ export const IFRAME_REFERRER_POLICY = "no-referrer";
 export function iframeAllow(origin) {
   return `clipboard-read ${origin}; clipboard-write ${origin}`;
 }
+
+// The portal's own reading of the device, for a workspace frame on a phone: internal/webentry's rule for a
+// browser that says it is a phone, else ui/src/entry-layout.mjs's for a phone-sized touch screen that is not
+// showing a desktop site. Such a frame most likely shows the phone UI, so the portal steps back for it (on a
+// phone-sized window, styles.css); the frame itself can bring the portal's bar back but never send it away.
+export function phoneDevice(win) {
+  const nav = win.navigator || {};
+  const mobile = nav.userAgentData?.mobile;
+  const agent = String(nav.userAgent || "");
+  if (mobile === true) return true;
+  if (mobile !== false && !agent.includes("iPad")) {
+    if (agent.includes("iPhone") || agent.includes("iPod")) return true;
+    if (agent.includes("Android") ? agent.includes("Mobile") : agent.includes("Mobi")) return true;
+  }
+  const matches = (query) => Boolean(win.matchMedia?.(query).matches);
+  if (!matches("(pointer: coarse)") || matches("(hover: hover)")) return false;
+  const width = win.innerWidth;
+  const display = win.screen || {};
+  if (width >= 980 || width > Math.max(display.width || 0, display.height || 0) + 1) return false;
+  return width < 740 || win.innerHeight < 500;
+}
+
+// A link a workspace asks the portal to offer (its frame cannot open tabs): http(s) only, no credentials, at
+// most LINK_MAX_LENGTH characters, and nothing that hides or reorders what the person reads (control,
+// invisible and direction characters). Returns what the notice shows, or null.
+export const LINK_MAX_LENGTH = 2048;
+const HIDDEN_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/u;
+export function externalLink(raw) {
+  if (typeof raw !== "string" || raw.length > LINK_MAX_LENGTH || HIDDEN_CHARACTERS.test(raw)) return null;
+  let link;
+  try {
+    link = new URL(raw);
+  } catch {
+    return null;
+  }
+  if ((link.protocol !== "https:" && link.protocol !== "http:") || link.username || link.password || !link.hostname) return null;
+  if (link.href.length > LINK_MAX_LENGTH || HIDDEN_CHARACTERS.test(link.href)) return null;
+  return { href: link.href, host: link.host };
+}
+
+// A workspace that reports its sign-in lapsed makes the portal check its own session and enter it again: at
+// most once a minute per virtual machine, the gap doubling while it keeps asking (to 16 minutes) and back to a
+// minute after a quiet spell, so no frame can make the portal hammer the gateway.
+export const REENTRY_MIN_GAP_MS = 60000;
+export const REENTRY_MAX_GAP_MS = 960000;
+export function createReentryLimiter(now = () => Date.now()) {
+  const last = new Map();
+  return (key) => {
+    const at = now();
+    const previous = last.get(key);
+    if (previous && at - previous.at < previous.gap) return false;
+    const gap = previous && at - previous.at < previous.gap * 2 ? Math.min(previous.gap * 2, REENTRY_MAX_GAP_MS) : REENTRY_MIN_GAP_MS;
+    last.set(key, { at, gap });
+    return true;
+  };
+}
 export const ENTER_PATH = "/_tenant/enter";
 export const SELECTION_KEY = "cage-tenant.selected-vm.v1";
 export const THEME_KEY = "cage-tenant.theme.v1";
@@ -1668,9 +1724,20 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     const barRule = h("span", { class: "bar-rule", "aria-hidden": "true" });
     const switcher = h("nav", { class: "switcher", "aria-label": "虚拟机切换" }, [tablist, addButton]);
 
+    // While the portal steps back for a workspace on a phone, this strip of its own stays above the frame (which
+    // cannot draw outside its box) and brings the portal's bar back.
+    const stripName = h("span", { class: "portal-strip-name" });
+    const strip = h("button", { type: "button", class: "portal-strip", "aria-expanded": "false", "aria-label": "显示门户栏", onclick: () => setPortalBar(el.dataset.portalBar !== "open") }, [
+      mark("small"),
+      stripName,
+      icon("chevron", "icon portal-strip-chevron"),
+    ]);
+    const scrim = h("div", { class: "portal-scrim", "aria-hidden": "true", onclick: () => setPortalBar(false) });
+
     const el = h("div", { class: "shell" }, [
       skipToSwitcher,
       skipToStage,
+      strip,
       h("header", { class: "topbar" }, [
         h("div", { class: "bar-start" }, [brand(), home]),
         barRule,
@@ -1678,6 +1745,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         contextBar,
         h("div", { class: "account" }, [themeButton(), userChip, logoutButton]),
       ]),
+      scrim,
       banner,
       stage,
       live,
@@ -1834,6 +1902,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       ctxSystem.textContent = vm?.system_label || "";
       ctxSystem.setAttribute("title", vm?.system_id ? `系统：${vm.system_label}（${vm.system_id}）` : "系统");
       ctxId.textContent = `vm-${target.vmId.slice(0, 8)}`;
+      stripName.textContent = displayName(vm);
       ctxId.setAttribute("title", `虚拟机 ID：${target.vmId}`);
       setBusy(reconnectButton, target.status === "opening");
     }
@@ -1854,62 +1923,90 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       }
     }
 
-    // The workspace's phone UI (served to phones, see ui/src/mobile-cli/web-shell.mjs) says so once it has
-    // loaded; on a phone-sized window the portal then steps back and the workspace fills the screen.
-    // Back (the system button or swipe) leaves the workspace for the list once the workspace has no
-    // screen of its own left to go back to.
-    let phoneFrame = null;
+    // A workspace on a phone (its phone UI, see ui/src/mobile-cli/web-shell.mjs): the portal decides by itself
+    // (phoneDevice) when it mounts the frame and after each page the frame loads, and steps back so the
+    // workspace fills the screen, leaving its strip above it. A desktop workbench in the frame asks for the bar
+    // back (cage:desktop-ui, also its answer to cage:which-ui after each load); nothing from a frame hides it.
+    // Back (the system button or swipe) leaves the workspace for the list once the workspace has no screen of
+    // its own left to go back to.
+    function setPhoneUi(on) {
+      if (on) el.dataset.phoneUi = "true";
+      else delete el.dataset.phoneUi;
+      setPortalBar(false);
+    }
+    function setPortalBar(open) {
+      if (open && el.dataset.phoneUi) el.dataset.portalBar = "open";
+      else delete el.dataset.portalBar;
+      strip.setAttribute("aria-expanded", open && el.dataset.phoneUi ? "true" : "false");
+      strip.setAttribute("aria-label", open && el.dataset.phoneUi ? "收起门户栏" : "显示门户栏");
+    }
+    win.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && el.dataset.portalBar === "open") {
+        setPortalBar(false);
+        strip.focus({ preventScroll: true });
+      }
+    }, { signal: shellListeners.signal });
+    function frameLoadedPage(frame) {
+      if (mountedFrame !== frame || !phoneDevice(win)) return;
+      const load = ++frame.loads;
+      frame.el.contentWindow?.postMessage({ type: "cage:which-ui" }, frame.origin);
+      // A page that says nothing (the phone UI, an older workspace) gets the portal's own decision.
+      win.setTimeout(() => {
+        if (mountedFrame === frame && frame.loads === load && frame.desktopFor !== load && !el.dataset.phoneUi) setPhoneUi(true);
+      }, 500);
+    }
     // The workspace frame for which the portal holds a history entry: Back past it returns to the list.
     let backTo = null;
-    let lastReentry = 0;
-    function phoneMessage(frame, { type, url, depth }) {
-      if (type === "cage:phone-ui") {
-        backTo = frame;
-        if (phoneFrame === frame) return true;
-        phoneFrame = frame;
-        el.dataset.phoneUi = "true";
-        if (!win.history.state?.cagePortal) win.history.pushState({ ...win.history.state, cagePortal: "workspace" }, "");
-        return true;
+    function holdBackEntry(frame) {
+      const state = win.history.state;
+      if (!state?.cagePortal || !Number.isInteger(state.cagePortalStart) || state.cagePortalStart > win.history.length) {
+        win.history.pushState({ ...state, cagePortal: "workspace" }, "");
+        win.history.replaceState({ ...win.history.state, cagePortalStart: win.history.length }, "");
       }
+      backTo = frame;
+    }
+    // Straight to the list, past every entry since the portal's own, which it counts itself: mark the end
+    // (dropping any forward entries), go back to the entry before the workspace's, and the popstate below
+    // leaves it. Without the portal's entry, or where history.length stops counting, leave directly.
+    let leaving = 0;
+    function leaveWorkspace(frame) {
+      const start = win.history.state?.cagePortalStart;
+      if (backTo !== frame || !win.history.state?.cagePortal || !Number.isInteger(start) || start > win.history.length || win.history.length >= 49) {
+        portal.goHome();
+        return;
+      }
+      win.history.pushState({ ...win.history.state, cagePortal: "leaving" }, "");
+      const steps = win.history.length - start + 1;
+      win.clearTimeout(leaving);
+      leaving = win.setTimeout(() => {
+        if (mountedFrame === frame) portal.goHome();
+      }, 1000);
+      win.history.go(-steps);
+    }
+    const allowReentry = createReentryLimiter();
+    function phoneMessage(frame, { type, url }) {
+      if (type === "cage:phone-ui") return true; // older workspaces: the portal decides by itself
       if (type === "cage:desktop-ui") {
-        // The phone switched this workspace to the desktop workbench: the portal's bars come back.
-        if (phoneFrame === frame) {
-          phoneFrame = null;
-          delete el.dataset.phoneUi;
-        }
+        frame.desktopFor = frame.loads;
+        if (el.dataset.phoneUi) setPhoneUi(false);
         return true;
       }
       if (type === "cage:portal-home") {
-        // Straight to the list: back past the workspace's own entries (it reports how many) and the portal's;
-        // the popstate below then leaves the workspace. Without the portal's entry, leave it directly.
-        const steps = Number.isInteger(depth) && depth >= 0 && depth < 1000 ? depth + 1 : 0;
-        if (steps && win.history.state?.cagePortal && backTo === frame) win.history.go(-steps);
-        else portal.goHome();
+        leaveWorkspace(frame);
         return true;
       }
       if (type === "cage:workspace-unauthenticated") {
         // The workspace's sign-in lapsed. Check the portal's own; when it holds, enter the workspace again.
-        if (Date.now() - lastReentry < 10000) return true;
-        lastReentry = Date.now();
+        if (!allowReentry(frame.vmId)) return true;
         void portal.checkSession().then(() => {
           if (portal.getState().phase === "signed-in" && mountedFrame === frame) portal.reconnect();
         });
         return true;
       }
       if (type === "cage:open-link") {
-        // Links from the workspace open outside the sandboxed frame, http(s) only, with no opener or referrer.
-        let link = null;
-        try { link = new URL(String(url)); } catch { /* not a URL */ }
-        if (link && (link.protocol === "https:" || link.protocol === "http:") && !link.username && !link.password) {
-          // Open blank first: with "noopener" window.open reports nothing, and a blocked pop-up needs the notice.
-          const opened = win.open("", "_blank");
-          if (opened) {
-            opened.opener = null;
-            opened.location.replace(link.href);
-          } else {
-            showLinkNotice(link.href);
-          }
-        }
+        // The portal never opens a tab for a frame: it shows the address and the person decides.
+        const link = externalLink(url);
+        if (link) showLinkNotice(link);
         return true;
       }
       return false;
@@ -1917,29 +2014,37 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     win.addEventListener("popstate", () => {
       if (backTo && backTo === mountedFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
     }, { signal: shellListeners.signal });
-    // The browser blocked the new tab (no tap reached the portal itself): one tap here opens it.
+    // A link from the workspace: where it leads (the host in plain text, the whole address on request) and a
+    // button of the portal's own. A changed address cannot be opened in the first moments after it appears.
     let linkNotice = null;
-    function showLinkNotice(href) {
+    function showLinkNotice({ href, host }) {
       if (!linkNotice) {
-        const anchor = h("a", { class: "btn btn-sm", target: "_blank", rel: "noopener noreferrer" }, "打开链接");
-        const close = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭提示" }, icon("close"));
-        linkNotice = { el: h("div", { class: "link-notice", role: "status" }, [h("span", { class: "link-notice-text" }, "浏览器拦截了新标签页。"), anchor, close]), anchor };
+        const hostText = h("strong", { class: "link-notice-host" });
+        const urlText = h("span", { class: "link-notice-url" });
+        const details = h("details", { class: "link-notice-details" }, [h("summary", { text: "完整地址" }), urlText]);
+        const anchor = h("a", { class: "btn btn-sm btn-primary", target: "_blank", rel: "noopener noreferrer" }, "打开");
+        const close = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭" }, icon("close"));
+        const body = h("div", { class: "link-notice-body" }, [h("span", { class: "link-notice-text", text: "工作台中的链接将在新标签页打开：" }), hostText, details]);
+        linkNotice = { el: h("div", { class: "link-notice", role: "status" }, [body, anchor, close]), anchor, hostText, urlText, details, armedAt: 0 };
         const hide = () => { linkNotice.el.hidden = true; };
-        anchor.addEventListener("click", () => setTimeout(hide, 0));
+        anchor.addEventListener("click", (event) => {
+          if (Date.now() < linkNotice.armedAt) event.preventDefault();
+          else win.setTimeout(hide, 0);
+        });
         close.addEventListener("click", hide);
         el.append(linkNotice.el);
       }
+      if (linkNotice.el.hidden || linkNotice.anchor.href !== href) linkNotice.armedAt = Date.now() + 600;
+      linkNotice.hostText.textContent = host;
+      linkNotice.urlText.textContent = href;
+      linkNotice.details.open = false;
       linkNotice.anchor.href = href;
       linkNotice.el.hidden = false;
-      linkNotice.anchor.focus({ preventScroll: true });
     }
 
     function unmountFrame() {
       if (!mountedFrame) return;
-      if (phoneFrame === mountedFrame) {
-        phoneFrame = null;
-        delete el.dataset.phoneUi;
-      }
+      setPhoneUi(false);
       if (backTo === mountedFrame) backTo = null;
       mountedFrame.listeners.abort(); // 释放 load/error 回调
       mountedFrame.el.remove(); // 移除即销毁浏览上下文，断开其中的流和 WebSocket
@@ -1971,10 +2076,18 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       iframe.className = "workspace-frame is-loading";
       const listeners = new AbortController();
       const key = frame.key;
-      iframe.addEventListener("load", () => portal.frameLoaded(key), { signal: listeners.signal });
+      const mounted = { key, el: iframe, listeners, origin: checked.origin, vmId: target.vmId, loads: 0, desktopFor: -1 };
+      iframe.addEventListener("load", () => {
+        portal.frameLoaded(key);
+        frameLoadedPage(mounted);
+      }, { signal: listeners.signal });
       iframe.addEventListener("error", () => portal.frameFailed(key), { signal: listeners.signal });
       iframe.setAttribute("src", checked.url);
-      mountedFrame = { key, el: iframe, listeners, origin: checked.origin };
+      mountedFrame = mounted;
+      if (phoneDevice(win)) {
+        setPhoneUi(true);
+        holdBackEntry(mounted);
+      }
       frameHost.append(iframe);
     }
 

@@ -481,8 +481,11 @@ export async function startMockServer({
         const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2", ico: "image/x-icon", webmanifest: "application/manifest+json" };
         const type = types[asset.split(".").at(-1)];
         if (type) {
-          const file = await readFile(join(workbenchDir, asset)).catch(() => null);
+          let file = await readFile(join(workbenchDir, asset)).catch(() => null);
           if (!file) return problem(res, 404, "not_found", "未找到。");
+          // A workbench that can serve the phone UI marks its desktop document at "/" (static_assets.go).
+          const offered = phoneApi && url.pathname === "/" && asset === "index.html";
+          if (offered) file = Buffer.from(String(file).replace("<head>", '<head><meta name="cage-phone-entry" content="available">'));
           res.setHeader("Content-Security-Policy", `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'self'; ${ancestors}`);
           if (asset === "index.html" || url.pathname === "/") state.served.push({ vmId: id, userId: auth.session.userId, document: asset });
           // Cache and encode as the workbench does (internal/workbench/static_assets.go, through the
@@ -494,7 +497,7 @@ export async function startMockServer({
           res.setHeader("ETag", etag);
           if (url.pathname === "/") res.setHeader("Vary", "Cookie, User-Agent, Sec-CH-UA-Mobile");
           if (req.headers["if-none-match"] === etag) { res.writeHead(304); return res.end(); }
-          const brotli = /\bbr\b/.test(String(req.headers["accept-encoding"] || "")) ? await readFile(join(workbenchDir, asset + ".br")).catch(() => null) : null;
+          const brotli = !offered && /\bbr\b/.test(String(req.headers["accept-encoding"] || "")) ? await readFile(join(workbenchDir, asset + ".br")).catch(() => null) : null;
           if (brotli) {
             res.setHeader("Vary", [res.getHeader("Vary"), "Accept-Encoding"].filter(Boolean).join(", "));
             return send(res, 200, brotli, type, { "Content-Encoding": "br" });
