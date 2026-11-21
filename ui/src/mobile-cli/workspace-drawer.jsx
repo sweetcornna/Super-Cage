@@ -1,7 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { Folder, FolderOpen, Globe2, LayoutGrid, LoaderCircle, LogOut, Monitor, Plus, Power, Settings, Sparkles, SquarePen, SquareTerminal } from "lucide-react";
-import { chooseLayout } from "../entry-layout.mjs";
-import { backToPortal, portalFrame, useBackDismiss, webPhone } from "./web-shell.mjs";
+import { backToPortal, chooseDesktop, portalFrame, useBackDismiss, webPhone } from "./web-shell.mjs";
 
 const modal = (dialog) => { try { return dialog.matches(":modal"); } catch { return false; } };
 import { Logo } from "./doodles";
@@ -119,7 +118,7 @@ export function WorkspaceDrawer({open, docked = false, active, name, tools = wor
     <footer className="drawer-footer"><button className="drawer-exit" type="button" onClick={onSettings}><Settings size={18}/>设置</button>
       {webPhone ? <>
         {portalFrame && <button className="drawer-exit" type="button" onClick={backToPortal}><LayoutGrid size={18}/>返回门户</button>}
-        <button className="drawer-exit" type="button" onClick={() => chooseLayout("desktop")}><Monitor size={18}/>电脑版</button>
+        <button className="drawer-exit" type="button" onClick={chooseDesktop}><Monitor size={18}/>电脑版</button>
       </> : <a className="drawer-exit" href={nativePhone ? "cage://home" : "/"}
       onClick={event => {if (onExit()) event.preventDefault();}}><LogOut size={18}/>退出</a>}</footer>
   </dialog>;

@@ -15,15 +15,24 @@ export const edgeSwipe = !webPhone || globalThis.navigator?.standalone === true;
 
 const ROUTE = "cage-phone-route";
 
-// The phone side of ui/src/entry-layout.mjs (same cookie, flag and size test), kept here so the phone page
-// does not share a chunk with the desktop entry: the hand-over arrived; forget an automatic choice the
-// device no longer warrants, so the next load decides afresh (no bounce now).
+// The phone side of ui/src/entry-layout.mjs (same cookie, flag and size test; see the note at its end).
+const layoutCookie = (value, maxAge) => {
+  document.cookie = `cage-layout=${value}; Path=/; SameSite=Lax${maxAge === undefined ? "" : "; Max-Age=" + maxAge}${location.protocol === "https:" ? "; Secure" : ""}`;
+};
+// The hand-over arrived: forget an automatic choice the device no longer warrants, so the next load
+// decides afresh (no bounce now).
 function settlePhoneEntry() {
   try { sessionStorage.removeItem("cage-entry-guard"); } catch { /* storage may be unavailable */ }
   const auto = document.cookie.split(";").some((part) => part.trim() === "cage-layout=phone-auto");
   const phoneSized = matchMedia("(pointer: coarse)").matches && !matchMedia("(hover: hover)").matches &&
     (innerWidth < 740 || innerHeight < 500);
-  if (auto && !phoneSized) document.cookie = "cage-layout=; Path=/; SameSite=Lax; Max-Age=0" + (location.protocol === "https:" ? "; Secure" : "");
+  if (auto && !phoneSized) layoutCookie("", 0);
+}
+// 电脑版: remembered on this device for this origin; the server then serves the desktop workbench.
+export function chooseDesktop() {
+  layoutCookie("desktop", 31536000);
+  try { sessionStorage.removeItem("cage-entry-guard"); } catch { /* storage may be unavailable */ }
+  location.reload();
 }
 const load = Math.random().toString(36).slice(2, 8);
 let overlays = 0;
@@ -114,9 +123,8 @@ export function openExternal(url) {
 
 // Sign-in expired (HTTP 401): the portal checks its own session and re-enters the workspace, which
 // then returns to the remembered screen.
-export function signInExpired() {
-  if (webPhone) toPortal({ type: "cage:workspace-unauthenticated" });
-}
+// A request was refused for an expired workspace sign-in (transport.mjs): the portal signs in again.
+if (webPhone) window.addEventListener("cage-sign-in-expired", () => toPortal({ type: "cage:workspace-unauthenticated" }));
 
 // A tenant workspace (a VM of a Super Cage server): no paired computer for the remote browser.
 export function useWebTenant() {

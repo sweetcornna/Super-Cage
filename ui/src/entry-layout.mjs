@@ -70,5 +70,6 @@ export function announceDesktopInFrame() {
   try { window.parent.postMessage({ type: "cage:desktop-ui" }, "*"); } catch { /* no portal */ }
 }
 
-// The phone page's side of this (dropping phone-auto on a device that no longer warrants it) lives in
-// ui/src/mobile-cli/web-shell.mjs, so the phone page does not load this module.
+// The phone page's side of this (dropping phone-auto on a device that no longer warrants it, and its 电脑版
+// switch) lives in ui/src/mobile-cli/web-shell.mjs: a module shared by both pages becomes a chunk of its
+// own, one more request for each page, and the phone page has no use for the rest of this one.
