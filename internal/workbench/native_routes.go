@@ -23,6 +23,9 @@ func nativeWorkbenchRoute(path string) bool {
 		"/api/mobile/environment", "/api/mobile/terminals":
 		return true
 	}
+	if appUpdateRoute(path) {
+		return true
+	}
 	for _, prefix := range []string{
 		"/api/agent/jobs/",
 		"/api/account/", "/api/terminals/", "/api/claude-accounts/", "/api/codex-accounts/", "/api/cli/sessions/", "/api/proxy/",

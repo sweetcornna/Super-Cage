@@ -3,6 +3,7 @@ import { ExternalLink, LoaderCircle, RefreshCw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { getClientContext } from "./client-context.mjs";
 import { BrandMark } from "./brand";
+import { appUpdateSettings } from "./app-update-texts.mjs";
 import "./about-settings.css";
 
 const repository = "https://github.com/sweetcornna/Super-Cage";
@@ -44,6 +45,49 @@ function CheckResult({ label, item, source, onError }) {
       {!source && item.version && <p className="about-result-detail">{item.version} · {item.prerelease ? "预发行版" : "正式版"}</p>}
       <RepositoryLink kind={source ? "source" : "releases"} onError={onError}>{source ? "查看源码提交" : "查看发行说明与下载"}</RepositoryLink>
     </>}
+  </section>;
+}
+
+// 应用更新: how this computer's Super Cage takes new versions. The mode is
+// stored by the local workbench (POST /api/app-update/policy), which only
+// the desktop window may change.
+function AppUpdateSettings() {
+  const [status, setStatus] = useState(null);
+  const [error, setError] = useState(null);
+  const [saving, setSaving] = useState("");
+  const [saveError, setSaveError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    api("/app-update", undefined, undefined, {}, { signal: controller.signal })
+      .then(next => { setStatus(next); setError(null); })
+      .catch(failure => { if (!controller.signal.aborted) setError(failure); });
+    return () => controller.abort();
+  }, []);
+  const view = appUpdateSettings({ status, error });
+  // A workbench without this route (an older version) has nothing to set.
+  if (error?.status === 404 || (status && typeof status.mode !== "string")) return null;
+  const choose = async mode => {
+    if (saving || mode === view.mode) return;
+    setSaving(mode); setSaveError("");
+    try { setStatus(await api("/app-update/policy", { mode })); }
+    catch (failure) { setSaveError(failure.message); }
+    finally { setSaving(""); }
+  };
+  return <section className="about-updates" aria-label="应用更新">
+    <h4>应用更新</h4>
+    <div className="choice-list about-update-modes" role="radiogroup" aria-label="更新方式">
+      {view.options.map(option => <label key={option.value} className={`choice ${view.mode === option.value ? "checked" : ""}`} data-disabled={option.disabled || undefined}>
+        <input type="radio" name="app-update-mode" value={option.value} checked={view.mode === option.value}
+          disabled={!view.editable || option.disabled || Boolean(saving)} onChange={() => choose(option.value)} />
+        <span>
+          <strong>{option.label}{saving === option.value && <LoaderCircle size={13} className="spin" aria-hidden="true" />}</strong>
+          <small>{option.description}</small>
+          {option.reason && <small className="about-update-reason" data-reason={option.value}>{option.reason}</small>}
+        </span>
+      </label>)}
+    </div>
+    {view.rows.map(row => <p key={row.key} className={row.key === "mode_error" ? "error-message" : "footnote"} data-row={row.key}>{row.text}</p>)}
+    {saveError && <p className="error-message" role="alert">{saveError}</p>}
   </section>;
 }
 
@@ -92,6 +136,7 @@ export function AboutSettings() {
       <div><dt>构建提交</dt><dd>{build?.commit ? <code title={build.commit}>{build.commit.slice(0, 12)}</code> : loading ? "正在读取…" : "未记录"}</dd></div>
     </dl>
     {build?.modified && <p className="footnote">此构建包含未提交的修改，提交核对仅反映已记录的提交。</p>}
+    {!workspaceOnly && nativeAvailable() && <AppUpdateSettings />}
     {workspaceOnly ? <p className="footnote">工作台版本由服务器管理员维护。</p> : <>
       <div className="about-check-actions">
         <button className="secondary-button" onClick={check} disabled={busy || coolingDown}>

@@ -20,7 +20,8 @@ type displayViewDemand struct {
 	mu           sync.Mutex
 	op           sync.Mutex
 	viewers      int
-	held         int // open streams whose pane is hidden; guarded by mu
+	held         int    // open streams whose pane is hidden; guarded by mu
+	joined       uint64 // every stream that became shown, ever; guarded by mu
 	idle         *time.Timer
 	known, shown bool                    // guarded by op
 	sentHeld     int                     // held streams the guest was told about with its last hide; guarded by op
@@ -76,6 +77,7 @@ func (d *displayViewDemand) background(update func(bool) error) {
 func (d *displayViewDemand) acquire(update func(bool) error) (func(), error) {
 	d.mu.Lock()
 	d.viewers++
+	d.joined++
 	if d.idle != nil {
 		d.idle.Stop()
 		d.idle = nil
@@ -194,6 +196,7 @@ type displayViewer struct {
 func (d *displayViewDemand) join(ctx context.Context, update func(bool) error, failed func(error)) *displayViewer {
 	d.mu.Lock()
 	d.viewers++
+	d.joined++
 	if d.idle != nil {
 		d.idle.Stop()
 		d.idle = nil
@@ -220,6 +223,7 @@ func (v *displayViewer) setVisible(visible bool) {
 	d.mu.Lock()
 	if visible {
 		d.viewers++
+		d.joined++
 		d.held--
 		if d.idle != nil {
 			d.idle.Stop()
