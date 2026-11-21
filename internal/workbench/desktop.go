@@ -9,6 +9,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/host"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -32,6 +33,7 @@ type controllerClient struct {
 	record          controlFile
 	launch          launchResponse
 	client          *http.Client
+	dial            func(context.Context, string, string) (net.Conn, error)
 }
 
 var errControllerUnavailable = errors.New("control service is unavailable")
@@ -79,12 +81,27 @@ func openController(profile string) (*controllerClient, error) {
 	if json.Unmarshal(b, &record) != nil || record.Port < 1024 || record.Port > 65535 || len(record.Token) != 64 || record.PID < 1 {
 		return nil, errors.New("后台记录无效，请保留现有环境并检查私有配置。")
 	}
+	if record.Auth > controlAuth {
+		return nil, errClientOutdated
+	}
+	if (record.Auth == controlAuth) != proofSecret.MatchString(record.ProofKey) || record.Auth == 0 && record.ProofKey != "" {
+		return nil, errors.New("后台记录无效，请保留现有环境并检查私有配置。")
+	}
 	jar, _ := cookiejar.New(nil)
-	c := &controllerClient{profile: profile, record: record, origin: fmt.Sprintf("http://localhost:%d", record.Port), client: &http.Client{Timeout: controllerRequestTimeout, Jar: jar, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}
+	dial := controllerDial(record)
+	c := &controllerClient{profile: profile, record: record, origin: fmt.Sprintf("http://localhost:%d", record.Port), dial: dial, client: &http.Client{Timeout: controllerRequestTimeout, Jar: jar, Transport: &http.Transport{Proxy: nil, DialContext: dial}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}
 	return c, nil
 }
 
+// connectController serves the window and its helpers. Until the next
+// release it also reaches a controller from the release before the identity
+// proof (a record without auth), over 127.0.0.1 and unproven, because saving
+// and stopping that controller's environment is how an update completes.
 func connectController(profile string) (*controllerClient, error) {
+	return connectControllerOrOlder(profile, true)
+}
+
+func connectControllerOrOlder(profile string, older bool) (*controllerClient, error) {
 	if controllerLockFree(profile) {
 		return nil, errControllerUnavailable
 	}
@@ -96,9 +113,16 @@ func connectController(profile string) (*controllerClient, error) {
 		return nil, err
 	}
 	record := c.record
+	if record.Auth == 0 && !older {
+		c.close()
+		return nil, errControllerOutdated
+	}
 	status, err := c.call("POST", "/api/launch", map[string]string{"token": record.Token}, &c.launch)
 	if err != nil {
 		c.close()
+		if errors.Is(err, errControllerUnproven) {
+			return nil, errControllerUnproven
+		}
 		var networkError *url.Error
 		if errors.As(err, &networkError) {
 			return nil, errControllerUnavailable
@@ -129,6 +153,13 @@ func connectController(profile string) (*controllerClient, error) {
 	}
 	return c, nil
 }
+
+// connectProvenController is connectController for automation (the agent
+// transport): it never talks to a controller that cannot prove itself.
+func connectProvenController(profile string) (*controllerClient, error) {
+	return connectControllerOrOlder(profile, false)
+}
+
 func (c *controllerClient) close() { c.client.CloseIdleConnections() }
 
 // The private launcher record supplies the same desktop proof used by the
