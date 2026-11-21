@@ -35,10 +35,13 @@ import (
 //     environment: those channels are rejected, those requests answered no.
 
 const (
-	entryMaxChannels       = 8
-	entryHandshakeTimeout  = 20 * time.Second
-	entryWrapperTimeout    = 20 * time.Second
-	entryHopWaitDelay      = 2 * time.Second
+	entryMaxChannels      = 8
+	entryHandshakeTimeout = 20 * time.Second
+	entryWrapperTimeout   = 20 * time.Second
+	entryHopWaitDelay     = 2 * time.Second
+	// entryOperationWait bounds how long a new terminal waits for another
+	// terminal's creation or a monitor round to release the operation lock.
+	entryOperationWait     = 10 * time.Second
 	entryServerVersion     = "SSH-2.0-SuperCage"
 	entryHerdrRefusal      = "Super Cage：本机终端还不能接入 Herdr，需要更新 Super Cage 到支持 Herdr 的版本。"
 	entryTerminalLimitText = "已有 12 个终端：先关闭一个"
@@ -557,8 +560,37 @@ func (s *Server) entryRunHop(ctx context.Context, conn *entryConn, channel ssh.C
 // the same script, hop and limit as a terminal from the menu (kind shell),
 // with the client's window size and the device as its origin. The client's
 // TERM is not used: every Cage terminal is xterm-256color (design 5.8).
+// entryLockOperation takes the environment's operation lock, waiting
+// briefly: several ssh -t sessions often start together (a script, a tmux
+// layout, Herdr's TUI), and each must get its terminal instead of "环境正在执
+// 行其他操作". It retries like lockProjectOperation and stops at once when the
+// connection is cut.
+func (s *Server) entryLockOperation(ctx context.Context) bool {
+	if s.op.TryLock() {
+		return true
+	}
+	wait, cancel := context.WithTimeout(ctx, entryOperationWait)
+	defer cancel()
+	retry := time.NewTicker(projectOperationRetry)
+	defer retry.Stop()
+	for {
+		select {
+		case <-wait.Done():
+			return false
+		case <-retry.C:
+			if s.op.TryLock() {
+				if ctx.Err() != nil {
+					s.op.Unlock()
+					return false
+				}
+				return true
+			}
+		}
+	}
+}
+
 func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, command string) (*terminalSession, error) {
-	if !s.op.TryLock() {
+	if !s.entryLockOperation(conn.ctx) {
 		return nil, errTerminalBusy
 	}
 	defer s.op.Unlock()

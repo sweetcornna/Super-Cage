@@ -7,9 +7,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -222,6 +224,32 @@ func TestEntryTerminalEndsWithTheConnectionUnlessKept(t *testing.T) {
 		} else {
 			entryAwait(t, 5*time.Second, "the terminal to end with its connection", func() bool { return f.s.terminals.get(id) == nil })
 		}
+	}
+}
+
+// Several ssh -t sessions that start together each get their terminal.
+func TestEntryTerminalsStartTogether(t *testing.T) {
+	f := newEntryFixture(t, true)
+	f.on()
+	client := f.client()
+	var wg sync.WaitGroup
+	shells := make([]*entryShell, 6)
+	for i := range shells {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			shells[i] = entryOpenShell(t, client, 80, 24, "")
+		}()
+	}
+	wg.Wait()
+	for i, shell := range shells {
+		shell.send(fmt.Sprintf("printf 'N=%%s\\n' %d\n", i))
+		if got := shell.expect("N="); got != strconv.Itoa(i) {
+			t.Fatalf("shell %d answered %q", i, got)
+		}
+	}
+	if n := len(entrySSHTerminals(f.s)); n != 6 {
+		t.Fatalf("%d terminals listed", n)
 	}
 }
 
