@@ -166,14 +166,14 @@ func (s *Server) syncScienceFront() {
 		ctx, cancel := context.WithCancel(s.lifetimeContext())
 		h.stop = cancel
 		go s.watchScienceFront(ctx, front, scienceWatchInterval)
-		if err := s.publishScienceControl(port, nil, false); err != nil {
+		if err := s.publishScienceControl(port, front.endSecret, nil, false); err != nil {
 			h.err = "无法记录本机渲染端口：" + err.Error()
 		}
 	case !want && h.front != nil:
 		h.stop()
 		h.front.close()
 		h.front, h.stop = nil, nil
-		_ = s.publishScienceControl(0, nil, true)
+		_ = s.publishScienceControl(0, "", nil, true)
 	}
 }
 
@@ -258,6 +258,15 @@ func (s *Server) resetScienceFront() {
 	if front := s.scienceFrontRunning(); front != nil {
 		front.reset("")
 	}
+}
+
+// endScienceFront ends the session and waits for its requests and sockets
+// (round-2 N1): the pane's release.
+func (s *Server) endScienceFront() bool {
+	if front := s.scienceFrontRunning(); front != nil {
+		return front.endSession("", scienceEndWait)
+	}
+	return true
 }
 
 func (s *Server) scienceFrontHooks() scienceFrontHooks {
@@ -359,10 +368,10 @@ func (s *Server) scienceAncestor() string {
 	return "http://localhost:" + strconv.Itoa(record.Port)
 }
 
-// publishScienceControl records the front port (and the identity the shell
-// applies) in this workload's control.json, which only the native shell and
-// the desktop entry read. Port 0 removes both.
-func (s *Server) publishScienceControl(port int, identity *scienceIdentity, keepIdentity bool) error {
+// publishScienceControl records the front port, its end secret (and the
+// identity the shell applies) in this workload's control.json, which only the
+// native shell and the desktop entry read. Port 0 removes them.
+func (s *Server) publishScienceControl(port int, end string, identity *scienceIdentity, keepIdentity bool) error {
 	if !s.controlPublished {
 		return nil
 	}
@@ -380,8 +389,9 @@ func (s *Server) publishScienceControl(port int, identity *scienceIdentity, keep
 		if err = json.Unmarshal(data, &record); err != nil {
 			return err
 		}
-		record.SciencePort = port
+		record.SciencePort, record.ScienceEnd = port, end
 		if port == 0 {
+			record.ScienceEnd = ""
 			record.ScienceIdentity = nil
 		} else if identity != nil || !keepIdentity {
 			record.ScienceIdentity = identity
@@ -505,7 +515,7 @@ func (s *Server) scienceReleaseAction(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &input) {
 		return
 	}
-	s.resetScienceFront()
+	scienceEnded(w, s.endScienceFront())
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -618,7 +628,7 @@ func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	if err := s.publishScienceControl(front.port, &identity, true); err != nil {
+	if err := s.publishScienceControl(front.port, front.endSecret, &identity, true); err != nil {
 		http.Error(w, "无法交给 Super Cage 窗口环境身份，请重试。", http.StatusInternalServerError)
 		return
 	}

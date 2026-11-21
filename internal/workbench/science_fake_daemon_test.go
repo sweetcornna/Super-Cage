@@ -126,6 +126,12 @@ func newFakeScienceDaemon(t *testing.T) *fakeScienceDaemon {
 		case r.URL.Path == "/api/projects":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, "[]")
+		case r.URL.Path == "/api/hold":
+			// Held until the caller goes (or 10 s).
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
 		case r.URL.Path == "/":
 			nonce := webfront.Secret(12)
 			w.Header().Set("Content-Security-Policy", fmt.Sprintf(fakeScienceSPAPolicy, nonce))

@@ -49,6 +49,9 @@ type controlFile struct {
 	// the native shell and the desktop entry, never served to a page.
 	SciencePort     int              `json:"science_port,omitempty"`
 	ScienceIdentity *scienceIdentity `json:"science_identity,omitempty"`
+	// ScienceEnd lets the native shell end the front's session
+	// (POST /_cage/end, round-2 N1).
+	ScienceEnd string `json:"science_end,omitempty"`
 }
 type Server struct {
 	desktopViews                                     displayViewDemand

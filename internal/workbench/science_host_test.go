@@ -650,8 +650,8 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true}).send(s); w.Code != http.StatusForbidden {
 			t.Fatalf("release not from the window: %d", w.Code)
 		}
-		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true, headers: windowFetch}).send(s); w.Code != http.StatusNoContent {
-			t.Fatalf("release: %d", w.Code)
+		if w := (requestShape{method: "POST", path: "/api/claude-science/release", trusted: true, headers: windowFetch}).send(s); w.Code != http.StatusNoContent || w.Header().Get("X-Cage-Ended") != "complete" {
+			t.Fatalf("release: %d %q", w.Code, w.Header().Get("X-Cage-Ended"))
 		}
 		if !frontCleared(front) {
 			t.Fatal("release kept the credential")
@@ -713,6 +713,7 @@ func TestScienceFrontDropsTheCredential(t *testing.T) {
 		now := time.Now()
 		front.mu.Lock()
 		front.now = func() time.Time { return now.Add(time.Hour) }
+		front.lastHeard = now.Add(time.Hour) // the pane still polls
 		front.mu.Unlock()
 		time.Sleep(60 * time.Millisecond)
 		front.mu.Lock()
@@ -807,7 +808,7 @@ func TestSciencePublishKeepsTheWorkloadRecord(t *testing.T) {
 	}
 	identity, _ := json.Marshal(testScienceIdentity)
 	for _, keep := range []*scienceIdentity{&testScienceIdentity, nil} { // a ticket, then a restart of the front's watch
-		if err := s.publishScienceControl(front.port, keep, true); err != nil {
+		if err := s.publishScienceControl(front.port, front.endSecret, keep, true); err != nil {
 			t.Fatal(err)
 		}
 		record := read()

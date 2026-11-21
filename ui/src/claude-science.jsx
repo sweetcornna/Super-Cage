@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Download, ExternalLink, LogIn, Play, Power, RefreshCw, RotateCcw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { getClientContext } from "./client-context.mjs";
@@ -53,7 +53,9 @@ const hostMeasure = () => ({
 const remembered = { fallback: null, release: Promise.resolve(), contract: null };
 // F8: the bridge's frame contract, asked once per document and only where
 // the switch could show.
-const bridgeContract = () => remembered.contract ??= native("scienceFrame", { op: "capabilities" })
+// Quiet: a window without the op is the normal case on integration builds,
+// not an error worth a diagnostic.
+const bridgeContract = () => remembered.contract ??= native("scienceFrame", { op: "capabilities" }, { quiet: true })
   .then((reply) => Number(reply?.contract) || 0, () => 0);
 // One automatic reload when the window's document predates the front (its
 // frame-src cannot change); a second refusal asks instead.
@@ -132,9 +134,15 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
     return () => {
       window.removeEventListener("cage-science-frame", ended);
       disposed.current = true;
-      void native("scienceFrame", { op: "detach" }).catch(() => {});
-      remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
     };
+  }, []);
+  // Round-2 N1: the front ends the session first (release returns once its
+  // requests and sockets are gone), then the window is told to detach. A
+  // layout cleanup runs before React removes the frame element, so the
+  // release is on its way before the frame's targets start to go.
+  useLayoutEffect(() => () => {
+    remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
+    void remembered.release.then(() => native("scienceFrame", { op: "detach" })).catch(() => {});
   }, []);
   useEffect(() => {
     if (!url) return;

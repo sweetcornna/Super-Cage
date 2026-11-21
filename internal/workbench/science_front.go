@@ -3,6 +3,7 @@ package workbench
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -143,6 +144,8 @@ type scienceFrontHooks struct {
 	upstream func() (*scienceUpstream, error)
 	// signIn opens the daemon's sign-in in the guest browser (phase 1).
 	signIn func() (claudeScienceTab, error)
+	// unwind, in tests only, runs as a proxied request's handler returns.
+	unwind func()
 }
 
 type scienceFront struct {
@@ -178,8 +181,15 @@ type scienceFront struct {
 	generation uint64
 	done       context.Context
 	cancel     context.CancelFunc
+	// flight counts the generation's proxied requests and sockets until
+	// their handlers return (endSession waits for it).
+	flight *sync.WaitGroup
 	// wake starts the watchdog when a session or credential appears.
 	wake chan struct{}
+	// endSecret lets the native shell end the session (POST /_cage/end,
+	// header X-Cage-End); published as control.json science_end while the
+	// front runs.
+	endSecret string
 }
 
 // wakeWatch tells the watchdog there is something to watch.
@@ -218,18 +228,16 @@ func (f *scienceFront) heard() {
 	f.mu.Unlock()
 }
 
-// dropOrphan ends the session and its credential when neither the pane nor
-// the frame's page has been heard from for scienceOrphanAfter: the window
-// switched to another environment (whose workload now gets the pane's
-// polls), closed, or lost its renderer. Nothing on this workload sees a
-// switch happen; silence is the signal.
+// dropOrphan ends the session and its credential when the pane has not
+// been heard from for scienceOrphanAfter: the window switched to another
+// environment (whose workload now gets the pane's polls), closed, or lost its
+// renderer. Nothing on this workload sees a switch happen; silence is the
+// signal. The page's own requests and sockets do not count: workers that
+// outlived a torn-down frame keep talking without their overrides (round-2
+// N1).
 func (f *scienceFront) dropOrphan() bool {
 	f.mu.Lock()
-	last := f.lastHeard
-	if f.lastActive.After(last) {
-		last = f.lastActive
-	}
-	orphan := f.session != "" && f.active == 0 && f.now().Sub(last) > scienceOrphanAfter
+	orphan := f.session != "" && f.now().Sub(f.lastHeard) > scienceOrphanAfter
 	f.mu.Unlock()
 	if orphan {
 		f.reset("")
@@ -290,7 +298,7 @@ func newScienceFront(listener net.Listener, port int, hooks scienceFrontHooks) *
 	f := &scienceFront{
 		port: port, listener: listener, hooks: hooks, now: time.Now,
 		issued: map[string]scienceProbeSession{}, checking: map[string]scienceProbeSession{},
-		wake: make(chan struct{}, 1),
+		wake: make(chan struct{}, 1), endSecret: webfront.Secret(24), flight: &sync.WaitGroup{},
 	}
 	f.done, f.cancel = context.WithCancel(context.Background())
 	f.server = &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: scienceFrontHeaderLimit, ErrorLog: log.New(io.Discard, "", 0)}
@@ -376,6 +384,62 @@ func (f *scienceFront) endGenerationLocked() {
 	f.cancel()
 	f.generation++
 	f.done, f.cancel = context.WithCancel(context.Background())
+	f.flight = &sync.WaitGroup{}
+}
+
+// scienceEndWait bounds how long an end waits for the ended session's
+// requests and sockets to return.
+const scienceEndWait = 2 * time.Second
+
+// endSession ends the session as reset does, then waits (up to limit) until
+// the ended generation's requests and sockets have returned, so that nothing
+// the page sends afterwards reaches the daemon (round-2 N1). It reports
+// whether they all returned in time.
+func (f *scienceFront) endSession(reason string, limit time.Duration) bool {
+	f.mu.Lock()
+	flight := f.flight
+	f.mu.Unlock()
+	f.reset(reason)
+	finished := make(chan struct{})
+	go func() {
+		flight.Wait()
+		close(finished)
+	}()
+	timer := time.NewTimer(limit)
+	defer timer.Stop()
+	select {
+	case <-finished:
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
+// scienceEnded tells the caller of an end whether the wait finished.
+func scienceEnded(w http.ResponseWriter, complete bool) {
+	if complete {
+		w.Header().Set("X-Cage-Ended", "complete")
+	} else {
+		w.Header().Set("X-Cage-Ended", "timeout")
+	}
+}
+
+// serveEnd lets the native shell end the session before it tears a frame
+// down, even with the pane gone or hung (round-2 N1): a POST to a loopback
+// host of this port from a non-browser caller (no Origin, no fetch
+// metadata) with X-Cage-End: control.json's science_end. A page cannot send
+// that header without a preflight, which the front never answers.
+func (f *scienceFront) serveEnd(w http.ResponseWriter, r *http.Request) {
+	port := strconv.Itoa(f.port)
+	local := r.Host == "127.0.0.1:"+port || r.Host == "[::1]:"+port || r.Host == "localhost:"+port
+	secret := r.Header.Get("X-Cage-End")
+	if r.Method != http.MethodPost || !local || r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" ||
+		len(secret) != len(f.endSecret) || subtle.ConstantTimeCompare([]byte(secret), []byte(f.endSecret)) != 1 {
+		sciencePlain(w, http.StatusForbidden, "refused")
+		return
+	}
+	scienceEnded(w, f.endSession("", scienceEndWait))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // resetGeneration resets only if no reset happened since generation.
@@ -466,6 +530,10 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cache-Control", "no-store")
 	// The exact Host names a label this front issued: DNS rebinding cannot
 	// produce it (no DNS name resolves to *.localhost but itself).
+	if r.URL.Path == "/_cage/end" {
+		f.serveEnd(w, r)
+		return
+	}
 	label := f.requestLabel(r)
 	state := f.labelState(label)
 	if state == "" {
@@ -802,10 +870,18 @@ func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current sci
 	f.mu.Lock()
 	done := f.done
 	stale := f.generation != generation
+	flight, unwind := f.flight, f.hooks.unwind
+	if !stale {
+		flight.Add(1)
+	}
 	f.mu.Unlock()
 	if stale {
 		sciencePlain(w, http.StatusUnauthorized, errScienceReset.Error())
 		return
+	}
+	defer flight.Done()
+	if unwind != nil {
+		defer unwind()
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -217,6 +218,98 @@ func TestScienceUncheckedUnauthorizedPassesThrough(t *testing.T) {
 	state := env.front.snapshot()
 	if exchanges != 1 || state.SignInNeeded || !state.Session {
 		t.Fatalf("%d exchanges, %+v", exchanges, state)
+	}
+}
+
+// Round-2 N1 (server half): only the pane's polls say its frame is open. A
+// page that keeps talking (workers that outlived a teardown) does not keep
+// its session alive.
+func TestScienceOrphanIgnoresThePage(t *testing.T) {
+	env := newTestScienceFront(t)
+	env.enter(t, goodProbeReports(testScienceIdentity))
+	env.front.begin() // a socket of the page stays open
+	defer env.front.end()
+	now := time.Now()
+	env.front.mu.Lock()
+	env.front.lastHeard = now.Add(-scienceOrphanAfter - time.Second)
+	env.front.lastActive = now
+	env.front.mu.Unlock()
+	if !env.front.dropOrphan() {
+		t.Fatal("the page's own traffic kept a session whose pane went quiet")
+	}
+}
+
+// Round-2 N1 (server half): the native shell ends a session before it tears
+// a frame down. POST /_cage/end returns once the session's requests and
+// sockets have returned; only a non-browser caller holding control.json's
+// science_end can send it.
+func TestScienceEndWaitsForTheSession(t *testing.T) {
+	env := newTestScienceFront(t)
+	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
+	var unwound atomic.Int32
+	env.front.mu.Lock()
+	env.front.hooks.unwind = func() {
+		time.Sleep(300 * time.Millisecond)
+		unwound.Add(1)
+	}
+	env.front.mu.Unlock()
+	held, _ := http.NewRequest("GET", env.base()+"/api/hold", nil)
+	go func() {
+		if r, err := client.Do(held); err == nil {
+			r.Body.Close()
+		}
+	}()
+	waitFor(t, 5*time.Second, "the held request", func() bool {
+		return slices.ContainsFunc(env.daemon.seen(), func(r fakeScienceRequest) bool { return r.Path == "/api/hold" })
+	})
+	end := func(host, secret, origin string) *http.Response {
+		t.Helper()
+		request, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/_cage/end", env.front.port), nil)
+		request.Host = host
+		if secret != "" {
+			request.Header.Set("X-Cage-End", secret)
+		}
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		response, err := http.DefaultTransport.RoundTrip(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		return response
+	}
+	local := fmt.Sprintf("127.0.0.1:%d", env.front.port)
+	for name, refused := range map[string]func() *http.Response{
+		"no secret":    func() *http.Response { return end(local, "", "") },
+		"wrong secret": func() *http.Response { return end(local, "x"+env.front.endSecret[1:], "") },
+		"from a page":  func() *http.Response { return end(local, env.front.endSecret, env.base()) },
+		"label host":   func() *http.Response { return end(env.host(), env.front.endSecret, "") },
+	} {
+		if r := refused(); r.StatusCode != http.StatusForbidden {
+			t.Errorf("%s: %d", name, r.StatusCode)
+		}
+	}
+	if !env.front.snapshot().Session {
+		t.Fatal("a refused end ended the session")
+	}
+	started := time.Now()
+	r := end(local, env.front.endSecret, "")
+	if r.StatusCode != http.StatusNoContent || r.Header.Get("X-Cage-Ended") != "complete" {
+		t.Fatalf("end: %d %q", r.StatusCode, r.Header.Get("X-Cage-Ended"))
+	}
+	if unwound.Load() != 1 {
+		t.Fatalf("end returned after %v with the session's request still in its handler", time.Since(started))
+	}
+	if env.front.snapshot().Session {
+		t.Fatal("the session survived its end")
+	}
+	before := len(env.daemon.seen())
+	if r := env.do(t, client, "GET", "/api/echo", "", "", nil); r.StatusCode == http.StatusOK {
+		t.Fatal("the ended label still reaches the daemon")
+	}
+	if seen := env.daemon.seen()[before:]; len(seen) != 0 {
+		t.Fatalf("the daemon saw %v after the end", seen)
 	}
 }
 
