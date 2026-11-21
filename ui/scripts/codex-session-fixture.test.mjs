@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { codexSessionFixtures, codexSessionsRoute, seedCodexSessions } from "./codex-session-fixture.mjs";
+import { codexMenuTerminal, codexSessionFixtures, codexSessionsRoute, codexTerminalRoute, seedCodexSessions } from "./codex-session-fixture.mjs";
 
 async function call(state, method, path, body) {
   const route = { fulfill: (value) => value };
@@ -83,4 +83,61 @@ test("stop, archive and the read-only view", async () => {
   await call(state, "POST", "/api/cli/sessions/" + ids[1] + "/archive", {});
   assert.equal(state.terminals.length, 0);
   assert.equal((await call(state, "POST", "/api/cli/sessions/" + ids[1] + "/open", {})).status, 410);
+});
+
+test("a held list answers as soon as it changes", async () => {
+  const state = { ...fresh(), codexHoldMs: 5000 };
+  const first = await json(state, "GET", list);
+  setTimeout(() => { state.codexSessions[0].title = "改名"; }, 120);
+  const started = Date.now();
+  const changed = await json(state, "GET", list + "&after=" + first.revision + "&wait=25");
+  assert.ok(Date.now() - started < 1000, "answered on the change, not at the end of the hold");
+  assert.equal(changed.sessions[0].title, "改名");
+});
+
+test("a held view answers on change; its revision follows what it shows", async () => {
+  const state = { ...fresh(), codexHoldMs: 5000 };
+  const path = "/api/cli/sessions/" + ids[2];
+  const first = await json(state, "GET", path);
+  assert.equal((await call(state, "GET", path + "?after=" + first.revision)).status, 204);
+  setTimeout(() => { state.codexSessions[2].owner = ""; }, 100);
+  const next = await json(state, "GET", path + "?after=" + first.revision + "&epoch=fixture&wait=25");
+  assert.equal(next.owner, "");
+  assert.ok(next.revision > first.revision);
+});
+
+test("menu sessions, metadata, purge and the older server", async () => {
+  const state = { ...fresh(), status: { projects: ["/p"] } };
+  const terminal = codexMenuTerminal(state, { workspace: "/p" });
+  assert.equal(terminal.cli_session_provider, "codex");
+  const made = state.codexSessions.find((item) => item.id === terminal.cli_session_id);
+  assert.equal(made.owner, "desktop");
+  await json(state, "POST", "/api/cli/sessions/" + ids[0] + "/metadata", { pinned: true });
+  assert.equal(state.codexSessions[0].pinned, true);
+  const route = { fulfill: (value) => value };
+  const request = (method) => ({ method: () => method });
+  const renamed = await codexTerminalRoute(route, request("POST"), "/terminals/" + terminal.id + "/metadata", { title: "新名字" }, state);
+  assert.equal(renamed.json.title, "新名字");
+  assert.equal(await codexTerminalRoute(route, request("POST"), "/terminals/none/metadata", {}, state), false);
+  await codexTerminalRoute(route, request("DELETE"), "/terminals/" + terminal.id, undefined, state);
+  assert.equal(made.archived, true, "closing a live bound tab archives");
+  assert.equal((await call(state, "POST", "/api/cli/sessions/" + made.id + "/purge", {})).status, 400);
+  await json(state, "POST", "/api/cli/sessions/" + made.id + "/purge", { confirm: true });
+  assert.equal(state.codexSessions.some((item) => item.id === made.id), false);
+  state.codexOlderServer = true;
+  const old = await json(state, "GET", list + "&after=" + "a".repeat(32) + "&wait=25");
+  assert.equal(old.revision, undefined);
+  assert.equal(old.capabilities, undefined);
+});
+
+test("a set refusal answers the next call of that action once, in the server's words", async () => {
+  const state = fresh();
+  seedCodexSessions(state);
+  state.codexRefusals = { [ids[0] + "/open"]: [409, "这段会话所用的 Codex 账号已移除，无法继续"] };
+  const refused = await call(state, "POST", "/api/cli/sessions/" + ids[0] + "/open", {});
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body, "这段会话所用的 Codex 账号已移除，无法继续");
+  assert.equal(state.codexSessions[0].owner, "", "a refused open binds nothing");
+  const opened = await json(state, "POST", "/api/cli/sessions/" + ids[0] + "/open", {});
+  assert.equal(opened.owner, "desktop");
 });

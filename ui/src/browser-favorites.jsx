@@ -12,7 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { api } from "./api";
-import { Modal } from "./views";
+import { Modal } from "./modal";
 
 // The saved page is primary, folder context secondary, management actions quiet.
 // Reuse paper/strong/muted/line tokens, 8/12/16px spacing and existing modal forms.

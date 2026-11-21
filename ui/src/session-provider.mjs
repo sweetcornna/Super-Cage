@@ -55,6 +55,15 @@ export const READONLY_REASONS = {
   phone: "手机发起的一轮仍在运行，完成后再在终端中继续。",
   external: "这段会话正在其他 Codex 进程中打开，请先退出该进程后再继续。",
 };
+// When "在终端中继续" becomes available, per owner.
+export const CONTINUE_HINTS = { phone: "本轮完成后可用", external: "退出其他 Codex 进程后可用" };
+// The server's owner notices (connection_notice) are worded for the phone
+// ("再从手机继续"); the desktop pane states the owner in its own words and
+// shows only the history notices.
+export const PHONE_OWNER_NOTICES = new Set([
+  "这段会话正在电脑的 Codex 终端中打开，手机上可以查看和停止本轮。",
+  "这段会话正在电脑上的 Codex 终端中打开。请先退出该终端中的 Codex，再从手机继续。",
+]);
 
 // What a click on a Codex row does: focus its live tab, open it (the server
 // reuses a terminal it already has), or show it read-only with the reason.
@@ -109,10 +118,18 @@ export function codexSessionAccountLabel(session, accounts) {
   return codexAccountName(accounts?.find((account) => account.id === session.codex_account_id)) || "Codex 账号";
 }
 
-export function purgeCopy(provider, title, count = 1) {
-  const history = provider === CODEX ? "Codex 原始对话" : "Claude Code 原始对话和子代理记录";
-  if (count > 1) return `永久删除所选的 ${count} 个会话及其原始对话？此操作无法撤销。`;
+// provider: "codex", "" (Claude) or "mixed" (a selection of both). A bulk
+// confirmation names the count even for one session, as it did before.
+export function purgeCopy(provider, title, count = 1, bulk = count > 1) {
+  const history = provider === CODEX ? "Codex 原始对话" : provider === "mixed" ? "原始对话" : "Claude Code 原始对话和子代理记录";
+  if (bulk) return `永久删除所选的 ${count} 个会话及其${provider === "mixed" ? "" : " "}${history}？此操作无法撤销。`;
   return `永久删除“${title || "新会话"}”及其 ${history}？此操作无法撤销。`;
+}
+
+// The provider of a selection for purgeCopy.
+export function selectionProvider(sessions) {
+  const codex = sessions.filter(isCodexSession).length;
+  return !codex ? "" : codex === sessions.length ? CODEX : "mixed";
 }
 
 export function codexCapabilities(answer) {
@@ -123,6 +140,44 @@ export function codexCapabilities(answer) {
 // The menu entry names what it makes.
 export function codexMenuLabel(capabilities) {
   return capabilities?.sessions ? "Codex 会话" : "Codex 终端";
+}
+
+// GET /api/cli/sessions/{id}: after (the view's revision) and epoch (its
+// generation) answer 204 while unchanged; wait holds that (a server whose list
+// carries revisions).
+export function sessionViewPath(id, { after = "", epoch = "", wait = 0 } = {}) {
+  const query = new URLSearchParams();
+  if (after !== "" && after !== undefined && after !== null) {
+    query.set("after", String(after));
+    if (epoch) query.set("epoch", epoch);
+    if (wait > 0) query.set("wait", String(wait));
+  }
+  const text = query.toString();
+  return "/api/cli/sessions/" + encodeURIComponent(id) + (text ? "?" + text : "");
+}
+
+// The archive confirmation says what archiving does to whoever writes now.
+export function archiveCopy(session, { closing = false } = {}) {
+  const kept = "历史将保留，可从设置中的已归档会话恢复。";
+  if (!isCodexSession(session)) {
+    return { title: "归档这段会话？", body: "归档会关闭关联终端。" + kept, confirm: "归档会话" };
+  }
+  const owner = sessionOwner(session);
+  const body = owner === "desktop" ? "关闭后这段会话会归档：Codex 终端会关闭，正在进行的一轮会停止。"
+    : owner === "phone" ? "归档会停止手机上正在运行的这一轮。"
+      : owner === "external" ? "归档只在 Super Cage 中收起这段会话，不会停止其他进程中的 Codex。"
+        : "";
+  return { title: closing ? "关闭并归档这段会话？" : "归档这段会话？", body: body + kept, confirm: closing ? "关闭并归档" : "归档会话" };
+}
+
+// The state word in the header of a Codex session's pane.
+export function codexStateWord(session, { closed = false } = {}) {
+  if (closed) return "已结束";
+  const owner = sessionOwner(session);
+  if (owner === "phone") return session?.active ? "手机正在运行" : "手机上打开";
+  if (owner === "external") return "在其他进程中打开";
+  if (owner === "desktop") return session?.active ? "运行中" : "空闲";
+  return "空闲";
 }
 
 export const ERROR_COPY = {
