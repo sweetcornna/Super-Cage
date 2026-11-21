@@ -21,6 +21,10 @@ internal sealed class MainWindow : Form
     private string smokePhase = "starting";
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, (string[] Paths, DateTime Expires)> fileSelections = new();
+    // Claude Science host rendering: the switches this WebView was created
+    // with (null: none, as always) and the frame support that needs them.
+    private string? webArguments;
+    private ScienceFrameHost? science;
 
     public MainWindow()
     {
@@ -161,13 +165,29 @@ internal sealed class MainWindow : Form
         retry.Enabled = false;
         try
         {
+            var arguments = ScienceFrame.Arguments(Backend.Root);
             if (recreate)
             {
+                // New switches need the old browser process gone: one user
+                // data folder runs with one set of options.
+                var previous = arguments != webArguments ? web.CoreWebView2?.Environment : null;
+                var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void BrowserExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs args) => exited.TrySetResult();
+                if (previous != null) previous.BrowserProcessExited += BrowserExited;
+                science = null;
                 Controls.Remove(web); web.Dispose();
                 web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
                 Controls.Add(web); status.BringToFront();
+                if (previous != null)
+                {
+                    try { await exited.Task.WaitAsync(TimeSpan.FromSeconds(15), lifetime.Token); }
+                    catch (TimeoutException) { }
+                    finally { previous.BrowserProcessExited -= BrowserExited; }
+                }
             }
-            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Backend.Root, "webview2"));
+            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Backend.Root, "webview2"),
+                arguments == null ? null : new CoreWebView2EnvironmentOptions(arguments));
+            webArguments = arguments;
             await web.EnsureCoreWebView2Async(environment);
             smokePhase = "webview_initialized";
             var core = web.CoreWebView2;
@@ -175,12 +195,17 @@ internal sealed class MainWindow : Form
             core.Settings.IsStatusBarEnabled = false; core.Settings.IsZoomControlEnabled = false;
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Settings.IsPasswordAutosaveEnabled = false; core.Settings.IsGeneralAutofillEnabled = false;
-            core.NavigationStarting += (_, e) => { if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true; };
+            core.NavigationStarting += (_, e) => {
+                if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true;
+                else if (science?.Armed == true) _ = science.Disarm(); // the pane's document is going away
+            };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.WebMessageReceived += Receive;
-            core.ProcessFailed += (_, _) => { webFailed = true; Error("工作台显示进程已退出。后台任务保留，可重试连接。"); };
+            core.ProcessFailed += (_, _) => { webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。"); };
+            science = arguments == null ? null : new ScienceFrameHost(core, reason =>
+                Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"));
             core.NavigationCompleted += (_, e) => {
                 if (!e.IsSuccess) {
                     var reason = e.WebErrorStatus.ToString() switch {
@@ -338,6 +363,32 @@ internal sealed class MainWindow : Form
         return new { fileSelection = selection, count = paths.Length };
     }
 
+    // The Claude Science pane's frame (ui/src/claude-science.jsx documents
+    // the ops). Arming needs the switches; without them the pane asks for
+    // restart, which recreates the WebView with them.
+    private async Task<object> ScienceFrameRequest(string op, string url)
+    {
+        switch (op)
+        {
+            case "prepare":
+                if (science != null) await science.Disarm();
+                return new { backstop = science != null };
+            case "arm":
+                if (science == null) throw new InvalidDataException("窗口缺少本机渲染需要的网络限制，请重新载入窗口后再打开。");
+                await science.Arm(url);
+                return true;
+            case "disarm":
+                if (science != null) await science.Disarm();
+                return true;
+            case "restart":
+                if (ScienceFrame.Arguments(Backend.Root) == webArguments) return true;
+                BeginInvoke(async () => await Initialize(true));
+                return true;
+            default:
+                throw new InvalidDataException("未知的本机渲染操作");
+        }
+    }
+
     private async void Receive(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         // CoreWebView2.WebMessageReceived is top-document only. Frame messages
@@ -484,6 +535,7 @@ internal sealed class MainWindow : Form
                     var appReference = request.Text("kind") switch {
                         "source" => "https://github.com/sweetcornna/Super-Cage/commits/main",
                         "releases" => "https://github.com/sweetcornna/Super-Cage/releases",
+                        "claude-science-host-render" => "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性",
                         _ => throw new InvalidDataException("未知的项目页面")
                     };
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(appReference) { UseShellExecute = true });
@@ -538,6 +590,7 @@ internal sealed class MainWindow : Form
                     if (exit != 0) throw new IOException("工作台会话恢复失败");
                     result = new { url = UpdatePolicy.Entry(data.Text("url")).AbsoluteUri }; break;
                 case "reconnect": result = true; _ = Bootstrap(); break;
+                case "scienceFrame": result = await ScienceFrameRequest(request.Text("op"), request.Text("url")); break;
                 case "quitNow": result = true; allowQuit = true; BeginInvoke(Close); break;
                 default: throw new InvalidDataException("未知原生操作");
             }

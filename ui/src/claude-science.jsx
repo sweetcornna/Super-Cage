@@ -101,8 +101,12 @@ function ScienceFrame({ data, toolbar, onFallback, onSignIn }) {
   };
   useEffect(() => {
     disposed.current = false;
+    // The window ended the frame (a worker could not take the identity).
+    const ended = (event) => fallback.current(event.detail?.error || "本机渲染已停止。", "retry");
+    window.addEventListener("cage-science-frame", ended);
     void start();
     return () => {
+      window.removeEventListener("cage-science-frame", ended);
       disposed.current = true;
       void native("scienceFrame", { op: "disarm" }).catch(() => {});
       void api("/claude-science/release", {}).catch(() => {});

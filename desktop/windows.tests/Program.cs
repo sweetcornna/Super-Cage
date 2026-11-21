@@ -60,6 +60,60 @@ Check(WindowLayout.Bounds(new(0, 0, 3840, 2080), 96, null).Width > 2500, "4K win
 Check(WindowLayout.Bounds(new(0, 0, 3840, 2080), 192, new(100, 100, 1000, 700, 96, false)).Width == 2000,
     "restoring a user size did not account for the new monitor DPI");
 Console.WriteLine($"Windows window layout: {assertions} assertions passed.");
+
+// Claude Science host rendering: ScienceFrame.cs against the contract the Go
+// tests drive headless Chromium with (internal/workbench/testdata/science-cdp.json).
+assertions = 0;
+{
+    using var goldenStream = typeof(Program).Assembly.GetManifestResourceStream("Cage.ScienceCDP.json")!;
+    var golden = System.Text.Json.Nodes.JsonNode.Parse(goldenStream)!.AsObject();
+    bool Same(System.Text.Json.Nodes.JsonNode? a, System.Text.Json.Nodes.JsonNode? b) => System.Text.Json.Nodes.JsonNode.DeepEquals(a, b);
+    System.Text.Json.Nodes.JsonArray Calls(IEnumerable<ScienceFrame.Call> calls) =>
+        new(calls.Select(call => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject { ["method"] = call.Method, ["params"] = call.Params.DeepClone() }).ToArray());
+    var scienceRoot = Path.Combine(Path.GetTempPath(), "cage-science-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(Path.Combine(scienceRoot, "vms", "lab"));
+        Check(ScienceFrame.Arguments(scienceRoot) == null, "switches without any profile");
+        File.WriteAllText(Path.Combine(scienceRoot, "workbench.json"), "{\n  \"science_host_render\": false\n}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{ broken");
+        Check(ScienceFrame.Arguments(scienceRoot) == null, "switches while host rendering is off");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{\n  \"keyboard\": \"pc\",\n  \"science_host_render\": true\n}");
+        Check(ScienceFrame.Arguments(scienceRoot) == ScienceFrame.BackstopArguments, "no switches with host rendering on in a named environment");
+        Check(ScienceFrame.BackstopArguments.Contains("--proxy-server=http://127.0.0.1:9") && ScienceFrame.BackstopArguments.Contains("--webrtc-ip-handling-policy=disable_non_proxied_udp") &&
+            ScienceFrame.BackstopArguments.Contains("--disable-shared-workers") && ScienceFrame.BackstopArguments.Contains("--no-pings"), "a network switch is missing");
+
+        var control = golden["control"]!;
+        var entry = "http://localhost:" + control["science_port"] + "/_cage/enter#" + new string('a', 43);
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity without a control file");
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+        var identity = ScienceFrame.Identity(scienceRoot, entry);
+        Check(identity != null && Same(identity, control["science_identity"]), "identity differs from the control file");
+        foreach (var other in new[] {
+            entry.Replace("http://localhost:17840", "http://localhost:17841"), entry.Replace("http://localhost", "http://127.0.0.1"),
+            entry.Replace("http://", "https://"), entry.Replace("http://", "http://user@"), entry.Replace("/_cage/enter", "/"),
+            entry.Replace("/_cage/enter#", "/_cage/enter?x=1#"), "http://localhost:17840/_cage/enter", "http://localhost/_cage/enter#x", "not a url",
+        })
+            Check(ScienceFrame.Identity(scienceRoot, other) == null, "identity for a foreign address: " + other);
+        var unsafeIdentity = control.DeepClone().AsObject();
+        unsafeIdentity["science_identity"]!["platform"] = "Linux\"; alert(1); \"";
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), unsafeIdentity.ToJsonString());
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity with a value that is not plain text");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+
+        Check(Same(Calls(ScienceFrame.Arm(identity!)), golden["arm"]), "arm calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Worker(identity!)), golden["worker"]), "worker calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Disarm), golden["disarm"]), "disarm calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Frame(identity!)), Calls([.. ScienceFrame.Arm(identity!), ScienceFrame.Resume])), "frame calls are not arm then resume");
+        foreach (var type in new[] { "service_worker", "shared_worker", "page", "" })
+            Check(ScienceFrame.ForTarget(type, identity!) is [var only] && only.Method == "Runtime.runIfWaitingForDebugger", "a " + type + " target gets more than resume");
+        Check(ScienceFrame.Benign("Another locale override is already in effect") && !ScienceFrame.Benign("Target closed"), "benign locale error");
+    }
+    finally { Directory.Delete(scienceRoot, true); }
+}
+Console.WriteLine($"Claude Science frame: {assertions} assertions passed.");
+
 assertions = 0;
 Check(UpdatePolicy.IsWorkbench("http://localhost:4321/", 4321), "expected local origin rejected");
 foreach (var origin in new[] { "https://localhost:4321/", "http://localhost:4322/", "http://localhost.evil:4321/", "http://user@localhost:4321/", "http://127.0.0.1:4321/", "file:///C:/workbench.html" })

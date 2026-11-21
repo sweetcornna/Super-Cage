@@ -195,7 +195,16 @@ async function walk(mode) {
     await pane.getByRole("button", { name: "重试本机渲染", exact: true }).click();
     await frameReady();
 
-    // 11. Stop from the toolbar asks first.
+    // 11. The window ends the frame itself (a worker refused the identity).
+    const workerRefusal = "页面的一个后台线程没能使用环境的时区与语言，已停止本机渲染。";
+    await page.evaluate(text => window.dispatchEvent(new CustomEvent("cage-science-frame", { detail: { error: text } })), workerRefusal);
+    await pane.getByText(workerRefusal).waitFor({ timeout: 15000 });
+    assert.equal(await frame.count(), 0);
+    assert.equal(posts("/claude-science/open").length, opensBefore, "no browser tab when the window ends the frame");
+    await pane.getByRole("button", { name: "重试本机渲染", exact: true }).click();
+    await frameReady();
+
+    // 12. Stop from the toolbar asks first.
     await pane.getByRole("toolbar").getByRole("button", { name: "停止", exact: true }).click();
     await page.getByRole("dialog", { name: "停止 Claude Science？" }).getByRole("button", { name: "停止", exact: true }).click();
     await until(() => posts("/claude-science/stop").length === 1, "stop");
