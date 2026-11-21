@@ -136,7 +136,7 @@ export function appUpdateButton({ shell = {}, status = null, environment, now = 
   // 4. A newer version is ready to be installed with a click.
   if (version && (["available", "ready"].includes(shell.phase) || (status?.pending?.installable && !shell.phase))) {
     const label = `升级到 ${version}`;
-    if (status?.mode === "silent") {
+    if (effectiveMode(status) === "silent") {
       if (status.pending?.requested) return show({ label, action: "confirm", hint: "电脑空闲，即将自动升级；也可以现在点击升级" });
       const waiting = status.waiting;
       if (waiting && waiting.code !== "allowed") {
@@ -150,10 +150,17 @@ export function appUpdateButton({ shell = {}, status = null, environment, now = 
   return hidden;
 }
 
+// The mode in effect: a stored "silent" counts only where silent mode is
+// available (the real-machine gate among others); elsewhere it is manual and
+// the stored value waits, unchanged, until silent becomes available.
+export function effectiveMode(status) {
+  return status?.mode === "silent" && status?.silent_available === true ? "silent" : "manual";
+}
+
 // GET /api/app-update changes by itself only while silent mode waits for an
 // idle computer or a post-update chain runs. Otherwise the window looks again
 // on focus, visibility and update events only, and polls nothing.
 export function statusNeedsWatch(status) {
   const step = status?.chain?.step;
-  return status?.mode === "silent" || Boolean(step && !["done", "failed", "attention"].includes(step));
+  return effectiveMode(status) === "silent" || Boolean(step && !["done", "failed", "attention"].includes(step));
 }

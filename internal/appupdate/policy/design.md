@@ -218,7 +218,8 @@ Inputs: trigger (`click`/`silent`), version, current version, mode, attempts, bl
 | command | new? | answer |
 |---|---|---|
 | `cage app-update check` | changed | adds `{"phase":"manual","latestVersion":v,"message":reason}` when a newer release exists but is not installable here |
-| `cage app-update download` | unchanged | |
+| `cage app-update download [--release KEY]` | changed | `--release`: refused when the release found has another key or is younger than 24 h (unattended download) |
+| `cage app-update silent-available` | new | `{"available":bool,"reason":…}`: the workbench's own rule and real-machine gate for this installation. The macOS shell asks it before acting on a silent request file and removes the file on anything but a clear yes. |
 | `cage prepare-update --json [--stop]` | unchanged | old behaviour for old shells |
 | `cage prepare-update --stop --json --app-update <v> --trigger click\|silent [--confirmed <id,...>] [--request <id>]` | new | `{"status":"prepared","attempt":"<16 hex>"}` or `{"status":"blocked","code":…,"message":…,"blockers":[…]}` (exit 0); `{"status":"error","message":…}` exit 1. `--app-update` without `--stop --json` is refused. With no workload running a click falls back to the old `PrepareDesktopUpdate`; a silent request is refused (`unreadable`). |
 
@@ -230,11 +231,12 @@ Budget: the macOS shell kills `prepare-update` after 180 s; the handoff request 
 - Order inside the handoff: TryLock `s.op` → seal admissions (`appUpdateSealed`) → decision snapshot (incl. guest read and, for silent, host input idle) → `Decide` → final snapshot (fingerprint must not move for silent; a click is decided again on it) → attempt + chain(`stopping`) saved → stop with the stop button's own steps (`requireStorageReady`, `stopEnvironmentOwners`, `pauseNetworkForStop`, a `stop` job run inside the held operation) → no VM owner → proxy stopped → chain `installing` saved → `closing` → reply → shutdown. Any failure before the reply unseals and, when the environment was running, starts it again.
 
 ### 6.3 Window routes on the workload (session cookie, Origin on POST, account unlocked, **trusted desktop view**)
-- `GET /api/app-update` → `policy.Status`: `{mode, mode_error, silent_available, silent_unavailable_reason, pending:{version, published_at, installable, reason, requested}|null, waiting:{code, message, blockers}|null, last_attempt, chain:{step, from, to, trigger, failed_step, error, next, notes_url, terminals, note}|null}`. `pending`/`waiting` are filled by the silent tick only; in manual mode the button's version comes from the shell's own check.
+- `GET /api/app-update` → `policy.Status`: `{mode, mode_error, silent_available, silent_unavailable_reason, pending:{version, published_at, installable, reason, requested}|null, waiting:{code, message, blockers}|null, last_attempt, chain:{step, from, to, trigger, failed_step, error, next, notes_url, note}|null}`. Open to agents (read only), so it carries no terminal titles, workspaces or conversation ids.
+- `GET /api/app-update/terminals` → `{terminals:[{title, kind, workspace, conversation}]}` once the last update is done; window only (`/api/app-update/` is window only for agents). `pending`/`waiting` are filled by the silent tick only; in manual mode the button's version comes from the shell's own check.
 - `POST /api/app-update/policy` `{mode:"manual"|"silent"}` → the same status. 403 without the trusted view, 423 when locked, 409 with the reason when silent is unavailable. Switching to manual deletes `silent-request.json`.
 - `GET /api/app-update/interruptions` → `{blockers:[interruptible], must_wait:[…], confirm:[ids], reopen:[terminals], environment_running}` (runs the one guest read).
 - The gateway answers `/api/app-update*` with 409 and the plain text `应用升级由本机管理，请切换到本机后查看` when the selected connection is a cloud workspace (plain Chinese text survives `httpErrorMessage`; the UI module matches it); the cloud is never contacted (test).
-- The agent transport refuses non-GET `/api/app-update*`.
+- The agent transport refuses every `/api/app-update/` route (registry in `agent_access.go`); only `GET /api/app-update` is open to agents.
 
 ### 6.4 Files in `<profile>/updates/` (private directory, 0700; files 0600)
 | file | writer | reader |
@@ -243,7 +245,7 @@ Budget: the macOS shell kills `prepare-update` after 180 s; the handoff request 
 | `silent-request.json` `{id, version, decided_at}` | W hourly tick | S (file watch). The fingerprint stays in W's memory, so a request from an earlier process never matches. Replaced after one hour. |
 | `attempts.json` (last 20) | W | W |
 | `chain.json` (`environment: {running, network_paused, workspace, terminals}`) | W (old and new binaries) | W |
-| `last-result.json` `{success, message, version, attempt}` | H (installer) | S, W (rollback evidence: attempt id, or version + written after `installing`) |
+| `last-result.json` `{success, message, version, attempt}` | H (installer); S (abandoned) | S, W (rollback evidence: attempt id, or version + written after `installing`). When it cannot be written, H writes `<profile>/app-update-result.json` instead; S and W read the newer of the two. |
 | `launch-<token>.json`, `download-resume/`, `verified-*/` | H, S, C (existing) | S |
 
 ## 7. Settings and wording
@@ -405,9 +407,24 @@ Setup (in the throwaway user): copy A to `~/Applications/Super Cage.app`, open i
 6. **45 s confirmation**: B must pass verification, so it cannot be a damaged copy (removing a file breaks the signature and stops the chain at verify, before the helper). Two variants:
    - **B-silent**: a throwaway build of B whose window never sends `workbenchReady` (one line removed in a throwaway branch), signed like B and published as the newest test release → after 45 s of awake time the helper asks B to quit, restores A **without an alert and in the background**, `last-result.json` says failed for the attempt, B is recorded as failed and never retried.
    - **suspended**: with the normal B, `kill -STOP` the relaunched Super Cage within 45 s (from a terminal of the same user, by the PID of the new process) → after 45 + 10 s the helper records "新版本未确认就绪…原应用备份已保留" and exits without restoring; `kill -CONT` it afterwards. This checks the branch where the new version does not quit.
-7. **Click takes over**: while a silent download runs, click 升级 → the same download continues as a click (confirmation shown, window activated after install).
+7. **Click takes over**: not reachable from the UI. During a silent download or verification the button is busy and disabled and the page sends nothing (`app-updates.jsx`), so the takeover in `Updates.swift` is never asked for; the silent handoff is refused for user activity and the person clicks afterwards. Check only that: touching the mouse during a silent download leads to `user_active` and a normal click works afterwards.
 
 Duration: with the production thresholds the run needs B to be 24 h old before step 4, an hour of hold before each silent decision, and step 3 alone spans more than 24 h (requests at +0, +1 h, +6 h, +24 h). The release source override named in the prerequisite does not exist yet either.
+
+**Before the gate may be lifted for macOS** (second review, `findings-round2.md` section 4). Steps 1–6 above still apply, with the missing release-source override, test thresholds and test release. In addition, each of these is unverified until shown on a real Mac:
+
+1. **Display-held check**: with the parser fix for names with parentheses in place (done in this pass), test a video in Safari and in Chrome, Zoom, Teams, FaceTime and Meet calls, Keynote presenting and screen sharing, including processes whose names contain parentheses.
+2. **Display asleep while the system is awake** (default about 10 min), **and screen locked**: `pmset -g systemstate` must still list `Graphics`; otherwise every idle Mac reads as a dark wake and silent never fires.
+3. **A Mac without a lid** (mini, Studio, iMac): the root power domain must be read and the missing clamshell key read as "no lid" (the parser handles this shape; unverified on real hardware).
+4. **A default-configured MacBook**: whether the tick ever fires (the hold counts awake time only, so a laptop that sleeps when idle may never accumulate the hour), and whether the Mac sleeps mid-restore after the helper exits (N5).
+5. **Background relaunch**: time to `workbenchReady` with the window behind others, screen locked, display asleep, account locked, and on the first launch after an update; repeated runs, all well under 45 s of awake time. Check: no activation, no Dock bounce, no keychain, TCC or automatic-unlock prompt, no alert, and a full-screen app stays in front.
+6. **Sleep injected at each helper stage** (`pmset sleepnow` from another account, or closing the lid): during the old app's exit, the replace, the 45 s wait and the recovery. A result file is always written, and there is no false rollback.
+7. **Recovery failure in the background**: how the person is told (the notification added for N4, and the note at the next launch).
+8. **Killed processes**: `kill -9` the CLI after "stopped", and the helper after COMMIT; the environment comes back, or stays stopped with a clear note. Never a wrong resume.
+9. **The retry bound with real clocks.**
+10. **The click end-to-end run of the release condition below**, repeated with silent on.
+
+**Release condition (applies with the gate closed).** Before the first release that contains this code is published, run one real click update on a Mac, from a build of this code (`2eb801c` or later) to a newer signed build, with the environment running, terminals open and a network pause set. Check: the confirmation appears, the environment stops, `COMMIT` carries the attempt, the new version opens in front, `last-result.json` names the attempt, the environment comes back, and the attempt is recorded as ok. Reason: every click now goes through the new path (confirmation, `prepareEnvironment`, the NDJSON parsing, `COMMIT <attempt>` and the changed helper), and the helper is copied from the installed app, so that release's helper performs the next update; if it is broken, every user of that release is left with manual DMG updates (safe, but real).
 
 Pass = every step as described. Then write `darwin` into `verifiedPlatforms` in a reviewed commit.
 
@@ -475,7 +492,7 @@ Findings from `review3-update/findings.md` (reviewed at 3e0da87), fixed on this 
 `cage agent` goes through the default-deny registry in `internal/workbench/agent_access.go` (landed from `agent-transport-allowlist`): `/api/app-update/` (policy, the confirmation list) and `/api/desktop-local/` (blockers, handoff) are window only; the native `appUpdate` action is open to agents only for `status` and `check`. The macOS bridge cannot tell a user gesture from a script message (a `WKScriptMessage` carries only the frame and the world), so the server-side refusal is the guard.
 
 ### 15.3 Host conditions (darwin, silent only)
-Read after the idle hold in the tick and again in the handoff decision, with a 4 s bound: `pmset -g systemstate` (no Graphics capability = dark wake), `pmset -g batt` (on battery below `MinBattery` = 50 %), `pmset -g assertions` (PreventUserIdleDisplaySleep or NoDisplaySleepAssertion held by another process, powerd excluded = display held), `ioreg -r -n IOPMrootDomain -d 1 -k AppleClamshellState` (closed and `AppleClamshellCausesSleep` not No = lid closed). Any read or parse failure is `host_unknown`: not now. Camera and microphone are not read: the only cheap signal (coreaudiod's assertions) does not tell a call from playback.
+Read after the idle hold in the tick and again in the handoff decision, with a 4 s bound: `pmset -g systemstate` (no Graphics capability = dark wake), `pmset -g batt` (on battery below `MinBattery` = 50 %), `pmset -g assertions` (PreventUserIdleDisplaySleep or NoDisplaySleepAssertion held by another process, powerd excluded = display held; the owner's name may contain parentheses, and a `pid` line of any other shape is unknown), `ioreg -r -n IOPMrootDomain -d 1`, the whole root power domain (`AppleClamshellState` Yes and `AppleClamshellCausesSleep` not No = lid closed; no clamshell key = no lid, never closed; no root domain = unknown). Any read or parse failure is `host_unknown`: not now. Camera and microphone are not read: the only cheap signal (coreaudiod's assertions) does not tell a call from playback.
 
 ### 15.4 Attempts and retries
 `attempts.json` keeps decided attempts (by attempt id, `Finish`/`Undo`) and request entries (`Request`/`Report`: requested, download, verify, prepare, changed) apart, 20 of each. A request is charged when the tick writes `silent-request.json`; the shell reports a pre-decision failure in `updates/silent-outcome.json` {request, version, release, stage, code, message}, which the tick consumes. `RetrySchedule` = 1 h, 6 h, 24 h after the first, second and third request; after a fourth, the release (its key: tag, publish time and every asset's name, size, digest, update time) is not requested again until it changes. Verification failures are never retried. An unreadable `attempts.json` is kept aside as `attempts.unreadable-<UTC>.json` and silent mode waits for one successful update (`LostHistory`).
@@ -498,3 +515,20 @@ Guest blocker ids are made by the host (position and a digest of a plain, length
 
 ### 15.9 Cost
 Manual mode: the tick allocates nothing (benchmark 14.9 ns, 0 allocs); the window polls the status only while silent mode is on or a chain runs. Silent mode adds four short host reads per tick, and only after the 60 min hold has been met. After an update the new version polls one file once a second for at most 3 min.
+
+### 15.10 Second review (`findings-round2.md`): what changed
+
+Verdict there: safe to merge with silent mode gated off. Closed on this branch, each with a test that failed first (`internal/workbench/app_update_review_test.go`, `desktop/UpdatesTests.swift`, `ui/src/app-update-state.test.mjs`):
+
+- **N1** The assertion parser reads owner names with parentheses ("Code Helper (Renderer)"): the name ends at the first `): [0x` followed by the rest of the line's shape (the first, not the last, because the assertion's own name, which any app chooses, comes later on the line). Any `pid` line it cannot read makes the reading unknown: not now.
+- **N2** The root power domain is read whole (`ioreg -r -n IOPMrootDomain -d 1`, about 4 KB, 20 ms here); `-k AppleClamshellState` printed nothing on a Mac without that key. No clamshell key = no lid. An empty read, or one without the root domain's class line, stays unknown. The lidless shape is unverified on real hardware.
+- **N3** The macOS shell acts on a silent request file only after `cage app-update silent-available` says yes (the workbench's own rule, gate included); on anything else it removes the file. The workbench refuses a silent handoff before the seal and the snapshot while silent is unavailable (no guest read). Still reachable with the gate closed: the shell's folder watch (no polling), one `cage app-update silent-available` run per request file that appears under a silent `policy.json`, the removal of that file, and the tick's early return with its waiting reason. Not reachable: a silent download, verification, helper preparation, host commands, an install.
+- **N4** A recovery that fails with nobody watching (unattended attempt) posts a notification through `osascript` (`display notification`, title and text passed as arguments, never as script; the helper is a bare executable, so `UNUserNotificationCenter` is not available to it). The same text is in the result file, which the app shows at its next launch, also when notifications are not permitted.
+- **N6** While silent is unavailable, a stored "silent" is shown and treated as manual: 手动更新 is checked, the silent option is disabled with the reason beside it, no minute polling, and one line says the stored choice applies again once silent is available. The stored value is not changed.
+- **N7** `GET /api/app-update` stays open to agents without the chain's terminals; the window reads them from `GET /api/app-update/terminals` (window only). The trusted-view cookie does not separate the two: the agent transport carries it.
+- **N9** The helper's result is written to `updates/last-result.json` or, when that fails, to `<profile>/app-update-result.json`; the app and the workbench read the newer of the two. When neither can be written the helper logs it and exits with status 3.
+
+Documented behaviour, unchanged:
+
+- **N5** Nothing keeps the Mac awake after the helper exits while the new version restores the environment (the helper's power assertion ends with it). If the Mac sleeps then, the restore waits for the wake (not verified on a real Mac).
+- **N8** Records that cannot be proved (retired, or held until they are) leave the environment stopped, with the note in 设置 → 关于 and on the button. For silent mode this means an unattended stop without a restore whenever something cannot be proved. That is fail-safe by design: never resume on a guess.

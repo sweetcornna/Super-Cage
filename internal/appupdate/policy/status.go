@@ -22,15 +22,14 @@ type Pending struct {
 
 // ChainView is the chain as the UI shows it.
 type ChainView struct {
-	Step       Step       `json:"step"`
-	From       string     `json:"from"`
-	To         string     `json:"to"`
-	Trigger    Trigger    `json:"trigger"`
-	FailedStep Step       `json:"failed_step,omitempty"`
-	Error      string     `json:"error,omitempty"`
-	Next       string     `json:"next,omitempty"`
-	NotesURL   string     `json:"notes_url,omitempty"`
-	Terminals  []Terminal `json:"terminals,omitempty"`
+	Step       Step    `json:"step"`
+	From       string  `json:"from"`
+	To         string  `json:"to"`
+	Trigger    Trigger `json:"trigger"`
+	FailedStep Step    `json:"failed_step,omitempty"`
+	Error      string  `json:"error,omitempty"`
+	Next       string  `json:"next,omitempty"`
+	NotesURL   string  `json:"notes_url,omitempty"`
 	// Note explains a step that waits for the person, such as unlocking.
 	Note string `json:"note,omitempty"`
 }
@@ -74,8 +73,15 @@ func View(c *Chain) *ChainView {
 	if c.Step == StepFailed {
 		v.Next = NextAction(c.FailedStep)
 	}
-	if c.Step == StepDone {
-		v.Terminals = c.Environment.Terminals
-	}
 	return v
+}
+
+// ChainTerminals is what was open before the update, once it is done: for the
+// window only (titles, workspaces and conversation ids stay out of the status,
+// which agents may read).
+func ChainTerminals(c *Chain) []Terminal {
+	if c == nil || !c.Known() || c.Step != StepDone {
+		return nil
+	}
+	return c.Environment.Terminals
 }

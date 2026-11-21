@@ -82,6 +82,7 @@ function AppUpdateSettings() {
         <span>
           <strong>{option.label}{saving === option.value && <LoaderCircle size={13} className="spin" aria-hidden="true" />}</strong>
           <small>{option.description}</small>
+          {option.reason && <small className="about-update-reason" data-reason={option.value}>{option.reason}</small>}
         </span>
       </label>)}
     </div>

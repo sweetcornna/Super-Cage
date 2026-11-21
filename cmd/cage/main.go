@@ -324,6 +324,12 @@ func run() int {
 		}
 		return relay(path, args[1])
 	}
+	if args[0] == "app-update" && len(args) == 2 && args[1] == "silent-available" {
+		// The native shell's question before it acts on a silent request.
+		reason := workbench.SilentUpdateUnavailable()
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"available": reason == "", "reason": reason})
+		return 0
+	}
 	if args[0] == "app-update" {
 		return appupdate.Run(path, args[1:], os.Stdout)
 	}

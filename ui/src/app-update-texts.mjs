@@ -2,7 +2,7 @@
 // Inputs are GET /api/app-update (internal/appupdate/policy/status.go) and
 // GET /api/app-update/interruptions (internal/workbench/app_update.go). Only
 // lazy chunks (the confirmation, the settings page) load this module.
-import { formatWhen, readStatusFailure } from "./app-update-state.mjs";
+import { effectiveMode, formatWhen, readStatusFailure } from "./app-update-state.mjs";
 
 /**
  * The confirmation shown after the click, before anything stops.
@@ -89,11 +89,13 @@ export function appUpdateSettings({ status = null, error = null, timeZone } = {}
     const options = modeOptions.map((option) => ({ ...option, disabled: true, reason: failure?.message || "" }));
     return { mode: "manual", options, editable: false, rows: [{ key: "unavailable", text: failure?.message || "正在读取升级设置…" }] };
   }
-  const silent = status.mode === "silent";
+  const silent = effectiveMode(status) === "silent";
+  // Where silent mode is unavailable its option cannot be chosen and says
+  // why; a stored "silent" is shown as manual and kept for later.
   const options = modeOptions.map((option) => ({
     ...option,
-    disabled: option.value === "silent" && !status.silent_available && !silent,
-    reason: option.value === "silent" && !status.silent_available ? status.silent_unavailable_reason || "" : "",
+    disabled: option.value === "silent" && !status.silent_available,
+    reason: option.value === "silent" && !status.silent_available ? status.silent_unavailable_reason || "此安装方式不支持静默更新" : "",
   }));
   const rows = [];
   if (status.mode_error) rows.push({ key: "mode_error", text: status.mode_error });
@@ -103,7 +105,7 @@ export function appUpdateSettings({ status = null, error = null, timeZone } = {}
       ? "只在没有运行中的任务、终端命令、下载、手机或远程连接，电脑 30 分钟无人操作、没有通话或视频让屏幕常亮、接着电源或电量不低于一半时升级；失败会恢复原版本，并且不会自动重试同一版本。"
       : "不会自动更新。Super Cage 只会检查是否有新版本，不会自行下载或安装。",
   });
-  if (!status.silent_available) rows.push({ key: "unavailable", text: status.silent_unavailable_reason || "此安装方式不支持静默更新" });
+  if (status.mode === "silent" && !silent) rows.push({ key: "stored", text: "已保存的“空闲时自动静默更新”暂不生效，按手动更新处理；在此平台可用后会恢复。" });
   if (silent && status.pending) {
     const waiting = status.waiting;
     const text = !status.pending.installable

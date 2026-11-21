@@ -201,6 +201,21 @@ enum CageUpdateDecision {
     static func dropsPrepared(version held: String, for requested: String) -> Bool {
         held != requested
     }
+    /// "cage app-update silent-available" answers with one JSON line,
+    /// {"available":…,"reason":…}: the workbench's own rule and real-machine
+    /// gate. Only a clear yes counts; an older cage, an error or noise is no.
+    static func silentAvailable(_ output: Data?) -> Bool {
+        guard let output, output.count < 4096 else { return false }
+        for line in String(decoding: output, as: UTF8.self).split(separator: "\n").reversed() {
+            if let value = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] { return value["available"] as? Bool == true }
+        }
+        return false
+    }
+    /// A notice for a failed update nobody watched. osascript reads the title
+    /// and the text from its arguments, never from the script.
+    static func notificationArguments(title: String, message: String) -> [String] {
+        ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv)", "-e", "end run", title, String(message.prefix(300))]
+    }
 }
 
 /// A deadline on the uptime clock, which stops while the Mac sleeps: a wait
@@ -273,6 +288,32 @@ enum CageUpdateFiles {
     static func write(_ data: Data, to url: URL) throws {
         try data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+    /// The installer's result goes to updates/last-result.json or, when that
+    /// cannot be written, once more to app-update-result.json beside the
+    /// updates folder. The app and the workbench read the newer of the two.
+    /// Returns where it was written; nil when nowhere (logged).
+    static func writeResult(_ data: Data, primary: URL, write: (Data, URL) throws -> Void = CageUpdateFiles.write) -> URL? {
+        for url in [primary, resultFallback(for: primary)] {
+            do { try write(data, url); return url }
+            catch { NSLog("Super Cage update result not written to %@: %@", url.path, error.localizedDescription) }
+        }
+        return nil
+    }
+    static func resultFallback(for primary: URL) -> URL {
+        primary.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("app-update-result.json")
+    }
+    /// The newer of the two result files, as the workbench reads them.
+    static func readResult(primary: URL) -> Data? {
+        var newest: (date: Date, data: Data)?
+        for url in [primary, resultFallback(for: primary)] {
+            // attributesOfItem, not URL resource values: those are cached.
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular, (attributes[.size] as? Int ?? 0) < 16384,
+                  let date = attributes[.modificationDate] as? Date, let data = try? Data(contentsOf: url) else { continue }
+            if newest == nil || date > newest!.date { newest = (date, data) }
+        }
+        return newest?.data
     }
     static func digest(_ url: URL, validation: CageUpdateValidation? = nil) throws -> String {
         let file = try FileHandle(forReadingFrom: url)
@@ -434,6 +475,9 @@ final class CageAppUpdater {
     private var askWorkbench = false
     private var silentActivity: NSObjectProtocol?
     private var silentWatch: DispatchSourceFileSystemObject?
+    // The request the workbench's gate said yes to, and whether it is asked.
+    private var silentGateAnswer: String?
+    private var silentGateAsking = false
 
     init(bundleURL: URL, onChange: @escaping ([String: Any]) -> Void, quit: @escaping () -> Void, reconnect: @escaping () -> Void) {
         self.bundleURL = bundleURL.resolvingSymlinksInPath()
@@ -441,7 +485,7 @@ final class CageAppUpdater {
         root = CageProfile.configURL().deletingLastPathComponent().appendingPathComponent("updates", isDirectory: true)
         let version = Bundle(url: bundleURL)?.object(forInfoDictionaryKey: "CageVersion") as? String ?? "开发版本"
         state = ["phase": "idle", "currentVersion": version, "message": ""]
-        if let data = try? Data(contentsOf: root.appendingPathComponent("last-result.json")), data.count < 16384,
+        if let data = CageUpdateFiles.readResult(primary: root.appendingPathComponent("last-result.json")),
            let result = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             state["message"] = result["message"] as? String ?? ""
             if result["success"] as? Bool == false { state["phase"] = "failed"; state["retryable"] = true }
@@ -787,6 +831,24 @@ final class CageAppUpdater {
               let current = state["currentVersion"] as? String,
               let request = CageUpdateDecision.silentRequest(try? Data(contentsOf: root.appendingPathComponent("silent-request.json")), current: current),
               request.id != silentRequest else { return }
+        // The workbench's own rule decides whether silent mode exists on this
+        // installation (the real-machine gate among others). Until it says
+        // yes, a request file, left over or forged, starts nothing: no
+        // download, no verification, no helper. It is removed instead.
+        guard silentGateAnswer == request.id else {
+            guard !silentGateAsking else { return }
+            silentGateAsking = true
+            let control = bundleURL.appendingPathComponent("Contents/Resources/cage").path
+            DispatchQueue.global(qos: .utility).async {
+                let answer = try? CageUpdateFiles.run(control, ["app-update", "silent-available"], timeout: 10)
+                DispatchQueue.main.async {
+                    self.silentGateAsking = false
+                    if CageUpdateDecision.silentAvailable(answer) { self.silentGateAnswer = request.id; self.silentRequestChanged() }
+                    else { try? FileManager.default.removeItem(at: self.root.appendingPathComponent("silent-request.json")) }
+                }
+            }
+            return
+        }
         // A verified package of another version is not what was asked for.
         if let held = prepared, CageUpdateDecision.dropsPrepared(version: held.version, for: request.version) {
             try? FileManager.default.removeItem(at: held.directory)
@@ -802,7 +864,7 @@ final class CageAppUpdater {
     private func recordAbandoned(_ message: String, version: String, attempt: String) {
         var result: [String: Any] = ["success": false, "message": message, "version": version]
         if !attempt.isEmpty { result["attempt"] = attempt }
-        if let data = try? JSONSerialization.data(withJSONObject: result) { try? CageUpdateFiles.write(data, to: root.appendingPathComponent("last-result.json")) }
+        if let data = try? JSONSerialization.data(withJSONObject: result) { _ = CageUpdateFiles.writeResult(data, primary: root.appendingPathComponent("last-result.json")) }
     }
     /// The earlier stop-and-handoff path, for a page without the confirmation.
     private func prepareLegacy(stop: Bool) {

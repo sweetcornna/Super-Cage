@@ -65,6 +65,18 @@ try {
   assert.ok(await section.getByRole("radio", { name: /空闲时自动静默更新/ }).isDisabled());
   await page.keyboard.press("Escape");
 
+  // A stored "silent" where silent is unavailable is shown as manual and
+  // kept; the page says so in one line.
+  workbench.status = { ...workbench.status, mode: "silent", silent_available: false, silent_unavailable_reason: "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级" };
+  await page.getByRole("navigation", { name: "设置分组" }).getByRole("button", { name: "通用", exact: true }).click().catch(() => {});
+  await page.getByRole("navigation", { name: "设置分组" }).getByRole("button", { name: "关于", exact: true }).click();
+  await section.getByText(/已保存的“空闲时自动静默更新”暂不生效/).waitFor();
+  assert.ok(await section.getByRole("radio", { name: /手动更新（默认）/ }).isChecked());
+  assert.ok(await section.getByRole("radio", { name: /空闲时自动静默更新/ }).isDisabled());
+  await section.getByText("静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级").first().waitFor();
+  await page.screenshot({ path: `${output}/about-stored-silent-gated.png` });
+  await page.keyboard.press("Escape");
+
   // Silent mode waiting for idle: the button says what it waits for.
   workbench.status = { ...workbench.status, mode: "silent", silent_available: true, pending: { version: "0.1.16", installable: true }, waiting: { code: "busy", message: "等待空闲：终端里还有命令在运行（make）", blockers: [terminal] } };
   await publish({ ...update });

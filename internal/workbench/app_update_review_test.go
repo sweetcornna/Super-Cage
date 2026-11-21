@@ -7,9 +7,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -594,5 +596,190 @@ func TestReviewStopIsToldFirstAndAbandonmentNamesTheAttempt(t *testing.T) {
 		if result.Status != c.status || result.Attempt != reply.Attempt || (c.status == "abandoned") != (err != nil) {
 			t.Errorf("%s: %+v %v", c.name, result, err)
 		}
+	}
+}
+
+// Round 2 of the third review (findings-round2.md).
+
+// N1: a display assertion is never skipped because of its owner's name. The
+// first line is the reviewer's; the second was printed by pmset on this Mac
+// for a process named "Code Helper (Renderer)" holding the assertion.
+func TestReviewHostParserReadsParenthesisedNamesAndRefusesUnknownLines(t *testing.T) {
+	full := []byte("Current System Capabilities are: CPU Graphics Audio Network \n")
+	ac := []byte("Now drawing from 'AC Power'\n")
+	open := []byte("+-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000384, registered, matched, active, busy 0 (4353 ms), retain 262>\n    {\n      \"AppleClamshellCausesSleep\" = No\n      \"AppleClamshellState\" = No\n    }\n")
+	for _, line := range []string{
+		"   pid 812(Code Helper (Renderer)): [0x0003510f00018659] 00:00:13 PreventUserIdleDisplaySleep named: \"x\"  ",
+		"   pid 20168(Code Helper (Renderer)): [0x000355ac00058ae5] 00:00:00 PreventUserIdleDisplaySleep named: \"paren test\"",
+	} {
+		assertions := []byte("Assertion status system-wide:\nListed by owning process:\n" + line + "\nKernel Assertions: 0x100=MAGICWAKE\n")
+		state, err := parseHostConditions(full, ac, assertions, open, nil)
+		if err != nil || strings.Join(state.DisplayHeld, ",") != "Code Helper (Renderer)" {
+			t.Errorf("display held by a name with parentheses: %+v %v", state, err)
+		}
+	}
+	// A line that names a process but has another shape is unknown: not now.
+	for _, line := range []string{
+		"   pid 900(zoom.us) [0x0002dab900108923] 00:10:00 PreventUserIdleDisplaySleep named: \"zoom call\"",
+		"   pid 900(zoom.us): PreventUserIdleDisplaySleep",
+		"   pid 900(zoom.us: [0x0002dab900108923] 00:10:00 PreventUserIdleDisplaySleep named: \"zoom call\"",
+	} {
+		assertions := []byte("Listed by owning process:\n" + line + "\n")
+		if state, err := parseHostConditions(full, ac, assertions, open, nil); err == nil {
+			t.Errorf("unknown assertion line read as %+v: %q", state, line)
+		}
+	}
+}
+
+// N2: the whole root power domain is read; without a clamshell key the Mac
+// has no lid (never "lid closed"), and an empty or foreign read is unknown.
+// The lidless shape is this Mac's real output with the clamshell keys
+// removed: unverified on real hardware.
+func TestReviewHostRootDomainWithoutLid(t *testing.T) {
+	full := []byte("Current System Capabilities are: CPU Graphics Audio Network \n")
+	ac := []byte("Now drawing from 'AC Power'\n")
+	quiet := []byte("Listed by owning process:\n   pid 21066(caffeinate): [0x1] 00:03:11 PreventUserIdleSystemSleep named: \"x\"\n")
+	head := "+-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000384, registered, matched, active, busy 0 (4353 ms), retain 262>\n    {\n      \"Wake Reason\" = \"rtc\"\n"
+	lidless := []byte(head + "      \"SleepTimer\" = 0\n    }\n")
+	closed := []byte(head + "      \"AppleClamshellCausesSleep\" = Yes\n      \"AppleClamshellState\" = Yes\n    }\n")
+	if state, err := parseHostConditions(full, ac, quiet, lidless, nil); err != nil || state.LidClosed {
+		t.Fatalf("a Mac without a lid: %+v %v", state, err)
+	}
+	if state, err := parseHostConditions(full, ac, quiet, closed, nil); err != nil || !state.LidClosed {
+		t.Fatalf("closed lid: %+v %v", state, err)
+	}
+	for _, domain := range [][]byte{nil, []byte("\n"), []byte("IOPMrootDomain\n"), []byte("+-o IOPMrootDomainX  <class IOPMrootDomainX>\n")} {
+		if state, err := parseHostConditions(full, ac, quiet, domain, nil); err == nil {
+			t.Errorf("root domain read %q accepted: %+v", domain, state)
+		}
+	}
+}
+
+// N3 (workbench side): with silent unavailable, a silent handoff is refused
+// before the seal and the snapshot: no guest read, and the request file goes.
+func TestReviewSilentHandoffRefusedFirstWhileUnavailable(t *testing.T) {
+	f := newUpdateFixture(t)
+	f.setMode(t, policy.Silent)
+	f.s.appUpdate.unavailable = func() string { return policy.NotVerifiedReason }
+	path := filepath.Join(policy.Dir(f.s.updateProfile()), silentRequestFile)
+	if err := policy.WriteRecord(f.s.updateProfile(), silentRequestFile, map[string]any{"id": "0123456789abcdef", "version": "0.1.16"}); err != nil {
+		t.Fatal(err)
+	}
+	code, reply := f.handoff(t, "silent", "0123456789abcdef")
+	if code != http.StatusConflict || reply.Status != "blocked" || reply.Message != policy.NotVerifiedReason {
+		t.Fatalf("silent handoff while unavailable: %d %+v", code, reply)
+	}
+	if n := f.guests.Load(); n != 0 {
+		t.Fatalf("the guest was read %d times for a silent request while silent is unavailable", n)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("the request file survived the refusal")
+	}
+}
+
+// N7: the status stays open to agents, without the terminals of the last
+// update; the window reads them from a window-only route.
+func TestReviewAgentStatusCarriesNoTerminalDetail(t *testing.T) {
+	s := agentTestController(t)
+	now := time.Now().UTC()
+	c := &policy.Chain{Schema: policy.ChainSchema, ID: "0123456789abcdef", From: "0.1.15", To: "0.1.16", Trigger: policy.Click, Step: policy.StepDone,
+		Environment: policy.Environment{Running: true, Terminals: []policy.Terminal{{Title: "secret-title", Kind: "claude", Workspace: "/work/secret-workspace", Conversation: "conversation-1234"}}},
+		StartedAt:   now, UpdatedAt: now}
+	if err := policy.SaveChain(s.updateProfile(), c); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := AgentRequest(context.Background(), s.configPath, AgentTarget{}, "GET", "/api/app-update", nil, "", "")
+	if err != nil || reply.HTTPStatus != http.StatusOK || !strings.Contains(string(reply.Data), "0.1.16") {
+		t.Fatalf("agent status: %+v %v", reply, err)
+	}
+	for _, secret := range []string{"secret-title", "secret-workspace", "conversation-1234", "terminals"} {
+		if strings.Contains(string(reply.Data), secret) {
+			t.Errorf("agent status carries %q: %s", secret, reply.Data)
+		}
+	}
+	_, err = AgentRequest(context.Background(), s.configPath, AgentTarget{}, "GET", "/api/app-update/terminals", nil, "", "")
+	var agentErr *AgentError
+	if !errors.As(err, &agentErr) || agentErr.Code != "native_transport_required" {
+		t.Fatalf("agent read the terminals: %v", err)
+	}
+	w := trustedUpdateRequest(s, "GET", "/api/app-update/terminals", "")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "conversation-1234") {
+		t.Fatalf("window terminals: %d %s", w.Code, w.Body.String())
+	}
+}
+
+// N9: a result the helper could only write to its second place is read.
+func TestReviewInstallerResultFallbackIsRead(t *testing.T) {
+	profile := t.TempDir()
+	if err := os.MkdirAll(policy.Dir(profile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	primary := filepath.Join(policy.Dir(profile), "last-result.json")
+	fallback := filepath.Join(profile, "app-update-result.json")
+	write := func(path, attempt string, at time.Time) {
+		t.Helper()
+		data := []byte(`{"success":true,"version":"0.1.16","attempt":"` + attempt + `"}`)
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, at, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now()
+	write(fallback, "0123456789abcdef", now)
+	if r := readInstallerResult(profile); r == nil || r.Attempt != "0123456789abcdef" {
+		t.Fatalf("fallback alone: %+v", r)
+	}
+	write(primary, "aaaaaaaaaaaaaaaa", now.Add(-time.Hour))
+	if r := readInstallerResult(profile); r == nil || r.Attempt != "0123456789abcdef" {
+		t.Fatalf("newer fallback: %+v", r)
+	}
+	write(primary, "bbbbbbbbbbbbbbbb", now.Add(time.Minute))
+	if r := readInstallerResult(profile); r == nil || r.Attempt != "bbbbbbbbbbbbbbbb" {
+		t.Fatalf("newer primary: %+v", r)
+	}
+}
+
+// N2: the root domain is asked for whole. A fake ioreg that answers "-k" with
+// nothing, as on a Mac without a lid, must still give an answer.
+func TestReviewHostReadsTheWholeRootDomain(t *testing.T) {
+	lidless := []byte("+-o IOPMrootDomain  <class IOPMrootDomain, id 0x100000384, registered, matched, active, busy 0 (4353 ms), retain 262>\n    {\n      \"SleepTimer\" = 0\n    }\n")
+	outputs := map[string][]byte{
+		"/usr/bin/pmset -g systemstate": []byte("Current System Capabilities are: CPU Graphics Audio Network \n"),
+		"/usr/bin/pmset -g batt":        []byte("Now drawing from 'AC Power'\n"),
+		"/usr/bin/pmset -g assertions":  []byte("Listed by owning process:\n"),
+	}
+	run := func(command []string) ([]byte, error) {
+		line := strings.Join(command, " ")
+		if command[0] == "/usr/sbin/ioreg" {
+			if slices.Contains(command, "-k") {
+				return nil, nil
+			}
+			return lidless, nil
+		}
+		if out, ok := outputs[line]; ok {
+			return out, nil
+		}
+		return nil, errors.New("unexpected command " + line)
+	}
+	if state, err := readHostConditions(run, nil); err != nil || state.LidClosed {
+		t.Fatalf("lidless Mac: %+v %v", state, err)
+	}
+	failing := func(command []string) ([]byte, error) {
+		if command[0] == "/usr/sbin/ioreg" {
+			return nil, errors.New("ioreg failed")
+		}
+		return run(command)
+	}
+	if state, err := readHostConditions(failing, nil); err == nil {
+		t.Fatalf("failed domain read accepted: %+v", state)
+	}
+}
+
+// N3: the shell's question gets the workbench's answer: closed here.
+func TestReviewShellAsksTheSameGate(t *testing.T) {
+	if reason := SilentUpdateUnavailable(); reason == "" {
+		t.Fatal("silent offered to the shell before a real-machine run")
 	}
 }

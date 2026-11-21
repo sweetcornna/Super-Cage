@@ -32,6 +32,7 @@
 .settings-page .settings-content .about-updates h4 { grid-column: 1; grid-row: 1 / span 6; margin: 0; color: var(--ink); font-size: var(--fs-body); font-weight: 500; }
 .settings-page .settings-content .about-update-modes { margin: 0; }
 .about-update-modes .choice strong { display: inline-flex; align-items: center; gap: 6px; }
+.about-update-modes .about-update-reason { margin-top: 4px; }
 .about-update-modes .choice[data-disabled] { cursor: default; }
 .about-update-modes .choice[data-disabled] strong { color: var(--muted); }
 .about-updates > p, .settings-page .settings-content .about-updates > p { margin: 10px 0 0; }

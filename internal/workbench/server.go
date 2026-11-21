@@ -422,6 +422,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/app-update", s.appUpdateStatus)
 	mux.HandleFunc("POST /api/app-update/policy", s.appUpdatePolicy)
 	mux.HandleFunc("GET /api/app-update/interruptions", s.appUpdateInterruptions)
+	mux.HandleFunc("GET /api/app-update/terminals", s.appUpdateTerminals)
 	mux.HandleFunc("POST /api/projects/open", s.openProject)
 	mux.HandleFunc("POST /api/projects/save", s.saveProject)
 	mux.HandleFunc("POST /api/projects/remove", s.removeProject)

@@ -149,9 +149,10 @@ test("settings rows for every mode", () => {
 
   const unsupported = appUpdateSettings({ status: { ...manualStatus, silent_available: false, silent_unavailable_reason: "Linux 版本由系统安装包管理，不支持静默更新" } });
   assert.equal(unsupported.options[1].disabled, true);
-  assert.equal(unsupported.rows.find((r) => r.key === "unavailable").text, "Linux 版本由系统安装包管理，不支持静默更新");
+  assert.equal(unsupported.options[1].reason, "Linux 版本由系统安装包管理，不支持静默更新");
+  assert.deepEqual(unsupported.rows.map((r) => r.key), ["explain"]);
   const gated = appUpdateSettings({ status: { ...manualStatus, silent_available: false, silent_unavailable_reason: "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级" } });
-  assert.equal(gated.rows.find((r) => r.key === "unavailable").text, "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级");
+  assert.equal(gated.options[1].reason, "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级");
   assert.equal(gated.options.find((o) => o.value === "silent").disabled, true);
 
   const corrupt = appUpdateSettings({ status: { ...manualStatus, mode_error: "更新方式记录无效，已按手动更新处理" } });
@@ -190,12 +191,29 @@ test("the status is polled only while it can change by itself", () => {
   assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "attention" } }), false);
   assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "restoring" } }), true);
   assert.equal(statusNeedsWatch({ mode: "manual", chain: { step: "installing" } }), true);
-  assert.equal(statusNeedsWatch({ mode: "silent", chain: null }), true);
+  assert.equal(statusNeedsWatch({ mode: "silent", silent_available: true, chain: null }), true);
+  assert.equal(statusNeedsWatch({ mode: "silent", silent_available: false, chain: null }), false);
 });
 
 test("the host's power and display state reads as waiting, not as a fault", () => {
   for (const code of ["dark_wake", "lid_closed", "low_battery", "display_held", "host_unknown", "retry_later"]) {
-    const view = appUpdateButton({ shell: { phase: "available", latestVersion: "0.1.16" }, status: { mode: "silent", pending: { version: "0.1.16", installable: true }, waiting: { code, message: "等一下" } } });
+    const view = appUpdateButton({ shell: { phase: "available", latestVersion: "0.1.16" }, status: { mode: "silent", silent_available: true, pending: { version: "0.1.16", installable: true }, waiting: { code, message: "等一下" } } });
     assert.equal(view.tone, "waiting", code);
   }
+});
+
+test("a stored silent mode is shown and treated as manual while silent is unavailable", () => {
+  const reason = "静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级";
+  const stored = silentStatus({ silent_available: false, silent_unavailable_reason: reason, waiting: { code: "silent_unavailable", message: reason } });
+  const view = appUpdateSettings({ status: stored });
+  assert.equal(view.mode, "manual");
+  const silent = view.options.find((o) => o.value === "silent");
+  assert.equal(silent.disabled, true);
+  assert.equal(silent.reason, reason);
+  assert.deepEqual(view.rows.map((r) => r.key), ["explain", "stored"]);
+  assert.equal(view.rows[0].text, "不会自动更新。Super Cage 只会检查是否有新版本，不会自行下载或安装。");
+  assert.equal(view.rows[1].text, "已保存的“空闲时自动静默更新”暂不生效，按手动更新处理；在此平台可用后会恢复。");
+  assert.equal(statusNeedsWatch(stored), false);
+  const button = appUpdateButton({ shell: { phase: "available", latestVersion: "0.1.16" }, status: stored });
+  assert.doesNotMatch(button.hint, /静默|空闲/);
 });

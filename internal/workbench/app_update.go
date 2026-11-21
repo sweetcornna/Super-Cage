@@ -330,15 +330,20 @@ func (s *Server) silentUnavailable() string {
 	// Computed once per process: the answer only changes with a new
 	// installation, and on Windows the check creates a file.
 	a := &s.appUpdate
-	a.unavailableOnce.Do(func() {
-		executable, err := os.Executable()
-		if err != nil {
-			a.unavailableReason = "无法确认安装位置，不支持静默更新"
-			return
-		}
-		a.unavailableReason = silentUnavailableReason(runtime.GOOS, version.Version, executable, dirWritable)
-	})
+	a.unavailableOnce.Do(func() { a.unavailableReason = SilentUpdateUnavailable() })
 	return a.unavailableReason
+}
+
+// SilentUpdateUnavailable is why silent mode is not offered by this
+// installation, gate included; empty when it is. The native shell asks the
+// same question ("cage app-update silent-available") before it acts on a
+// silent request file.
+func SilentUpdateUnavailable() string {
+	executable, err := os.Executable()
+	if err != nil {
+		return "无法确认安装位置，不支持静默更新"
+	}
+	return silentUnavailableReason(runtime.GOOS, version.Version, executable, dirWritable)
 }
 
 // silentVerified is the real-machine gate (policy.SilentVerified); tests
@@ -429,6 +434,22 @@ func (s *Server) appUpdateStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jsonReply(w, s.appUpdateStatusView())
+}
+
+// appUpdateTerminals lists the terminals that were open before the last
+// update, once it is done. It sits under /api/app-update/, which agents
+// cannot reach (agent_access.go), unlike the status.
+func (s *Server) appUpdateTerminals(w http.ResponseWriter, r *http.Request) {
+	if !s.hasTrustedView(r) {
+		http.Error(w, "请在本机 Super Cage 窗口中查看", http.StatusForbidden)
+		return
+	}
+	c, _ := policy.LoadChain(s.updateProfile())
+	terminals := policy.ChainTerminals(c)
+	if terminals == nil {
+		terminals = []policy.Terminal{}
+	}
+	jsonReply(w, map[string]any{"terminals": terminals})
 }
 
 // appUpdatePolicy is the only writer of the update mode. A phone, a remote
@@ -553,6 +574,16 @@ func (s *Server) appUpdateHandoff(w http.ResponseWriter, r *http.Request) {
 	if trigger != policy.Click && trigger != policy.SilentUpdate {
 		appUpdateRefuse(w, policy.NotEligible, "升级请求无效", nil)
 		return
+	}
+	// While silent mode is unavailable here (the real-machine gate among
+	// others) an unattended request is refused before the seal and the
+	// snapshot: no guest is read for it, and a leftover request file goes.
+	if trigger == policy.SilentUpdate {
+		if reason := s.silentUnavailable(); reason != "" {
+			_ = os.Remove(filepath.Join(policy.Dir(s.updateProfile()), silentRequestFile))
+			appUpdateRefuse(w, policy.SilentUnavailable, reason, nil)
+			return
+		}
 	}
 	if !s.op.TryLock() {
 		appUpdateRefuse(w, policy.Busy, "另一个操作仍在进行，请稍后再升级", nil)
@@ -980,10 +1011,24 @@ func (s *Server) resumeAppUpdateChain() {
 	s.runAppUpdateChain(c)
 }
 
-// readInstallerResult reads the installer's last-result.json; nil when
-// there is none or it cannot be read.
+// readInstallerResult reads the installer's result: updates/last-result.json,
+// or app-update-result.json in the profile when the helper could write only
+// there; the newer of the two. nil when there is none or it cannot be read.
 func readInstallerResult(profile string) *policy.InstallerResult {
-	path := filepath.Join(policy.Dir(profile), "last-result.json")
+	var newest *policy.InstallerResult
+	for _, path := range []string{filepath.Join(policy.Dir(profile), "last-result.json"), filepath.Join(profile, installerResultFallback)} {
+		if result := readInstallerResultFile(path); result != nil && (newest == nil || result.WrittenAt.After(newest.WrittenAt)) {
+			newest = result
+		}
+	}
+	return newest
+}
+
+// installerResultFallback is where the installer helper writes its result
+// when updates/last-result.json cannot be written (desktop/UpdateInstaller.swift).
+const installerResultFallback = "app-update-result.json"
+
+func readInstallerResultFile(path string) *policy.InstallerResult {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() > 16384 {
 		return nil

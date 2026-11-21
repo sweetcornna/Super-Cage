@@ -18,18 +18,44 @@ import (
 var (
 	powerSourcePattern = regexp.MustCompile(`Now drawing from '([^']+)'`)
 	batteryPattern     = regexp.MustCompile(`(\d{1,3})%`)
-	assertionPattern   = regexp.MustCompile(`^\s*pid (\d+)\(([^)]*)\): \[0x[0-9a-fA-F]+\] \S+ (\S+) named: `)
-	clamshellPattern   = regexp.MustCompile(`"AppleClamshellState" = (Yes|No)`)
-	clamshellSleeps    = regexp.MustCompile(`"AppleClamshellCausesSleep" = (Yes|No)`)
+	// The owner's name may contain parentheses ("Code Helper (Renderer)"):
+	// it ends at the first "): [0x" followed by the rest of the shape. The
+	// first, not the last: the assertion's own name, which any app chooses,
+	// comes later on the same line.
+	assertionPattern  = regexp.MustCompile(`^\s*pid (\d+)\((.+?)\): \[0x[0-9a-fA-F]+\] \S+ (\S+) named: `)
+	rootDomainPattern = regexp.MustCompile(`(?m)^\+-o IOPMrootDomain\s+<class IOPMrootDomain[,>]`)
+	clamshellPattern  = regexp.MustCompile(`"AppleClamshellState" = (Yes|No)`)
+	clamshellSleeps   = regexp.MustCompile(`"AppleClamshellCausesSleep" = (Yes|No)`)
 )
 
 // displayAssertions are the assertion types that keep the display awake.
 var displayAssertions = map[string]bool{"PreventUserIdleDisplaySleep": true, "NoDisplaySleepAssertion": true}
 
-// parseHostConditions reads the output of "pmset -g systemstate",
-// "pmset -g batt", "pmset -g assertions" and
-// "ioreg -r -n IOPMrootDomain -d 1 -k AppleClamshellState". own lists this
-// process tree's ids, whose assertions do not count.
+// hostConditionCommands are read in this order, with fixed arguments and no
+// shell. The root power domain is read whole: with "-k AppleClamshellState"
+// ioreg prints nothing on a Mac without a lid.
+var hostConditionCommands = [4][]string{
+	{"/usr/bin/pmset", "-g", "systemstate"},
+	{"/usr/bin/pmset", "-g", "batt"},
+	{"/usr/bin/pmset", "-g", "assertions"},
+	{"/usr/sbin/ioreg", "-r", "-n", "IOPMrootDomain", "-d", "1"},
+}
+
+// readHostConditions runs hostConditionCommands through run and parses them.
+func readHostConditions(run func(command []string) ([]byte, error), own map[int]bool) (*policy.HostState, error) {
+	var outputs [len(hostConditionCommands)][]byte
+	for i, command := range hostConditionCommands {
+		out, err := run(command)
+		if err != nil {
+			return nil, err
+		}
+		outputs[i] = out
+	}
+	return parseHostConditions(outputs[0], outputs[1], outputs[2], outputs[3], own)
+}
+
+// parseHostConditions reads the output of hostConditionCommands. own lists
+// this process tree's ids, whose assertions do not count.
 func parseHostConditions(systemState, battery, assertions, clamshell []byte, own map[int]bool) (*policy.HostState, error) {
 	var state policy.HostState
 	capabilities := ""
@@ -63,7 +89,15 @@ func parseHostConditions(systemState, battery, assertions, clamshell []byte, own
 	held := map[string]bool{}
 	for _, line := range strings.Split(string(assertions), "\n") {
 		match := assertionPattern.FindStringSubmatch(line)
-		if match == nil || !displayAssertions[match[3]] {
+		if match == nil {
+			// A process's assertion in a shape this parser does not know
+			// could be a display held: unknown, so not now.
+			if strings.HasPrefix(strings.TrimSpace(line), "pid ") {
+				return nil, errors.New("unknown assertion line")
+			}
+			continue
+		}
+		if !displayAssertions[match[3]] {
 			continue
 		}
 		pid, _ := strconv.Atoi(match[1])
@@ -77,12 +111,12 @@ func parseHostConditions(systemState, battery, assertions, clamshell []byte, own
 	}
 	sort.Strings(state.DisplayHeld)
 
-	if !bytes.Contains(clamshell, []byte("IOPMrootDomain")) {
+	if !rootDomainPattern.Match(clamshell) {
 		return nil, errors.New("power domain missing")
 	}
-	// A Mac without a lid has no clamshell state. A closed lid with an
-	// external display (clamshell mode) does not cause sleep: that counts as
-	// open.
+	// A Mac without a lid has no clamshell state: never "lid closed". A
+	// closed lid with an external display (clamshell mode) does not cause
+	// sleep: that counts as open.
 	if lid := clamshellPattern.FindSubmatch(clamshell); lid != nil && string(lid[1]) == "Yes" {
 		sleeps := clamshellSleeps.FindSubmatch(clamshell)
 		state.LidClosed = sleeps == nil || string(sleeps[1]) != "No"

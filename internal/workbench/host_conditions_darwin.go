@@ -17,18 +17,7 @@ import (
 func hostConditions(ctx context.Context) (*policy.HostState, error) {
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
 	defer cancel()
-	var outputs [4][]byte
-	for i, command := range [][]string{
-		{"/usr/bin/pmset", "-g", "systemstate"},
-		{"/usr/bin/pmset", "-g", "batt"},
-		{"/usr/bin/pmset", "-g", "assertions"},
-		{"/usr/sbin/ioreg", "-r", "-n", "IOPMrootDomain", "-d", "1", "-k", "AppleClamshellState"},
-	} {
-		out, err := exec.CommandContext(ctx, command[0], command[1:]...).Output()
-		if err != nil {
-			return nil, err
-		}
-		outputs[i] = out
-	}
-	return parseHostConditions(outputs[0], outputs[1], outputs[2], outputs[3], map[int]bool{os.Getpid(): true})
+	return readHostConditions(func(command []string) ([]byte, error) {
+		return exec.CommandContext(ctx, command[0], command[1:]...).Output()
+	}, map[int]bool{os.Getpid(): true})
 }

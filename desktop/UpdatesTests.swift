@@ -269,6 +269,37 @@ enum UpdatesTests {
         for phase in ["checking", "downloading", "downloaded", "verifying"] { try expect(CageUpdateDecision.clickTakesOver(phase: phase, installerStarted: false), "click takes over \(phase)") }
         try expect(!CageUpdateDecision.clickTakesOver(phase: "installing", installerStarted: false) && !CageUpdateDecision.clickTakesOver(phase: "verifying", installerStarted: true), "click waits once installing")
         try expect(CageUpdateDecision.dropsPrepared(version: "0.1.16", for: "0.1.17") && !CageUpdateDecision.dropsPrepared(version: "0.1.17", for: "0.1.17"), "a package of another version is dropped for a silent request")
+        // N3: the watcher acts only on the workbench's yes; anything else,
+        // an older cage or noise, is no.
+        try expect(CageUpdateDecision.silentAvailable(Data(#"{"available":true,"reason":""}"#.utf8)), "silent available")
+        try expect(CageUpdateDecision.silentAvailable(Data(("diagnostics line\n" + #"{"available":true,"reason":""}"# + "\n").utf8)), "answer after noise")
+        for refused in [#"{"available":false,"reason":"静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级"}"#, "", "unknown command: silent-available", #"{"available":"true"}"#, #"{"reason":""}"#] {
+            try expect(!CageUpdateDecision.silentAvailable(Data(refused.utf8)), "silent not available: \(refused)")
+        }
+        try expect(!CageUpdateDecision.silentAvailable(nil), "no answer is no")
+        // N4: the text of a background notice is data, never script.
+        let notice = CageUpdateDecision.notificationArguments(title: "Super Cage 更新未完成", message: #""; do shell script "x" --"# + String(repeating: "长", count: 400))
+        try expect(notice.count == 8 && notice[6] == "Super Cage 更新未完成" && notice[7].hasPrefix(#""; do shell script"#) && notice[7].count == 300 && !notice[..<6].joined().contains("do shell script"), "notification arguments")
+        // N9: the result goes to a second place when the first refuses, and
+        // the newer of the two is read.
+        let results = FileManager.default.temporaryDirectory.appendingPathComponent("cage-results-\(UUID().uuidString)", isDirectory: true)
+        let updatesFolder = results.appendingPathComponent("updates", isDirectory: true)
+        try FileManager.default.createDirectory(at: updatesFolder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: results) }
+        let primary = updatesFolder.appendingPathComponent("last-result.json")
+        try expect(CageUpdateFiles.resultFallback(for: primary) == results.appendingPathComponent("app-update-result.json"), "fallback beside the updates folder")
+        let refusing: (Data, URL) throws -> Void = { data, url in
+            if url == primary { throw CageUpdateError("disk") }
+            try CageUpdateFiles.write(data, to: url)
+        }
+        try expect(CageUpdateFiles.writeResult(Data(#"{"attempt":"b"}"#.utf8), primary: primary, write: refusing) == CageUpdateFiles.resultFallback(for: primary), "written to the fallback")
+        try expect(CageUpdateFiles.writeResult(Data("{}".utf8), primary: primary, write: { _, _ in throw CageUpdateError("disk") }) == nil, "nowhere")
+        try CageUpdateFiles.write(Data(#"{"attempt":"a"}"#.utf8), to: primary)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-60)], ofItemAtPath: primary.path)
+        try expect(CageUpdateFiles.readResult(primary: primary) == Data(#"{"attempt":"b"}"#.utf8), "newer fallback read")
+        try CageUpdateFiles.write(Data(#"{"attempt":"c"}"#.utf8), to: primary)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: primary.path)
+        try expect(CageUpdateFiles.readResult(primary: primary) == Data(#"{"attempt":"c"}"#.utf8), "newer primary read")
         // Deadlines count awake time only: a sleep does not use them up.
         var uptime: TimeInterval = 100
         let awake = CageUptimeDeadline(after: 45) { uptime }
@@ -283,7 +314,11 @@ enum UpdatesTests {
         let silentResources = silentBundle.appendingPathComponent("Contents/Resources")
         try CageUpdateFiles.privateDirectory(silentResources)
         let silentCount = root.appendingPathComponent("silent-invocations")
-        let silentScript = "#!/bin/sh\nprintf '%s;' \"$*\" >> '\(silentCount.path)'\nprintf '%s\\n' '{\"phase\":\"failed\",\"message\":\"offline\",\"retryable\":true,\"code\":\"transient\"}'\nexit 1\n"
+        // The fake cage answers the gate question from a file the test sets,
+        // and counts every other call.
+        let silentGate = root.appendingPathComponent("silent-gate")
+        try Data(#"{"available":false,"reason":"静默更新还没有在此平台的真机上验证，暂不可用；可以点击升级"}"#.utf8).write(to: silentGate)
+        let silentScript = "#!/bin/sh\nif [ \"$1 $2\" = 'app-update silent-available' ]; then cat '\(silentGate.path)'; exit 0; fi\nprintf '%s;' \"$*\" >> '\(silentCount.path)'\nprintf '%s\\n' '{\"phase\":\"failed\",\"message\":\"offline\",\"retryable\":true,\"code\":\"transient\"}'\nexit 1\n"
         try Data(silentScript.utf8).write(to: silentResources.appendingPathComponent("cage"))
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: silentResources.appendingPathComponent("cage").path)
         let silentInfo: [String: Any] = ["CFBundleIdentifier": cageUpdateBundleID + ".silent-test", "CFBundlePackageType": "APPL", "CageVersion": "0.1.15"]
@@ -301,7 +336,17 @@ enum UpdatesTests {
         silent.watchSilentRequests()
         _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
         try expect(!FileManager.default.fileExists(atPath: silentCount.path), "manual policy started an unattended download")
+        // N3: with the gate closed, a request under a silent policy starts
+        // nothing and is removed.
         try CageUpdateFiles.write(Data(#"{"mode":"silent"}"#.utf8), to: updates.appendingPathComponent("policy.json"))
+        let gateDeadline = Date().addingTimeInterval(5)
+        while FileManager.default.fileExists(atPath: updates.appendingPathComponent("silent-request.json").path) && Date() < gateDeadline { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
+        _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.2))
+        try expect(!FileManager.default.fileExists(atPath: updates.appendingPathComponent("silent-request.json").path) && !FileManager.default.fileExists(atPath: silentCount.path) && silentState["phase"] as? String != "downloading",
+                   "a request with the gate closed started something or survived")
+        // With the workbench's yes, the same request starts the download.
+        try Data(#"{"available":true,"reason":""}"#.utf8).write(to: silentGate)
+        try CageUpdateFiles.write(request("0123456789abcdef", "0.1.16", ISO8601DateFormatter().string(from: Date()), release), to: updates.appendingPathComponent("silent-request.json"))
         let silentDeadline = Date().addingTimeInterval(5)
         while silentState["phase"] as? String != "failed" && Date() < silentDeadline { _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.01)) }
         _ = RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.1))
