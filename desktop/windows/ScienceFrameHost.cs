@@ -10,7 +10,8 @@ namespace Cage.Windows;
 // handler it always had and refuses to arm.
 //
 // The overrides are WebView-wide (the workbench page sees the guest's time
-// zone and language while the frame shows); the pane disarms when the frame
+// zone and language, and its own file inputs open no chooser, while the
+// frame shows); the pane disarms when the frame
 // goes away, and this host disarms on a main-frame navigation or a renderer
 // failure.
 internal sealed class ScienceFrameHost

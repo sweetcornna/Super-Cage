@@ -95,12 +95,16 @@ internal static partial class ScienceFrame
 
     public static Call Resume => Make("Runtime.runIfWaitingForDebugger", new JsonObject());
 
-    // The page (and a frame in its own process): time zone, locale, user agent,
-    // then pause every new worker and frame until it has them too.
+    // The page (and a frame in its own process): time zone, locale, user agent;
+    // no host file chooser (the page sees a cancel; interception needs the
+    // Page domain); then pause every new worker and frame until it has them
+    // too.
     public static Call[] Arm(JsonObject identity) => [
         Make("Emulation.setTimezoneOverride", new JsonObject { ["timezoneId"] = Text(identity, "timezone") }),
         Make("Emulation.setLocaleOverride", new JsonObject { ["locale"] = Text(identity, "locale") }),
         UserAgent(identity),
+        Make("Page.enable", new JsonObject()),
+        Make("Page.setInterceptFileChooserDialog", new JsonObject { ["enabled"] = true, ["cancel"] = true }),
         AutoAttach(true),
     ];
 
@@ -124,6 +128,8 @@ internal static partial class ScienceFrame
         Make("Emulation.setTimezoneOverride", new JsonObject { ["timezoneId"] = "" }),
         Make("Emulation.setLocaleOverride", new JsonObject()),
         Make("Emulation.setUserAgentOverride", new JsonObject { ["userAgent"] = "" }),
+        Make("Page.setInterceptFileChooserDialog", new JsonObject { ["enabled"] = false }),
+        Make("Page.disable", new JsonObject()),
     ];
 
     // The locale override is per renderer process: a second target in the

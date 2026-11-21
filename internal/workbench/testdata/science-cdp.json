@@ -36,6 +36,17 @@
       }
     },
     {
+      "method": "Page.enable",
+      "params": {}
+    },
+    {
+      "method": "Page.setInterceptFileChooserDialog",
+      "params": {
+        "cancel": true,
+        "enabled": true
+      }
+    },
+    {
       "method": "Target.setAutoAttach",
       "params": {
         "autoAttach": true,
@@ -113,6 +124,16 @@
       "params": {
         "userAgent": ""
       }
+    },
+    {
+      "method": "Page.setInterceptFileChooserDialog",
+      "params": {
+        "enabled": false
+      }
+    },
+    {
+      "method": "Page.disable",
+      "params": {}
     }
   ],
   "worker": [

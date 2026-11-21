@@ -252,6 +252,10 @@ func scienceOverrideCalls(identity scienceIdentity) []cdpCall {
 		{"Emulation.setTimezoneOverride", map[string]any{"timezoneId": identity.Timezone}},
 		{"Emulation.setLocaleOverride", map[string]any{"locale": identity.Locale}},
 		{"Emulation.setUserAgentOverride", scienceUserAgentParams(identity)},
+		// No host file reaches the page (R5): the chooser never opens and
+		// the page sees a cancel. Interception needs the Page domain.
+		{"Page.enable", map[string]any{}},
+		{"Page.setInterceptFileChooserDialog", map[string]any{"enabled": true, "cancel": true}},
 		{"Target.setAutoAttach", map[string]any{"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true}},
 	}
 }
@@ -280,6 +284,8 @@ func scienceDisarmCalls() []cdpCall {
 		{"Emulation.setTimezoneOverride", map[string]any{"timezoneId": ""}},
 		{"Emulation.setLocaleOverride", map[string]any{}},
 		{"Emulation.setUserAgentOverride", map[string]any{"userAgent": ""}},
+		{"Page.setInterceptFileChooserDialog", map[string]any{"enabled": false}},
+		{"Page.disable", map[string]any{}},
 	}
 }
 
