@@ -350,12 +350,15 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	s.mu.Lock()
-	closing := s.closing
+	closing, sealed := s.closing, s.appUpdateSealed
 	componentUpdate := s.guestUpdateRequired
 	command := claudeTerminalCommand(s.preferences)
 	s.mu.Unlock()
 	if closing {
 		return nil, errTerminalsClosed
+	}
+	if sealed {
+		return nil, errAppUpdateSealed
 	}
 	if sharedRecord != nil && (!sharedCLILauncher(command) || sharedRecord.Launcher != "" && sharedRecord.Launcher != command) {
 		return nil, errors.New("主机启动命令与原会话不一致，请恢复原配置后重试")

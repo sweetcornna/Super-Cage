@@ -41,6 +41,10 @@ type controlFile struct {
 	Token      string             `json:"token"`
 	PID        int                `json:"pid"`
 	Controller ControllerIdentity `json:"controller"`
+	// Auth and ProofKey let a client check who answers before it sends
+	// Token (control_proof.go). A record without them predates that check.
+	Auth     int    `json:"auth,omitempty"`
+	ProofKey string `json:"proof_key,omitempty"`
 	// Set only while a Claude Science front runs (science_host.go); read by
 	// the native shell and the desktop entry, never served to a page.
 	SciencePort     int              `json:"science_port,omitempty"`
@@ -104,8 +108,11 @@ type Server struct {
 	nativeDownloadSlots                              chan struct{}
 	nativeDownloadRevision                           uint64
 	windowsNetwork                                   *windowsHostNetwork
+	appUpdate                                        appUpdateState
+	appUpdateSealed                                  bool
 	op                                               sync.Mutex
 	profile, configPath, exe, origin, token, session string
+	proofKey                                         string
 	mu                                               sync.Mutex
 	preferences                                      Preferences
 	jobs                                             jobManager
@@ -207,6 +214,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	}
 	defer listener.Close()
 	s := &Server{profile: profile, configPath: configPath, exe: exe, clientOnly: clientOnly, origin: fmt.Sprintf("http://localhost:%d", port), token: randomToken(), session: randomToken(), preferences: Preferences{Keyboard: defaultKeyboard(), AutoTimezone: true, AutoLanguage: true, BalancedDisplay: true, ProjectFileCache: true}}
+	s.proofKey = randomToken()
 	s.desktopEntry = fullConfigPath != ""
 	s.appUpdateConfigPath = configPath
 	if fullConfigPath != "" {
@@ -293,6 +301,9 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			_ = s.closeProxyGate("网络保持暂停，请手动恢复后再联网")
 		}
 		s.startMonitors()
+		// Continue an update chain the previous version began, or record a
+		// rollback and bring the environment back.
+		go s.resumeAppUpdateChain()
 		if err = s.restorePhone(); err != nil {
 			s.phones.status = "无法恢复手机配对，请移除旧记录后重试"
 		}
@@ -302,7 +313,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	if err != nil {
 		return err
 	}
-	if err = writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity}); err != nil {
+	if err = writePrivate(filepath.Join(profile, "control.json"), s.controlRecord(port)); err != nil {
 		return err
 	}
 	s.controlPublished = true
@@ -381,6 +392,8 @@ func (s *Server) handler() http.Handler {
 	} else {
 		mux.HandleFunc("POST /api/handoff", s.handoff)
 		mux.HandleFunc("POST /api/desktop-local/trusted-login", s.localTrustedLogin)
+		mux.HandleFunc("POST /api/desktop-local/app-update-handoff", s.appUpdateHandoff)
+		mux.HandleFunc("POST /api/desktop-local/app-update-blockers", s.appUpdateBlockers)
 		mux.HandleFunc("POST /api/desktop-local/{action}", s.desktopLocalControl)
 	}
 	if s.desktopEntry {
@@ -421,6 +434,10 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("GET /api/client/about", s.appAbout)
 	mux.HandleFunc("POST /api/client/about", s.appAbout)
+	mux.HandleFunc("GET /api/app-update", s.appUpdateStatus)
+	mux.HandleFunc("POST /api/app-update/policy", s.appUpdatePolicy)
+	mux.HandleFunc("GET /api/app-update/interruptions", s.appUpdateInterruptions)
+	mux.HandleFunc("GET /api/app-update/terminals", s.appUpdateTerminals)
 	mux.HandleFunc("POST /api/projects/open", s.openProject)
 	mux.HandleFunc("POST /api/projects/save", s.saveProject)
 	mux.HandleFunc("POST /api/projects/remove", s.removeProject)
@@ -550,6 +567,12 @@ func (s *Server) handler() http.Handler {
 				return
 			}
 		}
+		// The identity proof answers before any credential is sent, on this
+		// listener only, in every mode (control_proof.go).
+		if r.URL.Path == controllerProofPath {
+			s.controllerProof(w, r)
+			return
+		}
 		// Launcher-token routes are handled only by this listener, never by a
 		// selected workload. They perform their own authentication.
 		if strings.HasPrefix(r.URL.Path, "/api/desktop-local/") || r.URL.Path == "/api/desktop-owner" {
@@ -633,6 +656,11 @@ func (s *Server) handler() http.Handler {
 		bootstrapRoute := r.URL.Path == "/api/session" || r.URL.Path == "/api/launch" || r.URL.Path == "/api/handoff" || r.URL.Path == "/api/remote/manifest"
 		trustedDesktop := s.hasTrustedView(r)
 		phoneRoom := s.pairedPhoneRoom(r)
+		if phoneRoom != nil {
+			s.notePhoneRequest()
+		} else if !trustedDesktop && !bootstrapRoute && strings.HasPrefix(r.URL.Path, "/api/") {
+			s.noteRemoteRequest()
+		}
 		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil && !s.hasRemoteWindowsView(r) {
 			http.Error(w, "请通过本机 Super Cage 窗口或当前配对手机打开客机", http.StatusForbidden)
 			return
@@ -991,15 +1019,30 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.stopEnvironmentOwners()
+	jobID := s.jobs.cancelRunning()
+	if jobID != "" {
+		_ = cage.RequestJobStop(s.profile, jobID)
+	}
+	s.pauseNetworkForStop()
+	kind := "stop"
+	if logout {
+		kind = "logout"
+	}
+	s.launchJob(w, kind, s.stopEnvironment, reply)
+}
+
+// stopEnvironmentOwners asks the cage processes that own the environment to stop.
+func (s *Server) stopEnvironmentOwners() {
 	for _, name := range []string{cage.InstanceName(s.profile, s.environmentDir()), "base-building"} {
 		if owner := cage.InstanceJobID(filepath.Join(s.profile, "state"), name); owner != "" {
 			_ = cage.RequestJobStop(s.profile, owner)
 		}
 	}
-	jobID := s.jobs.cancelRunning()
-	if jobID != "" {
-		_ = cage.RequestJobStop(s.profile, jobID)
-	}
+}
+
+// pauseNetworkForStop closes the network before a stop job runs.
+func (s *Server) pauseNetworkForStop() {
 	if s.macosGuest != nil {
 		// Stopping the guest revokes its current grant. A user's saved pause
 		// remains distinct so the next Mac start can honor the same intent.
@@ -1007,11 +1050,6 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 	} else if s.windowsGuest == nil {
 		_ = s.pauseNetworkNow("正在停止环境")
 	}
-	kind := "stop"
-	if logout {
-		kind = "logout"
-	}
-	s.launchJob(w, kind, s.stopEnvironment, reply)
 }
 
 func (s *Server) cookieName() string { u, _ := url.Parse(s.origin); return cookieName + "_" + u.Port() }

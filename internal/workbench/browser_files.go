@@ -269,6 +269,7 @@ func (s *Server) startNativeDownload(item browserDownloadInfo) (*nativeDownload,
 	s.nativeDownloadRevision++
 	slots := s.nativeDownloadSlots
 	s.mu.Unlock()
+	s.noteAppUpdateActivity()
 	go func() {
 		defer finish()
 		defer func() {
