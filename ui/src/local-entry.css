@@ -1,14 +1,14 @@
 /*
  * 本机终端 (design 6.2): one environment's local SSH entry, a settings
- * sub-page. Scoped under .local-terminal inside .settings-subpage, so the
+ * sub-page. Scoped under .local-entry inside .settings-subpage, so the
  * shared settings-pages.css rules (group titles, hairlines) apply.
  */
 
-.settings-subpage .local-terminal .empty-state {
+.settings-subpage .local-entry .empty-state {
   padding-top: 24px;
 }
 
-.settings-subpage .local-terminal-state {
+.settings-subpage .local-entry-state {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -18,27 +18,27 @@
   font-size: var(--fs-body);
   line-height: 1.5;
 }
-.settings-subpage .local-terminal-state > button {
+.settings-subpage .local-entry-state > button {
   margin-left: auto;
 }
-.settings-subpage .local-terminal-dot {
+.settings-subpage .local-entry-dot {
   flex: none;
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: var(--faint);
 }
-.settings-subpage .local-terminal-state[data-tone="ok"] .local-terminal-dot {
+.settings-subpage .local-entry-state[data-tone="ok"] .local-entry-dot {
   background: var(--green);
 }
-.settings-subpage .local-terminal-state[data-tone="busy"] .local-terminal-dot {
+.settings-subpage .local-entry-state[data-tone="busy"] .local-entry-dot {
   background: var(--clay);
 }
-.settings-subpage .local-terminal-state[data-tone="warn"] .local-terminal-dot {
+.settings-subpage .local-entry-state[data-tone="warn"] .local-entry-dot {
   background: var(--amber);
 }
 
-.settings-subpage .local-terminal-error {
+.settings-subpage .local-entry-error {
   margin: 0 0 20px;
   padding: 10px 14px;
   border: 1px solid color-mix(in srgb, var(--error) 28%, var(--line));
@@ -51,26 +51,26 @@
 }
 
 /* Commands: monospace on top, caption below, copy at the end; hairlines. */
-.settings-subpage .local-terminal-commands {
+.settings-subpage .local-entry-commands {
   margin: 0;
   padding: 0;
   border-top: 1px solid var(--line);
   list-style: none;
 }
-.settings-subpage .local-terminal-commands li {
+.settings-subpage .local-entry-commands li {
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 12px 0;
   border-bottom: 1px solid var(--line);
 }
-.settings-subpage .local-terminal-commands li > div {
+.settings-subpage .local-entry-commands li > div {
   display: grid;
   flex: 1;
   gap: 4px;
   min-width: 0;
 }
-.settings-subpage .local-terminal-commands code {
+.settings-subpage .local-entry-commands code {
   justify-self: start;
   max-width: 100%;
   padding: 3px 8px;
@@ -82,12 +82,12 @@
   overflow-wrap: anywhere;
   user-select: all;
 }
-.settings-subpage .local-terminal-commands span {
+.settings-subpage .local-entry-commands span {
   color: var(--muted);
   font-size: var(--fs-secondary);
   line-height: 1.5;
 }
-.settings-subpage .local-terminal :is(.local-terminal-copy, .local-terminal-icon) {
+.settings-subpage .local-entry :is(.local-entry-copy, .local-entry-icon) {
   display: inline-grid;
   flex: none;
   place-items: center;
@@ -98,12 +98,12 @@
   padding: 0;
   color: var(--muted);
 }
-.settings-subpage .local-terminal-copy:hover:not(:disabled),
-.settings-subpage .local-terminal-icon:hover:not(:disabled) {
+.settings-subpage .local-entry-copy:hover:not(:disabled),
+.settings-subpage .local-entry-icon:hover:not(:disabled) {
   color: var(--ink);
 }
 
-.settings-subpage .local-terminal-include {
+.settings-subpage .local-entry-include {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -113,18 +113,18 @@
   font-size: var(--fs-secondary);
   line-height: 1.6;
 }
-.settings-subpage .local-terminal-include[data-state="error"] {
+.settings-subpage .local-entry-include[data-state="error"] {
   color: var(--error);
 }
 
 /* Devices. */
-.settings-subpage .local-terminal-devices ul {
+.settings-subpage .local-entry-devices ul {
   margin: 16px 0 0;
   padding: 0;
   border-top: 1px solid var(--line);
   list-style: none;
 }
-.settings-subpage .local-terminal-device {
+.settings-subpage .local-entry-device {
   display: flex;
   align-items: center;
   gap: 16px;
@@ -132,23 +132,23 @@
   padding: 10px 0;
   border-bottom: 1px solid var(--line);
 }
-.settings-subpage .local-terminal-device[data-revoked] .local-terminal-device-title strong {
+.settings-subpage .local-entry-device[data-revoked] .local-entry-device-title strong {
   color: var(--muted);
 }
-.settings-subpage .local-terminal-device-main {
+.settings-subpage .local-entry-device-main {
   display: grid;
   flex: 1;
   gap: 2px;
   min-width: 0;
 }
-.settings-subpage .local-terminal-device-title {
+.settings-subpage .local-entry-device-title {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   min-height: 32px;
 }
-.settings-subpage .local-terminal-device-title strong {
+.settings-subpage .local-entry-device-title strong {
   min-width: 0;
   overflow: hidden;
   color: var(--ink);
@@ -156,7 +156,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.settings-subpage .local-terminal-pill {
+.settings-subpage .local-entry-pill {
   flex: none;
   padding: 1px 8px;
   border-radius: 999px;
@@ -165,11 +165,11 @@
   font-size: var(--fs-caption);
   line-height: 1.6;
 }
-.settings-subpage .local-terminal-pill[data-tone="muted"] {
+.settings-subpage .local-entry-pill[data-tone="muted"] {
   background: var(--soft);
   color: var(--muted);
 }
-.settings-subpage .local-terminal-device-meta {
+.settings-subpage .local-entry-device-meta {
   display: flex;
   flex-wrap: wrap;
   gap: 0 12px;
@@ -177,32 +177,32 @@
   font-size: var(--fs-secondary);
   font-variant-numeric: tabular-nums;
 }
-.settings-subpage .local-terminal-device-meta > span:first-child {
+.settings-subpage .local-entry-device-meta > span:first-child {
   font-family: var(--font-mono);
   font-size: var(--fs-caption);
 }
-.settings-subpage .local-terminal-revoke {
+.settings-subpage .local-entry-revoke {
   flex: none;
   color: var(--error);
 }
-.settings-subpage .local-terminal-rename {
+.settings-subpage .local-entry-rename {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
-.settings-subpage .local-terminal-rename input {
+.settings-subpage .local-entry-rename input {
   flex: 1;
   min-width: 12em;
 }
 
-.settings-subpage .local-terminal-footer {
+.settings-subpage .local-entry-footer {
   margin: 40px 0 0;
   padding: 24px 0 0;
   border-top: 1px solid var(--line);
 }
 
-.local-terminal-include-line {
+.local-entry-include-line {
   display: block;
   margin: 10px 0;
   padding: 8px 12px;

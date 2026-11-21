@@ -18,6 +18,12 @@ import (
 	"testing"
 )
 
+type entryRouteRecorder struct{ patterns []string }
+
+func (r *entryRouteRecorder) HandleFunc(pattern string, _ func(http.ResponseWriter, *http.Request)) {
+	r.patterns = append(r.patterns, pattern)
+}
+
 // entrySnapshot lists every file and directory under the roots.
 func entrySnapshot(t *testing.T, roots ...string) map[string]string {
 	t.Helper()
@@ -57,28 +63,47 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 	if err := f.call("GET", "/api/entry/include", nil, &include); err != nil || include.Present || include.Token == "" || include.Line == "" {
 		t.Fatalf("include preview while off: %+v %v", include, err)
 	}
-	device := strings.Repeat("ab", 16)
-	for _, route := range []struct {
-		method, path string
-		input        any
-	}{
-		{"POST", "/api/entry/off", map[string]any{}},
-		{"POST", "/api/entry/include", map[string]string{"token": "x"}},
-		{"POST", "/api/entry/devices/" + device + "/revoke", map[string]any{}},
-		{"POST", "/api/entry/devices/" + device + "/rename", map[string]string{"name": "x"}},
-	} {
-		var refusal *entryRefusal
-		if err := f.call(route.method, route.path, route.input, nil); !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code {
-			t.Fatalf("%s %s while off: %v", route.method, route.path, err)
-		}
+	// Walk every route the entry registers, so a route added later is
+	// covered too. Only POST /api/entry/on may change anything: it is the
+	// action that turns the entry on.
+	recorder := &entryRouteRecorder{}
+	f.s.entryRoutes(recorder)
+	if len(recorder.patterns) < 9 {
+		t.Fatalf("recorded routes %v", recorder.patterns)
 	}
-	if _, _, err := entryDial(context.Background(), f.s.configPath, device); !errors.Is(err, error(nil)) {
+	device := strings.Repeat("ab", 16)
+	for _, pattern := range recorder.patterns {
+		method, path, _ := strings.Cut(pattern, " ")
+		path = strings.ReplaceAll(path, "{id}", device)
 		var refusal *entryRefusal
-		if !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code || refusal.Status != http.StatusConflict {
-			t.Fatalf("dial while off: %v", err)
+		switch pattern {
+		case "POST /api/entry/on":
+			continue
+		case "GET /api/entry", "GET /api/entry/include":
+			if err := f.call(method, path, nil, nil); err != nil {
+				t.Fatalf("%s while off: %v", pattern, err)
+			}
+		case "GET /api/entry/ssh":
+			if _, _, err := entryDial(context.Background(), f.s.configPath, device); !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code || refusal.Status != http.StatusConflict {
+				t.Fatalf("dial while off: %v", err)
+			}
+		case "POST /api/terminals/{id}/keep":
+			// A terminal action, not the entry's: no ssh terminal exists.
+			if err := f.call(method, path, map[string]any{}, nil); !errors.As(err, &refusal) || refusal.Status != http.StatusNotFound {
+				t.Fatalf("keep while off: %v", err)
+			}
+		default:
+			input := map[string]string{}
+			if strings.HasSuffix(path, "/rename") {
+				input["name"] = "x"
+			}
+			if strings.HasSuffix(path, "/include") {
+				input["token"] = "x"
+			}
+			if err := f.call(method, path, input, nil); !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code {
+				t.Fatalf("%s while off: %v", pattern, err)
+			}
 		}
-	} else {
-		t.Fatal("a dial while off was accepted")
 	}
 	var stderr bytes.Buffer
 	if code := entryProxy(context.Background(), f.s.configPath, defaultLocalVMID, f.paths, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != entryProxyFailure || !strings.HasPrefix(stderr.String(), "Super Cage：") {

@@ -7,8 +7,8 @@ import { createWorkbench } from "./workbench-fixture.mjs";
 // lazy loading, the Include dialog and both of its choices, copy, devices
 // (rename, revoke), every state line, load errors and turning it off; both
 // themes at 1440×900 and 1000×700. Run against a dev server:
-//   CAGE_UI_URL=http://127.0.0.1:5242 node scripts/local-terminal-smoke.mjs
-const output = new URL("../../output/local-terminal/", import.meta.url);
+//   CAGE_UI_URL=http://127.0.0.1:5242 node scripts/local-entry-smoke.mjs
+const output = new URL("../../output/local-entry/", import.meta.url);
 await fs.mkdir(output, { recursive: true });
 const now = Date.now();
 const ago = (minutes) => new Date(now - minutes * 60000).toISOString();
@@ -78,6 +78,8 @@ async function routeEntry(page, entry) {
 }
 
 const populated = (entry) => {
+  // Relative to now, not to the start of the run: "3 分钟前" must stay true.
+  const ago = (minutes) => new Date(Date.now() - minutes * 60000).toISOString();
   turnedOn(entry);
   entry.view.state = "in_use";
   entry.view.connections = { total: 2, shell: 1, exec: 1, sftp: 0 };
@@ -100,7 +102,7 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       return null;
     }, beforeNavigate: async (page) => {
       await page.emulateMedia({ colorScheme: scheme });
-      page.on("request", (request) => { if (/\/src\/local-terminal[.-]|\/assets\/local-terminal-/.test(new URL(request.url()).pathname)) chunks.push(request.url()); });
+      page.on("request", (request) => { if (/\/src\/local-entry[.-]|\/assets\/local-entry-/.test(new URL(request.url()).pathname)) chunks.push(request.url()); });
       await routeEntry(page, entry);
     } });
     const { page, browser, errors, context } = fixture;
@@ -167,7 +169,7 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText("工作本", { exact: true }).waitFor();
       assert.deepEqual(entry.requests.at(-1), { method: "POST", path: "/entry/devices/" + "a".repeat(32) + "/rename", body: { name: "工作本" } });
       // Revoke another device: a destructive confirm.
-      const studio = content.locator(".local-terminal-device").filter({ hasText: "林间工作室" });
+      const studio = content.locator(".local-entry-device").filter({ hasText: "林间工作室" });
       await studio.getByRole("button", { name: "撤销", exact: true }).click();
       const revoke = page.getByRole("dialog", { name: /^撤销「林间工作室/ });
       await revoke.getByText("这台电脑的所有连接会立即断开，之后需要重新开启才能连接。").waitFor();

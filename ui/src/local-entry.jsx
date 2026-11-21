@@ -14,15 +14,15 @@ import {
   shortFingerprint,
   sortedDevices,
   validDeviceName,
-} from "./local-terminal-state.mjs";
-import "./local-terminal.css";
+} from "./local-entry-state.mjs";
+import "./local-entry.css";
 
 // "本机终端" for the environment this workbench runs (design 6.2): turn the
 // local SSH entry on or off, copy the commands, list and revoke this
 // environment's devices. Loaded lazily by the settings page. It never polls:
 // it reads the state when it opens, after each action, when the window comes
 // back into view, and when the environment's readiness changes.
-export default function LocalTerminalPage({ onConfirm, environmentReady }) {
+export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const [view, setView] = useState(null);
   const [failure, setFailure] = useState(null);
   const [busy, setBusy] = useState("");
@@ -81,7 +81,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
       body: (
         <>
           {dialog.intro}
-          <code className="local-terminal-include-line">{dialog.line}</code>
+          <code className="local-entry-include-line">{dialog.line}</code>
           {dialog.after}
         </>
       ),
@@ -144,18 +144,18 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
   );
   if (failure && !failure.locked) {
     return (
-      <div className="local-terminal">
+      <div className="local-entry">
         {intro}
-        <p className="local-terminal-error" role="alert">{failure.text}</p>
+        <p className="local-entry-error" role="alert">{failure.text}</p>
       </div>
     );
   }
   if (!view || failure?.locked) {
     return (
-      <div className="local-terminal">
+      <div className="local-entry">
         {intro}
-        <p className="local-terminal-state" data-tone={line.tone} role="status">
-          <span className="local-terminal-dot" aria-hidden="true" />
+        <p className="local-entry-state" data-tone={line.tone} role="status">
+          <span className="local-entry-dot" aria-hidden="true" />
           {line.text}
         </p>
       </div>
@@ -163,7 +163,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
   }
   if (view.state === "unsupported") {
     return (
-      <div className="local-terminal">
+      <div className="local-entry">
         {intro}
         <EmptyState drawing="terminal" title="这个环境暂不支持本机终端">
           本机终端目前只支持 Linux 环境。
@@ -173,9 +173,9 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
   }
   if (!view.enabled) {
     return (
-      <div className="local-terminal">
+      <div className="local-entry">
         {intro}
-        {error && <p className="local-terminal-error" role="alert">{error}</p>}
+        {error && <p className="local-entry-error" role="alert">{error}</p>}
         <EmptyState
           drawing="terminal"
           title="在你自己的终端里使用这个环境"
@@ -196,10 +196,10 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
   const include = includeRow(view);
   const devices = sortedDevices(view.devices);
   return (
-    <div className="local-terminal">
+    <div className="local-entry">
       {intro}
-      <p className="local-terminal-state" data-tone={line.tone} role="status">
-        <span className="local-terminal-dot" aria-hidden="true" />
+      <p className="local-entry-state" data-tone={line.tone} role="status">
+        <span className="local-entry-dot" aria-hidden="true" />
         {line.text}
         {view.revoked && (
           <button type="button" className="primary" disabled={Boolean(busy)} onClick={turnOn}>
@@ -207,8 +207,8 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
           </button>
         )}
       </p>
-      {error && <p className="local-terminal-error" role="alert">{error}</p>}
-      <ul className="local-terminal-commands" aria-label="连接命令">
+      {error && <p className="local-entry-error" role="alert">{error}</p>}
+      <ul className="local-entry-commands" aria-label="连接命令">
         {rows.map((row) => (
           <li key={row.id}>
             <div>
@@ -217,7 +217,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
             </div>
             <button
               type="button"
-              className="quiet-button local-terminal-copy"
+              className="quiet-button local-entry-copy"
               aria-label={copied === row.id ? "已复制" : "复制 " + row.command}
               title={copied === row.id ? "已复制" : "复制"}
               onClick={() => copy(row)}
@@ -229,7 +229,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
       </ul>
       <span className="sr-only" aria-live="polite">{copied ? "已复制" : ""}</span>
       {include && (
-        <p className="local-terminal-include" data-state={include.state}>
+        <p className="local-entry-include" data-state={include.state}>
           {include.text}
           {include.state === "absent" && (
             <button type="button" className="quiet-button" disabled={Boolean(busy)} onClick={addInclude}>
@@ -238,7 +238,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
           )}
         </p>
       )}
-      <section className="settings-group local-terminal-devices" aria-label="设备">
+      <section className="settings-group local-entry-devices" aria-label="设备">
         <h3>设备</h3>
         <p className="field-help">每台电脑一把钥匙。撤销后，那台电脑的连接会立即断开。</p>
         <ul>
@@ -247,7 +247,7 @@ export default function LocalTerminalPage({ onConfirm, environmentReady }) {
           ))}
         </ul>
       </section>
-      <div className="local-terminal-footer">
+      <div className="local-entry-footer">
         <button type="button" disabled={Boolean(busy)} onClick={turnOff}>
           {busy === "off" && <LoaderCircle size={16} className="spin" aria-hidden="true" />}
           关闭本机终端
@@ -268,10 +268,10 @@ function DeviceRow({ device, busy, onRename, onRevoke }) {
     setEditing(false);
   };
   return (
-    <li className="local-terminal-device" data-revoked={device.revoked || undefined}>
-      <div className="local-terminal-device-main">
+    <li className="local-entry-device" data-revoked={device.revoked || undefined}>
+      <div className="local-entry-device-main">
         {editing ? (
-          <form onSubmit={save} className="local-terminal-rename">
+          <form onSubmit={save} className="local-entry-rename">
             <input
               aria-label="设备名称"
               value={name}
@@ -290,24 +290,24 @@ function DeviceRow({ device, busy, onRename, onRevoke }) {
             <button type="button" className="quiet-button" onClick={() => { setName(device.name); setEditing(false); }}>取消</button>
           </form>
         ) : (
-          <div className="local-terminal-device-title">
+          <div className="local-entry-device-title">
             <strong title={device.name}>{device.name}</strong>
-            {device.current && <span className="local-terminal-pill">这台电脑</span>}
-            {device.revoked && <span className="local-terminal-pill" data-tone="muted">已撤销</span>}
+            {device.current && <span className="local-entry-pill">这台电脑</span>}
+            {device.revoked && <span className="local-entry-pill" data-tone="muted">已撤销</span>}
             {!device.revoked && (
-              <button type="button" className="quiet-button local-terminal-icon" aria-label={"重命名 " + device.name} title="重命名" onClick={() => setEditing(true)}>
+              <button type="button" className="quiet-button local-entry-icon" aria-label={"重命名 " + device.name} title="重命名" onClick={() => setEditing(true)}>
                 <Pencil size={15} />
               </button>
             )}
           </div>
         )}
-        <span className="local-terminal-device-meta">
+        <span className="local-entry-device-meta">
           <span title={device.fingerprint}>{shortFingerprint(device.fingerprint)}</span>
           <span>{relativeTime(device.last_used)}</span>
         </span>
       </div>
       {!device.revoked && !editing && (
-        <button type="button" className="quiet-button local-terminal-revoke" disabled={Boolean(busy)} onClick={() => onRevoke(device)}>
+        <button type="button" className="quiet-button local-entry-revoke" disabled={Boolean(busy)} onClick={() => onRevoke(device)}>
           撤销
         </button>
       )}

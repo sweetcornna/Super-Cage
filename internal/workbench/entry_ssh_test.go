@@ -27,11 +27,13 @@ func TestEntryExecRunsInTheGuestWithItsLocale(t *testing.T) {
 	f.on()
 	client := f.client()
 	env := map[string]string{"LANG": "zh_CN.UTF-8", "LC_CTYPE": "zh_CN.UTF-8", "TZ": "America/New_York", "CAGE_LEAK": "1", "TERM_PROGRAM": "ghostty"}
-	out, stderr, status := entryRun(t, client, `printf '%s|%s|%s|%s|%s|%s|%s\n' "$TZ" "$LANG" "$LC_ALL" "$LC_CTYPE" "$CAGE_LEAK" "$TERM_PROGRAM" "$CAGE_WORKBENCH"`, nil, env)
+	out, stderr, status := entryRun(t, client, `printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$TZ" "$LANG" "$LC_ALL" "$LC_CTYPE" "$CAGE_LEAK" "$TERM_PROGRAM" "$CAGE_WORKBENCH" "$CAGE_LANGUAGE"`, nil, env)
 	if status != 0 {
 		t.Fatalf("status %d stderr %q", status, stderr)
 	}
-	if strings.TrimSpace(out) != "Asia/Tokyo|ja_JP.UTF-8|ja_JP.UTF-8||||1" {
+	// CAGE_LANGUAGE comes only from the guest's environment file (the
+	// private sshd's SetEnv models PAM's TZ and LANG, not it).
+	if strings.TrimSpace(out) != "Asia/Tokyo|ja_JP.UTF-8|ja_JP.UTF-8||||1|ja" {
 		t.Fatalf("environment = %q", out)
 	}
 	for _, line := range f.guest.commands() {

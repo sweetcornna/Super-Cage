@@ -12,7 +12,7 @@ import {
   shortFingerprint,
   sortedDevices,
   validDeviceName,
-} from "./local-terminal-state.mjs";
+} from "./local-entry-state.mjs";
 
 const on = {
   enabled: true,
