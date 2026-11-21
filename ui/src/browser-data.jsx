@@ -5,7 +5,6 @@ import { Modal } from "./modal";
 import { InlineSelect } from "./inline-select";
 import { EmptyState } from "./drawings";
 import { BrowserCookies } from "./browser-cookies";
-import { shortcut } from "./platform.mjs";
 import { openBrowserData, privacySectionMounted, takePendingPrivacyView } from "./browser-data-launcher";
 import { builtInNote, categories, categoryMeta, formatBytes, formatCount, groupByDay, hostOf, keptBy, keptDomain, privateCategories, ranges, relativeVisit, resultLine, siteOfURL, sorts, timeLabel } from "./browser-data-state.mjs";
 import "./browser-data.css";
@@ -472,7 +471,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
   return <div className="bd-privacy">
     <div className="bd-entry-list">
       <button className="bd-entry" onClick={() => openBrowserData({ view: "clear" })}><Eraser size={18} />
-        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><kbd>{shortcut("⌘⇧⌫").replace("+⌫", "+Delete")}</kbd><ChevronRight size={16} /></button>
+        <span><strong>清除浏览数据</strong><small>按时间清除浏览记录、Cookie、网站数据和缓存</small></span><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("sites")}><Cookie size={18} />
         <span><strong>网站数据</strong><small>查看各网站的 Cookie 和存储，逐个或批量清除</small></span><ChevronRight size={16} /></button>
       <button className="bd-entry" onClick={() => setView("history")}><History size={18} />

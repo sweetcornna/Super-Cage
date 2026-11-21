@@ -233,7 +233,7 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewPrivate}><ScanEye size={16} />新建无痕标签</button>
         {tab.incognito && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewRegular}><Globe2 size={16} />新建普通标签</button>}
         {!tab.login && tab.kind !== "browser-settings" && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => openBrowserData({ view: "site", tab, fallback: () => setCookiesOpen(true) })}><Cookie size={16} />管理 Cookie</button>}
-        {!tab.login && <button className="browser-menu-item" role="menuitem" title={shortcut("清除浏览数据 ⌘⇧⌫").replace("+⌫", "+Delete")} disabled={!ready || busy} onClick={() => openBrowserData({ view: "clear", tab })}><Trash2 size={16} />清除浏览数据…</button>}
+        {!tab.login && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => openBrowserData({ view: "clear", tab })}><Trash2 size={16} />清除浏览数据…</button>}
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => onSettings('extensions')}><Puzzle size={16} />扩展</button>
         <BrowserDownloads menu anchorRef={toolsTrigger} downloads={downloads} ready={ready && !busy} onStatus={onStatus} />
         {tab.kind === "editor" && <button className="browser-menu-item" role="menuitem" aria-label="恢复编辑器" title="单独重启编辑器"

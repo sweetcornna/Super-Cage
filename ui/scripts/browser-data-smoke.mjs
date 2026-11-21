@@ -285,6 +285,15 @@ try {
     check(`no horizontal overflow at ${width}×${height} ${scheme}`, !(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1)));
   }
   mark("matrix");
+  // The dialog's permissions link opens Chromium's page in a tab and shows it.
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await menu().click();
+  await page.getByRole("menuitem", { name: "清除浏览数据…", exact: true }).click();
+  await dialog.waitFor(); await loaded();
+  await dialog.getByRole("button", { name: "查看网站权限", exact: true }).click();
+  await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.body.innerText.includes("chrome://settings/content") || [...document.querySelectorAll("input")].some(input => input.value.includes("chrome://settings/content")), null, { timeout: 15000 });
+  check("查看网站权限 opens Chromium's page from the menu's dialog", true);
   check("no page errors", errors.length === 0);
   results.passed = true;
   await writeFile(output + "result.json", JSON.stringify(results, null, 2) + "\n");
