@@ -246,6 +246,13 @@ async function walk(mode) {
     await pane.getByRole("button", { name: "重试本机渲染", exact: true }).click();
     await frameReady();
 
+    // The audit reports (a tripwire): a note in the toolbar and one
+    // diagnostics event with the category only.
+    state.hostRender = { ...state.hostRender, audit_hit: "timezone", audit_hits: 1 };
+    await pane.getByRole("toolbar").getByText("页面发出过 1 次带有本机时区或语言的请求（已记录，未拦截）").waitFor({ timeout: 15000 });
+    await until(() => state.requests.some(request => request.path === "/diagnostics/events" && request.body?.source === "claude-science"), "the audit's diagnostics event");
+    state.hostRender = { ...state.hostRender, audit_hit: undefined, audit_hits: undefined };
+
     // 12. Stop from the toolbar asks first.
     await pane.getByRole("toolbar").getByRole("button", { name: "停止", exact: true }).click();
     await page.getByRole("dialog", { name: "停止 Claude Science？" }).getByRole("button", { name: "停止", exact: true }).click();
@@ -390,4 +397,4 @@ await elsewhere();
 await olderWindow();
 await agentRefused();
 await blockedByPolicy();
-console.log(`PASS: switch off by default (only the capability probe), restart asked without the network switches, ticket(proxy, contract)+attach+frame edge to edge, sign-in asks without a user action and moves after a click in the frame, one re-ticket then fallback (remembered), refused probe, off from both switches, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; an older window gets no switch (on: only off, with why); the agent transport cannot drive the frame; CSP refusal reloads once, comes back to the page, then asks`);
+console.log(`PASS: switch off by default (only the capability probe), restart asked without the network switches, ticket(proxy, contract)+attach+frame edge to edge, sign-in asks without a user action and moves after a click in the frame, one re-ticket then fallback (remembered), refused probe, off from both switches, audit hits noted in the toolbar and the diagnostics, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; an older window gets no switch (on: only off, with why); the agent transport cannot drive the frame; CSP refusal reloads once, comes back to the page, then asks`);

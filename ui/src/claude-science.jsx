@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Download, ExternalLink, LogIn, Play, Power, RefreshCw, RotateCcw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { getClientContext } from "./client-context.mjs";
+import { reportDiagnostic } from "./diagnostics.mjs";
 import { Drawing } from "./drawings";
 import { SafetyMessage } from "./safety-message";
 import { useWindowVisibility } from "./window-visibility";
@@ -95,6 +96,7 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
   const phaseRef = useRef("preparing");
   const retried = useRef(false);
   const seenSignIn = useRef(data.host_render?.signin?.at || "");
+  const auditHits = useRef(data.host_render?.audit_hits || 0);
   const fallback = useRef(onFallback);
   fallback.current = onFallback;
   const signIn = useRef(onSignIn);
@@ -156,6 +158,11 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
         const state = await api("/claude-science/host-render");
         if (stopped) return;
         setRender(state);
+        // The audit's counter goes to the diagnostics too (category only).
+        if ((state.audit_hits || 0) > auditHits.current) {
+          auditHits.current = state.audit_hits;
+          reportDiagnostic("claude-science", `本机渲染审计：页面已发出 ${state.audit_hits} 次带有本机时区或语言的请求（最近一次：${state.audit_hit || "未知"}），已放行`);
+        }
         const event = state.signin;
         // The first answer for this document only sets the baseline: its
         // page has not loaded far enough to ask for a sign-in.

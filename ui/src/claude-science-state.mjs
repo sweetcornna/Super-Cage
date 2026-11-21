@@ -315,7 +315,9 @@ export function hostFrameStatus(data, phase) {
   let text = "时区、语言与浏览器标识来自环境";
   if (phase === "preparing") text = "正在核对页面的时区与语言…";
   else if (phase === "loading") text = "正在打开…";
-  else if (render.blocked) text = "已拦截一次带有本机时区或语言的请求";
+  // The front's audit is a tripwire (science_front.go auditHit): it
+  // reports what an honest page should never send, and lets it through.
+  else if (render.audit_hits) text = `页面发出过 ${render.audit_hits} 次带有本机时区或语言的请求（已记录，未拦截）`;
   else if (render.audit_note) text = render.audit_note;
-  return { chips, text, tone: render.blocked ? "warn" : phase === "ready" ? "ok" : "busy" };
+  return { chips, text, tone: render.audit_hits ? "warn" : phase === "ready" ? "ok" : "busy" };
 }

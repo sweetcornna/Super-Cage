@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -360,19 +361,19 @@ func (a *scienceAudit) scan(data []byte) string {
 	if a == nil || len(data) == 0 {
 		return ""
 	}
-	text := string(data)
+	// No copy of data: the socket audit scans every chunk.
 	for _, zone := range a.zone {
-		if strings.Contains(text, zone) {
+		if bytes.Contains(data, []byte(zone)) {
 			return "timezone"
 		}
 	}
 	for _, pattern := range a.offsets {
-		if pattern.MatchString(text) {
+		if pattern.Match(data) {
 			return "offset"
 		}
 	}
 	for _, pattern := range a.locales {
-		if pattern.MatchString(text) {
+		if pattern.Match(data) {
 			return "locale"
 		}
 	}

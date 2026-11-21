@@ -70,6 +70,9 @@ const (
 	// fill its own origin's jar, and the front still reads every request
 	// (it reads no cookie).
 	scienceFrontHeaderLimit = 1 << 20
+	// Per session: open sockets, and request body bytes held at once.
+	scienceSocketCap  = 32
+	scienceBodyBudget = 4 * scienceBodyLimit
 )
 
 // scienceLabelHost matches a session host; the port is checked separately.
@@ -232,6 +235,25 @@ type scienceFront struct {
 	active     int
 	lastActive time.Time
 	lastHeard  time.Time
+	// bodies is the request body bytes held now (scienceBodyBudget);
+	// sockets the open upgraded connections (scienceSocketCap).
+	bodies  int64
+	sockets int
+	// generation changes on every reset; done ends what a generation
+	// started (requests, sockets, credential).
+	generation uint64
+	done       context.Context
+	cancel     context.CancelFunc
+	// wake starts the watchdog when a session or credential appears.
+	wake chan struct{}
+}
+
+// wakeWatch tells the watchdog there is something to watch.
+func (f *scienceFront) wakeWatch() {
+	select {
+	case f.wake <- struct{}{}:
+	default:
+	}
 }
 
 // scienceIdleDrop is how long an idle front keeps the daemon credential. The
@@ -299,16 +321,18 @@ func (f *scienceFront) dropIdle() bool {
 
 // scienceFrontState is what the pane may learn (status host_render fields).
 type scienceFrontState struct {
-	Refused      string               `json:"refused,omitempty"`
-	RefusedAt    *time.Time           `json:"refused_at,omitempty"`
-	Blocked      string               `json:"blocked,omitempty"`
-	BlockedAt    *time.Time           `json:"blocked_at,omitempty"`
-	BlockedCount int                  `json:"blocked_count,omitempty"`
-	Audit        scienceAuditDistinct `json:"audit"`
-	Session      bool                 `json:"session"`
-	Transport    string               `json:"transport,omitempty"`
-	SignIn       *scienceSignInEvent  `json:"signin,omitempty"`
-	Violations   []scienceViolation   `json:"violations,omitempty"`
+	Refused   string     `json:"refused,omitempty"`
+	RefusedAt *time.Time `json:"refused_at,omitempty"`
+	// The audit reports (F6): the last category a request or socket frame
+	// carried, when, and how many so far. Nothing is refused for it.
+	AuditHit   string               `json:"audit_hit,omitempty"`
+	AuditHitAt *time.Time           `json:"audit_hit_at,omitempty"`
+	AuditHits  int                  `json:"audit_hits,omitempty"`
+	Audit      scienceAuditDistinct `json:"audit"`
+	Session    bool                 `json:"session"`
+	Transport  string               `json:"transport,omitempty"`
+	SignIn     *scienceSignInEvent  `json:"signin,omitempty"`
+	Violations []scienceViolation   `json:"violations,omitempty"`
 }
 
 type scienceSignInEvent struct {
@@ -328,7 +352,9 @@ func newScienceFront(listener net.Listener, port int, hooks scienceFrontHooks) *
 	f := &scienceFront{
 		port: port, listener: listener, hooks: hooks, now: time.Now,
 		issued: map[string]scienceProbeSession{}, checking: map[string]scienceProbeSession{},
+		wake: make(chan struct{}, 1),
 	}
+	f.done, f.cancel = context.WithCancel(context.Background())
 	f.server = &http.Server{Handler: f, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute, MaxHeaderBytes: scienceFrontHeaderLimit, ErrorLog: log.New(io.Discard, "", 0)}
 	return f
 }
@@ -394,6 +420,10 @@ func (f *scienceFront) reset(reason string) {
 	f.upstream, f.session, f.current, f.audit, f.jar = nil, "", scienceTicket{}, nil, scienceJar{}
 	clear(f.issued)
 	clear(f.checking)
+	// Requests and sockets of the old generation end with it (F9).
+	f.cancel()
+	f.generation++
+	f.done, f.cancel = context.WithCancel(context.Background())
 	f.state.Session, f.state.Audit = false, scienceAuditDistinct{}
 	if reason != "" {
 		now := f.now()
@@ -402,6 +432,16 @@ func (f *scienceFront) reset(reason string) {
 	f.mu.Unlock()
 	if upstream != nil {
 		upstream.close()
+	}
+}
+
+// resetGeneration resets only if no reset happened since generation.
+func (f *scienceFront) resetGeneration(generation uint64, reason string) {
+	f.mu.Lock()
+	current := f.generation == generation
+	f.mu.Unlock()
+	if current {
+		f.reset(reason)
 	}
 }
 
@@ -519,7 +559,7 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		sciencePlain(w, http.StatusForbidden, "本机渲染不支持共享 Worker 与 Service Worker")
 		return
 	}
-	current, ok := f.authorized(label)
+	current, generation, ok := f.authorized(label)
 	if !ok {
 		sciencePlain(w, http.StatusUnauthorized, "本机渲染会话已失效，请回到工作台重新打开 Claude Science。")
 		return
@@ -537,28 +577,29 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if f.intercept(w, r) {
 		return
 	}
-	f.proxy(w, r, current)
+	f.proxy(w, r, current, generation)
 }
 
 // authorized checks that the label is the session's and that the workbench
 // session it came from is still unlocked.
-func (f *scienceFront) authorized(label string) (scienceTicket, bool) {
+func (f *scienceFront) authorized(label string) (scienceTicket, uint64, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.session == "" || label == "" || !webfront.Equal(label, f.session) {
-		return scienceTicket{}, false
+		return scienceTicket{}, 0, false
 	}
 	if f.current.epoch == nil || f.current.epoch.Err() != nil {
-		return scienceTicket{}, false
+		return scienceTicket{}, 0, false
 	}
-	return f.current, true
+	return f.current, f.generation, true
 }
 
 var scienceSignInHidden = map[string]bool{"/oauth/code/callback": true, "/api/auth/callback": true, "/api/auth/exchange": true, "/api/auth/broker-exchange": true}
 
 // intercept answers the routes that must never be served from the host.
 func (f *scienceFront) intercept(w http.ResponseWriter, r *http.Request) bool {
-	path := r.URL.Path
+	// The daemon's router may take a trailing slash for the same route.
+	path := strings.TrimRight(r.URL.Path, "/")
 	switch {
 	case path == "/api/auth/login":
 		f.requestSignIn()
@@ -608,12 +649,14 @@ func (f *scienceFront) requestSignIn() {
 	}()
 }
 
-func (f *scienceFront) block(category string) {
+// auditHit records what the audit saw: a tripwire for a page whose
+// overrides failed, not a barrier (a hostile page has many other ways).
+func (f *scienceFront) auditHit(category string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	now := f.now()
-	f.state.Blocked, f.state.BlockedAt = category, &now
-	f.state.BlockedCount++
+	f.state.AuditHit, f.state.AuditHitAt = category, &now
+	f.state.AuditHits++
 }
 
 // scienceRequestHeaders is the tenant gateway's request allow-list without
@@ -739,33 +782,109 @@ func auditRequest(audit *scienceAudit, target *url.URL, headers http.Header, bod
 	return audit.scan(body)
 }
 
-func (f *scienceFront) upstreamFor() (*scienceUpstream, error) {
+var errScienceReset = errors.New("本机渲染会话已结束，请回到工作台重新打开 Claude Science。")
+
+// upstreamFor returns the generation's upstream, creating it on first use.
+// A reset since the request's session check refuses (F9): nothing is
+// created or kept for a generation that ended.
+func (f *scienceFront) upstreamFor(generation uint64) (*scienceUpstream, error) {
 	f.mu.Lock()
-	upstream := f.upstream
+	upstream, create := f.upstream, f.hooks.upstream
+	current := f.generation
 	f.mu.Unlock()
+	if current != generation {
+		return nil, errScienceReset
+	}
 	if upstream != nil {
 		return upstream, nil
 	}
-	if f.hooks.upstream == nil {
+	if create == nil {
 		return nil, errors.New("Claude Science 尚未启动")
 	}
-	created, err := f.hooks.upstream()
+	created, err := create()
 	if err != nil {
 		return nil, err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.generation != generation {
+		created.close()
+		return nil, errScienceReset
+	}
 	if f.upstream != nil {
 		created.close()
 		return f.upstream, nil
 	}
 	f.upstream = created
+	f.wakeWatch()
 	return created, nil
 }
 
-func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current scienceTicket) {
+// reserve takes room for a request body (F7); release gives it back.
+func (f *scienceFront) reserve(r *http.Request) (int64, bool) {
+	size := int64(0)
+	if r.Body != nil && r.Body != http.NoBody {
+		size = r.ContentLength
+		if size < 0 || size > scienceBodyLimit {
+			size = scienceBodyLimit
+		}
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if size > 0 && f.bodies+size > scienceBodyBudget {
+		return 0, false
+	}
+	f.bodies += size
+	return size, true
+}
+
+func (f *scienceFront) release(size int64) {
+	f.mu.Lock()
+	f.bodies -= size
+	f.mu.Unlock()
+}
+
+func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current scienceTicket, generation uint64) {
 	f.begin()
 	defer f.end()
+	// The request (and an upgraded socket) ends with the workbench session
+	// it came from and with the front's generation.
+	f.mu.Lock()
+	done := f.done
+	stale := f.generation != generation
+	f.mu.Unlock()
+	if stale {
+		sciencePlain(w, http.StatusUnauthorized, errScienceReset.Error())
+		return
+	}
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	defer context.AfterFunc(current.epoch, cancel)()
+	defer context.AfterFunc(done, cancel)()
+	r = r.WithContext(ctx)
+	if webfront.IsUpgrade(r) {
+		f.mu.Lock()
+		full := f.sockets >= scienceSocketCap
+		if !full {
+			f.sockets++
+		}
+		f.mu.Unlock()
+		if full {
+			sciencePlain(w, http.StatusTooManyRequests, "Claude Science 页面打开的连接太多，请关闭一些页面后重试。")
+			return
+		}
+		defer func() {
+			f.mu.Lock()
+			f.sockets--
+			f.mu.Unlock()
+		}()
+	}
+	reserved, ok := f.reserve(r)
+	if !ok {
+		sciencePlain(w, http.StatusServiceUnavailable, "正在发送给 Claude Science 的内容太多，请稍后重试。")
+		return
+	}
+	defer f.release(reserved)
 	body, code, err := readScienceBody(r, scienceBodyLimit)
 	if err != nil {
 		if code == 0 {
@@ -778,26 +897,34 @@ func (f *scienceFront) proxy(w http.ResponseWriter, r *http.Request, current sci
 	audit := f.audit
 	jar := scienceJar{cookies: maps.Clone(f.jar.cookies)}
 	f.mu.Unlock()
-	upstream, err := f.upstreamFor()
+	upstream, err := f.upstreamFor(generation)
+	if errors.Is(err, errScienceReset) {
+		sciencePlain(w, http.StatusUnauthorized, err.Error())
+		return
+	}
 	if err != nil {
 		sciencePlain(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	outHeaders := scienceOutboundHeaders(r.Header, current.identity, upstream.origin(), &jar)
 	if category := auditRequest(audit, r.URL, outHeaders, body); category != "" {
-		f.block(category)
-		scienceDetail(w, http.StatusForbidden, scienceAuditMessages[category])
-		return
+		f.auditHit(category)
 	}
 	if body != nil {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		r.ContentLength = int64(len(body))
 	}
 	proxy := &httputil.ReverseProxy{
-		Transport:     scienceProxyTransport{upstream: upstream, audit: audit, onHit: f.block},
+		Transport:     scienceProxyTransport{upstream: upstream, audit: audit, onHit: f.auditHit},
 		FlushInterval: -1,
 		ErrorLog:      log.New(io.Discard, "", 0),
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+			if errors.Is(err, errScienceRefused) {
+				// F10: the daemon refused every fresh credential.
+				f.resetGeneration(generation, err.Error())
+				sciencePlain(w, http.StatusBadGateway, err.Error())
+				return
+			}
 			if errors.Is(err, errScienceBearer) {
 				sciencePlain(w, http.StatusBadGateway, err.Error())
 				return
@@ -844,7 +971,7 @@ func (t scienceProxyTransport) RoundTrip(request *http.Request) (*http.Response,
 			response.Body.Close()
 			return nil, errors.New("upgrade without a stream")
 		}
-		response.Body = scienceSocket{ReadWriteCloser: stream, audit: &wsAudit{dst: stream, audit: t.audit, onHit: t.onHit}}
+		response.Body = scienceSocket{ReadWriteCloser: stream, audit: newScienceSocketAudit(stream, t.audit, t.onHit)}
 	}
 	return response, nil
 }
@@ -1030,6 +1157,7 @@ func (f *scienceFront) probe(w http.ResponseWriter, r *http.Request, label strin
 	f.state.Refused, f.state.RefusedAt = "", nil
 	f.lastHeard = f.now()
 	f.mu.Unlock()
+	f.wakeWatch()
 	w.WriteHeader(http.StatusNoContent)
 }
 

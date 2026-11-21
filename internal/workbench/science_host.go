@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
@@ -191,25 +192,38 @@ func (s *Server) stopScienceFront() {
 // shorten it).
 var scienceWatchInterval = 3 * time.Second
 
+// scienceWatchWakes counts the watchdog's looks (tests).
+var scienceWatchWakes atomic.Int64
+
 // watchScienceFront drops every session and the daemon credential when the
 // account locks, the environment stops or the daemon stops or restarts, and
 // the credential alone after scienceIdleDrop without use.
+//
+// It sleeps while there is no session and no credential (nothing runs when
+// the switch is on but the Science page is closed), and the front wakes it
+// when either appears.
 func (s *Server) watchScienceFront(ctx context.Context, front *scienceFront) {
-	ticker := time.NewTicker(scienceWatchInterval)
-	defer ticker.Stop()
 	started := ""
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
 		front.mu.Lock()
 		active := front.upstream != nil || front.session != ""
 		front.mu.Unlock()
 		if !active {
+			select {
+			case <-ctx.Done():
+				return
+			case <-front.wake:
+			}
 			continue
 		}
+		timer := time.NewTimer(scienceWatchInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		scienceWatchWakes.Add(1)
 		if _, unlocked := s.account.accessFor(true, false); !unlocked {
 			front.reset("Super Cage 已锁定，本机渲染已关闭。")
 			continue

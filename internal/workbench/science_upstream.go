@@ -401,6 +401,10 @@ type scienceUpstream struct {
 	mu     sync.Mutex
 	bearer string
 	mint   sync.Mutex
+	// F10: exchanges since the daemon last accepted a bearer, and the
+	// earliest time for the next one.
+	unaccepted int
+	notBefore  time.Time
 }
 
 func newScienceUpstream(dialer scienceDialer, port int, link func(context.Context) (string, error)) *scienceUpstream {
@@ -444,7 +448,13 @@ func (u *scienceUpstream) remint(ctx context.Context, stale string) (string, err
 		u.mu.Unlock()
 		return token, nil
 	}
+	if u.unaccepted >= scienceMintCap {
+		u.mu.Unlock()
+		return "", errScienceRefused
+	}
 	u.bearer = ""
+	u.unaccepted++
+	u.notBefore = time.Now().Add(scienceMintBackoff << (u.unaccepted - 1))
 	u.mu.Unlock()
 	token, err := u.exchange(ctx)
 	if err != nil {
@@ -454,6 +464,29 @@ func (u *scienceUpstream) remint(ctx context.Context, stale string) (string, err
 	u.bearer = token
 	u.mu.Unlock()
 	return token, nil
+}
+
+// A daemon that refuses fresh credentials gets scienceMintCap exchanges,
+// scienceMintBackoff apart and doubling, then the session ends.
+var scienceMintBackoff = time.Second
+
+const scienceMintCap = 3
+
+var errScienceRefused = errors.New("Claude Science 多次拒绝了本机渲染的访问凭证，本机渲染已停止。请回到工作台重新打开。")
+
+// mayMint reports whether a refused bearer may be replaced now: at once
+// after a success (a daemon restart rotates bearers), with back-off after a
+// fresh one was refused.
+func (u *scienceUpstream) mayMint() bool {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return u.unaccepted < scienceMintCap && !time.Now().Before(u.notBefore)
+}
+
+func (u *scienceUpstream) accepted() {
+	u.mu.Lock()
+	u.unaccepted, u.notBefore = 0, time.Time{}
+	u.mu.Unlock()
 }
 
 var errScienceBearer = errors.New("Claude Science 没有接受访问凭证，请重新打开")
@@ -532,7 +565,20 @@ func (u *scienceUpstream) RoundTrip(request *http.Request) (*http.Response, erro
 		if err != nil {
 			return nil, err
 		}
-		if response.StatusCode != http.StatusUnauthorized || attempt > 0 || (request.Body != nil && request.Body != http.NoBody && request.GetBody == nil) {
+		if response.StatusCode != http.StatusUnauthorized {
+			u.accepted()
+			return response, nil
+		}
+		// One replacement per request, and only as often as mayMint allows;
+		// otherwise the page sees the daemon's 401 (F10).
+		if attempt > 0 || (request.Body != nil && request.Body != http.NoBody && request.GetBody == nil) || !u.mayMint() {
+			u.mu.Lock()
+			exhausted := u.unaccepted >= scienceMintCap && u.bearer == token
+			u.mu.Unlock()
+			if exhausted && attempt > 0 {
+				response.Body.Close()
+				return nil, errScienceRefused
+			}
 			return response, nil
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
@@ -546,7 +592,7 @@ func (u *scienceUpstream) RoundTrip(request *http.Request) (*http.Response, erro
 // scienceSocket audits what the browser writes into an upgraded connection.
 type scienceSocket struct {
 	io.ReadWriteCloser
-	audit *wsAudit
+	audit io.Writer
 }
 
 func (s scienceSocket) Write(p []byte) (int, error) { return s.audit.Write(p) }
@@ -558,105 +604,129 @@ func (s scienceSocket) CloseWrite() error {
 	return s.Close()
 }
 
-// wsAudit parses client-to-server WebSocket frames (RFC 6455, always masked),
-// holds each frame until it is complete, scans data frames and forwards the
-// original bytes unchanged. A hit refuses the frame and the connection.
-type wsAudit struct {
-	dst     io.Writer
-	audit   *scienceAudit
-	onHit   func(string)
-	pending []byte
-	carry   []byte
-	failed  error
+// newScienceSocketAudit wraps what the browser writes into an upgraded
+// connection: every byte goes on at once and unchanged; the client frames
+// (RFC 6455, masked) are unmasked chunk by chunk into a fixed buffer and
+// scanned with a small carry. A hit is reported, not refused (F6), and the
+// memory per socket stays fixed whatever the frame size (F7).
+func newScienceSocketAudit(dst io.Writer, audit *scienceAudit, onHit func(string)) io.Writer {
+	return &wsAudit{dst: dst, audit: audit, onHit: onHit, data: true}
 }
 
-const wsAuditFrameLimit = 16 << 20
+type wsAudit struct {
+	dst   io.Writer
+	audit *scienceAudit
+	onHit func(string)
+	// The frame header being read, then the payload's state.
+	header    [14]byte
+	have      int
+	remaining uint64
+	key       [4]byte
+	offset    uint64
+	masked    bool
+	data      bool
+	// carry is the end of the previous chunk (a value split across chunks);
+	// buffer is reused for carry plus one unmasked chunk.
+	carry  []byte
+	buffer []byte
+}
 
-var errScienceSocketRefused = errors.New("science socket refused by the identity audit")
+// wsAuditChunk bounds one scan (and the buffer).
+const wsAuditChunk = 32 << 10
 
 func (w *wsAudit) Write(p []byte) (int, error) {
-	if w.failed != nil {
-		return 0, w.failed
+	n, err := w.dst.Write(p)
+	if w.audit != nil {
+		w.observe(p[:n])
 	}
-	w.pending = append(w.pending, p...)
-	for {
-		size, payload, opcode, ok, err := wsFrame(w.pending)
-		if err != nil {
-			w.failed = err
-			return 0, err
-		}
-		if !ok {
-			break
-		}
-		if opcode < 8 {
-			scanned := append(append([]byte{}, w.carry...), payload...)
-			if category := w.audit.scan(scanned); category != "" {
-				w.failed = errScienceSocketRefused
-				if w.onHit != nil {
-					w.onHit(category)
-				}
-				return 0, w.failed
-			}
-			if keep := w.audit.window(); len(scanned) > keep {
-				w.carry = append([]byte{}, scanned[len(scanned)-keep:]...)
-			} else {
-				w.carry = scanned
-			}
-		}
-		if _, err := w.dst.Write(w.pending[:size]); err != nil {
-			w.failed = err
-			return 0, err
-		}
-		w.pending = w.pending[size:]
-	}
-	if len(w.pending) > wsAuditFrameLimit+14 {
-		w.failed = errors.New("science socket frame too large")
-		return 0, w.failed
-	}
-	return len(p), nil
+	return n, err
 }
 
-// wsFrame parses one frame at the start of data. It returns the frame's
-// total size and its unmasked payload once the whole frame is present.
-func wsFrame(data []byte) (size int, payload []byte, opcode byte, ok bool, err error) {
-	if len(data) < 2 {
-		return 0, nil, 0, false, nil
+func (w *wsAudit) observe(p []byte) {
+	for len(p) > 0 {
+		if w.remaining == 0 && w.have >= 0 {
+			// Reading a header: 2 bytes, then the extended length, then the key.
+			need := 2
+			if w.have >= 2 {
+				switch w.header[1] & 0x7f {
+				case 126:
+					need = 4
+				case 127:
+					need = 10
+				}
+				if w.header[1]&0x80 != 0 {
+					need += 4
+				}
+			}
+			if w.have < need {
+				take := min(need-w.have, len(p))
+				copy(w.header[w.have:], p[:take])
+				w.have += take
+				p = p[take:]
+				continue
+			}
+			w.begin(need)
+			continue
+		}
+		take := int(min(w.remaining, uint64(len(p)), wsAuditChunk))
+		if w.data {
+			w.scan(p[:take])
+		}
+		w.offset += uint64(take)
+		w.remaining -= uint64(take)
+		p = p[take:]
+		if w.remaining == 0 {
+			w.have = 0
+		}
 	}
-	opcode = data[0] & 0x0f
-	masked := data[1]&0x80 != 0
-	length := uint64(data[1] & 0x7f)
-	offset := 2
+}
+
+// begin starts a frame's payload once its header (need bytes) is in.
+func (w *wsAudit) begin(need int) {
+	opcode := w.header[0] & 0x0f
+	length := uint64(w.header[1] & 0x7f)
 	switch length {
 	case 126:
-		if len(data) < 4 {
-			return 0, nil, 0, false, nil
-		}
-		length, offset = uint64(binary.BigEndian.Uint16(data[2:4])), 4
+		length = uint64(binary.BigEndian.Uint16(w.header[2:4]))
 	case 127:
-		if len(data) < 10 {
-			return 0, nil, 0, false, nil
+		length = binary.BigEndian.Uint64(w.header[2:10])
+	}
+	w.masked = w.header[1]&0x80 != 0
+	if w.masked {
+		copy(w.key[:], w.header[need-4:need])
+	}
+	// Continuation frames carry on the message's kind; control frames are
+	// not scanned.
+	if opcode != 0 {
+		w.data = opcode < 8
+	}
+	w.offset, w.remaining = 0, length
+	if length == 0 {
+		w.have = 0
+		return
+	}
+	w.have = -1
+}
+
+func (w *wsAudit) scan(chunk []byte) {
+	w.buffer = append(w.buffer[:0], w.carry...)
+	start := len(w.buffer)
+	w.buffer = append(w.buffer, chunk...)
+	if w.masked {
+		for i := range chunk {
+			w.buffer[start+i] ^= w.key[(w.offset+uint64(i))%4]
 		}
-		length, offset = binary.BigEndian.Uint64(data[2:10]), 10
 	}
-	if !masked {
-		return 0, nil, 0, false, errors.New("unmasked client frame")
+	if category := w.audit.scan(w.buffer); category != "" {
+		if w.onHit != nil {
+			w.onHit(category)
+		}
+		// Reported once: the next scan starts after it.
+		w.carry = w.carry[:0]
+		return
 	}
-	if length > wsAuditFrameLimit {
-		return 0, nil, 0, false, errors.New("science socket frame too large")
-	}
-	if len(data) < offset+4 {
-		return 0, nil, 0, false, nil
-	}
-	key := data[offset : offset+4]
-	offset += 4
-	if uint64(len(data)-offset) < length {
-		return 0, nil, 0, false, nil
-	}
-	payload = make([]byte, length)
-	for i := range payload {
-		payload[i] = data[offset+i] ^ key[i%4]
-	}
-	return offset + int(length), payload, opcode, true, nil
+	keep := min(w.audit.window(), len(w.buffer))
+	w.carry = append(w.carry[:0], w.buffer[len(w.buffer)-keep:]...)
 }
 
 // readScienceBody buffers a request body for the audit, refusing encodings it

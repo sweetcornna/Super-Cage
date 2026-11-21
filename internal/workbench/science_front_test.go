@@ -476,7 +476,7 @@ type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
 
-func TestScienceAuditRefusesHostValues(t *testing.T) {
+func TestScienceAuditReportsHostValues(t *testing.T) {
 	env := newTestScienceFront(t)
 	client, _ := env.enter(t, goodProbeReports(testScienceIdentity))
 	host := testHostIdentity()
@@ -506,24 +506,34 @@ func TestScienceAuditRefusesHostValues(t *testing.T) {
 		for k, v := range tc.headers {
 			headers[k] = v
 		}
+		// Reported, not refused (F6): the audit is a tripwire.
 		r := env.do(t, client, "POST", tc.path, env.base(), tc.body, headers)
-		if r.StatusCode != 403 || !strings.Contains(readBody(t, r), "已拦截") {
-			t.Fatalf("%s passed the audit: %d", tc.name, r.StatusCode)
+		if r.StatusCode != 200 {
+			t.Fatalf("%s: %d", tc.name, r.StatusCode)
+		}
+		if state := env.front.snapshot(); state.AuditHits == 0 {
+			t.Fatalf("%s not reported", tc.name)
 		}
 	}
-	if after := len(env.daemon.seen()); after != before {
-		t.Fatalf("refused requests reached the daemon: %d", after-before)
+	echoed := 0
+	for _, request := range env.daemon.seen()[before:] {
+		if request.Path == "/api/echo" {
+			echoed++
+		}
+	}
+	if echoed != len(refused) {
+		t.Fatalf("reported requests did not reach the daemon: %d of %d", echoed, len(refused))
 	}
 	state := env.front.snapshot()
-	if state.BlockedCount != len(refused) || !state.Audit.Known || !state.Audit.Timezone || !state.Audit.Offset || !state.Audit.Locale {
+	if state.AuditHits != len(refused) || !state.Audit.Known || !state.Audit.Timezone || !state.Audit.Offset || !state.Audit.Locale {
 		t.Fatalf("audit state: %+v", state)
 	}
 	// The guest's own values pass.
 	if r := env.do(t, client, "POST", "/api/echo", env.base(), `{"timezone":"Asia/Tokyo","locale":"ja-JP","d":"2026-11-21T08:00:00+09:00"}`, map[string]string{"Content-Type": "application/json"}); r.StatusCode != 200 {
 		t.Fatalf("guest values refused: %d", r.StatusCode)
 	}
-	// A WebSocket text frame with the host zone closes the socket before
-	// the daemon sees it; ordinary frames echo.
+	// A WebSocket text frame with the host zone is reported and goes on;
+	// ordinary frames echo.
 	conn := env.dialSocket(t, client)
 	if err := conn.WriteMessage(websocket.TextMessage, []byte("hello")); err != nil {
 		t.Fatal(err)
@@ -533,19 +543,11 @@ func TestScienceAuditRefusesHostValues(t *testing.T) {
 	}
 	_ = conn.WriteMessage(websocket.TextMessage, []byte(`{"tz":"America/Los_Angeles"}`))
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if _, _, err := conn.ReadMessage(); err == nil {
-		t.Fatal("socket stayed open after a host value")
+	if _, data, err := conn.ReadMessage(); err != nil || !strings.Contains(string(data), "Los_Angeles") {
+		t.Fatalf("the socket did not carry on: %q %v", data, err)
 	}
-	env.daemon.mu.Lock()
-	frames := append([]string(nil), env.daemon.frames...)
-	env.daemon.mu.Unlock()
-	for _, frame := range frames {
-		if strings.Contains(frame, "Los_Angeles") {
-			t.Fatal("host zone reached the daemon over the socket")
-		}
-	}
-	if state := env.front.snapshot(); state.BlockedCount != len(refused)+1 || state.Blocked != "timezone" {
-		t.Fatalf("socket refusal not recorded: %+v", state)
+	if state := env.front.snapshot(); state.AuditHits != len(refused)+1 || state.AuditHit != "timezone" {
+		t.Fatalf("socket hit not recorded: %+v", state)
 	}
 }
 

@@ -73,8 +73,9 @@ const nonce = document.querySelector("script[nonce]").nonce;
   console.log("legit serviceWorker");
   results.legit.serviceWorkerRefused = navigator.serviceWorker ? await Promise.race([navigator.serviceWorker.register("/assets/sw.js").then(() => false, () => true), wait(3000).then(() => "timeout")]) : true;
   console.log("legit audit");
-  // The host's time zone in a body is refused by the front's audit.
-  results.legit.auditRefusesHostZone = await fetch("/api/echo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tz: "America/Los_Angeles" }) }).then((r) => r.status === 403, () => false);
+  // The host's time zone in a body is reported by the front's audit, and
+  // the request goes on (a tripwire, not a barrier).
+  results.legit.auditForwardsHostZone = await fetch("/api/echo", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ tz: "America/Los_Angeles" }) }).then((r) => r.status === 200, () => false);
 
   // Network vectors.
   await attempt("fetch-http", () => fetch(ext("fetch-http")).then((r) => r.status));
@@ -402,10 +403,13 @@ func runScienceExfiltration(t *testing.T, preferences map[string]any) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	report, _ := json.MarshalIndent(map[string]any{"legit": results.Legit, "vectors": results.Vectors, "violations": state.Violations, "blocked_navigations": blockedNavigations(), "proxy": proxied(), "canary": canary.seen(), "udp": canary.packets.Load(), "network": network, "workbench_other": workbenchOther.Load(), "blocked_count": state.BlockedCount}, "", "  ")
+	report, _ := json.MarshalIndent(map[string]any{"legit": results.Legit, "vectors": results.Vectors, "violations": state.Violations, "blocked_navigations": blockedNavigations(), "proxy": proxied(), "canary": canary.seen(), "udp": canary.packets.Load(), "network": network, "workbench_other": workbenchOther.Load(), "audit_hits": state.AuditHits}, "", "  ")
 	t.Logf("browser run:\n%s", report)
 
-	for _, need := range []string{"inline", "unnoncedInlineBlocked", "eval", "wasm", "blobWorker", "webSocket", "eventSource", "fetchWithGuestValues", "noSharedWorker", "serviceWorkerRefused", "auditRefusesHostZone"} {
+	if state.AuditHits == 0 {
+		t.Error("the audit did not report the host's time zone")
+	}
+	for _, need := range []string{"inline", "unnoncedInlineBlocked", "eval", "wasm", "blobWorker", "webSocket", "eventSource", "fetchWithGuestValues", "noSharedWorker", "serviceWorkerRefused", "auditForwardsHostZone"} {
 		if results.Legit[need] != true {
 			t.Errorf("legitimate need %s failed: %v", need, results.Legit[need])
 		}

@@ -573,6 +573,7 @@ func liveScienceFront(t *testing.T, s *Server) (*scienceFront, *fakeScienceDaemo
 	front.state.Session = true
 	front.lastHeard = time.Now() // as the probe does
 	front.mu.Unlock()
+	front.wakeWatch()
 	return front, daemon
 }
 

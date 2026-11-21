@@ -39,6 +39,8 @@ type fakeScienceDaemon struct {
 	assets map[string]string
 	// rootHeaders replace the document's caching headers (a hostile daemon).
 	rootHeaders map[string]string
+	// refuseAll: every bearer is refused (a daemon that rejects the front).
+	refuseAll bool
 }
 
 type fakeScienceRequest struct {
@@ -194,6 +196,9 @@ func newFakeScienceDaemon(t *testing.T) *fakeScienceDaemon {
 func (d *fakeScienceDaemon) authorized(r *http.Request) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.refuseAll {
+		return false
+	}
 	if token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok && d.tokens[token] {
 		return true
 	}

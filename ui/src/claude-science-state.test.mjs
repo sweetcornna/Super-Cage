@@ -269,7 +269,7 @@ test("host rendering: the toolbar says what the frame is doing", () => {
   const ready = hostFrameStatus(data, "ready");
   assert.deepEqual(ready.chips.map((chip) => chip.text), ["v0.1.73", "已登录"]);
   assert.equal(ready.tone, "ok");
-  const blocked = hostFrameStatus({ ...data, host_render: { ...data.host_render, blocked: "timezone", blocked_count: 1 } }, "ready");
-  assert.equal(blocked.tone, "warn");
-  assert.match(blocked.text, /拦截/);
+  const reported = hostFrameStatus({ ...data, host_render: { ...data.host_render, audit_hit: "timezone", audit_hits: 2 } }, "ready");
+  assert.equal(reported.tone, "warn");
+  assert.equal(reported.text, "页面发出过 2 次带有本机时区或语言的请求（已记录，未拦截）");
 });
