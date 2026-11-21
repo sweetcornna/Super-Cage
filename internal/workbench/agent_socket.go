@@ -14,6 +14,43 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// agentDialSocket opens a workload WebSocket on an authenticated controller
+// connection, exactly as the UI does, without exporting its cookies.
+func agentDialSocket(ctx context.Context, c *controllerClient, target AgentTarget, path string) (*websocket.Conn, error) {
+	if !strings.HasPrefix(path, "/api/") || strings.ContainsAny(path, "\r\n\\") || strings.Contains(path, "#") || strings.Contains(path, "://") {
+		return nil, &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
+	}
+	if target.Scope == "desktop" {
+		return nil, &AgentError{Code: "invalid_input", Message: "Use local or selected scope for a workload WebSocket", NextAction: "client.context"}
+	}
+	if target.Scope == "client" && target.Connection == "" {
+		return nil, &AgentError{Code: "invalid_input", Message: "Client sockets require an explicit connection generation", NextAction: "client.context"}
+	}
+	req, _ := http.NewRequest("GET", c.origin, nil)
+	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{agentConnection(target)}}
+	for _, cookie := range c.client.Jar.Cookies(req.URL) {
+		headers.Add("Cookie", cookie.String())
+	}
+	dialer := websocket.Dialer{Proxy: nil, HandshakeTimeout: 15 * time.Second}
+	ws, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(c.origin, "http")+path, headers)
+	if err != nil {
+		if response != nil {
+			return nil, agentHTTPError(response.StatusCode)
+		}
+		return nil, &AgentError{Code: "connection_failed", Message: "WebSocket connection failed", NextAction: "status"}
+	}
+	return ws, nil
+}
+
+// agentConnection is the connection generation a request names: the
+// selected one, or the local workload.
+func agentConnection(target AgentTarget) string {
+	if target.Connection != "" {
+		return target.Connection
+	}
+	return "local"
+}
+
 // AgentSocket carries the same WebSocket messages as the UI without exporting
 // session cookies. One NDJSON line in/out is {type:"text"|"binary",data:...};
 // binary data uses JSON's []byte base64 encoding.
@@ -26,28 +63,9 @@ func AgentSocket(ctx context.Context, configPath string, target AgentTarget, pat
 		return err
 	}
 	defer c.close()
-	if target.Scope == "desktop" {
-		return &AgentError{Code: "invalid_input", Message: "Use local or selected scope for a workload WebSocket", NextAction: "client.context"}
-	}
-	if target.Scope == "client" && target.Connection == "" {
-		return &AgentError{Code: "invalid_input", Message: "Client sockets require an explicit connection generation", NextAction: "client.context"}
-	}
-	connection := "local"
-	if target.Connection != "" {
-		connection = target.Connection
-	}
-	req, _ := http.NewRequest("GET", c.origin, nil)
-	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{connection}}
-	for _, cookie := range c.client.Jar.Cookies(req.URL) {
-		headers.Add("Cookie", cookie.String())
-	}
-	dialer := websocket.Dialer{Proxy: nil, HandshakeTimeout: 15 * time.Second}
-	ws, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(c.origin, "http")+path, headers)
+	ws, err := agentDialSocket(ctx, c, target, path)
 	if err != nil {
-		if response != nil {
-			return agentHTTPError(response.StatusCode)
-		}
-		return &AgentError{Code: "connection_failed", Message: "WebSocket connection failed", NextAction: "status"}
+		return err
 	}
 	defer ws.Close()
 	ws.SetReadLimit(32 << 20)
