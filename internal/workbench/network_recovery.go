@@ -360,7 +360,9 @@ func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing mem
 }
 
 // browserHeldSlack is how far below its soft limit (memory.high) the browser
-// class still counts as held there: the governor's hysteresis.
+// class still counts as held there: one step of the governor's 64 MiB
+// granularity (resource-governor.py STEP), since the kernel reclaims the
+// class to just under memory.high rather than to it.
 const browserHeldSlack = 64 << 20
 
 // browserHeld reports whether the guest's governor holds the browser at its
