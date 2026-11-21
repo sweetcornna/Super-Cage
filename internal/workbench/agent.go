@@ -195,7 +195,7 @@ func agentSameBuild(id ControllerIdentity) bool {
 }
 
 func agentConnect(ctx context.Context, configPath string) (*controllerClient, error) {
-	c, err := controlclient.AgentConnect(ctx, configPath, agentSameBuild, connectControllerConn)
+	c, err := controlclient.AgentConnect(ctx, configPath, agentSameBuild, connectProvenControllerConn)
 	if err != nil {
 		return nil, err
 	}

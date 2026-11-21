@@ -10,6 +10,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 	"io"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -33,6 +34,7 @@ type controllerClient struct {
 	record          controlFile
 	launch          launchResponse
 	client          *http.Client
+	dial            func(context.Context, string, string) (net.Conn, error)
 }
 
 var errControllerUnavailable = controlclient.ErrUnavailable
@@ -67,14 +69,32 @@ func openController(profile string) (*controllerClient, error) {
 		return nil, err
 	}
 	jar, _ := cookiejar.New(nil)
-	c := &controllerClient{profile: profile, record: record, origin: fmt.Sprintf("http://localhost:%d", record.Port), client: &http.Client{Timeout: controllerRequestTimeout, Jar: jar, Transport: &http.Transport{Proxy: nil}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}
+	dial := controllerDial(record)
+	c := &controllerClient{profile: profile, record: record, origin: fmt.Sprintf("http://localhost:%d", record.Port), dial: dial, client: &http.Client{Timeout: controllerRequestTimeout, Jar: jar, Transport: &http.Transport{Proxy: nil, DialContext: dial}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}
 	return c, nil
 }
 
-// connectController proves the launcher token to the controller of profile;
+// connectController serves the window and its helpers. Until the next
+// release it also reaches a controller from the release before the identity
+// proof (a record without auth), over 127.0.0.1 and unproven, because saving
+// and stopping that controller's environment is how an update completes.
 // controlclient.Connect holds the checks, shared with cage-attach.
 func connectController(profile string) (*controllerClient, error) {
-	conn, launch, err := controlclient.Connect(profile, openControllerConn)
+	return connectControllerOrOlder(profile, true)
+}
+
+// connectProvenController is connectController for automation (the agent
+// transport): it never talks to a controller that cannot prove itself.
+func connectProvenController(profile string) (*controllerClient, error) {
+	return connectControllerOrOlder(profile, false)
+}
+
+func connectControllerOrOlder(profile string, older bool) (*controllerClient, error) {
+	connect := controlclient.Connect
+	if !older {
+		connect = controlclient.ConnectProven
+	}
+	conn, launch, err := connect(profile, openControllerConn)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +113,14 @@ func openControllerConn(profile string) (controlclient.Conn, error) {
 
 func connectControllerConn(profile string) (controlclient.Conn, error) {
 	c, err := connectController(profile)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func connectProvenControllerConn(profile string) (controlclient.Conn, error) {
+	c, err := connectProvenController(profile)
 	if err != nil {
 		return nil, err
 	}

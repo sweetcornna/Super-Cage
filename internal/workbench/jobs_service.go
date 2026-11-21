@@ -11,22 +11,32 @@ func (s *Server) busy() bool { return s.jobs.snapshot().Running }
 // manager owns admission, execution, cancellation and published job state.
 func (s *Server) submitJob(kind string, run func() error) (Job, error) {
 	s.mu.Lock()
+	job, intentFailed, err := s.submitJobLocked(kind, run)
+	s.mu.Unlock()
+	if intentFailed {
+		_ = s.closeProxyGate("网络恢复意图无法保存，外网保持关闭")
+	}
+	return job, err
+}
+
+// submitJobLocked is submitJob for a caller that holds s.mu. intentFailed
+// asks the caller to close the proxy gate once it has released s.mu.
+func (s *Server) submitJobLocked(kind string, run func() error) (job Job, intentFailed bool, err error) {
 	if s.closing {
-		s.mu.Unlock()
-		return Job{}, errJobsClosed
+		return Job{}, false, errJobsClosed
+	}
+	if s.appUpdateSealed {
+		return Job{}, false, errAppUpdateSealed
 	}
 	if s.storageRecoveryError != "" && kind != "storage-recovery" {
-		err := fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
-		s.mu.Unlock()
-		return Job{}, err
+		return Job{}, false, fmt.Errorf("环境存储待恢复，请在设置中恢复后继续。%s", s.storageRecoveryError)
 	}
 	var afterSuccess func() error
 	if kind == "logout" {
 		kind = "stop"
 		afterSuccess = func() error { return s.account.lockAccess(true) }
 	}
-	intentFailed := false
-	job, err := s.jobs.submit(&s.op, kind, s.safety.pauseVersion, func() error {
+	job, err = s.jobs.submit(&s.op, kind, s.safety.pauseVersion, func() error {
 		if kind == "safety" || (s.macosGuest == nil && (kind == "start" || kind == "restart" || kind == "restore")) {
 			if err := s.saveNetworkIntentLocked(false); err != nil {
 				intentFailed = true
@@ -38,11 +48,7 @@ func (s *Server) submitJob(kind string, run func() error) (Job, error) {
 		}
 		return nil
 	}, afterSuccess, run)
-	s.mu.Unlock()
-	if intentFailed {
-		_ = s.closeProxyGate("网络恢复意图无法保存，外网保持关闭")
-	}
-	return job, err
+	return job, intentFailed, err
 }
 
 func (s *Server) setMessage(message string) { s.jobs.execution().message(message) }

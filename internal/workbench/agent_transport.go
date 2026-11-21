@@ -22,7 +22,7 @@ import (
 type AgentTarget = controlclient.AgentTarget
 
 func agentConnectTarget(ctx context.Context, configPath string, target AgentTarget) (*controllerClient, error) {
-	c, err := controlclient.AgentConnectTarget(ctx, configPath, target, agentSameBuild, connectControllerConn)
+	c, err := controlclient.AgentConnectTarget(ctx, configPath, target, agentSameBuild, connectProvenControllerConn)
 	if err != nil {
 		return nil, err
 	}

@@ -95,6 +95,9 @@ func (d *desktopLocal) Status(ctx context.Context) (DesktopLocalStatus, error) {
 	if errors.Is(err, errControllerUnavailable) {
 		return d.offlineStatus(ctx, available), nil
 	}
+	if errors.Is(err, errClientOutdated) {
+		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: err.Error()}, nil
+	}
 	if err != nil {
 		return DesktopLocalStatus{Available: available, Message: "本机后台记录无效，请检查本机配置"}, nil
 	}
@@ -104,7 +107,11 @@ func (d *desktopLocal) Status(ctx context.Context) (DesktopLocalStatus, error) {
 		if !processExists(c.record.PID) {
 			return d.offlineStatus(ctx, available), nil
 		}
-		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: "无法确认已有本机后台的状态或版本"}, nil
+		message := "无法确认已有本机后台的状态或版本"
+		if errors.Is(err, errControllerUnproven) {
+			message = errControllerUnproven.Error()
+		}
+		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: message}, nil
 	}
 	view.Available = available
 	return view.DesktopLocalStatus, nil
@@ -312,7 +319,7 @@ func (d *desktopLocal) localSession(life, bootstrap context.Context, c *controll
 		Name:  cookieName + "_" + u.Port() + "-desktop",
 		Value: trustedViewProof(c.record.Token), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	}})
-	return remotehost.LocalSession(life, c.origin, manifest, c.client.Jar)
+	return remotehost.LocalSessionDial(life, c.origin, manifest, c.client.Jar, c.dial)
 }
 
 func (d *desktopLocal) Release(ctx context.Context, expected DesktopLocalStatus, stop bool) error {

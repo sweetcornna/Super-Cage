@@ -70,9 +70,11 @@ func Open(profile string) (*Client, error) {
 	}, nil
 }
 
-// Connect proves the launcher token to the controller of profile.
+// Connect proves the launcher token to the controller of profile, after the
+// controller proved itself (the dial does, on every connection). Like cage
+// agent, it does not talk to a controller from before that proof.
 func Connect(profile string) (*Client, error) {
-	c, launch, err := controlclient.Connect(profile, func(profile string) (controlclient.Conn, error) {
+	c, launch, err := controlclient.ConnectProven(profile, func(profile string) (controlclient.Conn, error) {
 		c, err := Open(profile)
 		if err != nil {
 			return nil, err

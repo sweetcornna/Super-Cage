@@ -119,6 +119,7 @@ func attachController(t *testing.T, wrap func(http.Handler) http.Handler) *Serve
 		t.Fatal(err)
 	}
 	s.identity = identity
+	s.proofKey = randomToken()
 	handler := s.handler()
 	if wrap != nil {
 		handler = wrap(handler)
@@ -136,7 +137,7 @@ func attachController(t *testing.T, wrap func(http.Handler) http.Handler) *Serve
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { unlockController(lock); lock.Close() })
-	if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: identity}); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "control.json"), s.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(s.terminals.close)

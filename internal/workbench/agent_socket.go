@@ -26,7 +26,7 @@ func agentDialSocket(ctx context.Context, c *controllerClient, target AgentTarge
 	for _, cookie := range c.client.Jar.Cookies(req.URL) {
 		headers.Add("Cookie", cookie.String())
 	}
-	dialer := websocket.Dialer{Proxy: nil, HandshakeTimeout: 15 * time.Second}
+	dialer := websocket.Dialer{Proxy: nil, HandshakeTimeout: 15 * time.Second, NetDialContext: c.dial}
 	ws, response, err := dialer.DialContext(ctx, "ws"+strings.TrimPrefix(c.origin, "http")+path, headers)
 	if err != nil {
 		if response != nil {
