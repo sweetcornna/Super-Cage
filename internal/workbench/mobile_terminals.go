@@ -132,6 +132,9 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	// A phone reading the output shows the terminal: it stays a viewer for
+	// the size owner rules.
+	session.phonePeer()
 	hold := time.NewTimer(mobileTerminalHold)
 	defer hold.Stop()
 	for {
@@ -169,7 +172,10 @@ func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 	s.account.mu.Lock()
 	err := errMobileLocked
 	if s.mobileAuthorized(r.Context()) {
-		err = session.enqueueInput(r.Context(), input.Data)
+		var data string
+		if data, err = session.peerInput(session.phonePeer(), input.Data); err == nil {
+			err = session.enqueueInput(r.Context(), data)
+		}
 	}
 	s.account.mu.Unlock()
 	switch {
@@ -203,7 +209,7 @@ func (s *Server) mobileTerminalResize(w http.ResponseWriter, r *http.Request) {
 	session.mu.Lock()
 	closed := session.closed
 	session.mu.Unlock()
-	if closed || session.file.Resize(input.Cols, input.Rows) != nil {
+	if closed || session.peerResize(session.phonePeer(), input.Cols, input.Rows) != nil {
 		http.Error(w, "终端已结束", http.StatusConflict)
 		return
 	}
