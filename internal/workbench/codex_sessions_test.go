@@ -75,6 +75,13 @@ func newCodexFixture(t *testing.T) (*Server, string, *codexFakeGuest) {
 	code := "import json,os,sys\nmode=sys.argv[1]\nrequest=json.load(sys.stdin) if sys.argv[2]=='-' else json.loads(sys.argv[2])\nhome=os.environ['HOME']\n" +
 		"open(os.path.join(home,'calls.jsonl'),'a').write(json.dumps({'mode':mode,'request':request})+'\\n')\n" +
 		"if mode=='tui-launch':\n print('fake codex tui',flush=True)\n sys.stdin.read()\n sys.exit(0)\n" +
+		// delays.json holds seconds a mode (or a view asking for the probe,
+		// "view-probe") takes, marked by started-<key> and finished-<key>; a
+		// probe is slow once, then cached as in the guest.
+		"d=os.path.join(home,'delays.json')\nif os.path.exists(d):\n import time\n key=mode+('-probe' if isinstance(request,dict) and request.get('probe') else '')\n" +
+		" wait=json.load(open(d)).get(key,0)\n cached=os.path.join(home,'probe-cached')\n if wait and not ('probe' in key and os.path.exists(cached)):\n" +
+		"  open(os.path.join(home,'started-'+key),'w').close()\n  time.sleep(wait)\n  open(os.path.join(home,'finished-'+key),'w').close()\n" +
+		"  if 'probe' in key: open(cached,'w').close()\n" +
 		"print(json.dumps(json.load(open(os.path.join(home,'replies.json'))).get(mode,{'error':'unexpected'})))\n"
 	if err := os.WriteFile(helper, []byte(code), 0600); err != nil {
 		t.Fatal(err)
@@ -571,8 +578,10 @@ func TestCodexDesktopOpenBindsATerminal(t *testing.T) {
 	s.projectShares = map[string]*projectShare{project: {done: make(chan struct{})}}
 	row := listedCodexSession(t, s, guest, project, "打开我")
 	record, _ := s.mobileCLI.record(s.profile, row.ID)
+	caps := map[string]any{"installed": true, "complete": true, "version": "0.171.0", "resume": true, "resume_no_daemon": true}
 	guest.reply("view", map[string]any{"thread_id": record.CLIID, "account": "default", "workspace": guestPath(project), "turns": []any{}, "can_send": true, "owner": "",
-		"cli": map[string]any{"installed": true, "complete": true, "version": "0.171.0", "resume": true, "resume_no_daemon": true}})
+		"cli": caps})
+	guest.reply("probe", caps)
 	path := "/api/cli/sessions/" + row.ID + "/open"
 	w := request(s, "POST", path, s.origin, "{}", true)
 	var opened mobileSession
@@ -922,6 +931,154 @@ func TestCodexStopSendsOneEscPerRunningTurn(t *testing.T) {
 	}
 	if n := escapes("third"); n != 0 {
 		t.Fatalf("%d Esc for a turn that is not running", n)
+	}
+}
+
+func (g *codexFakeGuest) delay(delays map[string]float64) {
+	g.t.Helper()
+	data, _ := json.Marshal(delays)
+	if err := os.WriteFile(filepath.Join(g.home, "delays.json"), data, 0600); err != nil {
+		g.t.Fatal(err)
+	}
+}
+
+func (g *codexFakeGuest) await(marks ...string) string {
+	g.t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		for _, mark := range marks {
+			if _, err := os.Stat(filepath.Join(g.home, mark)); err == nil {
+				return mark
+			}
+		}
+		if time.Now().After(deadline) {
+			g.t.Fatal("the guest did not reach", marks)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Reading a Codex CLI's help the first time takes seconds. A desktop open
+// has the guest do it before the operation lock, so the lock is free
+// meanwhile, and asks for it under the lock only when that answer was
+// complete (from the guest's cache).
+func TestCodexFirstOpenProbesOutsideTheOperationLock(t *testing.T) {
+	s, project, guest := newCodexFixture(t)
+	t.Cleanup(s.terminals.close)
+	s.projectShares = map[string]*projectShare{project: {done: make(chan struct{})}}
+	row := listedCodexSession(t, s, guest, project, "首次打开")
+	record, _ := s.mobileCLI.record(s.profile, row.ID)
+	caps := map[string]any{"installed": true, "complete": true, "version": "0.171.0", "resume": true, "resume_no_daemon": true}
+	guest.reply("view", map[string]any{"thread_id": record.CLIID, "account": "default", "workspace": guestPath(project), "turns": []any{}, "can_send": true, "owner": "", "cli": caps})
+	guest.reply("probe", caps)
+	guest.delay(map[string]float64{"probe": 1, "view-probe": 1})
+	opened := make(chan *httptest.ResponseRecorder, 1)
+	go func() { opened <- request(s, "POST", "/api/cli/sessions/"+row.ID+"/open", s.origin, "{}", true) }()
+	guest.await("started-probe", "started-view-probe")
+	if !s.op.TryLock() {
+		t.Fatal("the open held the operation lock while the guest read the CLI's help")
+	}
+	s.op.Unlock()
+	if w := <-opened; w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if views := guest.calls("view"); len(views) != 1 || views[0]["probe"] != true {
+		t.Fatal("views", views)
+	}
+	// An incomplete answer: the check under the lock does not probe, and
+	// the open goes on (tui-launch checks resume support on its own).
+	second := listedCodexSession(t, s, guest, project, "再次打开")
+	secondRecord, _ := s.mobileCLI.record(s.profile, second.ID)
+	guest.reply("view", map[string]any{"thread_id": secondRecord.CLIID, "account": "default", "workspace": guestPath(project), "turns": []any{}, "can_send": true, "owner": ""})
+	guest.reply("probe", map[string]any{"installed": true, "complete": false})
+	if w := request(s, "POST", "/api/cli/sessions/"+second.ID+"/open", s.origin, "{}", true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if views := guest.calls("view"); len(views) != 2 || views[1]["probe"] != false {
+		t.Fatal("views", views)
+	}
+}
+
+// An archive's guest stop of a phone turn (up to 8 s) runs after the
+// operation lock; a restore meanwhile waits for it, so the stop never
+// reaches a turn started after the restore.
+func TestCodexArchiveStopsThePhoneTurnOutsideTheOperationLock(t *testing.T) {
+	s, project, guest := newCodexFixture(t)
+	t.Cleanup(s.terminals.close)
+	phone := listedCodexSession(t, s, guest, project, "归档停止")
+	record, _ := s.mobileCLI.record(s.profile, phone.ID)
+	if err := s.codexConnection(record); err != nil {
+		t.Fatal(err)
+	}
+	guest.reply("stop", map[string]any{"ok": true})
+	guest.delay(map[string]float64{"stop": 1})
+	archived := make(chan *httptest.ResponseRecorder, 1)
+	go func() { archived <- request(s, "POST", "/api/cli/sessions/"+phone.ID+"/archive", s.origin, "{}", true) }()
+	guest.await("started-stop")
+	if !s.op.TryLock() {
+		t.Fatal("the archive held the operation lock while the guest stopped the turn")
+	}
+	s.op.Unlock()
+	if record, _ := s.mobileCLI.record(s.profile, phone.ID); !record.Archived {
+		t.Fatal("not archived before the guest stop")
+	}
+	if err := s.setSessionArchived(phone.ID, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(guest.home, "finished-stop")); err != nil {
+		t.Fatal("the restore did not wait for the archive's stop")
+	}
+	if w := <-archived; w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if record, _ := s.mobileCLI.record(s.profile, phone.ID); record.Archived {
+		t.Fatal("restore lost")
+	}
+	s.mobileCLI.mu.Lock()
+	pending := len(s.mobileCLI.archiveStops)
+	s.mobileCLI.mu.Unlock()
+	if pending != 0 {
+		t.Fatal("archive stop not cleared")
+	}
+}
+
+// Session lists poll every 250 ms; the Codex accounts file is read again
+// only when it changed.
+func TestCodexAccountLabelsFollowTheFile(t *testing.T) {
+	s := testServer(t)
+	id := strings.Repeat("cd", 12)
+	save := func(label string) {
+		t.Helper()
+		if err := s.saveCodexAccounts(codexAccountList{Accounts: []codexAccount{{ID: id, Label: label, Enabled: true, Status: "ready"}}, Scheduling: (claudeScheduling{}).defaults()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("工作")
+	if labels := s.codexAccountLabels(); labels[id] != "工作" {
+		t.Fatal(labels)
+	}
+	path := filepath.Join(s.profile, "codex-accounts.json")
+	if os.Geteuid() != 0 {
+		// Unreadable but unchanged: answered from the cache, not read.
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		if labels := s.codexAccountLabels(); labels[id] != "工作" {
+			t.Fatal("the unchanged file was read again", labels)
+		}
+		if err := os.Chmod(path, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save("个人")
+	if labels := s.codexAccountLabels(); labels[id] != "个人" {
+		t.Fatal("a saved change was not read", labels)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if labels := s.codexAccountLabels(); len(labels) != 0 {
+		t.Fatal("labels of a removed file", labels)
 	}
 }
 

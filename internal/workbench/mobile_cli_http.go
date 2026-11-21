@@ -169,7 +169,8 @@ func (s *Server) openCodexSession(w http.ResponseWriter, r *http.Request, view m
 		http.Error(w, "Codex 会话请在手机上继续，暂不支持从手机打开电脑终端", 409)
 		return
 	}
-	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "codex", sharedID: view.ID, requestContext: r.Context()})
+	probed := s.warmCodexProbe(r.Context())
+	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "codex", sharedID: view.ID, codexProbed: probed, requestContext: r.Context()})
 	if err != nil {
 		switch {
 		case errors.Is(err, errMobileLocked):

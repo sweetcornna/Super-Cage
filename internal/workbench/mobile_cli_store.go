@@ -166,6 +166,9 @@ type mobileCLIStore struct {
 	// escSent is the turn each terminal conversation last got a Stop's Esc
 	// for, and when (claimTerminalStopLocked).
 	escSent map[string]terminalStop
+	// archiveStops holds, per session, the guest stop an archive runs after
+	// the operation lock; it is closed when that stop ends.
+	archiveStops map[string]chan struct{}
 }
 
 type terminalStop struct {
