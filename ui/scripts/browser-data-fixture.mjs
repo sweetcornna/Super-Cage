@@ -44,7 +44,7 @@ export function startSites(port = 0) {
   return new Promise(resolve => server.listen(port, "127.0.0.1", () => resolve({ server, port: server.address().port })));
 }
 
-export async function createDataController({ headless = true } = {}) {
+export async function createDataController({ headless = true, extension } = {}) {
   const browserPath = process.env.CAGE_TEST_BROWSER_PATH;
   assert.ok(browserPath, "Set CAGE_TEST_BROWSER_PATH to a Chromium-family browser");
   const directory = await realpath(await mkdtemp(join(tmpdir(), "cage-browser-data-")));
@@ -97,7 +97,7 @@ export async function createDataController({ headless = true } = {}) {
     for (const name of await readdir(source))
       if ((name.startsWith("browser-") && name.endsWith(".mjs") && !name.endsWith(".test.mjs")) || ["device-observation.mjs", "display-density.mjs", "native-input.mjs", "tailnet-client.mjs"].includes(name))
         await cp(new URL(name, source), join(directory, name));
-    await cp(new URL("split-extension", source), join(directory, "extension"), { recursive: true });
+    await cp(extension || new URL("split-extension", source), join(directory, "extension"), { recursive: true });
     const text = await readFile(new URL("browser-agent.mjs", source), "utf8");
     const marker = 'const input = JSON.parse(text || "{}");';
     const launch = 'await cdp("Target.setDiscoverTargets", { discover: true });';

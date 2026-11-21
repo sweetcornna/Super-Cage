@@ -168,7 +168,8 @@ export class BrowserData {
     };
     for (const tab of this.tabsOf(scope)) add(webOrigin(tab.url));
     const cookies = await this.cookies(scope);
-    for (const cookie of cookies) add((cookie.secure ? "https://" : "http://") + cookieHost(cookie));
+    // A cookie names a host, not a scheme or a port: both schemes are probed.
+    for (const host of new Set(cookies.map(cookieHost))) { add("https://" + host); add("http://" + host); }
     let historyComplete = true;
     if (!scope.private) {
       const history = await this.extension("history-origins");
@@ -247,7 +248,8 @@ export class BrowserData {
     const current = Math.min(page, Math.max(0, Math.ceil(cookies.length / pageSize) - 1));
     return {
       site, total: cookies.length, page: current, pageSize, incognito: scope.private,
-      origins: origins.map((origin, i) => ({ origin, bytes: bytes[i] })).sort((a, b) => b.bytes - a.bytes),
+      // Origins guessed from a cookie's host show only when they hold data.
+      origins: origins.map((origin, i) => ({ origin, bytes: bytes[i] })).filter(item => item.bytes > 0).sort((a, b) => b.bytes - a.bytes),
       cookies: cookies.slice(current * pageSize, (current + 1) * pageSize).map(cookie => ({
         key: cookieKey(cookie), name: cookie.name, domain: cookie.domain, path: cookie.path,
         expires: cookie.expires, session: cookie.session, secure: cookie.secure, httpOnly: cookie.httpOnly,

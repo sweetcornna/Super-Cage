@@ -458,6 +458,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/browser/preferences", s.browserPreferences)
 	mux.HandleFunc("POST /api/browser/preferences", s.browserPreferences)
 	mux.HandleFunc("POST /api/browser/extensions/upload", s.browserExtensionUpload)
+	mux.HandleFunc("POST /api/browser/data", s.browserData)
+	mux.HandleFunc("GET /api/browser/data-settings", s.browserDataSettingsRoute)
+	mux.HandleFunc("POST /api/browser/data-settings", s.browserDataSettingsRoute)
 	mux.HandleFunc("GET /api/client/browser-extensions", s.localBrowserExtensions)
 	mux.HandleFunc("POST /api/client/browser-extensions", s.localBrowserExtensions)
 	mux.HandleFunc("POST /api/browser/{action}", s.browser)
@@ -953,7 +956,11 @@ func (s *Server) startRun(options *guestprofile.Options, system string) func() e
 		if err := s.prepareEnvironment(); err != nil {
 			return err
 		}
-		return s.startEnvironment(true)
+		if err := s.startEnvironment(true); err != nil {
+			return err
+		}
+		s.browserDataAutoClean("start")
+		return nil
 	}
 }
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
