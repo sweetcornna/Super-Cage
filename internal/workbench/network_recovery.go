@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/containerenv"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
@@ -115,7 +116,7 @@ func (s *Server) recoverNetwork() {
 	// recheck waits for any reason.
 	resources, err := cage.ReadResourceStatus(s.instanceDir())
 	now := time.Now()
-	memory := memoryNote(resources, err, now)
+	memory := memoryNote(resources, err, now, s.memorySizing(resources))
 	s.mu.Lock()
 	s.safety.memory = memory
 	s.refreshNetworkExplanationLocked(now)
@@ -138,8 +139,13 @@ func (s *Server) recoverNetwork() {
 	// Only a recent pressure measurement should postpone the full gate check,
 	// and only for recoveryPressureWait: a guest that stays short of memory
 	// would otherwise never get its network back.
-	guestPressure := resources.Pressure && now.Sub(resources.ObservedAt) <= 10*time.Second
-	if err == nil && (guestPressure || resources.HostPressure) {
+	// With the guest's governor, pressure is the protected classes'; a
+	// browser it holds at its limit (browser_pressure) fails the full
+	// check's browser stage the same way and waits within the same bound.
+	fresh := now.Sub(resources.ObservedAt) <= 10*time.Second
+	guestPressure := resources.Pressure && fresh
+	browserPressure := resources.BrowserPressure && fresh
+	if err == nil && (guestPressure || browserPressure || resources.HostPressure) {
 		s.mu.Lock()
 		current := s.recovery == r
 		logWait := current && r.pressureSince.IsZero()
@@ -156,14 +162,14 @@ func (s *Server) recoverNetwork() {
 			return
 		}
 		if logWait {
-			diagnostics.Log("info", "network", fmt.Sprintf("automatic recheck waiting for memory pressure to subside (guest=%t, host=%t); runs anyway after %s", guestPressure, resources.HostPressure, recoveryPressureWait))
+			diagnostics.Log("info", "network", fmt.Sprintf("automatic recheck waiting for memory pressure to subside (guest=%t, browser=%t, host=%t); runs anyway after %s", guestPressure, browserPressure, resources.HostPressure, recoveryPressureWait))
 		}
 		if waited := now.Sub(r.pressureSince); waited < recoveryPressureWait {
 			timing.result = "memory_pressure"
 			return
 		}
 		timing.stages = append(timing.stages, "pressure_wait_elapsed=true")
-		diagnostics.Log("warn", "network", fmt.Sprintf("memory pressure persisted for %s; running the automatic recheck anyway (guest=%t, host=%t, attempt=%d)", recoveryPressureWait, guestPressure, resources.HostPressure, r.Attempts+1))
+		diagnostics.Log("warn", "network", fmt.Sprintf("memory pressure persisted for %s; running the automatic recheck anyway (guest=%t, browser=%t, host=%t, attempt=%d)", recoveryPressureWait, guestPressure, browserPressure, resources.HostPressure, r.Attempts+1))
 	}
 	_, _ = s.submitJob("network-recovery", func() error { return s.runNetworkRecovery(r, func() error { return networkRecoveryCheck(s) }) })
 }
@@ -253,48 +259,143 @@ func (s *Server) finishNetworkRecovery(expected networkRecovery, err error) erro
 
 // memorySnapshot is what the network status says about the guest's memory.
 type memorySnapshot struct {
-	At     time.Time
-	Short  bool
+	At    time.Time
+	Short bool
+	// Cause is what is short of memory: "environment" (the protected
+	// classes, or the whole guest without the governor), "browser" (the
+	// browser, held at its limit by the governor) or "machine".
+	Cause  string
 	Reason string
 	Advice []string
 }
 
+// The memory a monitoring read was short of.
+const (
+	memoryCauseEnvironment = "environment"
+	memoryCauseBrowser     = "browser"
+	memoryCauseMachine     = "machine"
+)
+
+// memorySizing is what the resource status cannot say on its own: whether
+// sizing advice applies (a Linux guest the host agent sizes, see
+// resource-allocation.md 7.2), whether someone chose the allocation, and,
+// for an older host agent that does not publish possible_bytes, what
+// automatic sizing gives on this machine.
+type memorySizing struct {
+	applies, manual bool
+	automatic       uint64
+}
+
+// automaticMemoryBytes is what automatic sizing gives on this machine;
+// tests replace it.
+var automaticMemoryBytes = func() uint64 {
+	memory, _ := cage.AutomaticLimits()
+	return uint64(memory) << 30
+}
+
+func (s *Server) memorySizing(status cage.ResourceStatus) memorySizing {
+	if s.windowsGuest != nil || s.macosGuest != nil || containerenv.Configured(s.profile) {
+		return memorySizing{}
+	}
+	sizing := memorySizing{applies: true}
+	if allocation, err := cage.LoadResourceAllocation(s.configPath); err == nil {
+		sizing.manual = !allocation.Effective().Automatic
+	}
+	if status.Possible == 0 {
+		sizing.automatic = automaticMemoryBytes()
+	}
+	return sizing
+}
+
 // memoryNote builds the user-facing memory reason and advice from the
-// resource manager's status. It is the one place the network explanation
-// takes its memory wording from: concrete sizing advice published in the
-// resource status (for example a suggested memory size) belongs here.
-func memoryNote(status cage.ResourceStatus, err error, now time.Time) memorySnapshot {
+// resource manager's status (resource-allocation.md 7.4, 7.12). It is the
+// one place the network explanation takes its memory wording from.
+//
+// pressure means the guest's protected classes stall (the whole guest
+// without the governor) and short that the guest has all it can get now;
+// browser_pressure that the governor holds the browser at its limit. They
+// are kept through failed samples, so they count with a fresh reading only;
+// pressure also counts with a failed one, which a starving guest causes.
+func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing memorySizing) memorySnapshot {
 	note := memorySnapshot{At: now}
 	if err != nil {
 		return note
 	}
+	fresh := status.Guest != nil && now.Sub(status.ObservedAt) <= 30*time.Second
 	switch {
-	case status.Pressure && status.Guest != nil && now.Sub(status.ObservedAt) <= 30*time.Second:
-		note.Short = true
+	case (status.Pressure || status.Short) && fresh:
+		note.Short, note.Cause = true, memoryCauseEnvironment
 		note.Reason = fmt.Sprintf("环境内存不足（可用约 %s，共 %s）", humanBytes(status.Guest.Available), humanBytes(status.Guest.Total))
 	case status.Pressure && status.Error != "":
 		// A starving guest also fails to answer the resource probe; keep its
 		// last pressured reading rather than report the memory as fine.
-		note.Short = true
+		note.Short, note.Cause = true, memoryCauseEnvironment
 		note.Reason = "环境内存不足，资源读数也暂时超时"
+	case status.BrowserPressure && fresh:
+		note.Short, note.Cause = true, memoryCauseBrowser
+		note.Reason = "隔离浏览器占用的内存超过了环境能分给它的上限"
 	case status.HostPressure:
-		note.Short = true
+		note.Short, note.Cause = true, memoryCauseMachine
 		note.Reason = "运行环境的这台机器内存不足"
 		note.Advice = []string{"关闭这台机器上其他占用内存较多的程序"}
 		return note
+	default:
+		return note
 	}
-	if note.Short {
-		note.Advice = []string{
-			"在隔离浏览器中关闭或刷新占用内存较多的标签页，或结束环境里不需要的程序",
-			"在资源设置中查看环境内存；需要时调高内存上限（重启环境后生效）",
-		}
+	if note.Cause == memoryCauseBrowser {
+		note.Advice = []string{"在隔离浏览器中关闭或刷新占用内存较多的标签页"}
+	} else {
+		note.Advice = []string{"在隔离浏览器中关闭或刷新占用内存较多的标签页，或结束环境里不需要的程序"}
+	}
+	if advice := sizingAdvice(status, sizing); advice != "" {
+		note.Advice = append(note.Advice, advice)
+	} else if !sizing.applies {
+		// Guests the host agent does not size keep their own settings.
+		note.Advice = append(note.Advice, "在资源设置中查看环境内存；需要时调高内存上限（重启环境后生效）")
 	}
 	return note
 }
 
+// sizingAdvice is the allocator's own sentence about more memory when it
+// has one (short at its maximum), what holds the guest when the machine
+// does, and otherwise "可以调到 N GB" when automatic sizing gives more than
+// the environment has: possible_bytes from the host agent, or this machine's
+// automatic size against an older host agent that does not publish it.
+func sizingAdvice(status cage.ResourceStatus, sizing memorySizing) string {
+	if status.Advice != nil && status.Advice.Message != "" {
+		return status.Advice.Message
+	}
+	if !sizing.applies {
+		return ""
+	}
+	if status.LimitedBy == "machine" {
+		return "这台机器暂时没有更多内存可给环境；关闭这台机器上不用的程序后会自动增加"
+	}
+	possible := status.Possible
+	if possible == 0 {
+		possible = sizing.automatic
+	}
+	if status.Maximum == 0 || possible <= status.Maximum {
+		return ""
+	}
+	if sizing.manual {
+		return "在资源设置中改为自动（推荐）后可以调到 " + memoryGB(possible) + "，需要重启环境"
+	}
+	return "在资源设置中可以把内存调到 " + memoryGB(possible) + "，需要重启环境"
+}
+
+// memoryGB words a memory size as the allocator's advice does.
+func memoryGB(size uint64) string {
+	value := float64(size) / float64(1<<30)
+	if value >= 10 || value == math.Trunc(value) {
+		return fmt.Sprintf("%.0f GB", value)
+	}
+	return fmt.Sprintf("%.1f GB", value)
+}
+
 func (s *Server) readMemorySnapshot() memorySnapshot {
 	status, err := cage.ReadResourceStatus(s.instanceDir())
-	return memoryNote(status, err, time.Now())
+	return memoryNote(status, err, time.Now(), s.memorySizing(status))
 }
 
 // withMemoryReason leads text with the memory shortage that likely caused it.
@@ -341,8 +442,11 @@ type networkExplanation struct {
 	RecheckAt   *time.Time `json:"recheck_at,omitempty"`
 	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
 	MemoryShort bool       `json:"memory_short"`
-	Advice      []string   `json:"advice,omitempty"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	// MemoryCause says what is short when memory_short is set: environment,
+	// browser (held at its limit) or machine. Additive; older clients ignore it.
+	MemoryCause string    `json:"memory_cause,omitempty"`
+	Advice      []string  `json:"advice,omitempty"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // refreshNetworkExplanationLocked recomputes safety.Explanation from the
@@ -361,9 +465,10 @@ func (s *Server) networkExplanationLocked(now time.Time) *networkExplanation {
 	if now.Sub(memory.At) > 30*time.Second {
 		memory = memorySnapshot{}
 	}
-	e := &networkExplanation{MemoryShort: memory.Short, Advice: memory.Advice, UpdatedAt: now.UTC()}
+	e := &networkExplanation{MemoryShort: memory.Short, MemoryCause: memory.Cause, Advice: memory.Advice, UpdatedAt: now.UTC()}
 	if s.networkPaused {
 		e.State, e.Reason, e.Next, e.Advice = networkPausedState, "外网已手动暂停", "离线终端和文件仍可使用；重新检测通过后恢复联网。", nil
+		e.MemoryShort, e.MemoryCause = false, ""
 		return e
 	}
 	reason := s.networkErrorLocked()

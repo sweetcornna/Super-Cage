@@ -122,6 +122,8 @@ func (s *Server) networkStateLabel(state, label string) string {
 		return "已联网，监测重试中"
 	case state != "paused":
 		return label
+	case explanation.State == networkWaitingMemory && explanation.MemoryCause == memoryCauseBrowser:
+		return "外网未放行：浏览器内存不足，等待自动重检"
 	case explanation.State == networkWaitingMemory:
 		return "外网未放行：环境内存不足，等待自动重检"
 	case explanation.State == networkRecheckScheduled:
