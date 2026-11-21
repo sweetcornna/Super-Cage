@@ -719,17 +719,92 @@ func (f *Filter) decideOSC() bool {
 	case "8":
 		return allowLink(text)
 	case "9":
-		return !f.replay && len(text) <= NoticeLimit
+		return !f.replay && allowOSC9(text)
 	case "777":
 		return !f.replay && len(text) <= NoticeLimit && hasPrefix(text, "notify;")
 	case "99":
 		return !f.replay && f.rewriteKittyNotification(semi)
 	case "4", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "104", "105", "110", "111", "112", "113", "114", "115", "116", "117", "118", "119":
 		return !f.replay || !contains(text, '?')
-	case "22", "133":
+	case "22":
 		return true
+	case "133":
+		return allowMark(text)
 	}
 	return false
+}
+
+// allowOSC9 keeps the two meanings of OSC 9 that stay in the window: a
+// notification (iTerm2, Ghostty, WezTerm) and ConEmu's progress report
+// 9;4;state[;percent]. Every other ConEmu sub-command is a number first:
+// 9;9 sets the working directory of the next local tab in Ghostty and
+// Windows Terminal, 9;2 opens a message box, 9;6 runs a GUI macro. So a
+// notification whose first field is a number is dropped.
+func allowOSC9(text []byte) bool {
+	if len(text) > NoticeLimit {
+		return false
+	}
+	first, rest, more := cut(text, ';')
+	if !number(first) {
+		return true // notification text
+	}
+	if string(first) != "4" || !more {
+		return false
+	}
+	state, percent, hasPercent := cut(rest, ';')
+	if !number(state) || len(state) != 1 || state[0] > '4' {
+		return false
+	}
+	if !hasPercent {
+		return true
+	}
+	return number(percent) && len(percent) <= 3 && atoi(percent) <= 100
+}
+
+// allowMark keeps the shell integration marks of OSC 133 alone: prompt,
+// input and output start (A, B, C), and the end of a command (D) with its
+// exit status. Their key=value extras ask for more (click_events moves the
+// cursor on click, cmdline_url carries a URL) and are dropped.
+func allowMark(text []byte) bool {
+	mark, status, hasStatus := cut(text, ';')
+	switch string(mark) {
+	case "A", "B", "C":
+		return !hasStatus
+	case "D":
+		return !hasStatus || number(status) && len(status) <= 5
+	}
+	return false
+}
+
+// cut splits text at the first sep.
+func cut(text []byte, sep byte) (before, after []byte, found bool) {
+	for i, c := range text {
+		if c == sep {
+			return text[:i], text[i+1:], true
+		}
+	}
+	return text, nil, false
+}
+
+// number reports whether text is one or more decimal digits.
+func number(text []byte) bool {
+	if len(text) == 0 {
+		return false
+	}
+	for _, c := range text {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func atoi(text []byte) int {
+	n := 0
+	for _, c := range text {
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // allowLink keeps OSC 8 hyperlinks to http and https only; the empty target

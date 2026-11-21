@@ -314,3 +314,42 @@ func BenchmarkTUI(b *testing.B) {
 	// Claude Code style output: colours, cursor moves and text.
 	benchmarkFilter(b, bytes.Repeat([]byte(esc+"[2K"+esc+"[1G"+esc+"[38;2;215;119;87m✻"+esc+"[39m "+esc+"[1mThinking…"+esc+"[22m "+esc+"[2m(esc to interrupt)"+esc+"[0m\r\n"), 600))
 }
+
+// Review F1: OSC 9 sub-commands (ConEmu) and OSC 133 extras act outside the
+// window in some applications: Ghostty turns 9;9 into a working directory
+// for the owner's next local tab. The reviewer's bytes, row by row.
+func TestFilterOSCNotificationsAndMarks(t *testing.T) {
+	for _, row := range []struct{ name, in, out string }{
+		{"9;9 file URL BEL", "a\x1b]9;9;file://localhost/Users/owner/.claude-cage-downloads/r\x07b", "ab"},
+		{"9;9 file URL ST", "a\x1b]9;9;file://localhost/Users/owner/.claude-cage-downloads/r\x1b\\b", "ab"},
+		{"9;9 path", "\x1b]9;9;/tmp\x07", ""},
+		{"9;2 message box", "\x1b]9;2;message box\x07", ""},
+		{"9;6 GUI macro", "\x1b]9;6;guimacro\x07", ""},
+		{"9;7 run process", "\x1b]9;7;cmd\x07", ""},
+		{"9;1 sleep", "\x1b]9;1;100\x07", ""},
+		{"9;12 prompt mark", "\x1b]9;12\x07", ""},
+		{"9 notification", "\x1b]9;hello\x07", "\x1b]9;hello\x07"},
+		{"9 notification starting with digits and text", "\x1b]9;2 tests failed\x07", "\x1b]9;2 tests failed\x07"},
+		{"9;4 progress", "\x1b]9;4;1;50\x07", "\x1b]9;4;1;50\x07"},
+		{"9;4 clear", "\x1b]9;4;0\x07", "\x1b]9;4;0\x07"},
+		{"9;4 indeterminate", "\x1b]9;4;3\x07", "\x1b]9;4;3\x07"},
+		{"9;4 state out of range", "\x1b]9;4;5;10\x07", ""},
+		{"9;4 progress out of range", "\x1b]9;4;1;101\x07", ""},
+		{"9;4 extra field", "\x1b]9;4;1;50;x\x07", ""},
+		{"9;4 text progress", "\x1b]9;4;1;abc\x07", ""},
+		{"133 prompt start", "\x1b]133;A\x07", "\x1b]133;A\x07"},
+		{"133 command end with status", "\x1b]133;D;0\x07", "\x1b]133;D;0\x07"},
+		{"133 command end", "\x1b]133;D\x07", "\x1b]133;D\x07"},
+		{"133 click events", "\x1b]133;A;click_events=1\x07", ""},
+		{"133 command line URL", "\x1b]133;C;cmdline_url=file:///x\x07", ""},
+		{"133 aid", "\x1b]133;A;aid=1\x07", ""},
+		{"133 unknown mark", "\x1b]133;P;k=i\x07", ""},
+		{"133 status text", "\x1b]133;D;err\x07", ""},
+		{"777 notify", "\x1b]777;notify;t;b\x07", "\x1b]777;notify;t;b\x07"},
+		{"777 other", "\x1b]777;preexec\x07", ""},
+	} {
+		if got := filterAll(t, Options{}, false, row.in); got != row.out {
+			t.Errorf("%s: %q -> %q, want %q", row.name, row.in, got, row.out)
+		}
+	}
+}
