@@ -421,7 +421,7 @@
 .browser-more-menu .vault-save small { margin-top: 4px; font-size: var(--fs-caption); line-height: 1.5; }
 .browser-more-menu .vault-save .vault-actions { gap: 8px; margin-top: 12px; }
 .browser-more-menu .vault-save .vault-actions > button:not(.text-button) { min-height: var(--h-compact); padding: 0 12px; }
-.browser-more-menu .vault-save .vault-actions > .text-button { flex-basis: 100%; justify-content: flex-start; padding: 2px 0; color: var(--muted); font-size: var(--fs-caption); }
+.browser-more-menu .vault-save .vault-actions > .text-button { flex-basis: 100%; justify-content: flex-start; min-height: 28px; padding: 0; color: var(--muted); font-size: var(--fs-caption); }
 .browser-more-menu .vault-save .vault-actions > .text-button:hover:not(:disabled) { color: var(--ink); }
 .browser-more-menu .vault-picker { padding: 4px 0 6px; }
 .browser-more-menu .vault-picker > p { margin: 2px 10px 6px; color: var(--muted); font-size: var(--fs-caption); }
@@ -441,4 +441,4 @@
 .browser-more-menu .vault-account-choice:focus-visible { background: var(--soft); }
 .browser-more-menu .vault-account-choice:focus-visible { outline-offset: -2px; }
 .browser-more-menu .vault-account-choice span:first-child { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-.browser-more-menu .vault-picker > .text-button { margin: 4px 10px 0; padding: 2px 0; font-size: var(--fs-caption); }
+.browser-more-menu .vault-picker > .text-button { min-height: 28px; margin: 2px 10px 0; padding: 0; font-size: var(--fs-caption); }
