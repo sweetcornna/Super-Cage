@@ -115,8 +115,19 @@ func (f *Filter) Append(dst, src []byte) []byte {
 	for i < len(src) {
 		if f.st == stGround {
 			start := i
-			for i < len(src) && textClass[src[i]] {
-				i++
+			for {
+				for i < len(src) && textClass[src[i]] {
+					i++
+				}
+				// A whole, valid UTF-8 character that is not a C1 control;
+				// anything else takes the byte-wise path.
+				if i < len(src) && src[i] >= 0x80 {
+					if r, size := utf8.DecodeRune(src[i:]); size > 1 && r > 0x9f {
+						i += size
+						continue
+					}
+				}
+				break
 			}
 			dst = append(dst, src[start:i]...)
 			if i == len(src) {

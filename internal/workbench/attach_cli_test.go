@@ -702,3 +702,102 @@ func TestAttachLatency(t *testing.T) {
 	t.Logf("through cage attach: median %v p95 %v max %v", am, ap, ax)
 	t.Logf("added by the attach hop: median %v p95 %v", am-dm, ap-dp)
 }
+
+// TestAttachClientProcess is cage attach as its own process, for the
+// footprint measurement: CAGE_ATTACH_CLIENT holds its arguments.
+func TestAttachClientProcess(t *testing.T) {
+	args := os.Getenv("CAGE_ATTACH_CLIENT")
+	if args == "" {
+		return
+	}
+	os.Exit(AttachMain(strings.Fields(args), os.Stdin, os.Stdout, os.Stderr))
+}
+
+func processRSS(t *testing.T, pid int) int {
+	t.Helper()
+	out, err := exec.Command("/bin/ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kb, _ := strconv.Atoi(strings.TrimSpace(string(out)))
+	return kb
+}
+
+// TestAttachProcessFootprint runs cage attach as a separate process in a
+// pseudo-terminal, measures keystroke latency through it and its resident
+// memory idle and after output. CAGE_ATTACH_BENCH=1 runs it.
+func TestAttachProcessFootprint(t *testing.T) {
+	if os.Getenv("CAGE_ATTACH_BENCH") == "" {
+		t.Skip("set CAGE_ATTACH_BENCH=1")
+	}
+	s := attachController(t, nil)
+	session := startChild(t, s, "echo")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAttachClientProcess$")
+	cmd.Env = append(os.Environ(), "CAGE_ATTACH_CLIENT=--config "+s.configPath+" --terminal "+session.id)
+	master, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: 100, Rows: 30})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait(); master.Close() })
+	var mu sync.Mutex
+	var out bytes.Buffer
+	changed := make(chan struct{}, 1)
+	go func() {
+		buffer := make([]byte, 64<<10)
+		for {
+			n, err := master.Read(buffer)
+			mu.Lock()
+			out.Write(buffer[:n])
+			mu.Unlock()
+			select {
+			case changed <- struct{}{}:
+			default:
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	count := func(want string) int { mu.Lock(); defer mu.Unlock(); return strings.Count(out.String(), want) }
+	wait := func(want string, n int) {
+		deadline := time.After(10 * time.Second)
+		for count(want) < n {
+			select {
+			case <-changed:
+			case <-deadline:
+				mu.Lock()
+				t.Fatalf("never saw %q: %q", want, out.String())
+			}
+		}
+	}
+	wait("ready", 1)
+	time.Sleep(300 * time.Millisecond)
+	idle := processRSS(t, cmd.Process.Pid)
+	latencies := make([]time.Duration, 0, 150)
+	for i := 0; i < 150; i++ {
+		key := string(rune('a' + i%26))
+		before := count(key)
+		start := time.Now()
+		if _, err := master.Write([]byte(key)); err != nil {
+			t.Fatal(err)
+		}
+		wait(key, before+1)
+		latencies = append(latencies, time.Since(start))
+		time.Sleep(30 * time.Millisecond)
+	}
+	sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
+	// 4 MB through the filter: 2000 chunks of 2 KB typed and echoed.
+	chunk := strings.Repeat("0123456789abcdef", 128)
+	for i := 0; i < 2000; i++ {
+		if _, err := master.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+		if i%50 == 49 {
+			wait("0123456789abcdef", (i+1)*128)
+		}
+	}
+	wait("0123456789abcdef", 2000*128)
+	busy := processRSS(t, cmd.Process.Pid)
+	t.Logf("separate process: keystroke median %v p95 %v max %v", latencies[len(latencies)/2], latencies[len(latencies)*95/100], latencies[len(latencies)-1])
+	t.Logf("cage attach RSS: idle %d KB, after 4 MB of output %d KB", idle, busy)
+}
