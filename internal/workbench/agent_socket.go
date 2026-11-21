@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,7 +22,9 @@ func AgentSocket(ctx context.Context, configPath string, target AgentTarget, pat
 	if !strings.HasPrefix(path, "/api/") || strings.ContainsAny(path, "\r\n\\") || strings.Contains(path, "#") || strings.Contains(path, "://") {
 		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
 	}
-	if refusal := agentRouteRefusal(http.MethodGet, strings.SplitN(path, "?", 2)[0]); refusal != nil {
+	if u, err := url.Parse(path); err != nil || u.IsAbs() || u.Host != "" || u.RawPath != "" || !agentPlainPath(u.Path) {
+		return &AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path without traversal or unusual escaping", NextAction: "routes"}
+	} else if refusal := agentRouteRefusal(http.MethodGet, u.Path); refusal != nil {
 		return refusal
 	}
 	c, err := agentConnectTarget(ctx, configPath, target)

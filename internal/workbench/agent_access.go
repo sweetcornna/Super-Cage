@@ -128,6 +128,9 @@ var agentRoutes = []string{
 	"POST /api/client/candidate", "POST /api/client/commit", "POST /api/client/cancel", "POST /api/client/local-stop",
 	"POST /api/client/project-shares", "DELETE /api/client/project-shares/{id}",
 	"POST /api/client/tenant/login", "POST /api/client/tenant/vms",
+	// Routes of branches not merged yet, classified ahead (browser-data,
+	// local-terminal-ssh): guest browsing data and keeping a terminal open.
+	"POST /api/browser/data", "POST /api/browser/data-settings", "POST /api/terminals/{id}/keep",
 }
 
 // agentRouteFamilies are registered {action} routes whose values differ:
@@ -150,6 +153,20 @@ func agentRouteRefusal(method, path string) *AgentError {
 		}
 	}
 	return &AgentError{Code: "route_not_open", Message: "This route changes state and is not open to agents; nothing was sent. Read capabilities for the routes agents may call, or use the desktop window.", NextAction: "capabilities"}
+}
+
+// agentPlainPath reports whether a decoded path is already in the form the
+// server matches: no "." or ".." segment and no empty segment except a
+// trailing slash. Callers also refuse a path whose percent-encoding changes
+// its text (url.URL.RawPath), so what is classified is what the server routes.
+func agentPlainPath(path string) bool {
+	segments := strings.Split(path, "/")
+	for i, segment := range segments[1:] {
+		if segment == "." || segment == ".." || (segment == "" && i != len(segments)-2) {
+			return false
+		}
+	}
+	return true
 }
 
 func agentPatternMatches(pattern, method, path string) bool {

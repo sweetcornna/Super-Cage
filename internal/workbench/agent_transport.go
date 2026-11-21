@@ -70,7 +70,7 @@ type AgentResponse struct {
 func AgentRequest(ctx context.Context, configPath string, target AgentTarget, method, path string, input io.Reader, contentType, output string) (AgentResponse, error) {
 	var result AgentResponse
 	u, err := url.Parse(path)
-	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/api/") || u.Fragment != "" || strings.ContainsAny(path, "\r\n\\") || strings.Contains(u.Path, "//") || strings.Contains(u.Path, "/../") {
+	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/api/") || u.Fragment != "" || strings.ContainsAny(path, "\r\n\\") || u.RawPath != "" || !agentPlainPath(u.Path) {
 		return result, &AgentError{Code: "invalid_input", Message: "Use a relative /api/ path without a host, fragment or traversal.", NextAction: "capabilities"}
 	}
 	switch method {

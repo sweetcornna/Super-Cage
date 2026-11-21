@@ -178,14 +178,32 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 	} {
 		refused(route[0], route[1], "route_not_open")
 	}
-	err := AgentSocket(context.Background(), config, AgentTarget{}, "/api/entry/ssh?device=x", io.NopCloser(strings.NewReader("")), io.Discard)
-	var ae *AgentError
-	if !errors.As(err, &ae) || ae.Code != "native_transport_required" {
-		t.Errorf("socket to a reserved route: %v", err)
+	// Another spelling of a window-only path is refused too, never classified
+	// as something else and then routed by the server to the same handler.
+	beforeConnecting := map[string]bool{"invalid_input": true, "native_transport_required": true}
+	for _, path := range []string{
+		"/api/%65ntry/ssh", "/api/./app-update/interruptions", "/api/app-update/x/../interruptions", "/api/terminals/..",
+		"/api/client%2Flocal-terminal/apps", "/api/client/local-terminal/apps/", "/api/entry/", "/api/app-update/interruptions/",
+	} {
+		for _, method := range []string{"GET", "POST"} {
+			_, err := AgentRequest(context.Background(), config, AgentTarget{}, method, path, nil, "", "")
+			var ae *AgentError
+			if !errors.As(err, &ae) || !beforeConnecting[ae.Code] {
+				t.Errorf("%s %s was not refused before connecting: %v", method, path, err)
+			}
+		}
 	}
+	for _, path := range []string{"/api/entry/ssh?device=x", "/api/%65ntry/ssh", "/api/./entry/ssh", "/api/entry/ssh/..", "/api/entry/ssh/", "/api/terminals/x/../../entry/ssh"} {
+		err := AgentSocket(context.Background(), config, AgentTarget{}, path, io.NopCloser(strings.NewReader("")), io.Discard)
+		var ae *AgentError
+		if !errors.As(err, &ae) || !beforeConnecting[ae.Code] {
+			t.Errorf("socket to %s: %v", path, err)
+		}
+	}
+	var ae *AgentError
 	// Reading the terminal-app setting stays open: this request goes on to
 	// look for the (absent) desktop service.
-	_, err = AgentRequest(context.Background(), config, AgentTarget{Scope: "desktop"}, "GET", "/api/client/local-terminal", nil, "", "")
+	_, err := AgentRequest(context.Background(), config, AgentTarget{Scope: "desktop"}, "GET", "/api/client/local-terminal", nil, "", "")
 	if !errors.As(err, &ae) || ae.Code == "native_transport_required" || ae.Code == "route_not_open" {
 		t.Errorf("reading the terminal-app setting was refused: %v", err)
 	}
@@ -227,6 +245,27 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 			}
 		}
 	}
+	// Registrations that only some platforms or build tags reach: every
+	// literal "METHOD /path" handed to HandleFunc in this package.
+	sources, _ := filepath.Glob("*.go")
+	literal := regexp.MustCompile(`HandleFunc\("([A-Z]+ /[^"]*)"`)
+	for _, name := range sources {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		data, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range literal.FindAllStringSubmatch(string(data), -1) {
+			registered[match[1]] = true
+			if access, _ := agentRouteClass(match[1]); access == "not_open" {
+				t.Errorf("%s (%s) changes state and is neither open to agents nor window only: classify it in agent_access.go", match[1], name)
+			}
+		}
+	}
+	// Classified ahead of their branches' merge; drop from here once merged.
+	pending := map[string]bool{"POST /api/browser/data": true, "POST /api/browser/data-settings": true, "POST /api/terminals/{id}/keep": true}
 	// No stale entries: an open pattern is registered, or a value of a family,
 	// or a /api/client/ route dispatched outside the mux.
 	for _, open := range agentRoutes {
@@ -235,7 +274,7 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 			family = family || strings.HasPrefix(open, strings.TrimSuffix(f, "{action}"))
 		}
 		_, path, _ := strings.Cut(open, " ")
-		if !registered[open] && !family && !strings.HasPrefix(path, "/api/client/") {
+		if !registered[open] && !family && !pending[open] && !strings.HasPrefix(path, "/api/client/") {
 			t.Errorf("agentRoutes lists %s, which no listener registers", open)
 		}
 		if access, _ := agentRouteClass(open); access == "window_only" {
@@ -252,14 +291,17 @@ func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 // What agents used before still works: every named operation and the raw
 // routes the guide documents, except the ones refused on purpose.
 func TestAgentDocumentedOperationsStayOpen(t *testing.T) {
-	refusedOnPurpose := map[string]bool{"client.trusted-login": true}
 	var names []string
 	for _, op := range AgentOperations() {
 		names = append(names, op.Name)
-		refusal := agentRouteRefusal(op.method, op.path)
-		if refusedOnPurpose[op.Name] != (refusal != nil) {
+		if refusal := agentRouteRefusal(op.method, op.path); refusal != nil {
 			t.Errorf("%s (%s %s): refused %v", op.Name, op.method, op.path, refusal)
 		}
+	}
+	// Remembering the login changes what the window trusts: refused on
+	// purpose, and no longer offered as a named operation.
+	if agentRouteRefusal("POST", "/api/client/trusted-login") == nil {
+		t.Error("trusted login is open to agents")
 	}
 	sort.Strings(names)
 	for _, route := range [][2]string{
