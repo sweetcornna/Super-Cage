@@ -40,6 +40,11 @@ type Options struct {
 	// ClipboardNow, when set, is asked as each clipboard write arrives: the
 	// write passes only while it says the owner is at this window.
 	ClipboardNow func() bool
+	// OnQuery, when set, hears of every query the output holds that a
+	// terminal application answers (Cage's web terminal included), whether
+	// or not it passes: the server uses it to know which input is an
+	// answer. Parameters are read as numbers, as applications read them.
+	OnQuery func(Reply)
 }
 
 type state uint8
@@ -408,6 +413,11 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 			return dst
 		}
 		f.st = stGround
+		if f.opts.OnQuery != nil {
+			if kind := csiQuery(f.hold[2:f.n-1], b); kind != ReplyNone {
+				f.opts.OnQuery(kind)
+			}
+		}
 		if f.allowCSI(f.hold[2:f.n-1], b) {
 			return f.emitHold(dst)
 		}
@@ -655,6 +665,9 @@ func (f *Filter) classifyDCS(dst []byte) []byte {
 		}
 		return dst
 	}
+	if f.opts.OnQuery != nil && c == 'q' && string(body) == "$q" {
+		f.opts.OnQuery(ReplySetting)
+	}
 	if c != 'q' || string(body) != "$q" || f.replay {
 		f.count("DCS " + string(body))
 		f.n, f.st = 0, stStringDrop
@@ -717,6 +730,13 @@ func (f *Filter) decideOSC() bool {
 	case "99":
 		return !f.replay && f.rewriteKittyNotification(semi)
 	case "4", "10", "11", "12", "104", "110", "111", "112":
+		if f.opts.OnQuery != nil {
+			for _, c := range text {
+				if c == '?' {
+					f.opts.OnQuery(ReplyColor)
+				}
+			}
+		}
 		return !f.replay || !contains(text, '?')
 	case "133":
 		return allowMark(text)

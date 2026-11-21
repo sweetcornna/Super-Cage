@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"sync"
@@ -97,36 +98,51 @@ func (f *recordingPTY) received(t *testing.T, want string) string {
 }
 
 func TestSplitTerminalReplies(t *testing.T) {
+	var z terminalSizing
+	z.init(80, 24)
 	for _, row := range []struct {
-		in, rest    string
-		cursorAsked bool
-		typing      bool
+		in, rest string
+		asked    bool // the viewer was just shown every kind of query
+		typing   bool
 	}{
 		{in: "ls\r", rest: "ls\r", typing: true},
-		{in: "\x1b[A", rest: "\x1b[A", typing: true},                                             // arrow up
-		{in: "\x1bOP", rest: "\x1bOP", typing: true},                                             // F1
-		{in: "\x1b", rest: "\x1b", typing: true},                                                 // Escape key
-		{in: "\x1bx", rest: "\x1bx", typing: true},                                               // Alt+x
-		{in: "\x1b[<0;10;5M", rest: "\x1b[<0;10;5M", typing: true},                               // mouse press
-		{in: "\x1b[97;5u", rest: "\x1b[97;5u", typing: true},                                     // kitty key
-		{in: "\x1b[?1;2c", rest: ""},                                                             // DA1 answer
-		{in: "\x1b[>0;276;0c", rest: ""},                                                         // DA2 answer
-		{in: "\x1b[0n", rest: ""},                                                                // status report
-		{in: "\x1b[?2004;1$y", rest: ""},                                                         // DECRPM
-		{in: "\x1b[?15u", rest: ""},                                                              // kitty keyboard flags
-		{in: "\x1b[8;40;120t", rest: ""},                                                         // size report
-		{in: "\x1b[I", rest: ""},                                                                 // focus in
-		{in: "\x1b]11;rgb:0000/0000/0000\x1b\\", rest: ""},                                       // OSC 11 answer
-		{in: "\x1b]10;rgb:ffff/ffff/ffff\x07", rest: ""},                                         // OSC 10 answer, BEL
-		{in: "\x1bP1$r0m\x1b\\", rest: ""},                                                       // DECRQSS answer
-		{in: "\x1bP>|xterm(388)\x1b\\", rest: ""},                                                // XTVERSION answer
-		{in: "\x1b_Gi=1;OK\x1b\\", rest: ""},                                                     // kitty graphics answer
-		{in: "\x1b[12;40R", rest: "", cursorAsked: true},                                         // cursor position answer
-		{in: "\x1b[1;2R", rest: "\x1b[1;2R", typing: true},                                       // Shift+F3: nothing asked
-		{in: "\x1b[?1;2ca", rest: "a", typing: true},                                             // answer and a key together
-		{in: "\x1b[200~\x1b[?1;2c\x1b[201~", rest: "\x1b[200~\x1b[?1;2c\x1b[201~", typing: true}, // pasted text
+		{in: "\x1b[A", rest: "\x1b[A", typing: true, asked: true},                                             // arrow up
+		{in: "\x1bOP", rest: "\x1bOP", typing: true, asked: true},                                             // F1
+		{in: "\x1b", rest: "\x1b", typing: true, asked: true},                                                 // Escape key
+		{in: "\x1bx", rest: "\x1bx", typing: true, asked: true},                                               // Alt+x
+		{in: "\x1bP", rest: "\x1bP", typing: true, asked: true},                                               // Alt+P
+		{in: "\x1b]", rest: "\x1b]", typing: true, asked: true},                                               // Alt+]
+		{in: "\x1b_", rest: "\x1b_", typing: true, asked: true},                                               // Alt+_
+		{in: "\x1b]ls\r", rest: "\x1b]ls\r", typing: true, asked: true},                                       // Esc, then ] typed fast
+		{in: "\x1b[<0;10;5M", rest: "\x1b[<0;10;5M", typing: true, asked: true},                               // mouse press
+		{in: "\x1b[97;5u", rest: "\x1b[97;5u", typing: true, asked: true},                                     // kitty key
+		{in: "\x1b[?1;2c", rest: "", asked: true},                                                             // DA1 answer
+		{in: "\x1b[?1;2c", rest: "\x1b[?1;2c", typing: true},                                                  // the same, nothing asked
+		{in: "\x1b[>0;276;0c", rest: "", asked: true},                                                         // DA2 answer
+		{in: "\x1b[0n", rest: "", asked: true},                                                                // status report
+		{in: "\x1b[?2004;1$y", rest: "", asked: true},                                                         // DECRPM
+		{in: "\x1b]11;rgb:0000/0000/0000\x1b\\", rest: "", asked: true},                                       // OSC 11 answer
+		{in: "\x1b]10;rgb:ffff/ffff/ffff\x07", rest: "", asked: true},                                         // OSC 10 answer, BEL
+		{in: "\x1bP1$r0m\x1b\\", rest: "", asked: true},                                                       // DECRQSS answer
+		{in: "\x1b[12;40R", rest: "", asked: true},                                                            // cursor position answer
+		{in: "\x1b[1;2R", rest: "\x1b[1;2R", typing: true},                                                    // Shift+F3: nothing asked
+		{in: "\x1b[I", rest: ""},                                                                              // focus in
+		{in: "\x1b[?1;2ca", rest: "a", typing: true, asked: true},                                             // answer and a key together
+		{in: "\x1b[200~\x1b[?1;2c\x1b[201~", rest: "\x1b[200~\x1b[?1;2c\x1b[201~", typing: true, asked: true}, // pasted text
+		// Answers to what no viewer is ever asked (the filter and Cage's web
+		// terminal ask none of these) are typing.
+		{in: "\x1b[?15u", rest: "\x1b[?15u", typing: true, asked: true},                             // kitty keyboard flags
+		{in: "\x1b[8;40;120t", rest: "\x1b[8;40;120t", typing: true, asked: true},                   // size report
+		{in: "\x1bP>|xterm(388)\x1b\\", rest: "\x1bP>|xterm(388)\x1b\\", typing: true, asked: true}, // XTVERSION answer
 	} {
-		typing, rest := splitTerminalReplies(row.in, row.cursorAsked)
+		p := &terminalPeer{key: "v:viewer"}
+		if row.asked {
+			for i := range p.asked {
+				p.asked[i] = 1
+			}
+			p.askedAt = time.Now()
+		}
+		typing, rest := z.splitReplies(p, row.in, time.Now())
 		if typing != row.typing || rest != row.rest {
 			t.Errorf("%q: typing %v rest %q, want %v %q", row.in, typing, rest, row.typing, row.rest)
 		}
@@ -158,6 +174,7 @@ func TestTerminalSizeOwnerRules(t *testing.T) {
 		t.Fatal("a non-owner resized the PTY", file.sizes)
 	}
 	// Answers: only the owner's reach the program, and they never move ownership.
+	output(session, "\x1b[c")
 	if data, _ := session.peerInput(local, "\x1b[?1;2c"); data != "" {
 		t.Fatalf("non-owner answer passed: %q", data)
 	}
@@ -305,6 +322,21 @@ func TestTerminalStreamsAnswerOnceOnlyForIdentifiedViewers(t *testing.T) {
 	}
 	sendTerminal(t, d, map[string]any{"type": "input", "data": "k"})
 	file.received(t, "k")
+	// The program asks; both applications see the question.
+	if _, err := file.writer.Write([]byte("\x1b[c")); err != nil {
+		t.Fatal(err)
+	}
+	for _, ws := range []*websocket.Conn{c, d} {
+		for {
+			_, frame, err := ws.ReadMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(frame), "\x1b[c") {
+				break
+			}
+		}
+	}
 	sendTerminal(t, c, map[string]any{"type": "input", "data": answer})
 	sendTerminal(t, d, map[string]any{"type": "input", "data": answer})
 	sendTerminal(t, d, map[string]any{"type": "input", "data": "mark-2"})
@@ -346,6 +378,7 @@ func TestTerminalMixedViewersStillAnswerTwice(t *testing.T) {
 	attach := session.openPeer("attach-identity-1", false)
 	answer := "\x1b[?62;22c"
 	count := func() int {
+		output(session, "[c")
 		n := 0
 		for _, p := range []*terminalPeer{web, attach} {
 			if data, _ := session.peerInput(p, answer); data == answer {
@@ -415,4 +448,194 @@ func TestStuckResizeStallsNoOne(t *testing.T) {
 		}
 	})
 	file.received(t, "xy")
+}
+
+// output feeds program output to the viewer rules, as the PTY reader does.
+func output(session *terminalSession, text string) {
+	session.mu.Lock()
+	session.sizing.noteOutput([]byte(text))
+	session.mu.Unlock()
+}
+
+// Input counts as an answer only when it is a complete, well-formed answer
+// to a query the program sent to that viewer recently; everything else is
+// typing, so no key is ever lost and no answer moves ownership.
+func TestTerminalAnswersOnlyToQueriesAsked(t *testing.T) {
+	session, file := newRecordingSession(t)
+	owner := session.openPeer("owner-identity-1", false)
+	other := session.openPeer("other-identity-1", false)
+	_ = session.peerResize(other, 100, 30)
+	_ = session.peerResize(owner, 120, 40)
+	if data, _ := session.peerInput(owner, "x"); data != "x" {
+		t.Fatal(data)
+	}
+	// Keys that start like an answer reach the program from anyone.
+	for _, key := range []string{"\x1bP", "\x1b]", "\x1b_", "\x1b]ls\r", "\x1bPq"} {
+		if data, _ := session.peerInput(other, key); data != key {
+			t.Errorf("non-owner key %q became %q", key, data)
+		}
+		_, _ = session.peerInput(owner, "x")
+	}
+	// An answer nobody asked for is typing.
+	if data, _ := session.peerInput(other, "\x1b[?62;22c"); data != "\x1b[?62;22c" {
+		t.Fatalf("unasked answer dropped: %q", data)
+	}
+	_, _ = session.peerInput(owner, "x")
+	// The program asks for the cursor in a form the old check missed.
+	output(session, "\x1b[06n")
+	if data, _ := session.peerInput(other, "\x1b[3;4R"); data != "" || file.lastSize() != [2]uint16{120, 40} {
+		t.Fatalf("a non-owner's answer passed or moved ownership: %q %v", data, file.lastSize())
+	}
+	// One query, one answer per viewer: the same bytes again are typing.
+	if data, _ := session.peerInput(other, "\x1b[3;4R"); data != "\x1b[3;4R" {
+		t.Fatalf("a second answer to one query was dropped: %q", data)
+	}
+	_, _ = session.peerInput(owner, "x")
+	// Answers in the forms a terminal application sends them, to their queries.
+	for query, answer := range map[string]string{
+		"\x1b[c":           "\x1b[?62;22c",
+		"\x1b[0c":          "\x1b[?1;2c",
+		"\x1b[>c":          "\x1b[>0;276;0c",
+		"\x1b[5n":          "\x1b[0n",
+		"\x1b[?6n":         "\x1b[?3;4;1R",
+		"\x1b[?2026$p":     "\x1b[?2026;2$y",
+		"\x1bP$qm\x1b\\":   "\x1bP1$r0m\x1b\\",
+		"\x1b]11;?\x07":    "\x1b]11;rgb:1e1e/1e1e/1e1e\x07",
+		"\x1b]4;1;?\x1b\\": "\x1b]4;1;rgb:cd/00/00\x1b\\",
+	} {
+		output(session, query)
+		if data, _ := session.peerInput(other, answer); data != "" {
+			t.Errorf("answer %q to %q passed from a non-owner", answer, query)
+		}
+		if data, _ := session.peerInput(owner, answer); data != "" && data != answer {
+			t.Errorf("owner answer %q became %q", answer, data)
+		}
+	}
+	if file.lastSize() != [2]uint16{120, 40} {
+		t.Fatal("an answer moved ownership", file.lastSize())
+	}
+}
+
+// A viewer without identity keeps the size behaviour from before the
+// viewer rules exactly: its every resize applies, its typing never resizes,
+// and its input is never filtered.
+func TestTerminalLegacyTypingNeverResizes(t *testing.T) {
+	session, file := newRecordingSession(t)
+	legacy := session.openPeer("", false)
+	attach := session.openPeer("local-app-identity", false)
+	_ = session.peerResize(legacy, 80, 24)
+	_ = session.peerResize(attach, 120, 40)
+	_, _ = session.peerInput(attach, "x")
+	if file.lastSize() != [2]uint16{120, 40} {
+		t.Fatal(file.sizes)
+	}
+	before := file.resizes()
+	if data, _ := session.peerInput(legacy, "typed"); data != "typed" {
+		t.Fatal(data)
+	}
+	if file.resizes() != before {
+		t.Fatal("typing in a viewer without identity resized the PTY", file.sizes)
+	}
+	phone := session.phonePeer()
+	_ = session.peerResize(phone, 50, 20)
+	before = file.resizes()
+	_, _ = session.peerInput(phone, "p")
+	if file.resizes() != before {
+		t.Fatal("typing on a phone without identity resized the PTY", file.sizes)
+	}
+}
+
+// A phone that sends a viewer identity in its input and resize (the server
+// says it may in every terminal summary) takes part in the rules: its
+// typing takes the size, its answers to what it was shown count once. One
+// without an identity keeps the phone's earlier behaviour.
+func TestPhoneViewerIdentity(t *testing.T) {
+	s := testServer(t)
+	t.Cleanup(s.terminals.close)
+	reader, writer := io.Pipe()
+	file := &recordingPTY{reader: reader, writer: writer, changed: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { file.once.Do(func() { close(file.release) }) })
+	session, err := s.terminals.startSessionWithPTY(exec.Command("true"), "/project", "shell", claudeSelection{}, nil, func() (terminalPTY, error) { return file, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := "/api/mobile/terminals/" + session.id
+	call := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		return request(s, method, base+path, s.origin, body, true)
+	}
+	if w := request(s, "GET", "/api/mobile/terminals", s.origin, "", true); !strings.Contains(w.Body.String(), "\"viewer\":1") {
+		t.Fatalf("summaries do not offer the viewer rules: %s", w.Body.String())
+	}
+	desktop := session.openPeer("desktop-tab-0001", false)
+	_ = session.peerResize(desktop, 120, 40)
+	_, _ = session.peerInput(desktop, "x")
+	// The program asks; the phone is shown the question by its next read.
+	if _, err := writer.Write([]byte("\x1b[c")); err != nil {
+		t.Fatal(err)
+	}
+	if w := call("GET", "/output?after=0", ""); !strings.Contains(w.Body.String(), "\"G1tj\"") { // base64 of the query
+		t.Fatalf("phone read: %d %s", w.Code, w.Body.String())
+	}
+	if w := call("POST", "/resize", "{\"cols\":50,\"rows\":20,\"viewer\":\"phone-viewer-0001\"}"); w.Code != http.StatusNoContent || file.lastSize() != [2]uint16{120, 40} {
+		t.Fatal("a named phone that does not own the size resized", w.Code, file.sizes)
+	}
+	answer := "\x1b[?62;22c"
+	if w := call("POST", "/input", "{\"data\":\"\\u001b[?62;22c\",\"viewer\":\"phone-viewer-0001\"}"); w.Code != http.StatusNoContent {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	data, _ := session.peerInput(desktop, "mark")
+	_ = session.enqueueInput(context.Background(), data)
+	if got := file.received(t, "mark"); strings.Contains(got, answer) || file.lastSize() != [2]uint16{120, 40} {
+		t.Fatalf("the named phone's answer passed or took the size: %q %v", got, file.sizes)
+	}
+	if w := call("POST", "/input", "{\"data\":\"p\",\"viewer\":\"phone-viewer-0001\"}"); w.Code != http.StatusNoContent || file.lastSize() != [2]uint16{50, 20} {
+		t.Fatal("typing on a named phone did not take the size", w.Code, file.sizes)
+	}
+	if w := call("POST", "/input", "{\"data\":\"p\",\"viewer\":\"no\"}"); w.Code != http.StatusBadRequest {
+		t.Fatal("a malformed phone identity was accepted", w.Code)
+	}
+	// Without an identity the phone is as before: its size always applies.
+	if w := call("POST", "/resize", "{\"cols\":60,\"rows\":22}"); w.Code != http.StatusNoContent || file.lastSize() != [2]uint16{60, 22} {
+		t.Fatal("a phone without identity lost its behaviour", w.Code, file.sizes)
+	}
+}
+
+// A viewer that opens after the program asked is shown the question in the
+// replayed history, and its terminal answers it: that answer is an answer,
+// not typing, so it neither reaches the program nor takes the size.
+func TestTerminalAnswersToReplayedQueries(t *testing.T) {
+	f, file := viewerStreams(t)
+	owner := f.dial("?after=0&viewer=owner-tab-0001")
+	sendTerminal(t, owner, map[string]any{"type": "resize", "cols": 120, "rows": 40})
+	sendTerminal(t, owner, map[string]any{"type": "input", "data": "k"})
+	file.received(t, "k")
+	if _, err := file.writer.Write([]byte("\x1b[c")); err != nil {
+		t.Fatal(err)
+	}
+	until := func(ws *websocket.Conn, want string) {
+		t.Helper()
+		for {
+			_, frame, err := ws.ReadMessage()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(frame), want) {
+				return
+			}
+		}
+	}
+	until(owner, "\x1b[c")
+	late := f.dial("?after=0&viewer=late-tab-00001")
+	until(late, "\x1b[c")
+	sendTerminal(t, late, map[string]any{"type": "resize", "cols": 200, "rows": 50})
+	answer := "\x1b[?62;22c"
+	sendTerminal(t, late, map[string]any{"type": "input", "data": answer})
+	sendTerminal(t, late, map[string]any{"type": "ping"})
+	until(late, "\"pong\"")
+	sendTerminal(t, owner, map[string]any{"type": "input", "data": "mark"})
+	got := file.received(t, "mark")
+	if strings.Contains(got, answer) || file.lastSize() != [2]uint16{120, 40} {
+		t.Fatalf("an answer to a replayed query passed or took the size: %q %v", got, file.sizes)
+	}
 }

@@ -214,3 +214,54 @@ func settingReply(data []byte) (int, bool) {
 	_, n, ok := stringEnd(data, false)
 	return n, ok
 }
+
+// csiQuery names the answer a control sequence asks for, reading its
+// parameter as a number the way terminal applications do (06n is 6n).
+func csiQuery(body []byte, final byte) Reply {
+	var marker byte
+	if len(body) > 0 && body[0] >= '<' && body[0] <= '?' {
+		marker, body = body[0], body[1:]
+	}
+	params, inter := body, []byte(nil)
+	for i, c := range body {
+		if c < 0x30 {
+			params, inter = body[:i], body[i:]
+			break
+		}
+	}
+	n, ok := 0, len(params) <= 5
+	for _, c := range params {
+		if c < '0' || c > '9' {
+			ok = false
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	if !ok {
+		return ReplyNone
+	}
+	switch {
+	case final == 'c' && len(inter) == 0 && marker == 0 && n == 0:
+		return ReplyDA1
+	case final == 'c' && len(inter) == 0 && marker == '>' && n == 0:
+		return ReplyDA2
+	case final == 'n' && len(inter) == 0 && marker == 0 && n == 5:
+		return ReplyStatus
+	case final == 'n' && len(inter) == 0 && (marker == 0 || marker == '?') && n == 6:
+		return ReplyCursor
+	case final == 'p' && string(inter) == "$" && (marker == 0 || marker == '?') && len(params) > 0:
+		return ReplyMode
+	}
+	return ReplyNone
+}
+
+// ReplyKinds bounds the Reply values, for tables indexed by them.
+const ReplyKinds = int(ReplyColor) + 1
+
+// Queries counts the queries in a stretch of output by the answer each asks
+// for, as OnQuery would hear them. The stretch is read on its own.
+func Queries(data []byte) (counts [ReplyKinds]int) {
+	f := New(Options{OnQuery: func(kind Reply) { counts[kind]++ }})
+	f.Append(make([]byte, 0, len(data)), data)
+	return counts
+}

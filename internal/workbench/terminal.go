@@ -181,7 +181,7 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer close(done)
 		defer ws.Close()
-		writeTerminalStream(ws, subscription, after != nil, hello, pongs, stop)
+		writeTerminalStream(ws, subscription, after != nil, hello, pongs, stop, func(data []byte) { session.showQueries(peer, data) })
 	}()
 	defer func() {
 		close(stop)
@@ -236,7 +236,9 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 // coalesced into frames of at most terminalFrameLimit bytes; the PTY never
 // waits for this viewer, which falls back to the kept history if its queue
 // overflows.
-func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, hello any, pongs, stop <-chan struct{}) {
+// shown hears the history replayed to the viewer, which its terminal
+// answers queries in.
+func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, hello any, pongs, stop <-chan struct{}, shown func([]byte)) {
 	writeJSON := func(value any) bool {
 		_ = ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 		return ws.WriteJSON(value) == nil
@@ -254,6 +256,7 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 	}
 	// Replayed output must render without repeating clipboard side effects.
 	replay := func(data []byte, offset uint64, reset bool) bool {
+		shown(data)
 		if !resume {
 			if len(data) == 0 {
 				return true

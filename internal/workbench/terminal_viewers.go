@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // One terminal can be shown by several viewers at once: desktop tabs, the
@@ -50,10 +52,12 @@ const (
 	// terminalPhoneLive: the phone long-polls output for 25 seconds, so a
 	// phone showing the terminal is seen at least this often.
 	terminalPhoneLive = 30 * time.Second
-	// terminalCursorQueryLive: how long after the output asked for the cursor
-	// position an input shaped like the answer is taken as that answer. Shift+F3
-	// in xterm's encoding has the same shape.
-	terminalCursorQueryLive = 5 * time.Second
+	// terminalQueryLive: how long after the output asked a viewer something
+	// an input shaped like the answer is taken as that answer. Shift+F3 in
+	// xterm's encoding has the shape of a cursor position answer.
+	terminalQueryLive = 5 * time.Second
+	// terminalAskedLimit bounds the answers one viewer owes per kind.
+	terminalAskedLimit = 8
 )
 
 type terminalPeer struct {
@@ -65,22 +69,26 @@ type terminalPeer struct {
 	live       int       // open streams of this identity
 	seen       time.Time // phone: last request
 	active     time.Time // last typing, else when it connected
+	// asked counts, per kind, the queries this viewer was shown and has not
+	// answered yet; askedAt is when the last one was asked.
+	asked   [termfilter.ReplyKinds]uint8
+	askedAt time.Time
 }
 
 type terminalSizing struct {
 	peers      map[string]*terminalPeer
-	owner      string // key of the size owner
-	typist     bool   // the owner became owner by typing
-	cols, rows uint16 // the PTY's size as last applied
-	cursorAsk  time.Time
-	tail       [4]byte // end of the previous output chunk, for split queries
-	tailN      int
+	owner      string             // key of the size owner
+	typist     bool               // the owner became owner by typing
+	cols, rows uint16             // the PTY's size as last applied
+	scan       *termfilter.Filter // reads the output for queries
+	scanned    []byte
 	sequence   uint64
 	grace      *time.Timer
 }
 
 func (z *terminalSizing) init(cols, rows uint16) {
 	z.peers, z.cols, z.rows = map[string]*terminalPeer{}, cols, rows
+	z.scan = termfilter.New(termfilter.Options{OnQuery: z.noteQuery})
 }
 
 // liveLocked reports whether an identity still shows the terminal.
@@ -126,7 +134,11 @@ func (t *terminalSession) openPeer(id string, observe bool) *terminalPeer {
 }
 
 // phonePeer is the identity of the phone's HTTP requests, marked as seen.
-func (t *terminalSession) phonePeer() *terminalPeer {
+// The phone's reads carry no identity, so every phone shares this one, as
+// before. viewer is the identity a phone sends with its input and resize: a
+// phone that sends one takes part in the viewer rules, one that does not (an
+// app from before them) keeps the phone's earlier behaviour.
+func (t *terminalSession) phonePeer(viewer ...string) *terminalPeer {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	z := &t.sizing
@@ -138,6 +150,9 @@ func (t *terminalSession) phonePeer() *terminalPeer {
 		p = &terminalPeer{key: "phone", legacy: true, phone: true}
 		z.peers["phone"] = p
 		z.evictLocked()
+	}
+	if len(viewer) > 0 {
+		p.legacy = viewer[0] == ""
 	}
 	p.seen = time.Now()
 	return p
@@ -313,20 +328,21 @@ func (t *terminalSession) peerResize(p *terminalPeer, cols, rows uint16) error {
 
 // peerInput returns what of a viewer's input reaches the program. Typing
 // makes the viewer the owner. Answers to queries pass only from the owner,
-// or while no owner shows the terminal; they never move ownership.
+// or while no owner shows the terminal; they never move ownership. A viewer
+// without identity keeps its behaviour from before these rules: its input
+// passes whole and its typing never resizes.
 func (t *terminalSession) peerInput(p *terminalPeer, data string) (string, error) {
 	if p.observe {
 		return "", nil
 	}
+	now := time.Now()
 	t.mu.Lock()
-	cursorAsked := time.Since(t.sizing.cursorAsk) < terminalCursorQueryLive
+	typing, rest := t.sizing.splitReplies(p, data, now)
 	t.mu.Unlock()
-	typing, rest := splitTerminalReplies(data, cursorAsked)
 	t.sizeMu.Lock()
 	defer t.sizeMu.Unlock()
 	t.mu.Lock()
 	z := &t.sizing
-	now := time.Now()
 	if p.phone {
 		p.seen = now
 	}
@@ -335,7 +351,7 @@ func (t *terminalSession) peerInput(p *terminalPeer, data string) (string, error
 		claim := z.owner != p.key
 		z.owner, z.typist = p.key, true
 		t.mu.Unlock()
-		if claim {
+		if claim && !p.legacy {
 			if err := t.applySizeOf(p); err != nil {
 				return "", err
 			}
@@ -350,119 +366,106 @@ func (t *terminalSession) peerInput(p *terminalPeer, data string) (string, error
 	return rest, nil
 }
 
-// noteOutput watches the program's output for cursor position queries.
-// Caller holds mu.
+// noteOutput reads the program's output for queries. Caller holds mu.
 func (z *terminalSizing) noteOutput(chunk []byte) {
-	if len(chunk) == 0 {
+	if len(chunk) == 0 || z.scan == nil {
 		return
 	}
-	found := bytes.Contains(chunk, []byte("\x1b[6n")) || bytes.Contains(chunk, []byte("\x1b[?6n"))
-	if !found && z.tailN > 0 {
-		var joined [9]byte
-		n := copy(joined[:], z.tail[:z.tailN])
-		n += copy(joined[n:], chunk[:min(len(chunk), 5)])
-		found = bytes.Contains(joined[:n], []byte("\x1b[6n")) || bytes.Contains(joined[:n], []byte("\x1b[?6n"))
+	z.scanned = z.scan.Append(z.scanned[:0], chunk)
+	if cap(z.scanned) > 64<<10 {
+		z.scanned = nil
 	}
-	if found {
-		z.cursorAsk = time.Now()
-	}
-	z.tailN = copy(z.tail[:], chunk[max(0, len(chunk)-4):])
 }
 
-// splitTerminalReplies reads a viewer's input. typing is false when it holds
-// only what a terminal emulator sends by itself: answers to queries and focus
-// reports. rest is the input without them.
-func splitTerminalReplies(data string, cursorAsked bool) (typing bool, rest string) {
+// noteQuery records a query for every viewer showing the terminal now: each
+// may answer it once. The phone is told of it by the read that returns it.
+// Caller holds mu.
+func (z *terminalSizing) noteQuery(kind termfilter.Reply) {
+	now := time.Now()
+	for _, p := range z.peers {
+		if !p.observe && !p.phone && z.liveLocked(p.key, now) {
+			p.askLocked(kind, 1, now)
+		}
+	}
+}
+
+// askLocked records n queries of one kind shown to this viewer. Caller
+// holds mu.
+func (p *terminalPeer) askLocked(kind termfilter.Reply, n int, now time.Time) {
+	if now.Sub(p.askedAt) >= terminalQueryLive {
+		p.asked = [termfilter.ReplyKinds]uint8{}
+	}
+	p.asked[kind] = uint8(min(int(p.asked[kind])+n, terminalAskedLimit))
+	p.askedAt = now
+}
+
+// showQueries records the queries in output a viewer is shown apart from the
+// live stream: the history replayed when it opens, or a phone's read. A
+// viewer without identity is skipped, its input passes whole anyway; not
+// the phone, which may send its identity only after its first read.
+func (t *terminalSession) showQueries(p *terminalPeer, data []byte) {
+	t.mu.Lock()
+	skip := p.legacy && !p.phone || p.observe
+	t.mu.Unlock()
+	if skip || bytes.IndexByte(data, 0x1b) < 0 {
+		return
+	}
+	counts := termfilter.Queries(data)
+	now := time.Now()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for kind, n := range counts {
+		if n > 0 {
+			p.askLocked(termfilter.Reply(kind), n, now)
+		}
+	}
+}
+
+// splitReplies reads a viewer's input. typing is false when it holds only
+// what a terminal application sends by itself: answers to queries this
+// viewer was asked, and focus reports. rest is the input without them.
+// Anything else is typing, whatever it looks like: a pasted answer, an
+// answer nobody asked for, Alt+P. Caller holds mu.
+func (z *terminalSizing) splitReplies(p *terminalPeer, data string, now time.Time) (typing bool, rest string) {
 	if strings.IndexByte(data, 0x1b) < 0 {
 		return data != "", data
+	}
+	if now.Sub(p.askedAt) >= terminalQueryLive {
+		p.asked = [termfilter.ReplyKinds]uint8{}
 	}
 	var kept strings.Builder
 	dropped := false
 	for i := 0; i < len(data); {
-		if data[i] != 0x1b {
-			j := i + 1
-			for j < len(data) && data[j] != 0x1b {
-				j++
-			}
-			typing = true
-			kept.WriteString(data[i:j])
-			i = j
-			continue
-		}
-		end, reply, paste := terminalInputSequence(data[i:], cursorAsked)
-		if paste {
+		if strings.HasPrefix(data[i:], "\x1b[200~") {
 			// A bracketed paste is typing, whatever it contains.
-			closing := strings.Index(data[i+end:], "\x1b[201~")
-			if closing < 0 {
+			end := strings.Index(data[i:], "\x1b[201~")
+			if end < 0 {
 				end = len(data) - i
 			} else {
-				end += closing + len("\x1b[201~")
+				end += len("\x1b[201~")
 			}
-		}
-		if reply {
-			dropped = true
-		} else {
 			typing = true
 			kept.WriteString(data[i : i+end])
+			i += end
+			continue
 		}
-		i += end
+		n, kind, reply := termfilter.NextInput([]byte(data[i:]))
+		unit := data[i : i+n]
+		i += n
+		switch {
+		case kind == termfilter.InputFocusIn || kind == termfilter.InputFocusOut:
+			dropped = true
+			continue
+		case kind == termfilter.InputReply && p.asked[reply] > 0:
+			p.asked[reply]--
+			dropped = true
+			continue
+		}
+		typing = true
+		kept.WriteString(unit)
 	}
 	if !dropped {
 		return typing, data
 	}
 	return typing, kept.String()
-}
-
-// terminalInputSequence measures the escape sequence at the start of s and
-// reports whether a terminal emulator sends it by itself.
-func terminalInputSequence(s string, cursorAsked bool) (n int, reply, paste bool) {
-	if len(s) < 2 {
-		return len(s), false, false
-	}
-	switch s[1] {
-	case '[':
-		i := 2
-		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x3f {
-			i++
-		}
-		if i >= len(s) || s[i] < 0x40 || s[i] > 0x7e {
-			return i, false, false // unfinished: a key the program reads itself
-		}
-		body, final := s[2:i], s[i]
-		var marker byte
-		if body != "" && body[0] >= '<' && body[0] <= '?' {
-			marker = body[0]
-		}
-		switch {
-		case body == "200" && final == '~':
-			return i + 1, false, true
-		case final == 'R':
-			// Cursor position report, or Shift+F3 (CSI 1;2R) when no query
-			// is waiting for one.
-			return i + 1, cursorAsked && strings.Trim(body, "0123456789;?") == "", false
-		case final == 'c' && (marker == '?' || marker == '>'), // DA1, DA2 answers
-			final == 'n', // status reports
-			final == 'y' && strings.HasSuffix(body, "$"), // DECRPM
-			final == 'u' && marker == '?',                // kitty keyboard flags
-			final == 't',                                 // window reports
-			(final == 'I' || final == 'O') && body == "": // focus in and out
-			return i + 1, true, false
-		}
-		return i + 1, false, false
-	case ']', 'P', '_':
-		// OSC, DCS and APC from a terminal are answers: colours, settings,
-		// version, graphics status.
-		for i := 2; i < len(s); i++ {
-			if s[i] == 0x07 && s[1] == ']' {
-				return i + 1, true, false
-			}
-			if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
-				return i + 2, true, false
-			}
-		}
-		return len(s), true, false
-	case 'O':
-		return min(3, len(s)), false, false
-	}
-	return 2, false, false
 }
