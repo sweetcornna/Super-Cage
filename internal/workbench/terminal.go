@@ -136,6 +136,7 @@ func (s *Server) closeTerminalID(id string) error {
 		}
 	}
 	s.terminals.remove(id)
+	s.entryUnkept()
 	return nil
 }
 

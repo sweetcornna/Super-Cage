@@ -141,6 +141,7 @@ type Server struct {
 	closeOnce                                        sync.Once
 	closeErr                                         error
 	controlPublished                                 bool
+	entry                                            entryService
 }
 
 func randomToken() string {
@@ -542,6 +543,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/login-link", s.terminalLoginLink)
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
+	s.entryRoutes(mux)
 	web, _ := fs.Sub(assets, "web")
 	mux.Handle("GET /", newEntryStaticHandler(web, s.phoneEntry, s.phoneEntryAvailable))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -676,7 +678,12 @@ func (s *Server) handler() http.Handler {
 			}
 			r = r.WithContext(ctx)
 		}
-		defer interruptHTTPOnCancel(w, r)()
+		// The local SSH entry's socket ends through entryServe, which lets
+		// its terminal sessions write their reset first; a deadline set here
+		// on a lock or a quit would cut it before.
+		if r.URL.Path != "/api/entry/ssh" {
+			defer interruptHTTPOnCancel(w, r)()
+		}
 		response := &diagnosticResponse{ResponseWriter: w}
 		w = response
 		defer func() {

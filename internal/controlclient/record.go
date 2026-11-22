@@ -35,6 +35,9 @@ const RequestTimeout = 5 * time.Second
 
 // ControllerIdentity is what a controller says about its own build.
 type ControllerIdentity struct {
+	// Attach is a pointer, so == would compare addresses: this field keeps
+	// == from compiling. Compare with SameController or Matches.
+	_        [0]func()
 	Version  string `json:"version"`
 	Build    string `json:"build"`
 	Protocol int    `json:"protocol"`
@@ -49,6 +52,15 @@ type ControllerIdentity struct {
 // Matches reports whether two identities are the same executable build.
 func (identity ControllerIdentity) Matches(other ControllerIdentity) bool {
 	return identity.Build != "" && identity.Build == other.Build && identity.Protocol == other.Protocol
+}
+
+// SameController reports whether two identities name the same running
+// controller: every field of its own. The companion beside it (Attach) is a
+// fact only some answers carry (the launch answer does, a status does not),
+// so it takes no part.
+func (identity ControllerIdentity) SameController(other ControllerIdentity) bool {
+	return identity.Version == other.Version && identity.Build == other.Build && identity.Protocol == other.Protocol &&
+		identity.PID == other.PID && identity.Stamp == other.Stamp
 }
 
 // ControlFile is the private record a running controller publishes.

@@ -298,7 +298,7 @@ func (d *desktopLocal) releaseFailedLaunch(id string) {
 func (d *desktopLocal) localSession(life, bootstrap context.Context, c *controllerClient, view desktopLocalReply) (*remotehost.Session, error) {
 	var launch launchResponse
 	status, err := c.callContext(bootstrap, "POST", "/api/launch", map[string]string{"token": c.record.Token}, &launch)
-	if err != nil || status != http.StatusOK || launch.Controller != view.Identity {
+	if err != nil || status != http.StatusOK || !launch.Controller.SameController(view.Identity) {
 		return nil, errors.New("本机后台身份已变化，请重新选择")
 	}
 	u, err := url.Parse(launch.URL)

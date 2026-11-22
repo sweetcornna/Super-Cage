@@ -38,6 +38,8 @@ const help = `Super Cage — local isolated Claude development
 
 cage desktop       Open the unified Super Cage workbench (desktop launcher)
 cage agent         Discover and use the versioned, JSON-only external Agent interface
+cage entry         本机终端: on|off|status|devices|revoke|rename|include|proxy
+cage ssh ENV       ssh into an environment through its local SSH entry
 cage serve         Run its private localhost control service
 cage server-entry --json  Issue a private SSH remote connection entry
 cage container-configure --json  Configure a Linux container from JSON stdin
@@ -115,6 +117,9 @@ func run() int {
 	}
 	if args[0] == "agent" {
 		return runAgent(args[1:], os.Stdin, os.Stdout)
+	}
+	if args[0] == "entry" || args[0] == "ssh" {
+		return runEntry(args)
 	}
 	if args[0] == "attach" {
 		return runAttach(args[1:])

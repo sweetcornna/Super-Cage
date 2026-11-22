@@ -157,10 +157,13 @@ func agentHTTPError(code int) *AgentError { return controlclient.HTTPError(code)
 // or stops an existing controller as a side effect of an agent call.
 func AgentStartService(ctx context.Context, configPath string) error {
 	profile := filepath.Dir(configPath)
-	c, err := connectController(profile)
+	c, err := connectProvenController(profile)
 	if err == nil {
 		defer c.close()
 		return agentCheckController(c, configPath)
+	}
+	if controllerIdentityError(err) {
+		return &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
 	}
 	if !errors.Is(err, errControllerUnavailable) || !controllerLockFree(profile) {
 		return &AgentError{Code: "service_unavailable", Message: "The controller cannot be authenticated. Preserve its data and inspect diagnostics.", NextAction: "doctor"}
@@ -175,10 +178,13 @@ func AgentStartService(ctx context.Context, configPath string) error {
 		case <-ctx.Done():
 			return &AgentError{Code: "service_start_timeout", Message: "The controller has not become ready. It may still be starting.", NextAction: "doctor", Retryable: true}
 		case <-timer.C:
-			c, err := connectController(profile)
+			c, err := connectProvenController(profile)
 			if err == nil {
 				defer c.close()
 				return agentCheckController(c, configPath)
+			}
+			if controllerIdentityError(err) {
+				return &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
 			}
 		}
 	}

@@ -2,12 +2,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "./api";
 import {
-  APPS_PATH, BUILT_IN, SETTINGS_PATH, SWITCHES, chooserOptions, missingChoice, normalizeSettings, settingsChanged,
+  APPS_PATH, BUILT_IN, SETTINGS_PATH, SWITCHES, automationNote, chooserOptions, missingChoice, normalizeSettings, settingsChanged,
 } from "./local-terminal-state.mjs";
 import "./local-terminal-settings.css";
 
-// Settings → 本机终端应用 (this computer). Loaded lazily: detecting the
-// applications happens only while this section is open.
+// Settings → 本机终端, its first part: which application "在本机终端中打开"
+// uses on this computer, and the two switches its windows (and, for the
+// clipboard, ssh sessions) follow. Loaded lazily with the section:
+// detecting the applications happens only while it is open.
 export default function LocalTerminalSettings({ onSaved, onDirty }) {
   const [saved, setSaved] = useState(null);
   const [draft, setDraft] = useState(null);
@@ -63,11 +65,9 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     }
   };
 
-  return <section className="local-terminal-settings" aria-label="本机终端应用" aria-busy={loading}>
-    <div className="section-title">
-      <h3>本机终端应用</h3>
-      <p>选择在这台电脑上用哪个应用打开 Super Cage 的终端。终端仍在环境中运行，关掉窗口也不会结束它。</p>
-    </div>
+  return <section className="settings-group local-terminal-part local-terminal-settings" aria-label="用哪个终端应用打开" aria-busy={loading}>
+    <h3>用哪个终端应用打开</h3>
+    <p className="field-help">在终端标签页或项目上选择“在本机终端中打开”时，用这里选的应用。终端仍在环境中运行，关掉窗口也不会结束它。</p>
     {loading && <p className="local-terminal-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在查找这台电脑上的终端应用…</p>}
     {!loading && !supported && <p className="field-help">这台电脑的系统暂不支持本机终端应用，终端会在 Super Cage 的标签页中打开。</p>}
     {!loading && gone && draft?.app === saved?.app && <p className="local-terminal-gone" role="status">之前选择的 {gone} 在这台电脑上找不到了。请另选一个应用，或使用内置终端。</p>}
@@ -84,7 +84,8 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
           {option.chip && <span className="local-terminal-chip">{option.chip}</span>}
         </label>)}
       </div>
-      <h4 className="local-terminal-subtitle">在本机终端中</h4>
+      {supported && automationNote(apps) && <p className="field-help local-terminal-automation">{automationNote(apps)}</p>}
+      <h4 className="local-terminal-subtitle">图片与剪贴板</h4>
       {SWITCHES.map(item => <label className="toggle-row" key={item.key}>
         <span>
           <strong>{item.title}</strong>
@@ -93,7 +94,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
         <input type="checkbox" role="switch" checked={Boolean(draft?.[item.key])} disabled={saving}
           onChange={event => change(item.key, event.target.checked)} />
       </label>)}
-      <p className="footnote">这些选择只保存在这台电脑上，不会同步到环境或其他设备。已经打开的本机终端窗口在下次打开时使用新的选择。</p>
+      <p className="footnote">这些选择只保存在这台电脑上，不会同步到环境或其他设备。已经打开的窗口和 ssh 连接在下次打开时使用新的选择。</p>
     </>}
     {warning && <p className="field-help">{warning}</p>}
     {error && <p className="error-message" role="alert">{error}</p>}

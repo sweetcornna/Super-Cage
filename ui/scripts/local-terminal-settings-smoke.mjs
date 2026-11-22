@@ -1,7 +1,9 @@
-// Settings → 本机终端应用 in the real settings page, against the isolated
-// workbench fixture: lazy loading, detection only while the section is open,
-// the chooser order, the unsaved-change guard, saving, and screenshots in both
-// themes and both window sizes. Needs a Vite dev server (CAGE_UI_URL).
+// Settings → 本机终端 › 用哪个终端应用打开 in the real settings page, against
+// the isolated workbench fixture: lazy loading, detection only while the
+// section is open, the chooser order, the macOS question said once, the
+// unsaved-change guard, saving, both parts in one section, and screenshots
+// in both themes and both window sizes. Needs a Vite dev server
+// (CAGE_UI_URL).
 import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -45,17 +47,26 @@ async function run({ theme, viewport, desktop = true }) {
     const nav = page.getByRole("navigation", { name: "设置分组" });
     await nav.getByRole("button", { name: "通用", exact: true }).waitFor();
     if (!desktop) {
-      assert.equal(await nav.getByRole("button", { name: "本机终端应用", exact: true }).count(), 0, "only the desktop app offers 本机终端应用");
+      // Outside the desktop app the section holds the ssh part only.
+      await nav.getByRole("button", { name: "本机终端", exact: true }).click();
+      await page.getByRole("region", { name: "从你自己的终端或 Herdr 连进来", exact: true }).waitFor();
+      assert.equal(await page.getByRole("region", { name: "用哪个终端应用打开", exact: true }).count(), 0, "only the desktop app chooses the application");
       assert.equal(detections, 0);
-      console.log("PASS: no 本机终端应用 outside the desktop app");
+      assert.deepEqual(errors, []);
+      console.log("PASS: outside the desktop app 本机终端 has no application chooser");
       return;
     }
     assert.equal(chunk.length, 0, "the section's code must load only when it opens");
     assert.equal(detections, 0, "detection must not run before the section opens");
-    await nav.getByRole("button", { name: "本机终端应用", exact: true }).click();
-    const section = page.getByRole("region", { name: "本机终端应用", exact: true });
+    assert.equal(await nav.getByRole("button", { name: "本机终端应用", exact: true }).count(), 0, "one 本机终端 section, not two");
+    await nav.getByRole("button", { name: "本机终端", exact: true }).click();
+    const section = page.getByRole("region", { name: "用哪个终端应用打开", exact: true });
     const group = section.getByRole("radiogroup", { name: "本机终端应用" });
     await group.waitFor();
+    await page.getByRole("region", { name: "从你自己的终端或 Herdr 连进来", exact: true }).waitFor();
+    // The macOS question is said once, not on each application.
+    assert.equal(await page.getByText(/macOS 会询问/).count(), 1);
+    await section.getByText("第一次用 Ghostty、iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。", { exact: true }).waitFor();
     assert.ok(chunk.length > 0);
     assert.equal(detections, 1);
     const names = await group.locator(".local-terminal-app strong").allTextContents();
@@ -89,7 +100,7 @@ async function run({ theme, viewport, desktop = true }) {
     assert.equal(await page.getByRole("dialog").count(), 0);
     assert.equal(await page.evaluate(() => document.querySelector(".settings-content").scrollWidth > document.querySelector(".settings-content").clientWidth), false);
     assert.deepEqual(errors, []);
-    console.log("PASS: " + theme + " " + viewport.width + "x" + viewport.height + " lazy section, detection on open, order, guard, save");
+    console.log("PASS: " + theme + " " + viewport.width + "x" + viewport.height + " lazy section, detection on open, order, one macOS note, both parts, guard, save");
   } finally { await browser.close(); }
 }
 

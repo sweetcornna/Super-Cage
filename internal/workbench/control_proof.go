@@ -81,6 +81,12 @@ func (s *Server) controllerProof(w http.ResponseWriter, r *http.Request) {
 // connection must first prove that the server holds it, before net/http
 // writes a request on it, so the launcher token, tickets and cookies reach
 // only this profile's controller.
+//
+// Residual (A2 of the review of controller-dial-hardening, documented, not
+// fixed): the desktop windows' web views load http://localhost:<port>
+// themselves and prove nothing. Only the [::1] twin that the controller
+// holds (listenLoopback) keeps another local user's listener from those
+// loads, and only while the controller lives.
 func controllerDial(record controlFile) func(context.Context, string, string) (net.Conn, error) {
 	host := fmt.Sprintf("localhost:%d", record.Port)
 	target := net.JoinHostPort("127.0.0.1", strconv.Itoa(record.Port))

@@ -59,8 +59,9 @@
   line-height: 1.5;
   white-space: nowrap;
 }
-/* The group heading of the two switches, as the settings page's own groups. */
-.local-terminal-settings .local-terminal-subtitle {
+/* The group heading of the two switches, as the settings page's own groups;
+   the entry's devices and kept terminals use it too. */
+:is(.local-terminal-settings, .local-entry) .local-terminal-subtitle {
   margin: 44px 0 8px;
   font-size: var(--s-lg, 1.15rem);
   font-weight: 600;

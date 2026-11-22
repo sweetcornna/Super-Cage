@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  APP_NAMES, BUILT_IN, BUILT_IN_NAME, MENU_LABEL, OPEN_PATH, automationNotice, chooserOptions, copyCommand,
+  APP_NAMES, BUILT_IN, BUILT_IN_NAME, MENU_LABEL, OPEN_PATH, automationNote, automationNotice, chooserOptions, copyCommand,
   launchFailure, menuItem, missingChoice, normalizeSettings, openRequest, settingsChanged,
 } from "./local-terminal-state.mjs";
 
@@ -38,7 +38,11 @@ test("the chooser lists found applications, then the built-in terminal, then the
   assert.deepEqual(options.filter(option => option.checked).map(option => option.id), ["wezterm"]);
   assert.ok(options.filter(option => !option.selectable).every(option => option.chip));
   assert.equal(options.find(option => option.id === "ghostty").chip, "未安装");
-  assert.match(options.find(option => option.id === "iterm2").note, /允许 Super Cage 控制 iTerm2/);
+  // The macOS question is said once for the chooser, not on each row.
+  assert.equal(options.find(option => option.id === "iterm2").note, "");
+  assert.equal(automationNote(apps), "第一次用 iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
+  assert.equal(automationNote(apps.map(app => ({ ...app, installed: true }))), "第一次用 Ghostty、iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
+  assert.equal(automationNote(apps.filter(app => !app.automation)), "");
   assert.match(options.find(option => option.id === "herdr").note, /SSH 入口/);
   assert.equal(chooserOptions(null)[0].id, BUILT_IN);
   assert.equal(chooserOptions(apps)[4].checked, true);
@@ -91,7 +95,7 @@ test("the copied command is quoted for any shell", () => {
 });
 
 test("messages follow the design's wording", () => {
-  assert.equal(launchFailure("Ghostty", "应用没有响应。"), "没能打开 Ghostty：应用没有响应。可在设置 → 本机终端应用里换一个。");
+  assert.equal(launchFailure("Ghostty", "应用没有响应。"), "没能打开 Ghostty：应用没有响应。可在设置 → 本机终端里换一个。");
   assert.equal(automationNotice({ name: "Ghostty", automation: true }).title, "Super Cage 需要控制 Ghostty 来打开窗口");
   assert.deepEqual([automationNotice({ name: "Ghostty", automation: true }).cancel, automationNotice({ name: "Ghostty", automation: true }).confirm], ["取消", "继续"]);
   assert.equal(automationNotice({ name: "Ghostty", automation: true }, true), null);

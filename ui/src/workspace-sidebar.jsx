@@ -29,7 +29,7 @@ import { mixedSessionRows } from "./session-provider.mjs";
 import { AccountMenu } from "./account";
 import { useSSHNavigation } from "./remote-hosts";
 import { GuestSystemIcon } from "./guest-system-icon";
-import { getClientContext } from "./client-context.mjs";
+import { getClientContext, isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
 import { VirtualMachines } from "./virtual-machines";
 
 const SESSION_PREVIEW_LIMIT = 5;
@@ -161,6 +161,8 @@ export function WorkspaceSidebar({
           <button className={`sidebar-link ${tailscaleOpen ? "selected" : ""}`} aria-current={tailscaleOpen ? "page" : undefined} onClick={onTailscale} aria-label="打开 Tailscale"><Network size={17} />Tailscale</button>
           {getClientContext().virtual_machines && <button className="sidebar-link" aria-haspopup="dialog" onClick={() => setShowVirtualMachines(true)}><Monitor size={17} />虚拟机</button>}
           {ssh && <button className="sidebar-link ssh-navigation" onClick={ssh.open} aria-label="SSH 主机"><Server size={17} />SSH</button>}
+          {/* 本机终端 manages this computer's ssh access, so only a window on this computer shows it. */}
+          {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("local-terminal")}><SquareTerminal size={17} />本机终端</button>}
         </div>
         <div className="sidebar-nav-group">
           <button className={`sidebar-link ${claudeAccountsOpen ? "selected" : ""}`} onClick={onClaudeAccounts}

@@ -44,6 +44,13 @@ func (s *Server) restoreNetworkIntent() error {
 
 // Caller holds mu so a later pause cannot be overwritten by a pending resume.
 func (s *Server) saveNetworkIntentLocked(paused bool) error {
+	// A pause cuts the local SSH entry (design 5.9, Q2) once the flag that
+	// refuses the next dial is set. cutAll only cancels contexts.
+	defer func() {
+		if s.networkPaused {
+			s.entry.registry.cutAll(errEntryPaused)
+		}
+	}()
 	if err := writePrivate(filepath.Join(s.profile, "network-intent.json"), networkIntent{Version: 1, Paused: paused, PauseVersion: s.safety.pauseVersion}); err != nil {
 		s.networkPaused = true
 		s.networkIntentError = "无法保存网络暂停状态，外网保持关闭；请解决配置写入问题后重试。"
