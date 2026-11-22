@@ -504,12 +504,51 @@ func must(t *testing.T, err error) {
 func TestValidPairName(t *testing.T) {
 	for name, want := range map[string]bool{
 		"MacBook Air": true, "小明的 Windows 电脑": true, "": false, " padded": false, "line\nbreak": false,
-		"evil\u202Eexe.app": false, "zero\u200Bwidth": false, "sep\u2028": false, strings.Repeat("长", 64): true,
-		strings.Repeat("长", 65): false, string([]byte{0xff}): false,
+		"evil\u202Eexe.app": false, "zero\u200Bwidth": false, "sep\u2028": false, strings.Repeat("a", 64): true,
+		strings.Repeat("a", 65): false, string([]byte{0xff}): false,
+		// At most 160 bytes as well, what the device list keeps: 53 CJK
+		// characters fit, 61 (183 bytes) or 64 (192 bytes) do not.
+		strings.Repeat("长", 53): true, strings.Repeat("电", 61): false, strings.Repeat("长", 64): false,
 	} {
 		if ValidPairName(name) != want {
 			t.Errorf("ValidPairName(%q) = %v", name, !want)
 		}
+	}
+}
+
+// A joiner that proves the code but names itself with more than the device
+// list keeps (61 CJK characters, 183 bytes) is refused before the host asks
+// its person: no request, ErrPairFailed. The joiner's own side refuses to
+// send such a name at all.
+func TestPairHostRefusesANameTheListCannotKeep(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	joiner, host, key := identityForTest(t), identityForTest(t), pairKeyForTest(t)
+	long := strings.Repeat("电", 61)
+	joined, accepted := pairSessionForTest(t, ctx, joiner, host)
+	if _, err := JoinHost(ctx, joined, joiner, key, long, "darwin"); err == nil || !strings.Contains(err.Error(), "invalid device name") {
+		t.Fatalf("joiner and a name of %d bytes: %v", len(long), err)
+	}
+	hostErr := make(chan error, 1)
+	go func() {
+		pending, err := ConfirmJoiner(ctx, accepted, host, key)
+		if err == nil {
+			err = errors.New("the host asks about " + pending.Request.Name)
+		}
+		hostErr <- err
+	}()
+	binding, err := bindPair(joined, joiner, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPairMessage(joined); err != nil {
+		t.Fatal(err)
+	}
+	var nonce [32]byte
+	commit := pairCommit(nonce[:])
+	must(t, writePairMessage(joined, pairMessage{Version: 1, MAC: encode32(binding.joinerMAC(key)), Commit: encode32(commit[:]), Name: long, Platform: "darwin"}))
+	if err := <-hostErr; !errors.Is(err, ErrPairFailed) {
+		t.Fatalf("host and a %d-byte name: %v", len(long), err)
 	}
 }
 

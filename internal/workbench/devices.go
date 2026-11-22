@@ -696,7 +696,14 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 	complete = true
 	go func() {
 		defer cancel()
+		// unlisted: a device that proved the code but describes itself as the
+		// list cannot keep it. Never shown, never saved.
+		unlisted := false
 		approve := func(decide context.Context, request mobilelink.DeviceRequest) bool {
+			if !shortCodeRequestListable(request) {
+				unlisted = true
+				return false
+			}
 			answer := make(chan bool, 1)
 			p.mu.Lock()
 			if p.invite != invite {
@@ -725,13 +732,13 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 				return errors.New("配对已结束")
 			}
 			record := deviceRecord{ID: newDeviceID(), Kind: "phone", AddedAt: time.Now().UTC().Truncate(time.Second), Seed: key.Seed(), Relay: origin, Pin: pin, Admin: input.Admin, Lookup: paired.Lookup}
-			if request.ShortCode && devicePlatform(request.Platform) {
-				// What the person approved; the device's first report may
-				// change the name only.
-				record.Platform, record.Kind = request.Platform, deviceKind(request.Platform)
-				if deviceName(request.Name) {
-					record.Name = request.Name
+			if request.ShortCode {
+				// What the person approved (approve refused anything else);
+				// the device's first report may change the name only.
+				if !shortCodeRequestListable(request) {
+					return errDeviceRecord
 				}
+				record.Platform, record.Kind, record.Name = request.Platform, deviceKind(request.Platform), request.Name
 			}
 			records := make([]deviceRecord, 0, len(p.devices)+1)
 			for _, d := range p.devices {
@@ -750,6 +757,9 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		if p.invite == invite && (invite.state == "waiting" || invite.state == "request" || invite.state == "confirming") {
 			invite.request, invite.answer = nil, nil
 			state, reason := inviteOutcome(ctx, invite, err)
+			if unlisted {
+				state, reason = "failed", "对方电脑的名称或类型无效，没有添加。"
+			}
 			invite.reason = reason
 			p.inviteStateLocked(invite, state, "")
 			p.status = ""

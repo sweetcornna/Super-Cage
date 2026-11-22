@@ -37,6 +37,7 @@ const (
 var (
 	errDevicesUnreadable = errors.New("设备列表无法读取。请先移除全部设备，再重新添加。")
 	errLegacyUnreadable  = errors.New("无法恢复手机配对，请移除旧记录后重试")
+	errDeviceRecord      = errors.New("设备记录无效，没有保存")
 )
 
 // phoneRecord is the record of earlier versions: one UI-managed phone per host.
@@ -94,6 +95,13 @@ func devicePlatform(platform string) bool {
 // deviceName is a model or machine name a device may report about itself.
 func deviceName(name string) bool {
 	return name != "" && len(name) <= 160 && utf8.ValidString(name) && !strings.ContainsFunc(name, unicode.IsControl)
+}
+
+// shortCodeRequestListable reports whether a device that proved the short
+// code describes itself as the device list can keep it. remotelink checks the
+// same rules in its hello; the host keeps its own gate before the prompt.
+func shortCodeRequestListable(request mobilelink.DeviceRequest) bool {
+	return devicePlatform(request.Platform) && deviceName(request.Name)
 }
 
 func newDeviceID() string {
@@ -179,13 +187,19 @@ func readDevicesFile(path string) (*devicesFile, error) {
 		return nil, err
 	}
 	var f devicesFile
-	if json.Unmarshal(b, &f) != nil || f.Version != devicesVersion || f.Devices == nil {
+	if json.Unmarshal(b, &f) != nil || f.Version != devicesVersion || f.Devices == nil || checkDevices(f.Devices) != nil {
 		return nil, errDevicesUnreadable
 	}
+	return &f, nil
+}
+
+// checkDevices is what a list must be to be read back: every record valid,
+// ids unique, at most one legacy entry.
+func checkDevices(devices []deviceRecord) error {
 	ids, legacy := map[string]bool{}, 0
-	for _, d := range f.Devices {
+	for _, d := range devices {
 		if !d.valid() || ids[d.ID] {
-			return nil, errDevicesUnreadable
+			return errDeviceRecord
 		}
 		ids[d.ID] = true
 		if d.Legacy {
@@ -193,14 +207,20 @@ func readDevicesFile(path string) (*devicesFile, error) {
 		}
 	}
 	if legacy > 1 {
-		return nil, errDevicesUnreadable
+		return errDeviceRecord
 	}
-	return &f, nil
+	return nil
 }
 
+// writeDevicesFile writes only a list readDevicesFile accepts: anything else
+// is an error and the file on disk stays as it was, so one bad record never
+// makes the whole list unreadable at the next start.
 func writeDevicesFile(path string, devices []deviceRecord) error {
 	if devices == nil {
 		devices = []deviceRecord{}
+	}
+	if err := checkDevices(devices); err != nil {
+		return err
 	}
 	return writePrivate(path, devicesFile{Version: devicesVersion, Devices: devices})
 }
