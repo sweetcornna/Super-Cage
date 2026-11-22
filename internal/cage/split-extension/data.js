@@ -36,7 +36,9 @@ globalThis.cageBrowsingData = async function (input) {
       } else if (input.excludeOrigins?.length) {
         const excluded = validOrigins(input.excludeOrigins);
         skipped = input.excludeOrigins.length - excluded.length;
-        if (excluded.length) options.excludeOrigins = excluded;
+        // Nor may an exclusion list that lost every origin become one.
+        if (!excluded.length) return { ok: true, skipped };
+        options.excludeOrigins = excluded;
       }
       await chrome.browsingData.remove(options, input.types);
       return { ok: true, skipped };

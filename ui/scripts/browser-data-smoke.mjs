@@ -30,6 +30,8 @@ const fields = ["mode", "session", "range", "since", "types", "protect", "keep",
 // Downloads whose save failed, as the guest counts them (browser-downloads.mjs
 // keeps them; its own tests cover that): set to show them in the dialog.
 let unsavedDownloads = 0;
+// Set to answer a clear as the host does while a different clear runs.
+let refuseClear = false;
 const opened = [], openedTabs = [];
 const settingsFields = ["action", "domain", "range", "types", "enabled", "trigger", "days"];
 const strict = (body, known) => { const extra = Object.keys(body || {}).filter(name => !known.includes(name)); if (extra.length) throw new Error("请求格式无效: " + extra.join(",")); };
@@ -37,6 +39,7 @@ const dataRoute = async body => {
   strict(body, fields);
   const input = { ...body };
   if (input.range) { input.since = windows[input.range] ? Date.now() - windows[input.range] : 0; delete input.range; }
+  if (input.mode === "clear" && refuseClear) throw new Error("另一项清除正在进行，完成后再试");
   if (input.mode === "clear") {
     input.keep = settings.keep.map(entry => entry.domain); input.keepEnabled = body.protect !== "none"; delete input.protect;
     if (body.remember) settings.defaults = { range: body.range, types: body.types };
@@ -254,6 +257,13 @@ try {
   await dialog.getByRole("combobox", { name: "时间范围" }).click();
   await page.getByRole("option", { name: "全部时间", exact: true }).click();
   await dialog.getByRole("checkbox", { name: /下载记录/ }).check();
+  // Review round 2, N2: a different clear running in another window is
+  // refused in plain words, and this one can be started again afterwards.
+  refuseClear = true;
+  await dialog.getByRole("button", { name: "清除数据", exact: true }).click();
+  await dialog.getByText("另一项清除正在进行，完成后再试").waitFor();
+  check("a different clear running elsewhere is refused in the dialog", await dialog.getByRole("button", { name: "清除数据", exact: true }).isEnabled());
+  refuseClear = false;
   started = Date.now();
   await dialog.getByRole("button", { name: "清除数据", exact: true }).click();
   await dialog.getByText(/^已清除浏览记录/).waitFor();
