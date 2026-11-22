@@ -237,6 +237,35 @@ assertions = 0;
             using (File.Open(Path.Combine(crashpad, "reports", "held.dmp"), FileMode.Create, FileAccess.ReadWrite, FileShare.None))
                 Check(CrashReports.Sweep(crashData) == 0, "a dump in use counted as deleted");
             Check(CrashReports.Sweep(crashData) == 1, "a dump left in use was not deleted later");
+
+            // Nothing is followed through a junction: not the user data
+            // folder, EBWebView, Crashpad or reports. (mklink /J needs no
+            // privilege; a host that refuses it skips these.)
+            bool Junction(string at, string to)
+            {
+                using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + at + "\" \"" + to + "\"")
+                    { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+                mklink.WaitForExit();
+                return mklink.ExitCode == 0 && File.GetAttributes(at).HasFlag(FileAttributes.ReparsePoint);
+            }
+            var linkTarget = Path.Combine(scienceRoot, "link-target");
+            var targetReports = Path.Combine(CrashReports.Folder(linkTarget), "reports");
+            Directory.CreateDirectory(targetReports);
+            var targetDump = Path.Combine(targetReports, "kept.dmp");
+            File.WriteAllText(targetDump, "x");
+            var linkCases = new (string Data, string Link, string Target)[] {
+                (Path.Combine(scienceRoot, "linked-data"), Path.Combine(scienceRoot, "linked-data"), linkTarget),
+                (Path.Combine(scienceRoot, "linked-ebwebview"), Path.Combine(scienceRoot, "linked-ebwebview", "EBWebView"), Path.Combine(linkTarget, "EBWebView")),
+                (Path.Combine(scienceRoot, "linked-crashpad"), Path.Combine(scienceRoot, "linked-crashpad", "EBWebView", "Crashpad"), CrashReports.Folder(linkTarget)),
+                (Path.Combine(scienceRoot, "linked-reports"), Path.Combine(scienceRoot, "linked-reports", "EBWebView", "Crashpad", "reports"), targetReports),
+            };
+            foreach (var (linkedData, link, target) in linkCases)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+                if (!Junction(link, target)) { Console.WriteLine("junction not created, skipped: " + link); continue; }
+                Check(CrashReports.Sweep(linkedData) == 0 && File.Exists(targetDump), "the sweep followed a junction: " + link);
+            }
+            Check(CrashReports.Sweep(linkTarget) == 1 && !File.Exists(targetDump), "the plain folder behind the junctions was not swept");
         }
 
         // The renderer processes the host terminates for a frame's origin.
