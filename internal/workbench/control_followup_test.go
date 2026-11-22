@@ -64,7 +64,10 @@ func TestOlderControllerGraceCallers(t *testing.T) {
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || fn.Name.Name == "connectControllerOrOlder" {
+			// connectControllerOrOlder chooses the grace and openControllerConn is
+			// the opener it hands to controlclient, which refuses a record
+			// without auth unless the grace was chosen.
+			if !ok || fn.Body == nil || fn.Name.Name == "connectControllerOrOlder" || fn.Name.Name == "openControllerConn" {
 				continue
 			}
 			caller := fn.Name.Name
@@ -78,11 +81,12 @@ func TestOlderControllerGraceCallers(t *testing.T) {
 				}
 			}
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
+				// A call or a function value: either uses the grace.
+				ident, ok := n.(*ast.Ident)
 				if !ok {
 					return true
 				}
-				if ident, ok := call.Fun.(*ast.Ident); ok && (ident.Name == "connectController" || ident.Name == "openController") && !slices.Contains(found, caller) {
+				if slices.Contains(olderControllerGraceEntries, ident.Name) && !slices.Contains(found, caller) {
 					found = append(found, caller)
 				}
 				return true

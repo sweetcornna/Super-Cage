@@ -84,8 +84,11 @@ func openController(profile string) (*controllerClient, error) {
 // the version reaches it.
 const olderControllerGraceEndsIn = "0.1.17"
 
+// olderControllerGraceEntries are the functions that give the grace.
+var olderControllerGraceEntries = []string{"connectController", "openController", "connectControllerConn"}
+
 // olderControllerGraceCallers are the functions that still use the grace
-// (they call connectController or openController); automation (the agent
+// (they call or pass one of olderControllerGraceEntries); automation (the agent
 // transport, AgentStartService, ServerEntry, the SSH entry's proxy) uses
 // connectProvenController. TestOlderControllerGraceCallers keeps this list
 // equal to the code.
@@ -95,6 +98,7 @@ var olderControllerGraceCallers = []string{
 	"desktopGateway.trustedLogin", "desktopLaunch", "desktopLocal.Connect", "desktopLocal.Release",
 	"desktopLocal.ReleaseOwnedIdle", "desktopLocal.ReleaseUnused", "desktopLocal.Status",
 	"desktopLocal.handoffOldLocal", "desktopLocal.releaseFailedLaunch", "exportDiagnostics", "waitControllerReady",
+	"connectControllerConn",
 }
 
 // connectController serves the window and its helpers. Until the next
