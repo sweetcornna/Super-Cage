@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DownloadManager } from "./browser-downloads.mjs";
@@ -76,4 +76,22 @@ test("finished download history stays bounded without losing current transfers",
   assert.ok(records.some(r => r.id === active && r.state === "downloading"));
   assert.equal(JSON.parse(readFileSync(join(f.directory, "download-state.json"))).length, 51);
   assert.ok(records.every(r => !("sourceReady" in r) && !("url" in r)));
+});
+
+test("finding 1: clearing records keeps unsaved downloads with their staging copies, still retryable", async t => {
+  const f = fixture(t, async (id, name) => {
+    if (name === "failed.txt") throw new Error("共享连接暂时不可用");
+    return { ok: true, path: "/shared/Downloads/" + name, name, bytes: 15 };
+  });
+  const failed = f.begin("failed.txt");
+  await completed(f.manager, failed);
+  const saved = f.begin("saved.txt");
+  await completed(f.manager, saved);
+  const canceled = f.begin("canceled.txt");
+  f.manager.progress({ guid: canceled, state: "canceled" });
+  assert.deepEqual(f.manager.forget(0), { removed: 2, kept: 1 });
+  assert.ok(existsSync(join(f.directory, "Downloads", failed)), "the only copy of an unsaved download stays");
+  assert.ok(!existsSync(join(f.directory, "Downloads", saved)), "a saved file's staging copy goes; the saved file stays where it was saved");
+  assert.deepEqual(f.manager.snapshot().map(item => [item.name, item.state, item.retryable]), [["failed.txt", "failed", true]]);
+  assert.deepEqual(f.manager.forget(0), { removed: 0, kept: 1 });
 });
