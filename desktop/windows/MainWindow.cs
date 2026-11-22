@@ -19,6 +19,10 @@ internal sealed class MainWindow : Form
     private bool controllerNeedsUpdate, allowQuit, bootstrapping, webFailed;
     private bool completingSmoke;
     private string smokePhase = "starting";
+    // Smoke only: what the Claude Science part of a smoke test recorded
+    // (SmokeReady, CompleteSmoke).
+    private readonly Dictionary<string, object?> smokeScience = new();
+    private System.Diagnostics.Stopwatch? smokeRestart;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, (string[] Paths, DateTime Expires)> fileSelections = new();
     // Claude Science host rendering: the switches this WebView was created
@@ -307,6 +311,13 @@ internal sealed class MainWindow : Form
                 }
                 catch (Exception error) { errors.Add("无法保存工作台画面：" + error.Message); }
             }
+            if (nativeBridgeReady && web.CoreWebView2 != null)
+            {
+                smokeScience["switches"] = webArguments != null;
+                if (smokeRestart != null) smokeScience["restartMilliseconds"] = smokeRestart.ElapsedMilliseconds;
+                try { smokeScience["page"] = await SmokeEvaluate(SmokeScienceProbe.Replace("ASK", SmokeScience.Length != 0 ? "true" : "false")); }
+                catch (Exception error) { smokeScience["pageError"] = error.Message; }
+            }
             var controllers = Backend.CaptureSmokeControllers();
             try
             {
@@ -346,13 +357,52 @@ internal sealed class MainWindow : Form
             File.WriteAllText(Program.SmokeOutput, JsonSerializer.Serialize(new {
                 success = nativeBridgeReady && errors.Count == 0, nativeBridgeReady, version = AppUpdater.Version,
                 phase = smokePhase, nativeStatus = message.Text, prepareExit, prepareStatus, prepareMessage, errors, page,
-                pageURL, webviewVersion,
+                pageURL, webviewVersion, science = smokeScience,
                 windowBounds = Bounds, workingArea = Screen.FromHandle(Handle).WorkingArea, deviceDpi = DeviceDpi,
                 nativeMenuBar = MainMenuStrip != null,
             }));
         }
         catch (Exception error) { Error(error.Message); }
         finally { allowQuit = true; BeginInvoke(Close); }
+    }
+
+    // Smoke only. CAGE_SMOKE_SCIENCE=on does from the page what the Claude
+    // Science pane's switch and then its reload prompt do (neither needs a
+    // guest) and completes in the WebView the reload made; =off turns the
+    // switch off; =probe only asks. Each then asks the frame ops what the
+    // pane would (SmokeScienceProbe).
+    private static string SmokeScience => Environment.GetEnvironmentVariable("CAGE_SMOKE_SCIENCE") switch { "on" => "on", "off" => "off", "probe" => "probe", _ => "" };
+
+    private async Task SmokeReady()
+    {
+        if (Program.SmokeOutput == null || completingSmoke) return;
+        if (SmokeScience is "on" or "off" && !smokeScience.ContainsKey("switch"))
+        {
+            try
+            {
+                smokeScience["switch"] = await SmokeEvaluate(SmokeScienceSwitch.Replace("ENABLED", SmokeScience == "on" ? "true" : "false"));
+                if (SmokeScience == "on" && webArguments == null && ScienceFrame.Arguments(Backend.Root) != null)
+                {
+                    smokeRestart = System.Diagnostics.Stopwatch.StartNew();
+                    // Not awaited: the reply races the WebView's end.
+                    smokeScience["restart"] = await SmokeEvaluate("void window.webkit.messageHandlers.cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {}); 'sent'");
+                    return;
+                }
+            }
+            catch (Exception error) { smokeScience["switchError"] = error.Message; }
+        }
+        await CompleteSmoke();
+    }
+
+    // Smoke only: what a page expression evaluates to (a promise awaited).
+    private async Task<JsonElement?> SmokeEvaluate(string expression)
+    {
+        var reply = await web.CoreWebView2.CallDevToolsProtocolMethodAsync("Runtime.evaluate",
+            JsonSerializer.Serialize(new { expression, awaitPromise = true, returnByValue = true })).WaitAsync(TimeSpan.FromSeconds(30));
+        using var document = JsonDocument.Parse(reply);
+        if (document.RootElement.TryGetProperty("exceptionDetails", out var failure))
+            throw new InvalidDataException(failure.TryGetProperty("exception", out var thrown) ? thrown.Text("description") : failure.Text("text"));
+        return document.RootElement.GetProperty("result").TryGetProperty("value", out var value) ? value.Clone() : null;
     }
 
     private async Task Bootstrap(params string[] options)
@@ -468,7 +518,7 @@ internal sealed class MainWindow : Form
                     break;
                 case "workbenchReady":
                     if (controllerNeedsUpdate) throw new IOException("后台版本尚未同步，更新未完成");
-                    updater.MarkReady(); result = true; _ = CompleteSmoke(); break;
+                    updater.MarkReady(); result = true; _ = SmokeReady(); break;
                 case "appUpdate": result = updater.Handle(request.Text("operation")); break;
                 case "importTheme":
                     using (var picker = new OpenFileDialog { Filter = "Super Cage 主题 (*.json)|*.json", Title = "导入主题", Multiselect = false })
@@ -644,6 +694,51 @@ internal sealed class MainWindow : Form
             if (id.Length != 0 && !IsDisposed && !web.IsDisposed) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id, error = error.Message }));
         }
     }
+
+    // Smoke only: the pane's requests (ui/src/claude-science.jsx), as the
+    // page sends them. Nothing in the reports is an address or a credential.
+    private const string SmokeScienceRequests = """
+          const context = await (await fetch('/api/client/context')).json();
+          const headers = {'Content-Type': 'application/json', 'X-Cage-Connection': context.connection_id || 'disconnected'};
+          const call = async (path, body) => {
+            const response = await fetch('/api' + path, body === undefined ? {headers} : {method: 'POST', headers, body: JSON.stringify(body)});
+            const text = await response.text();
+            let value = null;
+            try { value = JSON.parse(text); } catch {}
+            return {status: response.status, value: value || {}, text: response.ok ? '' : text.slice(0, 300)};
+          };
+          const state = reply => ({status: reply.status, available: reply.value.available, code: reply.value.unavailable_code || '',
+            enabled: reply.value.enabled, running: reply.value.running, error: reply.value.error || reply.text});
+        """;
+
+    private const string SmokeScienceSwitch = "(async () => {" + SmokeScienceRequests + """
+          return state(await call('/claude-science/host-render', {enabled: ENABLED, contract: window.cageNativeScienceFrame}));
+        })()
+        """;
+
+    private const string SmokeScienceProbe = """
+        (async () => {
+          const report = {contract: window.cageNativeScienceFrame ?? null, moveBefore: 'moveBefore' in Element.prototype,
+            frames: document.querySelectorAll('iframe').length};
+          if (!ASK) return report;
+        """ + SmokeScienceRequests + """
+          const bridge = window.webkit.messageHandlers.cage;
+          const ask = async request => {
+            try { return {result: await bridge.postMessage(request)}; }
+            catch (error) { return {error: String(error && error.message).slice(0, 300)}; }
+          };
+          report.prepare = await ask({action: 'scienceFrame', op: 'prepare'});
+          report.hostRender = state(await call('/claude-science/host-render'));
+          const ticket = await call('/claude-science/ticket', {host: {timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+            offset: new Date().getTimezoneOffset(), languages: [...(navigator.languages || [])].slice(0, 8)},
+            proxy: String(report.prepare.result?.proxy || ''), contract: window.cageNativeScienceFrame});
+          report.ticket = {status: ticket.status, url: Boolean(ticket.value.url), error: ticket.text};
+          report.attachUnknown = await ask({action: 'scienceFrame', op: 'attach', url: 'http://' + '0'.repeat(32) + '.localhost:9/_cage/enter'});
+          report.detach = await ask({action: 'scienceFrame', op: 'detach'});
+          report.frames = document.querySelectorAll('iframe').length;
+          return report;
+        })()
+        """;
 
     private const string SmokeDiagnosticsScript = """
         (() => {
