@@ -1,5 +1,6 @@
-/* Settings → 本机终端应用. The rows reuse the settings page's choice list and
-   toggle rows; only what is new to this section is styled here. */
+/* Settings → 本机终端, its first part. The line about the application and the
+   switches reuse the settings page's help and toggle rows; only what is new to
+   this section is styled here. */
 .local-terminal-settings {
   position: relative;
 }
@@ -11,54 +12,6 @@
   color: var(--muted);
   font-size: var(--fs-secondary);
 }
-.local-terminal-gone {
-  margin: 0 0 16px;
-  padding: 10px 14px;
-  border: 1px solid color-mix(in srgb, var(--amber) 35%, var(--line));
-  border-radius: var(--r-md);
-  background: color-mix(in srgb, var(--amber) 8%, var(--surface));
-  color: var(--ink);
-  font-size: var(--fs-secondary);
-  line-height: 1.6;
-}
-.local-terminal-apps .local-terminal-app {
-  align-items: center;
-}
-.local-terminal-apps .local-terminal-app input {
-  margin-top: 0;
-  flex: none;
-}
-.local-terminal-app-text {
-  flex: 1;
-  min-width: 0;
-}
-.local-terminal-app-text strong,
-.local-terminal-app-text small {
-  overflow-wrap: anywhere;
-}
-/* The built-in terminal closes the group of applications found here. */
-.local-terminal-apps .local-terminal-app.built-in {
-  border-bottom-color: var(--line-strong);
-}
-.local-terminal-apps .local-terminal-app.unavailable {
-  cursor: default;
-}
-.local-terminal-apps .local-terminal-app.unavailable strong {
-  color: var(--faint);
-}
-.local-terminal-apps .local-terminal-app.unavailable:hover {
-  background: transparent;
-}
-.local-terminal-chip {
-  flex: none;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--soft);
-  color: var(--muted);
-  font-size: var(--fs-caption);
-  line-height: 1.5;
-  white-space: nowrap;
-}
 /* The group heading of the two switches, as the settings page's own groups;
    the entry's devices and kept terminals use it too. */
 :is(.local-terminal-settings, .local-entry) .local-terminal-subtitle {
@@ -67,6 +20,10 @@
   font-weight: 600;
   line-height: 1.4;
   color: var(--strong);
+}
+/* The switches follow one short line, not a list. */
+.local-terminal-opener + .local-terminal-subtitle {
+  margin-top: 28px;
 }
 .local-terminal-savebar {
   position: sticky;

@@ -2,6 +2,7 @@ package localterm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -10,18 +11,18 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	yaml "go.yaml.in/yaml/v3"
 )
 
 // The cage binary of the app bundle has a space in its path.
 var attachCommand = Command{"/Applications/Super Cage.app/Contents/MacOS/cage", "attach", "--terminal", "0123456789abcdef"}
 
+// installed is an application of the table as if found at its usual place.
 func installed(t *testing.T, id string) Installed {
 	t.Helper()
+	paths := map[string]string{"ghostty": "/Applications/Ghostty.app", "terminal": "/System/Applications/Utilities/Terminal.app"}
 	for _, app := range macApps {
 		if app.ID == id {
-			return Installed{App: app, Path: "/Applications/" + app.Name + ".app"}
+			return Installed{App: app, Path: paths[id]}
 		}
 	}
 	t.Fatal("unknown app", id)
@@ -31,41 +32,32 @@ func installed(t *testing.T, id string) Installed {
 func planFor(t *testing.T, id string) (Plan, string) {
 	t.Helper()
 	scratch := t.TempDir()
-	plan, err := PlanLaunch(PlanInput{App: installed(t, id), Command: attachCommand, Name: "0123456789abcdef", Scratch: scratch, Home: "/Users/owner name"})
+	plan, err := PlanLaunch(PlanInput{App: installed(t, id), Command: attachCommand, Name: "0123456789abcdef", Scratch: scratch})
 	if err != nil {
 		t.Fatal(id, err)
 	}
 	return plan, filepath.Join(scratch, "super-cage-0123456789abcdef.command")
 }
 
+// The table keeps exactly two applications, and each opens its window its own
+// way: Terminal runs the script as a document, Ghostty gets a window through
+// AppleScript (after macOS's Automation question).
 func TestPlansPerApplication(t *testing.T) {
+	if got := len(macApps); got != 2 || macApps[0].ID != "ghostty" || macApps[1].ID != "terminal" {
+		t.Fatalf("the table is %+v", macApps)
+	}
 	quotedCage := "'/Applications/Super Cage.app/Contents/MacOS/cage'"
 	for _, row := range []struct {
-		id    string
-		steps func(script string) [][]string
+		id     string
+		prompt bool
+		steps  func(script string) [][]string
 	}{
-		{"terminal", func(s string) [][]string { return [][]string{{"/usr/bin/open", "-a", "/Applications/终端.app", s}} }},
-		{"iterm2", func(s string) [][]string {
-			return [][]string{{"/usr/bin/osascript", "-e", "tell application id \"com.googlecode.iterm2\" to create window with default profile command \"" + s + "\""}}
+		{"terminal", false, func(s string) [][]string {
+			return [][]string{{"/usr/bin/open", "-a", "/System/Applications/Utilities/Terminal.app", s}}
 		}},
-		{"ghostty", func(s string) [][]string {
+		{"ghostty", true, func(s string) [][]string {
 			return [][]string{
 				{"/usr/bin/osascript", "-e", "tell application id \"com.mitchellh.ghostty\"\nset cfg to new surface configuration\nset command of cfg to \"" + s + "\"\nnew window with configuration cfg\nend tell"},
-			}
-		}},
-		{"warp", func(string) [][]string {
-			return [][]string{{"/usr/bin/open", "warp://launch/super-cage-0123456789abcdef.yaml"}}
-		}},
-		{"wezterm", func(s string) [][]string {
-			return [][]string{{"/Applications/WezTerm.app/Contents/MacOS/wezterm", "start", "--", "/bin/sh", s}}
-		}},
-		{"kitty", func(s string) [][]string {
-			return [][]string{{"/Applications/kitty.app/Contents/MacOS/kitty", "--single-instance", "/bin/sh", s}}
-		}},
-		{"alacritty", func(s string) [][]string {
-			return [][]string{
-				{"/Applications/Alacritty.app/Contents/MacOS/alacritty", "msg", "create-window", "-e", "/bin/sh", s},
-				{"/usr/bin/open", "-na", "/Applications/Alacritty.app", "--args", "-e", "/bin/sh", s},
 			}
 		}},
 	} {
@@ -78,45 +70,50 @@ func TestPlansPerApplication(t *testing.T) {
 			if strings.Join(step.Argv, "\x00") != strings.Join(want[i], "\x00") {
 				t.Errorf("%s step %d:\n got %q\nwant %q", row.id, i, step.Argv, want[i])
 			}
-		}
-		for _, f := range plan.Files {
-			if strings.HasSuffix(f.Path, ".command") {
-				if f.Mode != 0o700 || !strings.Contains(f.Content, "rm -f -- \"$0\"\n"+quotedCage+" attach --terminal 0123456789abcdef\nstatus=$?\n") || !strings.Contains(f.Content, "\t"+quotedCage+" attach --reset 2>/dev/null\n") {
-					t.Errorf("%s script %o %q", row.id, f.Mode, f.Content)
-				}
+			if step.Prompt != row.prompt {
+				t.Errorf("%s step %d: prompt %v, want %v", row.id, i, step.Prompt, row.prompt)
 			}
 		}
+		if len(plan.Files) != 1 || plan.Files[0].Path != script {
+			t.Fatalf("%s: files %+v", row.id, plan.Files)
+		}
+		if f := plan.Files[0]; f.Mode != 0o700 || !strings.Contains(f.Content, "rm -f -- \"$0\"\n"+quotedCage+" attach --terminal 0123456789abcdef\nstatus=$?\n") || !strings.Contains(f.Content, "\t"+quotedCage+" attach --reset 2>/dev/null\n") {
+			t.Errorf("%s script %o %q", row.id, f.Mode, f.Content)
+		}
 	}
-	// Warp's launch configuration is valid YAML that runs the script.
-	plan, script := planFor(t, "warp")
-	var config struct {
-		Windows []struct {
-			Tabs []struct {
-				Layout struct {
-					Cwd      string `yaml:"cwd"`
-					Commands []struct {
-						Exec string `yaml:"exec"`
-					} `yaml:"commands"`
-				} `yaml:"layout"`
-			} `yaml:"tabs"`
-		} `yaml:"windows"`
+	// An application this build no longer knows cannot be planned.
+	gone := Installed{App: App{ID: "iterm2", Name: "iTerm2", BundleIDs: []string{"com.googlecode.iterm2"}}, Path: "/Applications/iTerm.app"}
+	if _, err := PlanLaunch(PlanInput{App: gone, Command: attachCommand, Name: "x", Scratch: "/tmp"}); err == nil {
+		t.Fatal("an unknown application was planned")
 	}
-	if len(plan.Files) != 2 || plan.Files[1].Path != "/Users/owner name/.warp/launch_configurations/super-cage-0123456789abcdef.yaml" {
-		t.Fatal(plan.Files)
+}
+
+// Ghostty opens the window when it is installed, the system Terminal when it
+// is not: there is nothing to choose, however many others are installed.
+func TestPickPrefersGhosttyElseTerminal(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS table")
 	}
-	if err := yaml.Unmarshal([]byte(plan.Files[1].Content), &config); err != nil || config.Windows[0].Tabs[0].Layout.Commands[0].Exec != script || config.Windows[0].Tabs[0].Layout.Cwd != "/Users/owner name" {
-		t.Fatalf("%v %+v", err, config)
+	ghostty, terminal := installed(t, "ghostty"), installed(t, "terminal")
+	for _, row := range []struct {
+		name  string
+		found []Installed
+		want  string
+	}{
+		{"both", []Installed{terminal, ghostty}, "ghostty"},
+		{"both in table order", []Installed{ghostty, terminal}, "ghostty"},
+		{"Ghostty alone", []Installed{ghostty}, "ghostty"},
+		{"Terminal alone", []Installed{terminal}, "terminal"},
+		{"neither", nil, ""},
+	} {
+		got, ok := Pick(row.found)
+		if row.want == "" && ok || row.want != "" && (!ok || got.ID != row.want) {
+			t.Errorf("%s: picked %+v (%v), want %q", row.name, got, ok, row.want)
+		}
 	}
-	// Warp Preview alone: its own URL scheme.
-	preview := installed(t, "warp")
-	preview.BundleID = "dev.warp.Warp-Preview"
-	plan, err := PlanLaunch(PlanInput{App: preview, Command: attachCommand, Name: "0123456789abcdef", Scratch: t.TempDir(), Home: "/Users/owner name"})
-	if err != nil || plan.Steps[0].Argv[1] != "warppreview://launch/super-cage-0123456789abcdef.yaml" {
-		t.Fatal(plan.Steps, err)
-	}
-	// Herdr is detected but cannot host cage attach yet.
-	if _, err := PlanLaunch(PlanInput{App: installed(t, "herdr"), Command: attachCommand, Name: "x", Scratch: "/tmp", Home: "/Users/x"}); err == nil {
-		t.Fatal("herdr planned")
+	// Whatever else the owner has installed is not even looked for.
+	if _, ok := Pick([]Installed{{App: App{ID: "kitty", Name: "kitty"}, Path: "/Applications/kitty.app"}}); ok {
+		t.Error("an application outside the table was picked")
 	}
 }
 
@@ -126,6 +123,9 @@ func TestPlanRefusesWhatItCouldMisread(t *testing.T) {
 		if _, err := PlanLaunch(PlanInput{App: app, Command: command, Name: "a", Scratch: "/tmp"}); err == nil {
 			t.Errorf("accepted %q", command)
 		}
+	}
+	if _, err := PlanLaunch(PlanInput{App: Installed{App: app.App, Path: "Terminal.app"}, Command: attachCommand, Name: "a", Scratch: "/tmp"}); err == nil {
+		t.Error("accepted a relative application path")
 	}
 	for _, name := range []string{"", "../x", "A", "a b"} {
 		if _, err := PlanLaunch(PlanInput{App: app, Command: attachCommand, Name: name, Scratch: "/tmp"}); err == nil {
@@ -151,14 +151,6 @@ func TestQuotingLayers(t *testing.T) {
 			}
 		}
 	}
-	for _, word := range append(words, "tab\there", "line\nbreak") {
-		var holder struct {
-			V string `yaml:"v"`
-		}
-		if err := yaml.Unmarshal([]byte("v: "+YAMLString(word)), &holder); err != nil || holder.V != word {
-			t.Errorf("YAML %q: %q %v", word, holder.V, err)
-		}
-	}
 }
 
 type recordingRunner struct {
@@ -175,44 +167,41 @@ func (r *recordingRunner) Run(_ context.Context, step Step) error {
 }
 
 func TestLaunchWritesPrivateFilesAndFallsBack(t *testing.T) {
-	plan, script := planFor(t, "alacritty")
-	runner := &recordingRunner{fail: 1} // Alacritty was not running
+	plan, script := planFor(t, "terminal")
+	// A plan's later steps are fallbacks: the first one was refused.
+	plan.Steps = append(plan.Steps, Step{Argv: []string{"/usr/bin/true"}})
+	runner := &recordingRunner{fail: 1}
 	if err := Launch(context.Background(), plan, runner); err != nil {
 		t.Fatal(err)
 	}
-	if len(runner.steps) != 2 || runner.steps[1][1] != "-na" {
+	if len(runner.steps) != 2 || runner.steps[1][0] != "/usr/bin/true" {
 		t.Fatal(runner.steps)
 	}
 	info, err := os.Stat(script)
 	if err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatal(info, err)
 	}
-	// Scripts never run and Warp launch configurations are removed later;
-	// recent ones and other files stay.
-	home := t.TempDir()
-	warp := filepath.Join(home, ".warp", "launch_configurations")
-	if err := os.MkdirAll(warp, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	stale := []string{script, filepath.Join(warp, "super-cage-0123456789abcdef.yaml")}
-	if err := os.WriteFile(script, []byte("x"), 0o700); err != nil && !os.IsExist(err) {
-		t.Fatal(err)
-	}
-	kept := []string{filepath.Join(warp, "super-cage-fresh.yaml"), filepath.Join(warp, "my-own.yaml")}
-	old := time.Now().Add(-time.Hour)
-	for _, path := range append(stale[1:], kept...) {
+	// Scripts never run are removed later; recent ones and other files stay.
+	dir := filepath.Dir(script)
+	stale := filepath.Join(dir, "super-cage-0123456789abcdef.command")
+	kept := []string{filepath.Join(dir, "super-cage-fresh.command"), filepath.Join(dir, "my-own.command"), filepath.Join(dir, "super-cage-other.yaml")}
+	for _, path := range kept {
 		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range append(stale, kept[1]) {
+	old := time.Now().Add(-time.Hour)
+	for _, path := range []string{stale, kept[1], kept[2]} {
+		if path != stale {
+			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		_ = os.Chtimes(path, old, old)
 	}
-	PruneScratch(filepath.Dir(script), home, 10*time.Minute)
-	for _, path := range stale {
-		if _, err := os.Stat(path); !os.IsNotExist(err) {
-			t.Fatal("stale file kept", path)
-		}
+	PruneScratch(dir, 10*time.Minute)
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatal("stale script kept")
 	}
 	for _, path := range kept {
 		if _, err := os.Stat(path); err != nil {
@@ -250,21 +239,30 @@ func TestDetectWithoutPermission(t *testing.T) {
 	t.Logf("detected %d of %d known applications in %v: %+v", len(found), len(macApps), elapsed, found)
 }
 
-func TestSettingsDefaultsAndValidation(t *testing.T) {
+func TestSettingsDefaults(t *testing.T) {
 	dir := t.TempDir()
 	settings, err := LoadSettings(dir)
-	if err != nil || settings != DefaultSettings() || !settings.ImageUpload || !settings.ClipboardWrite || settings.App != "" {
+	if err != nil || settings != DefaultSettings() || !settings.ImageUpload || !settings.ClipboardWrite {
 		t.Fatal(settings, err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, SettingsFile), []byte("{\"app\":\"ghostty\",\"clipboard_write\":false}"), 0o600); err != nil {
-		t.Fatal(err)
+	// The settings are the two switches and nothing else.
+	if data, err := json.Marshal(settings); err != nil || string(data) != "{\"image_upload\":true,\"clipboard_write\":true}" {
+		t.Fatalf("%s %v", data, err)
 	}
-	settings, _ = LoadSettings(dir)
-	if runtime.GOOS == "darwin" && (settings.App != "ghostty" || settings.ClipboardWrite || !settings.ImageUpload) {
-		t.Fatal(settings)
-	}
-	if (Settings{App: "no-such-app"}).Validate() == nil {
-		t.Fatal("unknown app accepted")
+}
+
+// A file written by an earlier build holds the application the owner chose
+// then: it is ignored without an error, and the other switches are kept.
+func TestSettingsIgnoreAnEarlierAppChoice(t *testing.T) {
+	for _, stored := range []string{"ghostty", "kitty", "no-such-app", ""} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, SettingsFile), []byte("{\"app\":\""+stored+"\",\"image_upload\":false,\"clipboard_write\":false}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := LoadSettings(dir)
+		if err != nil || settings != (Settings{}) {
+			t.Fatalf("%q: %+v, %v", stored, settings, err)
+		}
 	}
 }
 
@@ -285,9 +283,9 @@ func TestAppleScriptErrorsInTheOwnersWords(t *testing.T) {
 		timedOut bool
 		want     string
 	}{
-		{"36:120: execution error: Not authorized to send Apple events to iTerm. (-1743)", false, "自动化"},
+		{"36:120: execution error: Not authorized to send Apple events to Ghostty. (-1743)", false, "自动化"},
 		{"", true, "超时"},
-		{"execution error: iTerm got an error: AppleEvent timed out. (-1712)", false, "没有及时回应"},
+		{"execution error: Ghostty got an error: AppleEvent timed out. (-1712)", false, "没有及时回应"},
 		{"62:83: syntax error: Expected end of line but found identifier. (-2741)", false, "1.3"},
 		{"something else", false, "something else"},
 	} {

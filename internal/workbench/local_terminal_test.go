@@ -4,11 +4,13 @@ package workbench
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -19,46 +21,95 @@ import (
 )
 
 type recordingLaunches struct {
-	mu    sync.Mutex
-	steps [][]string
-	fail  bool // every step fails, as when the application refuses
+	mu      sync.Mutex
+	steps   [][]string
+	prompts []bool // whether each step waits on macOS's Automation question
+	fail    bool   // every step fails, as when the application refuses
 }
 
 func (r *recordingLaunches) Run(_ context.Context, step localterm.Step) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.steps = append(r.steps, step.Argv)
+	r.prompts = append(r.prompts, step.Prompt)
 	if r.fail {
 		return errors.New("refused")
 	}
 	return nil
 }
 
+// refusedLaunches is what every test starts with: no step can run, so a test
+// that forgets its own runner opens no window on the machine it runs on.
+type refusedLaunches struct{}
+
+func (refusedLaunches) Run(context.Context, localterm.Step) error {
+	return errors.New("this test did not set a runner")
+}
+
+// noApplications finds nothing, as a Mac with neither Ghostty nor Terminal.
+func noApplications() []localterm.Installed { return nil }
+
+func init() {
+	localTerminalRunner, localTerminalDetect = refusedLaunches{}, noApplications
+}
+
+// installedAt is the application of the table with this id, as if installed
+// under /Applications (a path that is never launched: the runner is a fake).
+func installedAt(id string) localterm.Installed {
+	for _, app := range localterm.Apps() {
+		if app.ID == id {
+			return localterm.Installed{App: app, Path: "/Applications/" + id + ".app"}
+		}
+	}
+	panic("unknown application " + id)
+}
+
+// useLocalTerminal lets a test open windows through runner on a Mac that has
+// exactly these applications, and puts the safe defaults back afterwards.
+func useLocalTerminal(t *testing.T, runner localterm.Runner, ids ...string) {
+	t.Helper()
+	oldRunner, oldDetect := localTerminalRunner, localTerminalDetect
+	localTerminalRunner = runner
+	localTerminalDetect = func() []localterm.Installed {
+		var found []localterm.Installed
+		for _, id := range ids {
+			found = append(found, installedAt(id))
+		}
+		return found
+	}
+	t.Cleanup(func() { localTerminalRunner, localTerminalDetect = oldRunner, oldDetect })
+}
+
 func TestLocalTerminalSettingsStayOnThisComputer(t *testing.T) {
 	desktop, _, full := desktopBeforeWorkload(t)
-	if w := clientCall(desktop, "GET", "/api/client/local-terminal", "", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "\"image_upload\":true") || !strings.Contains(w.Body.String(), "\"clipboard_write\":true") || !strings.Contains(w.Body.String(), "\"app\":\"\"") {
+	settingsFile := filepath.Join(filepath.Dir(full), localterm.SettingsFile)
+	// Two switches, no application: there is nothing to choose.
+	w := clientCall(desktop, "GET", "/api/client/local-terminal", "", "")
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"settings\":{\"image_upload\":true,\"clipboard_write\":true},\"supported\":true}" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"image_upload\":false,\"clipboard_write\":true}", ""); w.Code != 200 {
+	body := "{\"image_upload\":false,\"clipboard_write\":true}"
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", body, ""); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"settings\":{\"image_upload\":false,\"clipboard_write\":true},\"supported\":true}" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	info, err := os.Stat(filepath.Join(filepath.Dir(full), localterm.SettingsFile))
+	info, err := os.Stat(settingsFile)
 	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal(info, err)
 	}
-	if settings, _ := localterm.LoadSettings(filepath.Dir(full)); settings.App != "kitty" || settings.ImageUpload || !settings.ClipboardWrite {
+	if settings, _ := localterm.LoadSettings(filepath.Dir(full)); settings.ImageUpload || !settings.ClipboardWrite {
 		t.Fatal(settings)
 	}
-	for _, body := range []string{"{\"app\":\"no-such\"}", "{\"app\":\"herdr\"}"} {
-		if w := clientCall(desktop, "PUT", "/api/client/local-terminal", body, ""); w.Code != 400 {
-			t.Fatal(body, w.Code, w.Body.String())
+	// A request that still names an application is not one of this build's.
+	for _, bad := range []string{"{\"app\":\"ghostty\",\"image_upload\":true,\"clipboard_write\":true}", "{\"app\":\"\"}", "{\"unknown\":1}"} {
+		if w := clientCall(desktop, "PUT", "/api/client/local-terminal", bad, ""); w.Code != 400 {
+			t.Fatal(bad, w.Code, w.Body.String())
 		}
 	}
 	// A page from elsewhere cannot change it.
 	r := httptest.NewRequest("PUT", desktop.origin+"/api/client/local-terminal", strings.NewReader("{}"))
 	r.Header.Set("Origin", "https://attacker.example")
 	r.AddCookie(&http.Cookie{Name: desktop.cookieName(), Value: desktop.session})
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	desktop.handler().ServeHTTP(w, r)
 	if w.Code != 403 {
 		t.Fatal("cross-origin settings change", w.Code)
@@ -70,10 +121,77 @@ func TestLocalTerminalSettingsStayOnThisComputer(t *testing.T) {
 	if w := request(workloadOnly, "GET", "/api/client/local-terminal", "", "", true); w.Code != 404 {
 		t.Fatal("a workload answered the local terminal routes", w.Code)
 	}
-	// Detection only runs when the list is asked for; Terminal is always here.
-	w = clientCall(desktop, "GET", "/api/client/local-terminal/apps", "", "")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "{\"id\":\"terminal\",\"name\":\"终端\",\"automation\":false,\"hosts\":true,\"installed\":true}") || !strings.Contains(w.Body.String(), "\"id\":\"ghostty\"") {
-		t.Fatal(w.Code, w.Body.String())
+}
+
+// A file written by an earlier build holds the application the owner chose
+// then. It is ignored without an error (the page and an open work as they do
+// without it), and the next save leaves it out of the file.
+func TestLocalTerminalIgnoresAnEarlierAppChoice(t *testing.T) {
+	desktop, workload, full := desktopBeforeWorkload(t)
+	launches := &recordingLaunches{}
+	useLocalTerminal(t, launches, "terminal")
+	settingsFile := filepath.Join(filepath.Dir(full), localterm.SettingsFile)
+	for _, stored := range []string{"iterm2", "kitty", "no-such-app"} {
+		if err := os.WriteFile(settingsFile, []byte("{\"app\":\""+stored+"\",\"image_upload\":false,\"clipboard_write\":true}"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		w := clientCall(desktop, "GET", "/api/client/local-terminal", "", "")
+		if w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"settings\":{\"image_upload\":false,\"clipboard_write\":true},\"supported\":true}" {
+			t.Fatal(stored, w.Code, w.Body.String())
+		}
+		if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"image_upload\":false,\"clipboard_write\":false}", ""); w.Code != 200 {
+			t.Fatal(stored, w.Code, w.Body.String())
+		}
+		var saved map[string]any
+		data, err := os.ReadFile(settingsFile)
+		if err != nil || json.Unmarshal(data, &saved) != nil || len(saved) != 2 || saved["image_upload"] != false || saved["clipboard_write"] != false {
+			t.Fatalf("%s: the file after saving: %s %v", stored, data, err)
+		}
+	}
+	// An earlier choice of another application does not decide the open.
+	if err := os.WriteFile(settingsFile, []byte("{\"app\":\"kitty\"}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	every := localTerminalOpenEvery
+	localTerminalOpenEvery = 0
+	t.Cleanup(func() { localTerminalOpenEvery = every })
+	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, desktop.remote.desktop.generation); w.Code != 200 || len(launches.steps) != 1 || launches.steps[0][0] != "/usr/bin/open" {
+		t.Fatal(w.Code, w.Body.String(), launches.steps)
+	}
+}
+
+// The application that opens is asked for apart from the settings, and is
+// Ghostty when it is installed, else the system Terminal, else none.
+func TestLocalTerminalAppRoute(t *testing.T) {
+	desktop, _, _ := desktopBeforeWorkload(t)
+	for _, row := range []struct {
+		installed []string
+		want      string
+	}{
+		{[]string{"terminal", "ghostty"}, "{\"app\":{\"id\":\"ghostty\",\"name\":\"Ghostty\",\"automation\":true}}"},
+		{[]string{"ghostty"}, "{\"app\":{\"id\":\"ghostty\",\"name\":\"Ghostty\",\"automation\":true}}"},
+		{[]string{"terminal"}, "{\"app\":{\"id\":\"terminal\",\"name\":\"系统终端\",\"automation\":false}}"},
+		{nil, "{\"app\":null}"},
+	} {
+		useLocalTerminal(t, refusedLaunches{}, row.installed...)
+		w := clientCall(desktop, "GET", "/api/client/local-terminal/app", "", "")
+		if w.Code != 200 || strings.TrimSpace(w.Body.String()) != row.want {
+			t.Errorf("%v: %d %s, want %s", row.installed, w.Code, w.Body.String(), row.want)
+		}
+	}
+	// The list of applications of earlier builds is gone.
+	if w := clientCall(desktop, "GET", "/api/client/local-terminal/apps", "", ""); w.Code != 404 {
+		t.Error("the list of applications is still served:", w.Code)
+	}
+	// The settings never detect anything.
+	detections := 0
+	oldDetect := localTerminalDetect
+	localTerminalDetect = func() []localterm.Installed { detections++; return nil }
+	t.Cleanup(func() { localTerminalDetect = oldDetect })
+	clientCall(desktop, "GET", "/api/client/local-terminal", "", "")
+	if detections != 0 {
+		t.Fatal("the settings route looked for applications")
 	}
 }
 
@@ -83,23 +201,15 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	t.Cleanup(func() { localTerminalOpenEvery, localTerminalOpenPerMinute = every, perMinute })
 	desktop, workload, full := desktopBeforeWorkload(t)
 	launches := &recordingLaunches{}
-	localTerminalRunner = launches
-	home := t.TempDir()
-	localTerminalHome = func() (string, error) { return home, nil }
-	t.Cleanup(func() { localTerminalHome = os.UserHomeDir })
-	localTerminalDetect = func() []localterm.Installed {
-		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
-	}
-	t.Cleanup(func() { localTerminalRunner = localterm.ExecRunner{}; localTerminalDetect = localterm.Detect })
+	useLocalTerminal(t, launches)
 	generation := desktop.remote.desktop.generation
 	session := startChild(t, workload, "report")
 	open := "{\"terminal_id\":\"" + session.id + "\"}"
-	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 409 || !strings.Contains(w.Body.String(), "还没有选择本机终端应用") {
+	// Neither Ghostty nor the system Terminal is here: nothing opens.
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 409 || !strings.Contains(w.Body.String(), "找不到 Ghostty 或系统终端") {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"image_upload\":true,\"clipboard_write\":true}", ""); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	useLocalTerminal(t, launches, "terminal")
 	for _, stale := range []string{"", "an-earlier-connection"} {
 		if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, stale); w.Code != 409 {
 			t.Fatal("opened on a stale connection", stale, w.Code)
@@ -114,17 +224,17 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 		t.Fatal("a refused request launched", launches.steps)
 	}
 	w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation)
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "\"app\":\"kitty\"") {
+	if w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"系统终端\"}" {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	if len(launches.steps) != 1 {
 		t.Fatal(launches.steps)
 	}
 	step := launches.steps[0]
-	if len(step) != 4 || step[0] != "/Applications/kitty.app/Contents/MacOS/kitty" || step[1] != "--single-instance" || step[2] != "/bin/sh" {
-		t.Fatal(step)
+	if len(step) != 4 || step[0] != "/usr/bin/open" || step[1] != "-a" || step[2] != "/Applications/terminal.app" || launches.prompts[0] {
+		t.Fatal(step, launches.prompts)
 	}
-	script, err := os.ReadFile(step[3])
+	script, err := os.ReadFile(launchedScript(t, step))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,11 +294,59 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	}
 }
 
+// With Ghostty installed it opens the window, after macOS's Automation
+// question; with Ghostty gone, the very same request opens the system
+// Terminal. Nothing is stored in between: there is no choice to keep.
+func TestLocalTerminalOpensInGhosttyElseTerminal(t *testing.T) {
+	every := localTerminalOpenEvery
+	localTerminalOpenEvery = 0
+	t.Cleanup(func() { localTerminalOpenEvery = every })
+	desktop, workload, _ := desktopBeforeWorkload(t)
+	generation := desktop.remote.desktop.generation
+	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
+	launches := &recordingLaunches{}
+	useLocalTerminal(t, launches, "terminal", "ghostty")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"Ghostty\"}" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	step := launches.steps[0]
+	if len(step) != 3 || step[0] != "/usr/bin/osascript" || !strings.Contains(step[2], "tell application id \"com.mitchellh.ghostty\"") || !launches.prompts[0] {
+		t.Fatal(step, launches.prompts)
+	}
+	if argv := scriptCommand(t, step); argv[1] != "attach" {
+		t.Fatal(argv)
+	}
+	useLocalTerminal(t, launches, "terminal")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"系统终端\"}" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if step := launches.steps[1]; step[0] != "/usr/bin/open" || launches.prompts[1] {
+		t.Fatal(step, launches.prompts)
+	}
+	// A failing Ghostty is reported as it is, with its name: nothing falls
+	// back to another application behind the owner's back.
+	useLocalTerminal(t, &recordingLaunches{fail: true}, "terminal", "ghostty")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "无法在 Ghostty 中打开：refused") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+}
+
+// launchedScript is the one-shot script a launch step runs: the last word of
+// Terminal's open, or the command in Ghostty's AppleScript.
+func launchedScript(t *testing.T, step []string) string {
+	t.Helper()
+	path := regexp.MustCompile("/[^\\s\"']*super-cage-[0-9a-f-]+\\.command").FindString(strings.Join(step, "\n"))
+	if path == "" {
+		t.Fatalf("no script in %q", step)
+	}
+	return path
+}
+
 // scriptCommand reads the command a launch step's one-shot script runs: the
 // line after the script removes itself, in /bin/sh quoting.
 func scriptCommand(t *testing.T, step []string) []string {
 	t.Helper()
-	data, err := os.ReadFile(step[len(step)-1])
+	data, err := os.ReadFile(launchedScript(t, step))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,19 +390,9 @@ func scriptCommand(t *testing.T, step []string) []string {
 func TestLocalTerminalOpensTheSameTerminalTwice(t *testing.T) {
 	desktop, workload, _ := desktopBeforeWorkload(t)
 	launches := &recordingLaunches{}
-	localTerminalRunner = launches
-	home := t.TempDir()
-	localTerminalHome = func() (string, error) { return home, nil }
-	t.Cleanup(func() { localTerminalHome = os.UserHomeDir })
-	localTerminalDetect = func() []localterm.Installed {
-		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
-	}
-	t.Cleanup(func() { localTerminalRunner = localterm.ExecRunner{}; localTerminalDetect = localterm.Detect })
+	useLocalTerminal(t, launches, "terminal")
 	generation := desktop.remote.desktop.generation
 	session := startChild(t, workload, "report")
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\"}", ""); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
 	open := "{\"terminal_id\":\"" + session.id + "\"}"
 	for range 2 {
 		if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 {
@@ -255,7 +403,7 @@ func TestLocalTerminalOpensTheSameTerminalTwice(t *testing.T) {
 	if len(launches.steps) != 2 {
 		t.Fatal(launches.steps)
 	}
-	first, second := launches.steps[0][len(launches.steps[0])-1], launches.steps[1][len(launches.steps[1])-1]
+	first, second := launchedScript(t, launches.steps[0]), launchedScript(t, launches.steps[1])
 	if first == second {
 		t.Fatal("both windows share one script", first)
 	}
@@ -291,18 +439,8 @@ func blockingOpen(t *testing.T) (*Server, string, *blockingLaunches, string) {
 	t.Helper()
 	desktop, workload, _ := desktopBeforeWorkload(t)
 	launches := &blockingLaunches{entered: make(chan struct{}, 4), release: make(chan struct{})}
-	localTerminalRunner = launches
-	home := t.TempDir()
-	localTerminalHome = func() (string, error) { return home, nil }
-	localTerminalDetect = func() []localterm.Installed {
-		return []localterm.Installed{{App: *localterm.Lookup("iterm2"), Path: "/Applications/iTerm.app"}}
-	}
-	t.Cleanup(func() {
-		localTerminalRunner, localTerminalHome, localTerminalDetect = localterm.ExecRunner{}, os.UserHomeDir, localterm.Detect
-	})
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"iterm2\"}", ""); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	// Ghostty is the application macOS asks the owner about.
+	useLocalTerminal(t, launches, "ghostty", "terminal")
 	session := startChild(t, workload, "report")
 	return desktop, desktop.remote.desktop.generation, launches, "{\"terminal_id\":\"" + session.id + "\"}"
 }
@@ -355,33 +493,22 @@ func TestLocalTerminalOpenOutlivesTheRequest(t *testing.T) {
 	}
 }
 
-func kittyOpens(t *testing.T) (desktop, workload *Server, launches *recordingLaunches) {
+func terminalOpens(t *testing.T) (desktop, workload *Server, launches *recordingLaunches) {
 	t.Helper()
 	desktop, workload, _ = desktopBeforeWorkload(t)
 	launches = &recordingLaunches{}
-	localTerminalRunner = launches
-	home := t.TempDir()
-	localTerminalHome = func() (string, error) { return home, nil }
-	localTerminalDetect = func() []localterm.Installed {
-		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}}
-	}
-	t.Cleanup(func() {
-		localTerminalRunner, localTerminalHome, localTerminalDetect = localterm.ExecRunner{}, os.UserHomeDir, localterm.Detect
-	})
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\"}", ""); w.Code != 200 {
-		t.Fatal(w.Code, w.Body.String())
-	}
+	useLocalTerminal(t, launches, "terminal")
 	return desktop, workload, launches
 }
 
 // The settings and the open request are refused while the environment the
 // desktop shows is locked. The lock is the workload's: the desktop asks it.
 func TestLocalTerminalRefusedWhileLocked(t *testing.T) {
-	desktop, workload, launches := kittyOpens(t)
+	desktop, workload, launches := terminalOpens(t)
 	generation := desktop.remote.desktop.generation
 	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
 	workload.account.lock()
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != http.StatusLocked {
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"clipboard_write\":true}", ""); w.Code != http.StatusLocked {
 		t.Fatal("settings changed while locked:", w.Code, w.Body.String())
 	}
 	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != http.StatusLocked {
@@ -399,7 +526,7 @@ func TestLocalTerminalRefusedWhileLocked(t *testing.T) {
 // Opening is bounded: once a second, ten times a minute, whether or not
 // the launch worked.
 func TestLocalTerminalOpenRateLimit(t *testing.T) {
-	desktop, workload, launches := kittyOpens(t)
+	desktop, workload, launches := terminalOpens(t)
 	generation := desktop.remote.desktop.generation
 	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
 	call := func() int {
@@ -440,10 +567,13 @@ func TestLocalTerminalOpenRateLimit(t *testing.T) {
 // it is locked, as a window is not opened then. With none shown there is
 // no lock to keep.
 func TestLocalTerminalSettingsWaitForTheLockAnswer(t *testing.T) {
-	desktop, _, _ := kittyOpens(t)
+	desktop, _, _ := terminalOpens(t)
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"image_upload\":true,\"clipboard_write\":false}", ""); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
 	gateway := desktop.remote.desktop
 	gateway.active.cancel() // the environment no longer answers
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != http.StatusConflict {
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"clipboard_write\":true}", ""); w.Code != http.StatusConflict {
 		t.Fatal("settings changed without the lock answer:", w.Code, w.Body.String())
 	}
 	if settings, _ := localterm.LoadSettings(desktop.localTerminalDir()); settings.ClipboardWrite {
@@ -452,7 +582,10 @@ func TestLocalTerminalSettingsWaitForTheLockAnswer(t *testing.T) {
 	gateway.mu.Lock()
 	gateway.active = nil
 	gateway.mu.Unlock()
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != 200 {
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"clipboard_write\":true}", ""); w.Code != 200 {
 		t.Fatal("refused with no environment shown:", w.Code, w.Body.String())
+	}
+	if settings, _ := localterm.LoadSettings(desktop.localTerminalDir()); !settings.ClipboardWrite {
+		t.Fatal("not written with no environment shown")
 	}
 }

@@ -185,7 +185,7 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 		}
 	}
 	for _, route := range [][2]string{
-		{"PUT", "/api/client/local-terminal"}, {"POST", "/api/client/local-terminal/open"}, {"GET", "/api/client/local-terminal/apps"},
+		{"PUT", "/api/client/local-terminal"}, {"POST", "/api/client/local-terminal/open"}, {"GET", "/api/client/local-terminal/app"},
 		{"POST", "/api/claude-science/host-render"}, {"POST", "/api/claude-science/ticket"}, {"POST", "/api/claude-science/release"},
 		{"POST", "/api/app-update/policy"}, {"GET", "/api/app-update/interruptions"}, {"POST", "/api/desktop-local/app-update-handoff"},
 		{"GET", "/api/entry"}, {"POST", "/api/entry/on"}, {"GET", "/api/entry/include"}, {"POST", "/api/entry/devices/x/revoke"}, {"POST", "/api/client/entry/keys"},
@@ -207,7 +207,7 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 	beforeConnecting := map[string]bool{"invalid_input": true, "native_transport_required": true}
 	for _, path := range []string{
 		"/api/%65ntry/ssh", "/api/./app-update/interruptions", "/api/app-update/x/../interruptions", "/api/terminals/..",
-		"/api/client%2Flocal-terminal/apps", "/api/client/local-terminal/apps/", "/api/entry/", "/api/app-update/interruptions/",
+		"/api/client%2Flocal-terminal/app", "/api/client/local-terminal/app/", "/api/entry/", "/api/app-update/interruptions/",
 	} {
 		for _, method := range []string{"GET", "POST"} {
 			_, err := AgentRequest(context.Background(), config, AgentTarget{}, method, path, nil, "", "")

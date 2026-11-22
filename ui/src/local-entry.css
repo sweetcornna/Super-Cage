@@ -1,5 +1,5 @@
 /*
- * 本机终端 › 从你自己的终端或 Herdr 连进来 (design 6.2): one environment's
+ * 本机终端 › 从你自己的终端连进来 (design 6.2): one environment's
  * local SSH entry, the second part of the settings page. Scoped under
  * .local-entry inside .settings-subpage, so the shared settings-pages.css
  * rules (group titles, hairlines) apply.

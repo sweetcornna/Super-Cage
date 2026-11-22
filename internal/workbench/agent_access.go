@@ -60,11 +60,11 @@ var agentWindowRoutes = []agentWindowRoute{
 	{"/api/app-update/", "Application updates are configured and confirmed only in the desktop window.", "open_desktop"},
 	// Opening a workbench file with a host application (claim and complete).
 	{"POST /api/input/files/desktop/open", "Opening a file with an application on this computer is done by the desktop window.", "open_desktop"},
-	// The terminal app on this computer: choosing it, listing installed
-	// apps and opening windows in it (launches host applications and may
+	// The terminal app on this computer: its switches, finding the app that
+	// opens and opening windows in it (launches host applications and may
 	// raise the macOS automation prompt). Reading the setting stays open.
-	{"PUT,POST,PATCH,DELETE /api/client/local-terminal", "The terminal app on this computer is chosen and opened by the person in the desktop window.", "open_desktop"},
-	{"/api/client/local-terminal/", "The terminal app on this computer is chosen and opened by the person in the desktop window.", "open_desktop"},
+	{"PUT,POST,PATCH,DELETE /api/client/local-terminal", "Opening a terminal in the terminal app on this computer, and its settings, are done by the person in the desktop window.", "open_desktop"},
+	{"/api/client/local-terminal/", "Opening a terminal in the terminal app on this computer, and its settings, are done by the person in the desktop window.", "open_desktop"},
 	// Claude Science host rendering runs a renderer on this computer and
 	// hands the window a frame to trust.
 	{"POST /api/claude-science/host-render", "Claude Science host rendering is started and released by the desktop window.", "open_desktop"},

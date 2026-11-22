@@ -1,19 +1,19 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "./api";
-import {
-  APPS_PATH, BUILT_IN, SETTINGS_PATH, SWITCHES, automationNote, chooserOptions, missingChoice, normalizeSettings, settingsChanged,
-} from "./local-terminal-state.mjs";
+import { APP_PATH, SETTINGS_PATH, SWITCHES, normalizeSettings, openerLine, settingsChanged } from "./local-terminal-state.mjs";
 import "./local-terminal-settings.css";
 
-// Settings → 本机终端, its first part: which application "在本机终端中打开"
-// uses on this computer, and the two switches its windows (and, for the
-// clipboard, ssh sessions) follow. Loaded lazily with the section:
-// detecting the applications happens only while it is open.
-export default function LocalTerminalSettings({ onSaved, onDirty }) {
+// Settings → 本机终端, its first part: the one line that says which
+// application "在本机终端中打开" uses on this computer (there is nothing to
+// choose), and the two switches its windows (and, for the clipboard, ssh
+// sessions) follow. Loaded lazily with the section: the application is looked
+// for only while it is open.
+export default function LocalTerminalSettings({ onDirty }) {
   const [saved, setSaved] = useState(null);
   const [draft, setDraft] = useState(null);
-  const [apps, setApps] = useState(null);
+  // undefined until looked for; null when neither Ghostty nor Terminal is here.
+  const [app, setApp] = useState(undefined);
   const [supported, setSupported] = useState(true);
   const [warning, setWarning] = useState("");
   const [error, setError] = useState("");
@@ -23,25 +23,21 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
   useEffect(() => {
     const controller = new AbortController();
     const options = { signal: controller.signal };
-    Promise.all([api(SETTINGS_PATH, undefined, undefined, {}, options), api(APPS_PATH, undefined, undefined, {}, options)])
+    Promise.all([api(SETTINGS_PATH, undefined, undefined, {}, options), api(APP_PATH, undefined, undefined, {}, options)])
       .then(([state, found]) => {
         const settings = normalizeSettings(state?.settings);
         setSaved(settings);
         setDraft(settings);
         setSupported(state?.supported !== false);
         setWarning(state?.warning || "");
-        setApps(Array.isArray(found?.apps) ? found.apps : []);
+        setApp(found?.app || null);
       })
       .catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
   }, []);
 
-  // Where no application can be used, the built-in terminal is what opens.
-  const shown = supported ? draft?.app : BUILT_IN;
-  const options = useMemo(() => chooserOptions(apps, shown), [apps, shown]);
-  const gone = supported ? missingChoice(saved, apps) : "";
   const dirty = Boolean(saved && draft && settingsChanged(saved, draft));
-  const loading = !error && (!saved || !apps);
+  const loading = !error && (!saved || app === undefined);
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
   useEffect(() => () => onDirty?.(false), [onDirty]);
   const change = (key, value) => { setDraft(previous => ({ ...previous, [key]: value })); setDone(false); };
@@ -52,12 +48,10 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     setError("");
     try {
       const result = await api(SETTINGS_PATH, draft, "PUT");
-      window.dispatchEvent(new Event("cage-local-terminal-settings"));
       const settings = normalizeSettings(result?.settings);
       setSaved(settings);
       setDraft(settings);
       setDone(true);
-      onSaved?.(settings);
     } catch (reason) {
       setError(reason.message);
     } finally {
@@ -65,26 +59,11 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     }
   };
 
-  return <section className="settings-group local-terminal-part local-terminal-settings" aria-label="用哪个终端应用打开" aria-busy={loading}>
-    <h3>用哪个终端应用打开</h3>
-    <p className="field-help">在终端标签页或项目上选择“在本机终端中打开”时，用这里选的应用。终端仍在环境中运行，关掉窗口也不会结束它。</p>
-    {loading && <p className="local-terminal-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在查找这台电脑上的终端应用…</p>}
-    {!loading && !supported && <p className="field-help">这台电脑的系统暂不支持本机终端应用，终端会在 Super Cage 的标签页中打开。</p>}
-    {!loading && gone && draft?.app === saved?.app && <p className="local-terminal-gone" role="status">之前选择的 {gone} 在这台电脑上找不到了。请另选一个应用，或使用内置终端。</p>}
-    {saved && apps && <>
-      <div className="choice-list local-terminal-apps" role="radiogroup" aria-label="本机终端应用">
-        {options.map(option => <label key={option.id || "built-in"}
-          className={"choice local-terminal-app" + (option.checked ? " checked" : "") + (option.selectable ? "" : " unavailable") + (option.group === "built-in" ? " built-in" : "")}>
-          <input type="radio" name="local-terminal-app" value={option.id} checked={option.checked} disabled={!option.selectable || saving}
-            onChange={() => change("app", option.id)} />
-          <span className="local-terminal-app-text">
-            <strong>{option.name}</strong>
-            {option.note && <small>{option.note}</small>}
-          </span>
-          {option.chip && <span className="local-terminal-chip">{option.chip}</span>}
-        </label>)}
-      </div>
-      {supported && automationNote(apps) && <p className="field-help local-terminal-automation">{automationNote(apps)}</p>}
+  return <section className="settings-group local-terminal-part local-terminal-settings" aria-label="在本机终端中打开" aria-busy={loading}>
+    <h3>在本机终端中打开</h3>
+    {loading && <p className="local-terminal-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在查看这台电脑上的终端…</p>}
+    {!loading && saved && <p className="field-help local-terminal-opener">{openerLine(app, supported)}</p>}
+    {saved && app !== undefined && <>
       <h4 className="local-terminal-subtitle">图片与剪贴板</h4>
       {SWITCHES.map(item => <label className="toggle-row" key={item.key}>
         <span>

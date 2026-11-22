@@ -1,8 +1,9 @@
-// Package localterm knows the owner's own terminal applications: which are
-// installed on this computer, how to open a window in each that runs
-// "cage attach", and the per-computer choices of the "本机终端" feature.
-// Nothing here launches anything by itself: launching goes through a Runner
-// the caller supplies, so tests never open a window.
+// Package localterm opens a window of the owner's own terminal application
+// that runs "cage attach": Ghostty when it is installed on this computer,
+// the system Terminal otherwise, with no choice to make. It also keeps the
+// per-computer switches of the "本机终端" feature. Nothing here launches
+// anything by itself: launching goes through a Runner the caller supplies,
+// so tests never open a window.
 package localterm
 
 import (
@@ -16,11 +17,10 @@ import (
 // client configuration. It never travels to an environment or the portal.
 const SettingsFile = "local-terminal.json"
 
-// Settings are the per-computer choices.
+// Settings are the per-computer choices. A file written by an earlier build
+// may still hold the terminal application that was chosen then: it is
+// ignored and is not written again.
 type Settings struct {
-	// App is the application "在本机终端中打开" uses; empty means Super
-	// Cage's built-in terminal, where the menu item is hidden.
-	App string `json:"app"`
 	// ImageUpload uploads image files dropped or pasted into a local window
 	// as Cage's web terminal does, and pastes the environment's paths
 	// instead of this computer's.
@@ -58,16 +58,5 @@ func LoadSettings(dir string) (Settings, error) {
 	if len(data) > 64<<10 || json.Unmarshal(data, &settings) != nil {
 		return UnreadableSettings(), errors.New("本机终端设置无法读取：已关闭剪贴板写入，其余使用默认设置")
 	}
-	if settings.App != "" && Lookup(settings.App) == nil {
-		settings.App = ""
-	}
 	return settings, nil
-}
-
-// Validate refuses an application this build does not know.
-func (s Settings) Validate() error {
-	if s.App != "" && Lookup(s.App) == nil {
-		return errors.New("不支持这个本机终端应用")
-	}
-	return nil
 }

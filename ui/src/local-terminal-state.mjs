@@ -1,31 +1,17 @@
-// Pure state of the "本机终端" feature on this computer: the chooser of the
-// terminal application, the menu item "在本机终端中打开" and the request that
-// opens a terminal there. No DOM and no fetch, so node --test covers it.
+// Pure state of the "本机终端" feature on this computer: the line that says
+// which application opens, the two switches, the menu item "在本机终端中打开"
+// and the request that opens a terminal there. There is no application to
+// choose: Ghostty opens it when it is installed, the system Terminal
+// otherwise (internal/localterm). No DOM and no fetch, so node --test covers it.
 
-export const BUILT_IN = "";
-export const BUILT_IN_NAME = "Super Cage 内置终端";
 export const MENU_LABEL = "在本机终端中打开";
 export const MENU_SHORTCUT = "⌘⇧O";
 export const MENU_ICON = "square-arrow-out-up-right";
 export const SETTINGS_PATH = "/client/local-terminal";
-export const APPS_PATH = "/client/local-terminal/apps";
+export const APP_PATH = "/client/local-terminal/app";
 export const OPEN_PATH = "/client/local-terminal/open";
 
-// The names of the applications internal/localterm/apps.go knows, so the
-// menu can name the chosen one without detecting anything. The test checks
-// this list against the Go table.
-export const APP_NAMES = Object.freeze({
-  ghostty: "Ghostty",
-  iterm2: "iTerm2",
-  terminal: "终端",
-  warp: "Warp",
-  wezterm: "WezTerm",
-  kitty: "kitty",
-  alacritty: "Alacritty",
-  herdr: "Herdr",
-});
-
-export const DEFAULT_SETTINGS = Object.freeze({ app: BUILT_IN, image_upload: true, clipboard_write: true });
+export const DEFAULT_SETTINGS = Object.freeze({ image_upload: true, clipboard_write: true });
 
 export const SWITCHES = Object.freeze([
   {
@@ -40,10 +26,10 @@ export const SWITCHES = Object.freeze([
   },
 ]);
 
+// An older build also kept the application that was chosen; it is not read.
 export function normalizeSettings(raw) {
   const value = raw && typeof raw === "object" ? raw : {};
   return {
-    app: typeof value.app === "string" ? value.app : BUILT_IN,
     image_upload: typeof value.image_upload === "boolean" ? value.image_upload : true,
     clipboard_write: typeof value.clipboard_write === "boolean" ? value.clipboard_write : true,
   };
@@ -52,58 +38,16 @@ export function normalizeSettings(raw) {
 export function settingsChanged(saved, draft) {
   const a = normalizeSettings(saved);
   const b = normalizeSettings(draft);
-  return a.app !== b.app || a.image_upload !== b.image_upload || a.clipboard_write !== b.clipboard_write;
+  return a.image_upload !== b.image_upload || a.clipboard_write !== b.clipboard_write;
 }
 
-export function appName(id, apps) {
-  if (id === BUILT_IN) return BUILT_IN_NAME;
-  return (Array.isArray(apps) && apps.find(app => app.id === id)?.name) || APP_NAMES[id] || id;
-}
-
-const collator = new Intl.Collator("en", { sensitivity: "base", numeric: true });
-const byName = (a, b) => collator.compare(a.name, b.name);
-
-// chooserOptions orders the chooser as design 5.8 and 6.1 ask: applications
-// found on this computer (alphabetical), then the built-in terminal, then the
-// others greyed out. An installed application that cannot show Cage
-// terminals yet (Herdr) sits with the greyed ones and says why.
-export function chooserOptions(apps, selected = BUILT_IN) {
-  const list = Array.isArray(apps) ? apps : [];
-  const ready = list.filter(app => app.installed && app.hosts).sort(byName);
-  const waiting = list.filter(app => app.installed && !app.hosts).sort(byName);
-  const missing = list.filter(app => !app.installed).sort(byName);
-  const option = (app, group) => ({
-    id: app.id,
-    name: app.name,
-    group,
-    selectable: group === "ready",
-    note: group === "waiting" ? (app.note || "稍后的版本提供") : "",
-    chip: group === "missing" ? "未安装" : group === "waiting" ? "稍后提供" : "",
-    checked: app.id === selected,
-  });
-  return [
-    ...ready.map(app => option(app, "ready")),
-    { id: BUILT_IN, name: BUILT_IN_NAME, group: "built-in", selectable: true, note: "在 Super Cage 的标签页中打开终端，菜单里不显示“" + MENU_LABEL + "”。", chip: "", checked: selected === BUILT_IN },
-    ...waiting.map(app => option(app, "waiting")),
-    ...missing.map(app => option(app, "missing")),
-  ];
-}
-
-// automationNote says once, under the chooser, which of the applications
-// found here macOS asks about before Super Cage may open a window in it.
-export function automationNote(apps) {
-  const names = (Array.isArray(apps) ? apps : []).filter(app => app.installed && app.hosts && app.automation).sort(byName).map(app => app.name);
-  if (!names.length) return "";
-  return "第一次用 " + names.join("、") + " 打开时，macOS 会询问是否允许 Super Cage 控制它。";
-}
-
-// missingChoice names the saved application when it is no longer installed,
-// so the page can say so instead of silently showing another choice.
-export function missingChoice(settings, apps) {
-  const chosen = normalizeSettings(settings).app;
-  if (chosen === BUILT_IN || !Array.isArray(apps)) return "";
-  const app = apps.find(item => item.id === chosen);
-  return app && app.installed && app.hosts ? "" : appName(chosen, apps);
+// openerLine is the one line of the settings section about the application:
+// app is what GET /client/local-terminal/app found ({id, name}), or null.
+export function openerLine(app, supported = true) {
+  if (!supported) return "这台电脑的系统暂不支持在本机终端中打开，终端会在 Super Cage 的标签页中打开";
+  if (!app) return "这台电脑上找不到 Ghostty 或系统终端，暂时不能在本机终端中打开";
+  if (app.id === "ghostty") return "用 Ghostty 打开";
+  return "用系统终端打开；安装 Ghostty 后自动改用 Ghostty";
 }
 
 const terminalID = /^[0-9a-f]{16}$/;
@@ -132,16 +76,14 @@ function targetProblem(target) {
 }
 
 // menuItem is "在本机终端中打开" for a terminal tab, a project row or a
-// session row. It is hidden while the built-in terminal is chosen and outside
-// the desktop app. It never detects applications: the desktop refuses one
-// that is gone, and the failure toast says so.
-export function menuItem({ settings, apps, target, context, environment } = {}) {
-  const chosen = normalizeSettings(settings).app;
-  if (chosen === BUILT_IN || !context?.desktop_gateway) return { visible: false };
+// session row. It is hidden outside the desktop app and where the desktop
+// cannot open one (supported is false). It never detects an application:
+// the desktop finds the one to use when the item is chosen.
+export function menuItem({ supported = true, target, context, environment } = {}) {
+  if (!supported || !context?.desktop_gateway) return { visible: false };
   const item = {
     visible: true,
     label: MENU_LABEL,
-    detail: appName(chosen, apps),
     icon: MENU_ICON,
     shortcut: target?.kind === "terminal" ? MENU_SHORTCUT : "",
     enabled: false,
@@ -196,16 +138,17 @@ export function copyCommand(target) {
 
 export function launchFailure(name, reason) {
   const why = String(reason || "未知原因").trim().replace(/[。.]+$/, "");
-  return "没能打开 " + name + "：" + why + "。可在设置 → 本机终端里换一个。";
+  return "没能打开 " + name + "：" + why + "。";
 }
 
 // automationNotice is the dialog before the first launch of an application
 // that macOS asks permission to control (design 6.3); null when none is due.
+// app is what GET /client/local-terminal/app found ({id, name, automation}).
 export function automationNotice(app, acknowledged = false) {
   if (!app?.automation || acknowledged) return null;
   return {
     title: "Super Cage 需要控制 " + app.name + " 来打开窗口",
-    body: "macOS 接下来会询问是否允许 Super Cage 控制 " + app.name + "。Super Cage 只用它打开新窗口；如果不允许，窗口不会打开，之后可以在“系统设置 › 隐私与安全性 › 自动化”里允许，或在设置里换一个应用。",
+    body: "macOS 接下来会询问是否允许 Super Cage 控制 " + app.name + "。Super Cage 只用它打开新窗口；如果不允许，窗口不会打开，之后可以在“系统设置 › 隐私与安全性 › 自动化”里允许。",
     cancel: "取消",
     confirm: "继续",
   };

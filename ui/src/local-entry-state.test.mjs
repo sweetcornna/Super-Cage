@@ -29,7 +29,6 @@ const on = {
   commands: { ssh: "ssh cage-default", cage_ssh: "cage ssh default", cage_on_path: true },
   include: { line: "Include ~/.ssh/super-cage/config", present: true },
   devices: [],
-  herdr: false,
 };
 
 test("every state has one plain Chinese line", () => {
@@ -51,27 +50,26 @@ test("every state has one plain Chinese line", () => {
   assert.equal(entryStateLine({ ...on, state: "paused" }).tone, "warn");
 });
 
-test("connections split by kind only once Herdr exists", () => {
+test("connections are counted, not split by kind", () => {
   assert.equal(connectionSummary({ connections: { total: 1 } }), "1 个连接");
-  assert.equal(connectionSummary({ herdr: true, connections: { total: 2, herdr: 1 } }), "2 个连接（ssh 1，Herdr 1）");
+  assert.equal(connectionSummary({ connections: { total: 2, shell: 1, exec: 1 } }), "2 个连接");
   assert.equal(connectionSummary({ connections: {} }), "没有连接");
+  assert.equal(connectionSummary(null), "没有连接");
 });
 
 test("the first command works with and without the Include line", () => {
-  assert.deepEqual(commandRows(on).filter((row) => !row.later).map((row) => row.command), ["ssh cage-default"]);
+  assert.deepEqual(commandRows(on).map((row) => row.command), ["ssh cage-default"]);
   const without = commandRows({ ...on, include: { present: false } });
   assert.equal(without[0].command, "cage ssh default");
   assert.match(without[0].caption, /不改动/);
   assert.deepEqual(commandRows({ ...on, enabled: false }), []);
 });
 
-test("Herdr and attach rows wait for their capabilities", () => {
+test("the attach row waits for its capability", () => {
   assert.equal(commandRows(on).some((row) => row.id === "attach"), false);
-  // Herdr is named, as 稍后提供, until the server offers it.
-  assert.deepEqual(commandRows(on).filter((row) => row.later).map((row) => [row.id, row.name, row.command]), [["herdr", "Herdr", undefined]]);
-  const later = commandRows({ ...on, herdr: true, commands: { ...on.commands, attach: "cage attach" } });
-  assert.deepEqual(later.map((row) => row.command), ["ssh cage-default", "cage attach", "hc machine add cage-default"]);
-  assert.equal(later.some((row) => row.later), false);
+  const offered = commandRows({ ...on, commands: { ...on.commands, attach: "cage attach" } });
+  assert.deepEqual(offered.map((row) => row.command), ["ssh cage-default", "cage attach"]);
+  assert.deepEqual(offered.map((row) => row.id), ["ssh", "attach"]);
 });
 
 test("include row and dialog", () => {

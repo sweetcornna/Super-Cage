@@ -30,21 +30,16 @@ export function entryStateLine(view, { locked = false } = {}) {
   }
 }
 
-// "2 个连接", with a split once Herdr lines exist next to ssh ones.
+// "2 个连接".
 export function connectionSummary(view) {
-  const connections = view?.connections || {};
-  const total = connections.total ?? 0;
-  const herdr = connections.herdr ?? 0;
-  if (!total) return "没有连接";
-  if (view?.herdr && herdr) return `${total} 个连接（ssh ${total - herdr}，Herdr ${herdr}）`;
-  return `${total} 个连接`;
+  const total = view?.connections?.total ?? 0;
+  return total ? `${total} 个连接` : "没有连接";
 }
 
 // The command rows. "ssh cage-x" only works once ~/.ssh/config includes
 // Super Cage's file; until then the first row is the cage ssh form, which
 // needs no Include. The attach row shows when the server offers cage attach
-// for this environment (commands.attach); Herdr's row says 稍后提供 (later)
-// until its filter exists (view.herdr).
+// for this environment (commands.attach).
 export function commandRows(view) {
   const commands = view?.commands;
   if (!view?.enabled || !commands) return [];
@@ -56,11 +51,6 @@ export function commandRows(view) {
   ];
   if (commands.attach) {
     rows.push({ id: "attach", command: commands.attach, caption: "在任何终端应用里打开这个环境的新终端（会出现在 Super Cage 的终端列表里）" });
-  }
-  if (view.herdr && view.host_alias) {
-    rows.push({ id: "herdr", command: "hc machine add " + view.host_alias, caption: view.herdr_installed === false ? "安装 Herdr 后使用" : "Herdr：添加为一台机器，之后在 Herdr 里新建终端即可" });
-  } else {
-    rows.push({ id: "herdr", later: true, name: "Herdr", caption: "把这个环境添加为 Herdr 里的一台机器" });
   }
   return rows;
 }

@@ -158,7 +158,7 @@ func TestEntryClipboardFollowsTheDesktopSetting(t *testing.T) {
 	desktop.remote = newDesktopGateway(desktop.profile, &desktopLocal{profile: f.s.profile})
 	t.Cleanup(desktop.remote.close)
 	desktop.appUpdateConfigPath = f.s.configPath
-	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"\",\"image_upload\":true,\"clipboard_write\":false}", ""); w.Code != 200 {
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"image_upload\":true,\"clipboard_write\":false}", ""); w.Code != 200 {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	next := entryOpenShell(t, f.client(), 100, 30, "")

@@ -2,73 +2,54 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  APP_NAMES, BUILT_IN, BUILT_IN_NAME, MENU_LABEL, OPEN_PATH, automationNote, automationNotice, chooserOptions, copyCommand,
-  launchFailure, menuItem, missingChoice, normalizeSettings, openRequest, settingsChanged,
+  MENU_LABEL, OPEN_PATH, automationNotice, copyCommand, launchFailure, menuItem, normalizeSettings, openRequest, openerLine, settingsChanged,
 } from "./local-terminal-state.mjs";
 
-const apps = [
-  { id: "ghostty", name: "Ghostty", automation: true, hosts: true, installed: false },
-  { id: "iterm2", name: "iTerm2", automation: true, hosts: true, installed: true },
-  { id: "terminal", name: "终端", automation: false, hosts: true, installed: true },
-  { id: "warp", name: "Warp", automation: false, hosts: true, installed: false },
-  { id: "wezterm", name: "WezTerm", automation: false, hosts: true, installed: true },
-  { id: "kitty", name: "kitty", automation: false, hosts: true, installed: true },
-  { id: "alacritty", name: "Alacritty", automation: false, hosts: true, installed: false },
-  { id: "herdr", name: "Herdr", automation: false, hosts: false, installed: true, note: "Herdr 通过本机终端的 SSH 入口连接，稍后的版本提供" },
-];
 const desktop = { desktop_gateway: true, connection_id: "c".repeat(64), mode: "local" };
+const ghostty = { id: "ghostty", name: "Ghostty", automation: true };
+const terminal = { id: "terminal", name: "系统终端", automation: false };
 
-test("the names match the Go table of applications", () => {
+test("the Go table has Ghostty first and the system Terminal second, and nothing else", () => {
   const source = readFileSync(new URL("../../internal/localterm/apps.go", import.meta.url), "utf8");
-  const table = Object.fromEntries([...source.matchAll(/\{ID: "([a-z0-9]+)", Name: "([^"]+)"/g)].map(match => [match[1], match[2]]));
-  assert.deepEqual(table, { ...APP_NAMES });
+  const table = [...source.matchAll(/\{ID: "([a-z0-9]+)", Name: "([^"]+)"[^\n]*?(Automation: true)?,?\s*$/gm)].map(match => [match[1], match[2], Boolean(match[3])]);
+  assert.deepEqual(table.map(row => row.slice(0, 2)), [["ghostty", ghostty.name], ["terminal", terminal.name]]);
+  // The notice before the first open depends on what the server says about
+  // Automation: Ghostty is asked about by macOS, the system Terminal is not.
+  assert.deepEqual(table.map(row => row[2]), [ghostty.automation, terminal.automation]);
 });
 
-test("settings default to the web terminal's behaviour and the built-in terminal", () => {
-  assert.deepEqual(normalizeSettings(undefined), { app: BUILT_IN, image_upload: true, clipboard_write: true });
-  assert.deepEqual(normalizeSettings({ app: "kitty", image_upload: false }), { app: "kitty", image_upload: false, clipboard_write: true });
-  assert.equal(settingsChanged({ app: "kitty" }, { app: "kitty", image_upload: true }), false);
-  assert.equal(settingsChanged({ app: "kitty" }, { app: "kitty", clipboard_write: false }), true);
+test("settings are the two switches, on by default as in the web terminal", () => {
+  assert.deepEqual(normalizeSettings(undefined), { image_upload: true, clipboard_write: true });
+  assert.deepEqual(normalizeSettings({ image_upload: false }), { image_upload: false, clipboard_write: true });
+  // The application an earlier build kept is not read, and never sent back.
+  assert.deepEqual(normalizeSettings({ app: "kitty", image_upload: false, clipboard_write: false }), { image_upload: false, clipboard_write: false });
+  assert.equal(settingsChanged({ app: "kitty" }, { app: "iterm2", image_upload: true }), false);
+  assert.equal(settingsChanged({}, { clipboard_write: false }), true);
+  assert.equal(settingsChanged({ image_upload: true }, { image_upload: false }), true);
 });
 
-test("the chooser lists found applications, then the built-in terminal, then the rest", () => {
-  const options = chooserOptions(apps, "wezterm");
-  assert.deepEqual(options.map(option => option.name), ["iTerm2", "kitty", "WezTerm", "终端", BUILT_IN_NAME, "Herdr", "Alacritty", "Ghostty", "Warp"]);
-  assert.deepEqual(options.map(option => option.group), ["ready", "ready", "ready", "ready", "built-in", "waiting", "missing", "missing", "missing"]);
-  assert.deepEqual(options.filter(option => option.checked).map(option => option.id), ["wezterm"]);
-  assert.ok(options.filter(option => !option.selectable).every(option => option.chip));
-  assert.equal(options.find(option => option.id === "ghostty").chip, "未安装");
-  // The macOS question is said once for the chooser, not on each row.
-  assert.equal(options.find(option => option.id === "iterm2").note, "");
-  assert.equal(automationNote(apps), "第一次用 iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
-  assert.equal(automationNote(apps.map(app => ({ ...app, installed: true }))), "第一次用 Ghostty、iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
-  assert.equal(automationNote(apps.filter(app => !app.automation)), "");
-  assert.match(options.find(option => option.id === "herdr").note, /SSH 入口/);
-  assert.equal(chooserOptions(null)[0].id, BUILT_IN);
-  assert.equal(chooserOptions(apps)[4].checked, true);
+test("one line says which application opens, with no choice offered", () => {
+  assert.equal(openerLine(ghostty), "用 Ghostty 打开");
+  assert.equal(openerLine(terminal), "用系统终端打开；安装 Ghostty 后自动改用 Ghostty");
+  assert.match(openerLine(terminal), new RegExp("^用" + terminal.name + "打开"));
+  assert.match(openerLine(null), /找不到 Ghostty 或系统终端/);
+  assert.match(openerLine(ghostty, false), /暂不支持/);
+  for (const line of [openerLine(ghostty), openerLine(terminal), openerLine(null), openerLine(null, false)]) assert.doesNotMatch(line, /选择|选好|换一个|Herdr|iTerm|kitty/);
 });
 
-test("a saved application that is gone is named", () => {
-  assert.equal(missingChoice({ app: "ghostty" }, apps), "Ghostty");
-  assert.equal(missingChoice({ app: "kitty" }, apps), "");
-  assert.equal(missingChoice({ app: BUILT_IN }, apps), "");
-  assert.equal(missingChoice({ app: "kitty" }, null), "");
-});
-
-test("the menu item is hidden for the built-in terminal and outside the desktop", () => {
-  const terminal = { kind: "terminal", id: "0123456789abcdef" };
-  assert.equal(menuItem({ settings: { app: BUILT_IN }, target: terminal, context: desktop }).visible, false);
-  assert.equal(menuItem({ settings: { app: "kitty" }, target: terminal, context: { ...desktop, desktop_gateway: false } }).visible, false);
-  const item = menuItem({ settings: { app: "kitty" }, target: terminal, context: desktop });
-  assert.deepEqual(item, { visible: true, label: MENU_LABEL, detail: "kitty", icon: "square-arrow-out-up-right", shortcut: "⌘⇧O", enabled: true, reason: "" });
-  // Without detection the name still comes from the table.
-  assert.equal(menuItem({ settings: { app: "iterm2" }, target: { kind: "project", path: "/work" }, context: desktop }).shortcut, "");
-  assert.equal(menuItem({ settings: { app: "iterm2" }, apps: null, target: terminal, context: desktop }).detail, "iTerm2");
+test("the menu item shows on a computer that can open, only in the desktop app", () => {
+  const target = { kind: "terminal", id: "0123456789abcdef" };
+  assert.equal(menuItem({ target, context: { ...desktop, desktop_gateway: false } }).visible, false);
+  assert.equal(menuItem({ supported: false, target, context: desktop }).visible, false);
+  const item = menuItem({ supported: true, target, context: desktop });
+  assert.deepEqual(item, { visible: true, label: MENU_LABEL, icon: "square-arrow-out-up-right", shortcut: "⌘⇧O", enabled: true, reason: "" });
+  assert.equal(menuItem({ supported: true, target: { kind: "project", path: "/work" }, context: desktop }).shortcut, "");
+  // Nothing is stored for the menu to read: no application, no choice.
+  assert.equal(menuItem({ target, context: desktop }).enabled, true);
 });
 
 test("the menu item says why it cannot open", () => {
-  const settings = { app: "kitty" };
-  const reason = (target, context = desktop, environment) => menuItem({ settings, target, context, environment }).reason;
+  const reason = (target, context = desktop, environment) => menuItem({ supported: true, target, context, environment }).reason;
   assert.equal(reason({ kind: "terminal", id: "0123456789abcdef", closed: true }), "终端已结束");
   assert.equal(reason({ kind: "terminal", id: "0123456789abcdef" }, { ...desktop, mode: "none" }), "先选择一个工作环境");
   assert.equal(reason({ kind: "terminal", id: "0123456789abcdef" }, desktop, { running: false }), "环境已停止");
@@ -95,11 +76,17 @@ test("the copied command is quoted for any shell", () => {
 });
 
 test("messages follow the design's wording", () => {
-  assert.equal(launchFailure("Ghostty", "应用没有响应。"), "没能打开 Ghostty：应用没有响应。可在设置 → 本机终端里换一个。");
-  assert.equal(automationNotice({ name: "Ghostty", automation: true }).title, "Super Cage 需要控制 Ghostty 来打开窗口");
-  assert.deepEqual([automationNotice({ name: "Ghostty", automation: true }).cancel, automationNotice({ name: "Ghostty", automation: true }).confirm], ["取消", "继续"]);
-  assert.equal(automationNotice({ name: "Ghostty", automation: true }, true), null);
-  assert.equal(automationNotice({ name: "kitty", automation: false }), null);
+  assert.equal(launchFailure("Ghostty", "应用没有响应。"), "没能打开 Ghostty：应用没有响应。");
+  assert.equal(launchFailure("系统终端", ""), "没能打开 系统终端：未知原因。");
+  const notice = automationNotice(ghostty);
+  assert.equal(notice.title, "Super Cage 需要控制 Ghostty 来打开窗口");
+  assert.match(notice.body, /^macOS 接下来会询问是否允许 Super Cage 控制 Ghostty。.*如果不允许，窗口不会打开/);
+  assert.doesNotMatch(notice.body + launchFailure("Ghostty", "x"), /换一个|选择/);
+  assert.deepEqual([notice.cancel, notice.confirm], ["取消", "继续"]);
+  // Asked once: after the owner continued, and for the system Terminal, never.
+  assert.equal(automationNotice(ghostty, true), null);
+  assert.equal(automationNotice(terminal), null);
+  assert.equal(automationNotice(null), null);
 });
 
 test("a project path with any control character is refused, by code point", () => {
