@@ -380,36 +380,87 @@ func TestEntryRefusesForwardingAgentX11TunnelAndEnvironment(t *testing.T) {
 	}
 }
 
-// --- design 5.4: Herdr's line is refused until its filter exists ---
+// --- No Herdr through the entry while it is parked (2026-11-22) ---
 
-func TestEntryRefusesHerdrConnectLine(t *testing.T) {
+// entryHerdrConnectLine is Herdr's connect line (herdr-core 0.1.21,
+// machines.rs:242-266), as the shim logged it in the parked branch's runs.
+const entryHerdrConnectLine = `sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x "$p" ] || { echo "herdr-core is not installed here" >&2; exit 127; }; exec "$p" connect'`
+
+// entryHerdrInstallLine is herdr-core 0.1.21's first install on a machine
+// (machines.rs install()), as logged in the parked branch's first-install run
+// from this Mac: the core's bytes on stdin, then "server restart".
+const entryHerdrInstallLine = `sh -c 'set -e; d=$HOME/.local/bin; mkdir -p $d; case $(readlink "$d/herdr-core" || true) in */Contents/MacOS/herdr-core) echo "a bundled remote core needs a complete bundle; run hc update on that machine" >&2; exit 5;; esac; rm -f $d/.herdr-core.new.*; t=$d/.herdr-core.new.$$; head -c 6437760 > $t; [ $(($(wc -c < $t))) -eq 6437760 ] || { rm -f $t; echo "the copy arrived incomplete" >&2; exit 3; }; chmod 755 $t; $t --version > /dev/null || { rm -f $t; echo "this hc does not run there" >&2; exit 4; }; mv -f $t $d/herdr-core; command -v hc > /dev/null 2>&1 || [ -e $d/hc ] || ln -s herdr-core $d/hc; $d/herdr-core server restart > /dev/null; $d/herdr-core --version'`
+
+// Herdr is parked: an exec line that names herdr, herdr-core or hc, in any
+// case, also once the shell's quotes and escapes are taken out, is refused
+// with one sentence and never reaches the environment, with a pty or
+// without. Otherwise the owner's Herdr, running on this Mac, would link the
+// environment's core straight to its own through an unfiltered exec.
+func TestEntryRefusesEveryHerdrLine(t *testing.T) {
 	f := newEntryFixture(t, true)
 	f.on()
 	client := f.client()
 	refused := []string{
-		`sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x "$p" ] || { echo "herdr-core is not installed here" >&2; exit 127; }; exec "$p" connect'`,
-		`sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x "$p" ] || { echo "herdr-core is not installed here" >&2; exit 127; }; HC_SESSION=work exec "$p" connect'`,
-		`exec "$HOME/.local/bin/herdr-core" connect --session work`,
-		`hc connect`,
+		entryHerdrConnectLine,
+		strings.Replace(entryHerdrConnectLine, `exec "$p"`, `HC_SESSION=work exec "$p"`, 1),
+		entryHerdrInstallLine,
+		// A bundle's install (known from herdr-core's strings only; the
+		// line itself is reconstructed).
+		`sh -c 'd=$HOME/.local/bin; head -c 1024 > $d/.bundle.tgz && "$d/herdr-core" --hc-install-bundle $d/.bundle.tgz'`,
+		"herdr-core --version || true",
+		`sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`,
+		// The connect line drifted: spliced by the shell, another verb.
+		strings.Replace(entryHerdrConnectLine, "connect'", `conn""ect'`, 1),
+		strings.Replace(entryHerdrConnectLine, "connect'", "link'", 1),
+		`p=$HOME/.local/bin/herdr-core; exec "$p" link`,
+		`exec "$HOME/.local/bin/her""dr-core" link`,
+		`exec ~/.local/bin/h\c link`,
+		"hc connect",
+		"HC machine list",
+		"herdr remote-client-bridge",
+		// Windows.
 		`cmd /d /c "if exist .\AppData\Local\Programs\herdr-core\herdr-core.exe (.\AppData\Local\Programs\herdr-core\herdr-core.exe connect) else (echo herdr-core is not installed here 1>&2 & exit /b 127)"`,
+		`C:\Users\me\AppData\Local\Programs\Herdr\HC.EXE link`,
+		`cmd /c "%LOCALAPPDATA%\Programs\her^dr-core\her^dr-core.exe" conn^ect`,
 	}
 	for _, line := range refused {
-		_, stderr, status := entryRun(t, client, line, nil, nil)
-		if status != 1 || !strings.Contains(stderr, "Herdr") {
-			t.Fatalf("%q: status %d stderr %q", line, status, stderr)
+		if !entryHerdrLine(line) {
+			t.Errorf("%q was not taken for a Herdr line", line)
 		}
+		stdout, stderr, status := entryRun(t, client, line, nil, nil)
+		if status != 1 || stdout != "" || stderr != entryHerdrRefusal+"\n" {
+			t.Errorf("%q: status %d stdout %q stderr %q", line, status, stdout, stderr)
+		}
+	}
+	// With a pty: refused the same way, before any terminal.
+	session, err := client.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := session.RequestPty("xterm-256color", 30, 100, ssh.TerminalModes{}); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	session.Stdout, session.Stderr = &stdout, &stderr
+	if err := session.Run(entryHerdrConnectLine); err == nil || err.(*ssh.ExitError).ExitStatus() != 1 || stderr.String() != entryHerdrRefusal+"\n" {
+		t.Errorf("with a pty: %v stdout %q stderr %q", err, stdout.String(), stderr.String())
+	}
+	_ = session.Close()
+	if len(entrySSHTerminals(f.s)) != 0 {
+		t.Error("a Herdr line with a pty opened a terminal")
 	}
 	for _, line := range f.guest.commands() {
-		if strings.Contains(line, "connect") {
-			t.Fatalf("a Herdr line reached the guest: %q", line)
+		if l := strings.ToLower(line); strings.Contains(l, "herdr") || strings.Contains(l, "link") || strings.Contains(l, "conn") {
+			t.Errorf("a Herdr line reached the guest: %q", line)
 		}
 	}
-	for _, line := range []string{"uname -sm", "herdr-core --version || true", `sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`, "echo reconnect"} {
+	// Lines that only look alike are ordinary commands.
+	for _, line := range []string{"uname -sm", "echo reconnect", "echo hcl chc x.hc", "HC_SESSION=work true", "echo shepherd"} {
 		if entryHerdrLine(line) {
-			t.Fatalf("%q was taken for Herdr's line", line)
+			t.Errorf("%q was taken for a Herdr line", line)
 		}
 		if _, stderr, status := entryRun(t, client, line, nil, nil); status != 0 {
-			t.Fatalf("%q: status %d %q", line, status, stderr)
+			t.Errorf("%q: status %d %q", line, status, stderr)
 		}
 	}
 }

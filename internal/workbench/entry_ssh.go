@@ -42,7 +42,7 @@ import (
 //                            output through cage attach's escape filter;
 //       exec, shell        -> the guest's run script over Cage's own hop;
 //       subsystem sftp     -> the guest's sftp-server over the same hop;
-//       Herdr's connect line -> refused until step 3 brings its filter.
+//       an exec line that names Herdr -> refused while Herdr is parked.
 //   - no handler for any forwarding, agent, X11, tunnel or client
 //     environment: those channels are rejected, those requests answered no.
 
@@ -73,7 +73,7 @@ const (
 	// terminal's creation or a monitor round to release the operation lock.
 	entryOperationWait     = 10 * time.Second
 	entryServerVersion     = "SSH-2.0-SuperCage"
-	entryHerdrRefusal      = "Super Cage：本机终端还不能接入 Herdr，需要更新 Super Cage 到支持 Herdr 的版本。"
+	entryHerdrRefusal      = "Super Cage 暂不支持通过 Herdr 连接"
 	entryLockedNotice      = "Super Cage 已锁定：这个终端仍在运行。在应用中解锁后，用 ssh -t 重新接入，或在 Super Cage 里打开它。"
 	entryTerminalLimitText = "已有 12 个终端：先关闭一个"
 )
@@ -479,20 +479,22 @@ type entryWindowChange struct {
 	Cols, Rows, Width, Height uint32
 }
 
-// entryHerdrConnect recognises Herdr's connect line (herdr-core
-// machines.rs:242-266, "exec \"$p\" connect" after locating herdr-core) and
-// drifted variants of it: any command that names herdr-core, or hc as a
-// word, together with the word connect. Until step 3 brings the Herdr filter
-// these are refused, so a newer Herdr whose line changed still cannot open
-// an unfiltered link. Probes and installs (uname -sm, herdr-core --version,
-// herdr-core server restart) do not say connect and stay ordinary commands.
-var (
-	entryHerdrName    = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])hc([^A-Za-z0-9_-]|$)`)
-	entryHerdrConnect = regexp.MustCompile(`(^|[^A-Za-z0-9_-])connect([^A-Za-z0-9_-]|$)`)
-)
+// entryHerdrName finds Herdr in an exec line: herdr anywhere (herdr-core,
+// Herdr.app, herdr.exe, …) or hc as a word (hc, hc.exe, --hc-install-bundle;
+// not HC_SESSION), in any case.
+var entryHerdrName = regexp.MustCompile(`(?i)herdr|(^|[^a-z0-9_.])hc([^a-z0-9_]|$)`)
 
+// entryShellQuotes are what a shell (sh or cmd) takes out of a word before
+// it runs it: conn""ect, her\dr, h^c.
+var entryShellQuotes = strings.NewReplacer(`"`, "", "'", "", `\`, "", "^", "", "`", "")
+
+// entryHerdrLine: Herdr is parked (2026-11-22), so any exec line that names
+// it is refused, as written or once the shell's quotes are out: its connect
+// line, its install and update scripts, its TUI's bridge and whatever a newer
+// Herdr sends instead. Through an unfiltered exec the owner's Herdr on this
+// computer would link the environment's core straight to its own.
 func entryHerdrLine(command string) bool {
-	return (strings.Contains(command, "herdr-core") || entryHerdrName.MatchString(command)) && entryHerdrConnect.MatchString(command)
+	return entryHerdrName.MatchString(command) || entryHerdrName.MatchString(entryShellQuotes.Replace(command))
 }
 
 // entryOutput is one ssh window's side of the escape filter, written the way

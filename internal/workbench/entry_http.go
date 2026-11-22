@@ -96,9 +96,7 @@ type entryStatusView struct {
 	Computer    string            `json:"computer,omitempty"`
 	Revoked     bool              `json:"revoked"`
 	Devices     []entryDeviceView `json:"devices"`
-	// Herdr is offered only once its filter exists (step 3).
-	Herdr bool   `json:"herdr"`
-	Error string `json:"error,omitempty"`
+	Error       string            `json:"error,omitempty"`
 	// Unreached names the environments a revocation could not reach.
 	Unreached []string `json:"unreached,omitempty"`
 	// Kept are the kept ssh terminals of this environment, at most

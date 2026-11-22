@@ -48,6 +48,10 @@ func TestEntryCLI(t *testing.T) {
 	if code != 0 || json.Unmarshal([]byte(out), &view) != nil || !view.Enabled || view.HostAlias != "cage-default" || view.Commands == nil {
 		t.Fatalf("status --json: %d %q", code, out)
 	}
+	// Herdr is parked: nothing cage entry prints names it.
+	if _, usage, _ := run(); strings.Contains(strings.ToLower(out+usage), "herdr") {
+		t.Fatalf("cage entry names Herdr: %q %q", out, usage)
+	}
 	if _, _, code := run("rename", f.computer.ID, "工作本"); code != 0 {
 		t.Fatal("rename", code)
 	}
