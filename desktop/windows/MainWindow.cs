@@ -352,9 +352,9 @@ internal sealed class MainWindow : Form
             smokeScience["shown"] = smokeShown;
             errors.Add("重新载入窗口时显示了错误：" + smokeShown[0]);
         }
-        smokeScience["launches"] = new { started = desktopStarted, mostAtOnce = desktopMostAtOnce };
+        smokeScience["launches"] = new { started = desktopStarted, mostAtOnce = desktopMostAtOnce, joined = desktopLaunches.Joined };
         if (desktopMostAtOnce > 1) errors.Add("工作台同时运行了 " + desktopMostAtOnce + " 个后台启动进程");
-        if (SmokeScience.Mode == "retry" && !smokeScience.ContainsKey("retry")) errors.Add("自检没有在工作台启动期间重试");
+        if (SmokeScience.Mode == "retry" && (!smokeScience.ContainsKey("retry") || desktopLaunches.Joined == 0)) errors.Add("自检没有在工作台启动期间重试");
         try
         {
             if (!nativeBridgeReady && web.CoreWebView2 != null)
@@ -480,7 +480,7 @@ internal sealed class MainWindow : Form
         try
         {
             smokePhase = "starting_backend";
-            var (exit, data) = await DesktopLaunch(options);
+            var (exit, data) = await DesktopLaunch(options, join: true);
             // A restart replaced the WebView meanwhile: its own Bootstrap
             // connects it, and this one's reply is for a window that is gone.
             if (!generation.IsCurrent(turn)) return;
@@ -506,11 +506,13 @@ internal sealed class MainWindow : Form
     }
 
     // DesktopLaunch runs cage desktop --json with options through
-    // desktopLaunches: never two at once for this window, and the same launch
-    // asked for again while it is in flight (Retry during a slow start, the
-    // page's refreshSession) gets its reply instead of a second process.
-    private Task<(int Exit, JsonElement Data)> DesktopLaunch(params string[] options) =>
-        desktopLaunches.Run(string.Join(' ', options), async () => {
+    // desktopLaunches: never two at once for this window. The reply's URL
+    // carries a single-use ticket, so only a Bootstrap joins (join) the same
+    // launch of a Bootstrap in flight: the earlier one belongs to a replaced
+    // WebView (WebGeneration allows one Bootstrap per WebView) and discards
+    // its reply. The page's refreshSession waits its turn for its own.
+    private Task<(int Exit, JsonElement Data)> DesktopLaunch(string[] options, bool join) =>
+        desktopLaunches.Run(join ? string.Join(' ', options) : null, async () => {
             desktopStarted++;
             desktopMostAtOnce = Math.Max(desktopMostAtOnce, ++desktopRunning);
             try
@@ -529,9 +531,10 @@ internal sealed class MainWindow : Form
 
     // Smoke only (CAGE_SMOKE_SCIENCE=retry): what Retry does after the WebView
     // crashed (webFailed), while the first Bootstrap's launch still holds its
-    // reply. The new WebView's Bootstrap waits for that launch; the smoke
+    // reply. The new WebView's Bootstrap joins that launch; the smoke
     // completes in the new WebView and fails if the window showed an error
-    // (smokeShown) or ran two launches at once (CompleteSmoke).
+    // (smokeShown), ran two launches at once or the retry joined nothing
+    // (CompleteSmoke).
     private async void SmokeRetry()
     {
         smokeRestart = System.Diagnostics.Stopwatch.StartNew();
@@ -790,7 +793,7 @@ internal sealed class MainWindow : Form
                     if (request.Text("operation") != "status") throw new InvalidDataException("此平台暂不支持快捷登录");
                     result = new { supported = false }; break;
                 case "refreshSession":
-                    var (exit, data) = await DesktopLaunch(controllerNeedsUpdate ? ["--existing"] : []);
+                    var (exit, data) = await DesktopLaunch(controllerNeedsUpdate ? ["--existing"] : [], join: false);
                     if (exit != 0) throw new IOException("工作台会话恢复失败");
                     result = new { url = UpdatePolicy.Entry(data.Text("url")).AbsoluteUri }; break;
                 case "reconnect": result = true; _ = Bootstrap(); break;

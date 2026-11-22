@@ -372,7 +372,7 @@ var launched = new System.Collections.Concurrent.ConcurrentQueue<string>();
 var slowLaunch = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
 var firstLaunch = launches.Run("", () => { launched.Enqueue("desktop"); return slowLaunch.Task; });
 var retriedLaunch = launches.Run("", () => { launched.Enqueue("desktop again"); return Task.FromResult(2); });
-Check(retriedLaunch == firstLaunch && launched.Count == 1, "a retry during a launch started a second process");
+Check(retriedLaunch == firstLaunch && launched.Count == 1 && launches.Joined == 1, "a retry during a launch started a second process");
 var existingLaunch = launches.Run("--existing", () => { launched.Enqueue("existing"); return Task.FromResult(3); });
 Check(launched.Count == 1 && !existingLaunch.IsCompleted, "a different launch started while one was in flight");
 slowLaunch.SetResult(1);
@@ -388,6 +388,17 @@ var thrownLaunch = launches.Run("", () => throw new IOException("no process"));
 try { thrownLaunch.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
 var afterThrow = launches.Run("", () => Task.FromResult(5));
 Check(thrownLaunch.IsFaulted && afterThrow.Wait(TimeSpan.FromSeconds(5)) && afterThrow.Result == 5, "a launch that threw held up the next, or its failure was reused");
+// The page's refreshSession (no key): its reply's ticket is its own.
+var heldBootstrap = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var bootstrapLaunch = launches.Run("", () => heldBootstrap.Task);
+var refreshLaunch = launches.Run(null, () => Task.FromResult(6));
+var refreshAgain = launches.Run(null, () => Task.FromResult(7));
+var bootstrapAfter = launches.Run("", () => Task.FromResult(8));
+Check(refreshLaunch != bootstrapLaunch && refreshAgain != refreshLaunch && bootstrapAfter != bootstrapLaunch && !refreshLaunch.IsCompleted && launches.Joined == 1,
+    "a launch without a key joined one in flight, was joined, or ran beside it");
+heldBootstrap.SetResult(5);
+Check(refreshLaunch.Wait(TimeSpan.FromSeconds(5)) && refreshLaunch.Result == 6 && refreshAgain.Wait(TimeSpan.FromSeconds(5)) && refreshAgain.Result == 7 &&
+    bootstrapAfter.Wait(TimeSpan.FromSeconds(5)) && bootstrapAfter.Result == 8, "the launches without a key did not run in turn");
 Console.WriteLine($"Window backend launches: {assertions} assertions passed.");
 
 // The Claude Science smoke driver (ScienceSmoke): smoke mode only, never
