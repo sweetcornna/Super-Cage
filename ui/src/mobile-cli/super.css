@@ -290,3 +290,6 @@ html.portal-frame { --safe-top: 0px; --safe-right: 0px; --safe-bottom: 0px; --sa
 .workspace-drawer.docked .drawer-heading { min-height: 54px; }
 .mobile-app.docked .transcript, .mobile-app.docked .page-scroll, .mobile-app.docked .compose, .mobile-app.docked .chat-header {
   padding-inline: max(24px, calc((100% - 760px) / 2)); }
+/* 设备方式 (a joined computer's window, web-shell.mjs deviceMode): room for the slim line of device-bar.mjs above the app and its drawer. */
+html.device-mode { --device-bar: 36px; }
+.device-mode :is(.mobile-app, .workspace-drawer) { top: calc(var(--mobile-top, 0px) + var(--device-bar)); height: calc(min(100dvh, var(--mobile-height, 100dvh)) - var(--device-bar)); }

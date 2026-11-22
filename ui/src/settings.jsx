@@ -1,6 +1,5 @@
-import { MobilePairSettings } from "./mobile-pair-settings";
 import { ArchivedSessions } from "./cli-sessions";
-import { Smartphone } from "lucide-react";
+import { MonitorSmartphone } from "lucide-react";
 import { PasswordVaultSettings } from "./password-vault";
 import { KeyRound } from "lucide-react";
 import { InlineSelect } from "./inline-select";
@@ -44,13 +43,15 @@ import "./settings-pages.css";
 // Detecting this computer's terminal applications runs only while this
 // section is open, so its code loads with it.
 const LocalTerminalPage = lazy(() => import("./local-terminal-page.jsx"));
+// 设备 (phones and other computers) is loaded the same way: asking the host for the device list starts with it.
+const DevicesPage = lazy(() => import("./devices-page.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
   ["archived-sessions", "已归档会话", Archive],
   ["keyboard", "通用", Settings],
   ["appearance", "外观", Palette],
-  ["mobile", "远程连接", Smartphone],
+  ["devices", "设备", MonitorSmartphone],
   ["local-terminal", "本机终端", SquareTerminal],
   ["network", "网络与代理", Globe2],
   ["region", "时区与语言", Clock3],
@@ -264,7 +265,7 @@ export function SettingsPanel({
         </nav>
       </aside>
       <div className="settings-main">
-        <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "mobile" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
+        <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "devices" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
           {section === "appearance" && <AppearanceSettings />}
           {section === "about" && <AboutSettings />}
           {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
@@ -276,10 +277,10 @@ export function SettingsPanel({
           </>}
           {section === "vault" && <PasswordVaultSettings onConfirm={onConfirm} onDirty={setAccountDirty} />}
           {section === "account" && <AccountSettings busy={busy} onDirty={setAccountDirty} />}
+          {section === "devices" && <Suspense fallback={<p className="field-help">正在加载…</p>}>
+            <DevicesPage busy={busy} relay={draft.mobile_relay ?? ""} savedRelay={current.mobile_relay ?? ""} onRelayChange={value => update("mobile_relay", value)} onConfirm={onConfirm} />
+          </Suspense>}
           <fieldset className="settings-fields" disabled={busy && !(section === "project" && status.storage_recovery?.required)}>
-            {section === "mobile" && (isRemoteClient()
-              ? <section className="section-title"><h3>连接这台电脑</h3><p>请先切换到这台电脑的本机环境，再生成或管理手机配对码。</p></section>
-              : <MobilePairSettings relay={draft.mobile_relay ?? ""} savedRelay={current.mobile_relay ?? ""} onChange={value => update("mobile_relay",value)} onConfirm={onConfirm} />)}
             {section === "network" && (
               <>
                 {vmName && <p className="field-help">以下网络与代理设置只属于虚拟机「{vmName}」：订阅来源、节点、代理链路、代理端口、加密 DNS 和 IP 变化规则都由这台虚拟机单独保存，修改不会影响其他虚拟机。</p>}

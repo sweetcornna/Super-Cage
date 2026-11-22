@@ -38,7 +38,7 @@ sudo apt install ./Super-Cage-<版本>-linux-amd64.deb
 
 安装和启动 Super Cage 不要求启用主机 Git 裸仓库保护，也不因这项设置要求升级 Git。Super Cage 不修改主机的全局 Git 配置。
 
-作为手机远程主机时，Super Cage 通过系统的 `systemd-inhibit` 和 logind 申请保持系统运行，屏幕仍可熄灭。完整安装包依赖 systemd；服务或用户权限不满足时，“设置 → 远程连接”会显示防休眠失败原因，不会自动改动系统电源策略。
+作为手机远程主机时，Super Cage 通过系统的 `systemd-inhibit` 和 logind 申请保持系统运行，屏幕仍可熄灭。完整安装包依赖 systemd；服务或用户权限不满足时，“设置 → 设备”会显示防休眠失败原因，不会自动改动系统电源策略。
 
 从应用菜单打开 **Super Cage**，也可运行 `cage-desktop`。系统包名和后台命令为 `claude-cage`，避免与发行版自带的同名 Wayland 程序冲突。导入自己的代理、选择节点，再按[开始使用](getting-started.md#2-导入并选择代理)打开项目。项目路径例如 `/home/alice/Projects/demo`，项目共享只限明确选择的目录，下载使用独立的暂存目录；项目中的修改和删除会同步到主机。已授权项目中的 Git 元数据可读写，客机提交直接更新主机仓库；共享范围仍限于授权目录。
 

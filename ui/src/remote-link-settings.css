@@ -7,46 +7,6 @@
 .settings-content .remote-link-settings .section-title { margin-bottom: 32px; }
 .settings-content .remote-link-settings .section-title h3 { font-size: 2rem; }
 .settings-content .remote-link-settings .section-title p { font-size: var(--fs-body); line-height: 1.7; }
-.remote-pair-card {
-  border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 32px;
-  text-align: center;
-}
-.settings-content .remote-pair-card h4 {
-  margin: 0 0 12px;
-  font-size: 1.7143rem;
-  font-weight: 600;
-  color: var(--ink);
-}
-.remote-pair-instruction { margin: 0; color: var(--muted); font-size: var(--fs-body); line-height: 1.7; }
-.remote-pair-device { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: center; gap: 8px 12px; margin: 0; line-height: 1.7; overflow-wrap: anywhere; }
-.remote-pair-device strong { font-size: var(--fs-lead); color: var(--ink); }
-.remote-pair-device span { color: var(--muted); }
-.remote-pair-code { margin: 24px auto 0; }
-.remote-pair-code img {
-  display: block;
-  margin-inline: auto;
-  max-width: 100%;
-  height: auto;
-  image-rendering: pixelated;
-}
-.remote-pair-code .field-help { margin: 12px 0 0; }
-.remote-pair-placeholder {
-  width: 320px;
-  max-width: 100%;
-  aspect-ratio: 1;
-  display: grid;
-  place-items: center;
-  margin: 24px auto 0;
-  border-radius: 12px;
-  background: var(--chrome);
-  color: var(--muted);
-}
-.remote-pair-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin: 24px 0 0; }
-.remote-pair-actions button { min-height: 44px; padding: 10px 20px; font-size: var(--fs-body); }
-.remote-pair-privacy { margin: 16px 0 0; color: var(--muted); font-size: var(--fs-caption); line-height: 1.7; }
-.remote-pair-card [role="status"] { margin: 16px 0 0; line-height: 1.7; overflow-wrap: anywhere; }
 .remote-relay-settings { margin-top: 32px; }
 .remote-relay-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; }
 .settings-content .remote-relay-settings h4 { margin: 0 0 8px; font-size: var(--fs-lead); }
@@ -58,8 +18,4 @@
 .remote-link-settings button[aria-pressed="true"] {
   background: var(--selected);
   border-color: var(--ink);
-}
-@media (max-width: 720px) {
-  .remote-pair-card { padding: 24px 16px; }
-  .remote-pair-actions button { padding-inline: 12px; }
 }

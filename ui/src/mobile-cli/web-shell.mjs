@@ -2,11 +2,17 @@
 // (the workbench serves it there to phones, see ui/src/entry-layout.mjs). Everything here is inert in
 // the native apps, which load the same bundle with "CageMobile/1" in the user agent.
 import { useEffect, useRef, useState } from "react";
+import { storedConnection } from "./device-link.mjs";
 
 export const nativeShell = String(globalThis.navigator?.userAgent || "").includes("CageMobile/1");
-// Only the phone document (mobile.html, marked by its cage-entry meta) served at "/" to a browser.
-export const webPhone = !nativeShell && globalThis.location?.pathname === "/" &&
-  typeof globalThis.document?.querySelector === "function" && document.querySelector('meta[name="cage-entry"][content="phone"]') !== null;
+// The phone document (mobile.html, marked by its cage-entry meta) in a browser, not in a phone app.
+const phonePage = !nativeShell && typeof globalThis.document?.querySelector === "function" && document.querySelector('meta[name="cage-entry"][content="phone"]') !== null;
+const pagePath = globalThis.location?.pathname;
+// 设备方式: this computer's desktop window showing another computer's phone surface (Settings → 设备 → 打开 stores
+// the "device:" connection and navigates here). Never in a phone app, which is not this document.
+export const deviceMode = phonePage && pagePath === "/mobile.html" && storedConnection().startsWith("device:");
+// Served at "/" to a browser, or the device window: the page is the app.
+export const webPhone = phonePage && (pagePath === "/" || deviceMode);
 // Inside the portal's frame (tenant workspaces): the portal owns the window, the keyboard and the notch.
 export const portalFrame = webPhone && window.top !== window.self;
 // The swipe from the left edge that opens the side panel. In a phone browser that edge belongs to the
@@ -33,7 +39,7 @@ function settlePhoneEntry() {
 // Its web view shares cookies across every localhost port, so a choice made on another port could ask
 // for it; this window takes the desktop workbench for its session instead, before drawing (at most every
 // ten seconds in a tab, so a server that ignored the cookie could not make it loop).
-const nativeDesktopWindow = webPhone && Boolean(window.cageNativeBridge || window.webkit?.messageHandlers?.cage);
+const nativeDesktopWindow = webPhone && !deviceMode && Boolean(window.cageNativeBridge || window.webkit?.messageHandlers?.cage);
 if (nativeDesktopWindow) {
   try {
     if (!(Date.now() - Number(sessionStorage.getItem("cage-native-desktop")) < 10000)) {
@@ -59,7 +65,8 @@ const tenantListeners = new Set();
 if (webPhone && !nativeDesktopWindow) {
   document.documentElement.classList.add("web-phone");
   if (portalFrame) document.documentElement.classList.add("portal-frame");
-  settlePhoneEntry();
+  if (deviceMode) document.documentElement.classList.add("device-mode");
+  else settlePhoneEntry();
   // Return to the last screen of this tab after the portal re-enters the workspace (sign-in expiry,
   // a reconnect). Overlay entries of an earlier page life are dropped; a remote display is not resumed.
   let state = history.state;
@@ -71,7 +78,9 @@ if (webPhone && !nativeDesktopWindow) {
   }
   if (state !== history.state || state?.cageOverlay) history.replaceState({ ...state, cageOverlay: undefined }, "");
   trackViewport();
-  void readContext();
+  // The slim line above the page (device-bar.mjs), loaded only here.
+  if (deviceMode) void import("./device-bar.mjs");
+  else void readContext();
 }
 
 // The visual viewport is the visible area above the keyboard. Its height is published by main.jsx

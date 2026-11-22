@@ -10,6 +10,7 @@ import {
   Globe2,
   Home,
   Monitor,
+  MonitorSmartphone,
   Network,
   PanelLeftClose,
   Plus,
@@ -161,6 +162,8 @@ export function WorkspaceSidebar({
           <button className={`sidebar-link ${tailscaleOpen ? "selected" : ""}`} aria-current={tailscaleOpen ? "page" : undefined} onClick={onTailscale} aria-label="打开 Tailscale"><Network size={17} />Tailscale</button>
           {getClientContext().virtual_machines && <button className="sidebar-link" aria-haspopup="dialog" onClick={() => setShowVirtualMachines(true)}><Monitor size={17} />虚拟机</button>}
           {ssh && <button className="sidebar-link ssh-navigation" onClick={ssh.open} aria-label="SSH 主机"><Server size={17} />SSH</button>}
+          {/* 设备: the phones and computers that connect to this computer, and the computers this one joined. They reach this computer's workbench, so only a window on this computer shows it. */}
+          {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("devices")}><MonitorSmartphone size={17} />设备</button>}
           {/* 本机终端 manages this computer's ssh access, so only a window on this computer shows it. */}
           {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("local-terminal")}><SquareTerminal size={17} />本机终端</button>}
         </div>
