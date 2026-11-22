@@ -12,6 +12,7 @@ test("the list asks for both providers and keeps the hold parameters", () => {
   assert.equal(sessionListPath(), "/api/cli/sessions?providers=claude%2Ccodex");
   assert.equal(sessionListPath({ archived: true, after: "ab", wait: 25 }), "/api/cli/sessions?providers=claude%2Ccodex&archived=true&after=ab&wait=25");
   assert.equal(sessionListPath({ wait: 25 }), "/api/cli/sessions?providers=claude%2Ccodex", "wait needs a revision");
+  assert.equal(sessionListPath({ providers: "claude", after: "ab", wait: 25 }), "/api/cli/sessions?providers=claude&after=ab&wait=25", "Codex absent");
 });
 
 test("provider marks", () => {
