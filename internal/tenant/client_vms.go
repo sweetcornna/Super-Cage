@@ -3,12 +3,24 @@ package tenant
 import (
 	"net/http"
 	"strings"
+
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 )
 
 // serveVirtualMachines answers the owner-scoped VM controls used by the
 // workbench sidebar. It reports whether the request matched this API so the
 // ordinary workspace proxy and its internal-path blocklist are not involved.
 func (s *Server) serveVirtualMachines(w http.ResponseWriter, r *http.Request, id string) bool {
+	// The cloud entry's enrolment (devices.go); closed, it is not found like
+	// any other /api/client/ path.
+	if r.URL.Path == "/api/client/cloud-entry" && cloudentry.Open() {
+		if r.Method != http.MethodPost {
+			notFound(w)
+			return true
+		}
+		s.clientCloudEntry(w, r, id)
+		return true
+	}
 	if r.URL.Path == "/api/client/virtual-machines" {
 		switch r.Method {
 		case http.MethodGet:

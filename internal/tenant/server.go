@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 )
 
 type Runtime interface {
@@ -82,6 +84,7 @@ type Server struct {
 	sessionTTL    time.Duration
 	cooling       cooling
 	memory        memoryBalancing
+	entryState    cageEntryState
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -182,6 +185,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if id := s.site.vmID(r.Host); id != "" {
+		// The cloud entry is the gateway's own, never the workbench's:
+		// decided here, before the proxy's Origin and grant checks.
+		if r.URL.Path == cloudentry.Path {
+			s.cageEntry(w, r, id)
+			return
+		}
 		s.workbench(w, r, id)
 		return
 	}
@@ -339,7 +348,13 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request) {
 		s.listVMs(w, r)
 	case "POST /api/tenant/vms":
 		s.createVM(w, r)
+	case "GET /api/tenant/devices":
+		s.listDevices(w, r)
 	default:
+		if id, ok := strings.CutPrefix(r.URL.Path, "/api/tenant/devices/"); ok && r.Method == http.MethodPost && strings.HasSuffix(id, "/revoke") {
+			s.revokeDevice(w, r, strings.TrimSuffix(id, "/revoke"))
+			return
+		}
 		const prefix = "/api/tenant/vms/"
 		if id, ok := strings.CutPrefix(r.URL.Path, prefix); ok && r.Method == http.MethodPost && strings.HasSuffix(id, "/open") {
 			s.openVM(w, r, strings.TrimSuffix(id, "/open"))

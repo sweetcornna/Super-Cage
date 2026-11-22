@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 )
 
@@ -82,7 +83,7 @@ func internalPath(value string) bool {
 	if strings.HasPrefix(value, "/api/client/") && value != "/api/client/context" && value != "/api/client/about" {
 		return true
 	}
-	for _, prefix := range []string{"/_tenant", "/api/tenant", "/api/launch", "/api/session", "/api/handoff", "/api/desktop-local", "/api/desktop-owner", "/api/remote/manifest", "/api/agent/native/window", "/api/account/device-enroll", "/api/account/device-unlock", "/api/account/device-revoke"} {
+	for _, prefix := range []string{"/_tenant", "/api/tenant", "/api/launch", "/api/session", "/api/handoff", "/api/desktop-local", "/api/desktop-owner", "/api/remote/manifest", "/api/agent/native/window", "/api/account/device-enroll", "/api/account/device-unlock", "/api/account/device-revoke", "/api/entry"} {
 		if value == prefix || strings.HasPrefix(value, prefix+"/") {
 			return true
 		}
@@ -338,6 +339,9 @@ func (workspace *Workspace) proxy(origin string, fault, suspect func()) *httputi
 			req.Out.URL.Scheme, req.Out.URL.Host = workspace.origin.Scheme, workspace.origin.Host
 			req.Out.Host = workspace.origin.Host
 			req.Out.Header = selectHeaders(req.Out.Header, requestHeaders...)
+			// Only the gateway's own entry dial carries these (cage_entry.go).
+			req.Out.Header.Del(cloudentry.HeaderDevice)
+			req.Out.Header.Del(cloudentry.HeaderKey)
 			req.Out.Trailer = nil
 			req.Out.Header.Set("Origin", workspace.origin.String())
 			req.Out.Header.Set("User-Agent", "")

@@ -48,6 +48,10 @@ type database struct {
 	Version int                   `json:"version"`
 	Users   map[string]userRecord `json:"users"`
 	VMs     map[string]vmRecord   `json:"vms"`
+	// Devices are the computers enrolled for the cloud entry (devices.go).
+	// Absent until the first enrolment, so a dark build leaves state.json
+	// as it was.
+	Devices map[string]deviceRecord `json:"devices,omitempty"`
 }
 
 type store struct {
@@ -143,6 +147,11 @@ func (s *store) load(legacyImage string) error {
 			return errors.New("invalid VM state in tenant state")
 		}
 		s.VMs[id] = record
+	}
+	for id, record := range s.Devices {
+		if !validDeviceRecord(id, record, owners) {
+			return errors.New("invalid device record in tenant state")
+		}
 	}
 	if changed {
 		return s.save(s.database)
