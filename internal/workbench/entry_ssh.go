@@ -1296,7 +1296,12 @@ type entryWSConn struct {
 	ws              *websocket.Conn
 	readMu, writeMu sync.Mutex
 	reader          io.Reader
+	closing         sync.Once
 }
+
+// entryCloseLinger bounds how long a closed connection waits for the
+// client to answer its WebSocket close.
+const entryCloseLinger = time.Second
 
 func newEntryWSConn(ws *websocket.Conn) *entryWSConn {
 	ws.SetReadLimit(1 << 20)
@@ -1342,7 +1347,23 @@ func (c *entryWSConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (c *entryWSConn) Close() error                       { return c.ws.Close() }
+// Close ends the stream with a WebSocket close and goes on reading until the
+// client answers it, for at most entryCloseLinger; the TCP connection closes
+// when the reading ends (entrySSH). A socket closed with the client's window
+// adjustments still arriving answers them with a reset, and the client's
+// system then drops what it had not read yet: the last frame, the exit reset
+// and the notice of a cut.
+func (c *entryWSConn) Close() error {
+	c.closing.Do(func() {
+		deadline := time.Now().Add(entryCloseLinger)
+		_ = c.ws.SetReadDeadline(deadline)
+		go func() {
+			_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), deadline)
+		}()
+	})
+	return nil
+}
+
 func (c *entryWSConn) LocalAddr() net.Addr                { return c.ws.LocalAddr() }
 func (c *entryWSConn) RemoteAddr() net.Addr               { return c.ws.RemoteAddr() }
 func (c *entryWSConn) SetDeadline(t time.Time) error      { return nil }

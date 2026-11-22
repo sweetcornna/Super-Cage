@@ -81,8 +81,7 @@ func TestEntryCutReachesAClientThatIsBehind(t *testing.T) {
 			time.Sleep(500 * time.Millisecond)
 			read := make(chan string, 1)
 			go func() {
-				data, _ := io.ReadAll(stdout)
-				read <- string(data)
+				read <- entryDrain(stdout)
 			}()
 			var text string
 			select {
@@ -110,5 +109,22 @@ func TestEntryCutReachesAClientThatIsBehind(t *testing.T) {
 			}
 			t.Logf("%s: %d bytes of guest output, then the reset and %q; the stream ended %v after the cut", c.name, strings.Count(text, "x"), tail, took.Round(10*time.Millisecond))
 		})
+	}
+}
+
+// entryDrain reads a channel to its end as a terminal client does: what
+// arrived is read even when a read also reports an error. x/crypto/ssh
+// returns the failure of the window adjustment it sends after a read
+// together with the data, while the connection is ending; the rest is still
+// in its buffer.
+func entryDrain(r io.Reader) string {
+	var out []byte
+	buffer := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(buffer)
+		out = append(out, buffer[:n]...)
+		if n == 0 && err != nil {
+			return string(out)
+		}
 	}
 }
