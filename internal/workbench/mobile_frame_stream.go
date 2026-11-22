@@ -37,6 +37,7 @@ type phoneCall struct {
 	state       *phoneSurfaceState
 	defaultHome bool
 	frame       mobilelink.FrameQuery // zero for the original reads
+	device      string                // the id of the paired device asking
 	// deferGate leaves the check that guards pixels to the caller.
 	deferGate bool
 	// Set by phoneSurfaceExecute while it holds the surface lock.

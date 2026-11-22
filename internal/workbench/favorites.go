@@ -68,6 +68,7 @@ func (s *Server) serveFavorites(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/mobile/browser/favorites" {
 		s.account.mu.Lock()
 		s.phones.mu.Lock()
+		// Shared by every paired device, phones and joined computers alike.
 		if !s.mobileAuthorized(r.Context()) || s.phones.deviceForRequestLocked(r) == nil {
 			s.phones.mu.Unlock()
 			s.account.mu.Unlock()

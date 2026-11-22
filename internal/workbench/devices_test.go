@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/sylvinus/agent-vm/internal/keepawake"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 	"github.com/sylvinus/agent-vm/internal/relay"
@@ -504,5 +505,159 @@ func TestDevicesTodaysPhoneKeepsWorking(t *testing.T) {
 	}
 	if list, err := readDevicesFile(next.s.devicesFile()); err != nil || list == nil || len(list.Devices) != 0 {
 		t.Fatalf("list after the legacy phone was removed: %+v %v", list, err)
+	}
+}
+
+// Every paired device shares the one guest browser and Claude Desktop window:
+// an open from another device takes it over, and the device that held it,
+// even inside a held frame read, is told 「已在另一台设备打开」. Each device's
+// guest browser profile is its own. The guest sees no device id, name,
+// platform, pin or lookup token. A joined computer reports itself as one, and
+// its requests count as a device's, not as another computer's session.
+func TestDevicesShareTheSurfacesAndTellTheGuestNothing(t *testing.T) {
+	rig := newDeviceRig(t, relay.Config{})
+	s, ctx := rig.s, rig.ctx
+	s.desktopDisplayUpdate = func(bool) error { return nil }
+	var mu sync.Mutex
+	var guestSaw []string
+	s.browserControl = browserClientForTest(t, s, browserTransport(func(r *http.Request) (*http.Response, error) {
+		var body []byte
+		if r.Body != nil {
+			body, _ = io.ReadAll(r.Body)
+		}
+		headers, _ := json.Marshal(r.Header)
+		mu.Lock()
+		guestSaw = append(guestSaw, r.URL.String()+"\n"+string(headers)+"\n"+string(body))
+		mu.Unlock()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("{}")), Header: http.Header{}}, nil
+	}))
+	a, b := rig.pair(t), rig.pair(t)
+	clientA, clientB := rig.connect(t, a), rig.connect(t, b)
+	call := func(client *mobilelink.Client, method, path, body string) *mobilelink.Reply {
+		t.Helper()
+		var payload []byte
+		if body != "" {
+			payload = []byte(body)
+		}
+		reply, err := client.Do(ctx, method, path, payload)
+		if err != nil {
+			t.Fatal(path, err)
+		}
+		return reply
+	}
+	if reply := call(clientA, "POST", "/api/mobile/device", `{"platform":"android","model":"Pixel 9 测试机"}`); reply.Status != 200 {
+		t.Fatalf("phone report: %d %s", reply.Status, reply.Body)
+	}
+	if reply := call(clientB, "POST", "/api/mobile/device", `{"platform":"darwin","model":"工作室的 MacBook"}`); reply.Status != 200 {
+		t.Fatalf("computer report: %d %s", reply.Status, reply.Body)
+	}
+	if reply := call(clientB, "POST", "/api/mobile/device", `{"platform":"android","model":"Pixel"}`); reply.Status != http.StatusConflict {
+		t.Fatalf("a computer turned into a phone: %d", reply.Status)
+	}
+	if reply := call(clientB, "POST", "/api/mobile/device", `{"platform":"darwin","model":"Studio"}`); reply.Status != 200 {
+		t.Fatalf("rename: %d", reply.Status)
+	}
+	if reply := call(clientB, "POST", "/api/mobile/device", `{"platform":"plan9","model":"Studio"}`); reply.Status != http.StatusBadRequest {
+		t.Fatalf("unknown platform: %d", reply.Status)
+	}
+	deviceA, deviceB := rig.device(t, a), rig.device(t, b)
+	s.phones.mu.Lock()
+	kinds := deviceA.Kind + "/" + deviceA.Platform + "/" + deviceA.Name + " " + deviceB.Kind + "/" + deviceB.Platform + "/" + deviceB.Name
+	s.phones.mu.Unlock()
+	if kinds != "phone/android/Pixel 9 测试机 computer/darwin/Studio" {
+		t.Fatalf("reported devices: %s", kinds)
+	}
+	if list, err := readDevicesFile(s.devicesFile()); err != nil || len(list.Devices) != 2 || list.Devices[1].Kind != "computer" || list.Devices[1].Name != "Studio" {
+		t.Fatalf("reports on disk: %+v %v", list, err)
+	}
+
+	for _, surface := range []string{"browser", "desktop"} {
+		idA, idB := uuid.NewString(), uuid.NewString()
+		if reply := call(clientA, "POST", "/api/mobile/"+surface+"/open", `{"id":"`+idA+`","width":390,"height":640}`); reply.Status != 200 {
+			t.Fatalf("%s open on A: %d %s", surface, reply.Status, reply.Body)
+		}
+		held := make(chan *mobilelink.Reply, 1)
+		if surface == "browser" {
+			// A held frame read of A is waiting when B takes the surface.
+			first := call(clientA, "GET", "/api/mobile/browser/"+idA+"/frame?after="+strings.Repeat("0", 32)+"&wait=1", "")
+			var frame struct {
+				Tag string `json:"frame_tag"`
+			}
+			if first.Status != 200 || json.Unmarshal(first.Body, &frame) != nil || frame.Tag == "" {
+				t.Fatalf("first frame: %d %s", first.Status, first.Body)
+			}
+			tag := frame.Tag
+			go func() {
+				reply, err := clientA.Do(ctx, "GET", "/api/mobile/browser/"+idA+"/frame?after="+tag+"&wait=10000", nil)
+				if err != nil {
+					reply = &mobilelink.Reply{Status: 599, Body: []byte(err.Error())}
+				}
+				held <- reply
+			}()
+			time.Sleep(300 * time.Millisecond)
+		}
+		taken := time.Now()
+		if reply := call(clientB, "POST", "/api/mobile/"+surface+"/open", `{"id":"`+idB+`","width":390,"height":640}`); reply.Status != 200 {
+			t.Fatalf("%s open on B: %d %s", surface, reply.Status, reply.Body)
+		}
+		if surface == "browser" {
+			select {
+			case reply := <-held:
+				if reply.Status != http.StatusGone || !strings.Contains(string(reply.Body), "已在另一台设备打开") || time.Since(taken) > 3*time.Second {
+					t.Fatalf("A's held read after the takeover: %d %s after %v", reply.Status, reply.Body, time.Since(taken))
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("A's held read ran on after B took the browser")
+			}
+		}
+		for _, op := range []string{"frame", "close"} {
+			method, body := "POST", "{}"
+			if op == "frame" {
+				method, body = "GET", ""
+			}
+			if reply := call(clientA, method, "/api/mobile/"+surface+"/"+idA+"/"+op, body); reply.Status != http.StatusGone || !strings.Contains(string(reply.Body), "已在另一台设备打开") {
+				t.Fatalf("%s %s from the former holder: %d %s", surface, op, reply.Status, reply.Body)
+			}
+		}
+		state := s.phones.surface(phoneSurface(surface))
+		state.op.Lock()
+		holder := ""
+		if state.session != nil {
+			holder = state.session.holder
+		}
+		state.op.Unlock()
+		if holder != deviceB.ID {
+			t.Fatalf("%s holder %q after the takeover", surface, holder)
+		}
+		if reply := call(clientB, "POST", "/api/mobile/"+surface+"/"+idB+"/close", "{}"); reply.Status != 200 {
+			t.Fatalf("%s close on B: %d", surface, reply.Status)
+		}
+	}
+	for _, client := range []*mobilelink.Client{clientA, clientB} {
+		if reply := call(client, "GET", "/api/mobile/browser/favorites", ""); reply.Status != 200 {
+			t.Fatalf("favourites: %d", reply.Status)
+		}
+	}
+	if s.appUpdate.lastPhone.Load() == 0 || s.appUpdate.lastRemote.Load() != 0 {
+		t.Fatal("a device's requests did not count as a paired device's")
+	}
+
+	// The guest saw each device's own profile, and nothing that names a device.
+	mu.Lock()
+	saw := strings.Join(guestSaw, "\n")
+	mu.Unlock()
+	for _, profile := range []string{deviceA.guestProfile(), deviceB.guestProfile()} {
+		if !strings.Contains(saw, `"profile":"`+profile+`"`) {
+			t.Fatal("a device's browser opened without its own profile")
+		}
+	}
+	if deviceA.guestProfile() == deviceB.guestProfile() {
+		t.Fatal("two devices share a guest profile")
+	}
+	for _, secret := range []string{deviceA.ID, deviceB.ID, "Pixel", "测试机", "Studio", "MacBook", "android", "darwin",
+		a.identity.Pin, b.identity.Pin, a.host.HostPin, b.host.HostPin, a.host.Lookup, b.host.Lookup} {
+		if strings.Contains(saw, secret) {
+			t.Fatalf("the guest learned %q", secret)
+		}
 	}
 }

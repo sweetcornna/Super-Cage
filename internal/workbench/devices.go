@@ -448,8 +448,9 @@ func (s *Server) reportPhoneDevice(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	input.Model = strings.TrimSpace(input.Model)
-	if (input.Platform != "android" && input.Platform != "ios") || !deviceName(input.Model) {
-		http.Error(w, "手机型号无效", http.StatusBadRequest)
+	// Phones report android or ios; a joined computer its GOOS.
+	if !devicePlatform(input.Platform) || !deviceName(input.Model) {
+		http.Error(w, "设备型号或平台无效", http.StatusBadRequest)
 		return
 	}
 	s.account.mu.Lock()
@@ -463,7 +464,7 @@ func (s *Server) reportPhoneDevice(w http.ResponseWriter, r *http.Request) {
 	defer p.mu.Unlock()
 	d := p.deviceForRequestLocked(r)
 	if p.closed || d == nil {
-		http.Error(w, "请通过已配对的手机连接", http.StatusForbidden)
+		http.Error(w, "请通过已配对的设备连接", http.StatusForbidden)
 		return
 	}
 	if d.Platform != "" && d.Platform != input.Platform {
