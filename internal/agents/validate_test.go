@@ -58,6 +58,12 @@ func hiddenEntry() Entry {
 	}
 }
 
+// The fixtures' names are reviewed like a shipped entry's.
+func init() {
+	reviewed["alpha"] = allowance{command: "alpha", envPrefixes: []string{"ALPHA_"}, dataDirs: []string{"~/.alpha"}}
+	reviewed["beta"] = allowance{command: "beta", dataDirs: []string{"~/.beta"}}
+}
+
 func validCatalog() Catalog {
 	return Catalog{Schema: SchemaVersion, Entries: []Entry{builtinEntry(), availableEntry(), hiddenEntry()}}
 }

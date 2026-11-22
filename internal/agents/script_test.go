@@ -170,7 +170,7 @@ func TestScriptInputQuotesHostileValues(t *testing.T) {
 	e := lookup(t, "codex")
 	e.Name = "Codex'; touch " + touch + "; echo '"
 	e.Vendor = "$(touch " + touch + ") `touch " + touch + "` \"\\ ${HOME}"
-	hostileDir := "~/.codex it's $(touch " + touch + ")"
+	hostileDir := "~/.cache/codex it's $(touch " + touch + ")"
 	e.DataDirs = append(e.DataDirs, DataDir{Path: hostileDir})
 	e.Settings = append(e.Settings, Setting{File: hostileDir + "/a'b.json", Format: "json", Set: map[string]any{
 		"note": "it's \"quoted\" $(touch " + touch + ") `id` \\ ; rm -rf ~",
