@@ -187,9 +187,16 @@ export const NAME_LIMIT = 40;
 export const readJoinName = (raw) => String(raw ?? "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").slice(0, NAME_LIMIT);
 
 export const approvalText = (check) => "在那台电脑上点“允许”。核对数字 " + check;
+// After the other computer allows, this one still has to agree: the same four digits, shown on both screens. Only 确认 saves
+// the computer (so a code someone else typed, or a number that does not match, saves nothing).
+export const confirmTitle = "那台电脑已允许加入";
+export const confirmHintParts = (check) => ["核对数字 ", String(check), "，与那台电脑上显示的数字一致再确认。"];
+export const confirmHint = (check) => confirmHintParts(check).join("");
+// 确认 that finds nothing waiting any more (the other computer gave up, the time ran out, a lock): the join starts over.
+export const CONFIRM_LOST_TEXT = "这次加入已失效，请在那台电脑上重新生成配对码。";
 export const joinedText = (name) => "已加入「" + (String(name || "").trim() || "那台电脑") + "」";
 
-// phases: input → searching → approval → joined, or input again with an error.
+// phases: input → searching → approval → confirm → saving → joined, or input again with an error.
 export const initialJoin = { phase: "input", error: "" };
 export function joinReducer(state, event) {
   switch (event.type) {
@@ -197,12 +204,18 @@ export function joinReducer(state, event) {
     case "submit": return { phase: "searching" };
     case "reply": {
       const reply = event.reply || {};
-      if (reply.state === "approval") return state.phase === "approval" && state.check === String(reply.check || "") ? state : { phase: "approval", check: String(reply.check || "") };
+      // The other computer has allowed: the number is shown again, and the computer is saved only when 确认 is pressed.
+      if (reply.state === "confirm") return (state.phase === "saving" || state.phase === "confirm") && state.check === String(reply.check || "") && state.id === String(reply.id || "") ? state : { phase: "confirm", check: String(reply.check || ""), id: String(reply.id || "") };
+      if (reply.state === "approval") {
+        if (state.phase === "confirm" || state.phase === "saving") return state;
+        return state.phase === "approval" && state.check === String(reply.check || "") ? state : { phase: "approval", check: String(reply.check || "") };
+      }
       if (reply.state === "joined" || reply.id) return { phase: "joined", computer: { id: reply.id || "", name: String(reply.name || "").trim() } };
       if (reply.state === "failed" || reply.state === "denied" || reply.state === "expired") return { phase: "input", error: joinFailure({ state: reply.state, message: reply.error }) };
       return state;
     }
-    case "error": return { phase: "input", error: joinFailure(event.error) };
+    case "confirming": return state.phase === "confirm" ? { ...state, phase: "saving" } : state;
+    case "error": return { phase: "input", error: event.confirming && [404, 409, 410].includes(event.error?.status) ? CONFIRM_LOST_TEXT : joinFailure(event.error) };
     default: return state;
   }
 }

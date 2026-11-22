@@ -288,8 +288,23 @@ async function desktopRun({ theme, viewport, only }) {
     assert.equal(await label.isDisabled(), true);
     await shot("join-approval");
     await fits("加入其他电脑");
-    host.joinSay("joined");
+    // The other computer allows: this one shows the number again and saves nothing until 确认.
+    const agree = join.getByRole("group", { name: "核对数字", exact: true });
+    const agreeText = async () => (await agree.innerText()).replace(/\s+/g, " ").trim();
+    host.joinSay("confirm", { check: "3817", id: "h3" });
+    await agree.waitFor();
+    assert.equal(await agreeText(), "那台电脑已允许加入 核对数字 3817，与那台电脑上显示的数字一致再确认。");
+    assert.equal(await join.getByText("已加入", { exact: false }).count(), 0, "not joined before 确认");
+    assert.equal(host.computers.some((item) => item.id === "h3"), false, "nothing is saved before 确认");
+    assert.equal(await join.getByRole("button", { name: "确认", exact: true }).isDisabled(), false);
+    await shot("join-confirm");
+    await fits("加入其他电脑");
+    await quiet("the number waits for 确认");
+    assert.equal(host.count(/^POST \/client\/devices\/h3\/confirm$/), 0);
+    await join.getByRole("button", { name: "确认", exact: true }).click();
     await join.getByText("已加入「家里的 Mac mini」", { exact: true }).waitFor();
+    assert.deepEqual(host.confirmBody, { check: "3817" }, "the number shown goes back with 确认");
+    assert.equal(host.computers.some((item) => item.id === "h3"), true, "确认 saves the computer");
     await shot("join-joined");
     await join.getByRole("button", { name: "完成", exact: true }).click();
     await join.waitFor({ state: "detached" });
@@ -321,6 +336,37 @@ async function desktopRun({ theme, viewport, only }) {
     await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
     host.joinSay("denied");
     await join.getByText("那台电脑没有允许加入。", { exact: true }).waitFor();
+    // Allowed, but this computer does not agree: 取消 saves nothing and ends the join.
+    await field.fill("33334444");
+    await join.getByRole("button", { name: "加入", exact: true }).click();
+    await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
+    host.joinSay("confirm", { check: "5206", id: "h4" });
+    await agree.waitFor();
+    assert.equal(await agreeText(), "那台电脑已允许加入 核对数字 5206，与那台电脑上显示的数字一致再确认。");
+    await join.getByRole("button", { name: "取消", exact: true }).click();
+    await join.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/client\/devices\/join$/), 1, "取消 ends the join");
+    assert.equal(host.count(/^POST \/client\/devices\/h4\/confirm$/), 0);
+    assert.equal(host.computers.some((item) => item.id === "h4"), false);
+    // 取消 while the other computer has not answered yet ends it too.
+    await page.getByRole("button", { name: "加入其他电脑", exact: true }).click();
+    await field.fill("33334445");
+    await join.getByRole("button", { name: "加入", exact: true }).click();
+    await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
+    await join.getByRole("button", { name: "取消", exact: true }).click();
+    await join.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/client\/devices\/join$/), 2);
+    // 确认 that finds nothing waiting (the other computer gave up meanwhile) starts over, saving nothing.
+    await page.getByRole("button", { name: "加入其他电脑", exact: true }).click();
+    await field.fill("33334446");
+    await join.getByRole("button", { name: "加入", exact: true }).click();
+    await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
+    host.joinSay("confirm", { check: "7714", id: "h5" });
+    await agree.waitFor();
+    host.failNext["POST /client/devices/h5/confirm"] = { status: 409, body: "没有等待确认的加入" };
+    await join.getByRole("button", { name: "确认", exact: true }).click();
+    await join.getByText("这次加入已失效，请在那台电脑上重新生成配对码。", { exact: true }).waitFor();
+    assert.equal(host.computers.some((item) => item.id === "h5"), false);
     // A long code joins at once, with nothing to approve.
     host.joinMode = "ok";
     await field.fill(LONG);

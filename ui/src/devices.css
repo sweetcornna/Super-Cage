@@ -84,13 +84,13 @@
   font-size: var(--fs-secondary);
   line-height: 1.5;
 }
-/* The one clay mark in a row: the device is connected now. */
+/* The device is connected now: the green of the sidebar's 环境运行正常 dot (clay would read as a warning here), as quiet. */
 .devices-live {
   flex: none;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--clay);
+  background: var(--green);
 }
 .devices-row .quiet-button {
   color: var(--muted);

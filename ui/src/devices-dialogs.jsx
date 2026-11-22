@@ -4,7 +4,7 @@ import { api, writeClipboard } from "./api";
 import { Modal } from "./modal";
 import { requestDeadline, requestDeadlineMs } from "./session-poll.mjs";
 import {
-  FAILED_TEXT, approvalText, countdownText, customRelayLine, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinReducer,
+  FAILED_TEXT, approvalText, confirmHintParts, confirmTitle, countdownText, customRelayLine, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinReducer,
   joinedText, limitText, NAME_LIMIT, readCodeInput, readJoinName, requestHintParts, requestTitle,
 } from "./devices-state.mjs";
 import { openComputer } from "./devices-open.mjs";
@@ -177,7 +177,14 @@ export function JoinDialog({ onClose, onJoined }) {
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState("");
   const input = useRef(null);
+  const phase = useRef(view.phase);
+  phase.current = view.phase;
   useEffect(() => { if (view.phase === "input") input.current?.focus(); }, [view.phase]);
+  // A join that is still waiting for an allow or for 确认 ends with the dialog (also when the settings page is left meanwhile);
+  // once 确认 has gone out, the request decides.
+  useEffect(() => () => {
+    if (phase.current === "approval" || phase.current === "confirm") api("/client/devices/join", undefined, "DELETE", {}, { empty: true }).catch(() => {});
+  }, []);
 
   async function submit(event) {
     event?.preventDefault();
@@ -205,6 +212,16 @@ export function JoinDialog({ onClose, onJoined }) {
   }, [waiting]);
   useEffect(() => { if (view.phase === "joined") onJoined?.(); }, [view.phase]);
 
+  // 确认: the number matches, the computer is saved. The reply may be the saved computer or nothing at all.
+  async function confirm() {
+    if (view.phase !== "confirm") return;
+    dispatch({ type: "confirming" });
+    try {
+      const reply = await api("/client/devices/" + encodeURIComponent(view.id) + "/confirm", { check: view.check }, "POST", {}, { empty: true });
+      dispatch({ type: "reply", reply: { state: "joined", id: view.id, name: label.trim(), ...(reply && typeof reply === "object" ? reply : {}) } });
+    } catch (error) { dispatch({ type: "error", error, confirming: true }); }
+  }
+
   async function open() {
     setOpening(true);
     setOpenError("");
@@ -231,6 +248,21 @@ export function JoinDialog({ onClose, onJoined }) {
         <button type="button" onClick={onClose}>完成</button>
         <button type="button" className="primary" disabled={opening || !view.computer.id} onClick={open}>
           {opening && <LoaderCircle size={15} className="spin" aria-hidden="true" />}打开
+        </button>
+      </>
+    );
+  } else if (view.phase === "confirm" || view.phase === "saving") {
+    body = (
+      <div className="devices-request" role="group" aria-label="核对数字">
+        <h3>{confirmTitle}</h3>
+        <p>{confirmHintParts(view.check)[0]}<strong className="devices-check">{view.check}</strong>{confirmHintParts(view.check)[2]}</p>
+      </div>
+    );
+    footer = (
+      <>
+        <button type="button" disabled={view.phase === "saving"} onClick={onClose}>取消</button>
+        <button type="button" className="primary" disabled={view.phase === "saving"} onClick={confirm}>
+          {view.phase === "saving" && <LoaderCircle size={15} className="spin" aria-hidden="true" />}确认
         </button>
       </>
     );

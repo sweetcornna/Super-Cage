@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DEVICE_KEY, DEVICE_NAME_KEY, FAILED_TEXT, approvalText, atLimit, computerMeta, countdownText, customRelayLine, deviceIdOf, deviceMeta, deviceName,
+  CONFIRM_LOST_TEXT, DEVICE_KEY, DEVICE_NAME_KEY, FAILED_TEXT, approvalText, atLimit, computerMeta, confirmHint, confirmTitle, countdownText, customRelayLine, deviceIdOf, deviceMeta, deviceName,
   forgetConfirmation, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinFailure, joinReducer, joinedText, kindLine, limitOf, limitText,
   platformName, readCodeInput, readJoinName, rememberDevice, removeConfirmation, requestHint, requestTitle, summaryText, timeText, validTime,
 } from "./devices-state.mjs";
@@ -170,6 +170,29 @@ test("the joining dialog asks, waits for the other computer, and says why it fai
   // typing clears the error; typing while waiting changes nothing
   assert.equal(joinReducer({ phase: "input", error: "x" }, { type: "edit" }).error, "");
   assert.equal(joinReducer(state, { type: "edit" }), state);
+});
+
+test("the joining side confirms the number too: the computer is saved only after 确认", () => {
+  const waiting = joinReducer(joinReducer(initialJoin, { type: "submit" }), { type: "reply", reply: { state: "approval", check: "3817" } });
+  // the other computer allows: the number is shown again, nothing is joined
+  const asked = joinReducer(waiting, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } });
+  assert.deepEqual(asked, { phase: "confirm", check: "3817", id: "h3" });
+  assert.equal(joinReducer(asked, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } }), asked);
+  assert.equal(confirmTitle, "那台电脑已允许加入");
+  assert.equal(confirmHint("3817"), "核对数字 3817，与那台电脑上显示的数字一致再确认。");
+  // a late "approval" read does not take the number away again, and typing changes nothing
+  assert.equal(joinReducer(asked, { type: "reply", reply: { state: "approval", check: "3817" } }), asked);
+  assert.equal(joinReducer(asked, { type: "edit" }), asked);
+  // 确认 goes out; the reply (or the id the confirm carried) is the saved computer
+  const saving = joinReducer(asked, { type: "confirming" });
+  assert.deepEqual(saving, { phase: "saving", check: "3817", id: "h3" });
+  assert.equal(joinReducer(saving, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } }), saving, "a late read does not undo 确认");
+  assert.deepEqual(joinReducer(saving, { type: "reply", reply: { state: "joined", id: "h3", name: "家里的 Mac mini" } }), { phase: "joined", computer: { id: "h3", name: "家里的 Mac mini" } });
+  assert.equal(joinReducer(waiting, { type: "confirming" }), waiting, "nothing to confirm before the other computer allows");
+  // a 确认 that finds nothing waiting starts over with a sentence of its own; any other failure reads as before
+  for (const status of [404, 409, 410]) assert.deepEqual(joinReducer(saving, { type: "error", error: Object.assign(new Error("x"), { status }), confirming: true }), { phase: "input", error: CONFIRM_LOST_TEXT });
+  assert.equal(joinReducer(saving, { type: "error", error: Object.assign(new Error("Super Cage 已锁定，请先解锁。"), { status: 423 }), confirming: true }).error, "Super Cage 已锁定，请先解锁。");
+  assert.equal(joinReducer(waiting, { type: "error", error: Object.assign(new Error("x"), { status: 409 }) }).error, "配对码已被使用，请在那台电脑上重新生成。");
 });
 
 test("a refused join says what to do next", () => {

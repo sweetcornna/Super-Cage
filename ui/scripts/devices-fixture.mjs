@@ -179,6 +179,23 @@ export async function devicesRoutes(page, host) {
       }
       return host.reply(route, 200, answer);
     }
+    // The joiner leaves, or says no at 确认: the pending join ends and the held read is let go.
+    if (path === "/client/devices/join" && method === "DELETE") {
+      host.joinState = null;
+      wake(host.joinWaiters, { state: "none" });
+      return host.reply(route, 204, "");
+    }
+    // 确认 (assumed route, see interface-assumptions.md): only now is the computer saved.
+    const confirm = path.match(/^\/client\/devices\/([^/]+)\/confirm$/);
+    if (confirm && method === "POST") {
+      host.confirmBody = body;
+      const id = decodeURIComponent(confirm[1]);
+      if (host.joinState?.state !== "confirm" || host.joinState.id !== id || body?.check !== host.joinState.check) return host.reply(route, 409, "没有等待确认的加入");
+      const name = host.joinBody?.name || "另一台电脑";
+      host.computers.push({ id, name, platform: "", relay: "", added_at: new Date().toISOString(), last_open: null, state: "closed" });
+      host.joinState = { state: "joined", id, name };
+      return host.reply(route, 200, host.joinState);
+    }
     const open = path.match(/^\/client\/devices\/([^/]+)\/(open|close)$/);
     if (open && method === "POST") {
       if (open[2] === "close") return host.reply(route, 204, "");
