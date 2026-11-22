@@ -43,7 +43,7 @@ func NewPairCode(origin string, room relay.Invitation, host string) (PairCode, s
 		code.Relay = ""
 	}
 	b, err := json.Marshal(code)
-	return code, "CAGE1:" + string(b), err
+	return code, pairCodeScanned + string(b), err
 }
 func (p PairCode) origin() string {
 	if p.Relay == "" {
@@ -101,22 +101,34 @@ func enrollPhone(ctx context.Context, conn *tls.Conn, save func(string) (PairedH
 	return json.NewEncoder(conn).Encode(record)
 }
 
+// A long code is scanned (CAGE1: and its JSON) or pasted (CAGE- and the
+// scanned form in base64url).
+const pairCodeScanned, pairCodePasted = "CAGE1:", "CAGE-"
+
 // parsePairCode reads a pasted (CAGE-…) or scanned (CAGE1:…) code without
 // contacting anything.
 func parsePairCode(raw string) (PairCode, error) {
 	var p PairCode
 	raw = strings.TrimSpace(raw)
-	if len(raw) <= 4096 && strings.HasPrefix(raw, "CAGE-") {
-		b, err := base64.RawURLEncoding.DecodeString(raw[5:])
+	if len(raw) <= 4096 && strings.HasPrefix(raw, pairCodePasted) {
+		b, err := base64.RawURLEncoding.DecodeString(raw[len(pairCodePasted):])
 		if err != nil {
 			return p, errors.New("配对码格式无效")
 		}
 		raw = string(b)
 	}
-	if len(raw) > 4096 || !strings.HasPrefix(raw, "CAGE1:") || json.Unmarshal([]byte(raw[6:]), &p) != nil {
+	if len(raw) > 4096 || !strings.HasPrefix(raw, pairCodeScanned) || json.Unmarshal([]byte(raw[len(pairCodeScanned):]), &p) != nil {
 		return p, errors.New("请扫描 Super Cage 电脑端的配对码")
 	}
 	return p, nil
+}
+
+// ContainsPairCode reports whether text carries a long code anywhere in it,
+// whole or cut short: every code NewPairCode makes starts CAGE1:{ scanned and
+// CAGE-Q0FHRTE6 (CAGE1: in base64url) pasted. The shared clipboard keeps
+// such text from the environment.
+func ContainsPairCode(text string) bool {
+	return strings.Contains(text, pairCodeScanned+"{") || strings.Contains(text, pairCodePasted+base64.RawURLEncoding.EncodeToString([]byte(pairCodeScanned)))
 }
 
 // PairCodeRelay names the relay a code was made on, so a computer joining

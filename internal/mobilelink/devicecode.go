@@ -209,7 +209,7 @@ func NewDeviceInvite(ctx context.Context, origin, admin string, host *remotelink
 		// The code carries whole seconds and expires at that second, for the
 		// QR (PairCode.identity) and the short code alike.
 		return &DeviceInvite{
-			Code: code, Pair: pair, Raw: raw, Manual: "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: time.Unix(pair.Expires, 0),
+			Code: code, Pair: pair, Raw: raw, Manual: pairCodePasted + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: time.Unix(pair.Expires, 0),
 			origin: origin, hostToken: room.HostToken, confirm: confirm,
 		}, nil
 	}

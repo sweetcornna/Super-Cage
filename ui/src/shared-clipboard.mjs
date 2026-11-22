@@ -14,6 +14,11 @@ export async function copyGuestText({ request, sendCopy, valid }) {
 // components wait for an update, must not be hit every 1.5 seconds.
 export const clipboardReconnectDelay = failures => Math.min(1500 * 2 ** Math.max(0, failures), 30000);
 
+// A long pairing code (CAGE1:{… scanned, CAGE- and that in base64url pasted; mobilelink.ContainsPairCode) is never
+// shared with the environment, where an agent could redeem it. The workbench drops it too.
+const PAIR_CODE_STARTS = ["CAGE1:{", "CAGE-" + btoa("CAGE1:")];
+const carriesPairCode = content => typeof content.text === "string" && PAIR_CODE_STARTS.some(start => content.text.includes(start));
+
 // One connection owns clipboard synchronization for the workbench window,
 // including while its remote canvas is hidden or the window is unfocused.
 export function shareClipboard({ connect, native, onStatus, setActive, interval = 300, schedule = setTimeout }) {
@@ -82,7 +87,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
       revision = value.revision;
       if (!content) throw new Error("Clipboard content unavailable");
       const encoded = JSON.stringify(content);
-      if (initial || value.revision !== acknowledgedRevision || encoded !== lastPayload) await send(currentSocket, content);
+      if (!carriesPairCode(content) && (initial || value.revision !== acknowledgedRevision || encoded !== lastPayload)) await send(currentSocket, content);
       if (disposed || !guestReady || socket !== currentSocket || currentGeneration !== generation) return;
       acknowledgedRevision = value.revision;
       lastPayload = encoded;
