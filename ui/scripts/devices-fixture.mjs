@@ -166,7 +166,14 @@ export async function devicesRoutes(page, host) {
     if (!host.joinAvailable) return host.reply(route, 404, "没有这个功能");
     const fail = host.failNext[method + " " + path];
     if (fail) { delete host.failNext[method + " " + path]; return host.reply(route, fail.status, fail.body); }
-    if (path === "/client/devices" && method === "GET") return host.reply(route, 200, { computers: host.computers });
+    // joinedProblem: joined-computers.json cannot be read; DELETE /client/devices moves it aside (and only then).
+    if (path === "/client/devices" && method === "GET") return host.reply(route, 200, { computers: host.computers, ...(host.joinedProblem ? { problem: host.joinedProblem } : {}) });
+    if (path === "/client/devices" && method === "DELETE") {
+      if (!host.joinedProblem) return host.reply(route, 409, "已加入的电脑列表可以读取，请逐台移除。");
+      host.joinedProblem = "";
+      host.computers = [];
+      return host.reply(route, 200, { ok: true });
+    }
     if (path === "/client/devices/join" && method === "POST") {
       host.joinState = null;
       host.joinBody = body;

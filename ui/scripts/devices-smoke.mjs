@@ -449,6 +449,27 @@ async function desktopRun({ theme, viewport, only }) {
     await join.waitFor({ state: "detached" });
     await quiet("after the join dialogs closed");
 
+    // The list of joined computers cannot be read: one line says so, and its one button clears it (the gateway moves
+    // the file aside) and opens 加入其他电脑.
+    const keptComputers = host.computers;
+    host.joinedProblem = "已加入的电脑列表无法读取";
+    host.computers = [];
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    const joinedProblem = page.getByRole("alert").filter({ hasText: "已加入的电脑列表无法读取" });
+    await joinedProblem.waitFor();
+    assert.equal(await page.getByRole("heading", { name: "我加入的电脑", exact: true }).count(), 0);
+    await page.getByRole("button", { name: "加入其他电脑", exact: true }).waitFor();
+    await shot("joined-unreadable");
+    await joinedProblem.getByRole("button", { name: "清除并重新加入", exact: true }).click();
+    await field.waitFor();
+    await joinedProblem.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/client\/devices$/), 1, "cleared once");
+    await join.getByRole("button", { name: "关闭", exact: true }).click();
+    await join.waitFor({ state: "detached" });
+    host.computers = keptComputers;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.locator(".devices-row", { hasText: "家里的 Mac mini" }).first().waitFor();
+
     // 打开: a refusal is told on the row; success keeps the connection and goes to the phone page.
     host.failNext["POST /client/devices/h2/open"] = { status: 502, body: "连接不上那台电脑，请确认它已打开 Super Cage 并联网。" };
     await page.locator(".devices-row", { hasText: "实验室的 Linux 工作站" }).getByRole("button", { name: "打开", exact: true }).click();

@@ -78,6 +78,20 @@ export default function DevicesPage({ relay, savedRelay, busy: working, onRelayC
     } catch (reason) { fail(computer.id, reason); }
     finally { setBusy(""); }
   }
+  // The list of joined computers cannot be read: the gateway moves its file aside (never written over), and the join
+  // dialog opens to join again.
+  async function clearJoined() {
+    setBusy("joined");
+    setError("");
+    try {
+      await api("/client/devices", undefined, "DELETE");
+      revision.current++;
+      setJoined({ computers: [] });
+      setDialog("join");
+      void refresh();
+    } catch (reason) { setError(reason.message); }
+    finally { setBusy(""); }
+  }
   async function open(computer) {
     setBusy(computer.id);
     setRowErrors({});
@@ -151,6 +165,14 @@ export default function DevicesPage({ relay, savedRelay, busy: working, onRelayC
             </>
           )}
         </section>
+      )}
+      {joined?.problem && (
+        <p className="devices-note devices-problem" role="alert">
+          {joined.problem}
+          <button type="button" className="compact" disabled={busy !== ""} onClick={clearJoined}>
+            {busy === "joined" ? <LoaderCircle size={14} className="spin" aria-hidden="true" /> : null}清除并重新加入
+          </button>
+        </p>
       )}
       {computers.length > 0 && (
         <section className="devices-group" aria-label="我加入的电脑">
