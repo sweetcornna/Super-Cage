@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/guestprofile"
@@ -34,25 +35,9 @@ import (
 //go:embed web/*
 var assets embed.FS
 
-const cookieName = "cage_session"
+const cookieName = controlclient.CookieName
 
-type controlFile struct {
-	Port       int                `json:"port"`
-	Token      string             `json:"token"`
-	PID        int                `json:"pid"`
-	Controller ControllerIdentity `json:"controller"`
-	// Auth and ProofKey let a client check who answers before it sends
-	// Token (control_proof.go). A record without them predates that check.
-	Auth     int    `json:"auth,omitempty"`
-	ProofKey string `json:"proof_key,omitempty"`
-	// Set only while a Claude Science front runs (science_host.go); read by
-	// the native shell and the desktop entry, never served to a page.
-	SciencePort     int              `json:"science_port,omitempty"`
-	ScienceIdentity *scienceIdentity `json:"science_identity,omitempty"`
-	// ScienceEnd lets the native shell end the front's session
-	// (POST /_cage/end, round-2 N1).
-	ScienceEnd string `json:"science_end,omitempty"`
-}
+type controlFile = controlclient.ControlFile
 type Server struct {
 	desktopViews                                     displayViewDemand
 	desktopDisplayUpdate                             func(bool) error
@@ -98,6 +83,7 @@ type Server struct {
 	codexAccounts                                    codexAccountManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
+	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
 	diagnosticRateMu                                 sync.Mutex
 	diagnosticWindow                                 time.Time
 	diagnosticCount                                  int
@@ -231,6 +217,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 		}
 		s.remote = newDesktopGateway(profile, NewDesktopLocalController(fullConfigPath, exe))
 		s.remote.desktop.localVMs = newLocalVMStore(filepath.Dir(fullConfigPath), exe)
+		go s.pruneLocalTerminal()
 	} else {
 		s.remote = newRemoteGateway(profile)
 		s.remote.clientOnly = clientOnly
@@ -389,7 +376,7 @@ func (s *Server) handler() http.Handler {
 		if !s.launcherAuthenticated(w, r) {
 			return
 		}
-		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.identity})
+		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.launchIdentity()})
 	})
 	if s.desktopEntry || s.clientOnly {
 		mux.HandleFunc("POST /api/handoff", s.handoffEntry)
@@ -540,6 +527,7 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/macos/exit-policy", s.bindMacOSExit)
 	}
 	mux.HandleFunc("GET /api/terminals", s.listTerminals)
+	mux.HandleFunc("GET /api/terminals/viewers", s.terminalViewers)
 	mux.HandleFunc("GET /api/audio", s.audio)
 	mux.HandleFunc("GET /api/clipboard", s.sharedClipboard)
 	mux.HandleFunc("POST /api/clipboard/copy", s.clipboardCopy)

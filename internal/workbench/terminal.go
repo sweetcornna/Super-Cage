@@ -156,6 +156,11 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "终端输出位置无效", http.StatusBadRequest)
 		return
 	}
+	viewer, observe, valid := terminalViewerQuery(r)
+	if !valid {
+		http.Error(w, "终端查看者标识无效", http.StatusBadRequest)
+		return
+	}
 	ws, err := s.upgrade(w, r)
 	if err != nil {
 		return
@@ -164,12 +169,20 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 	ws.SetReadLimit(terminalInputMessageLimit)
 	_ = ws.SetReadDeadline(time.Now().Add(terminalReadTimeout))
 	ws.SetPongHandler(func(string) error { return ws.SetReadDeadline(time.Now().Add(terminalReadTimeout)) })
+	peer := session.openPeer(viewer, observe)
+	defer session.closePeer(peer)
+	var hello any
+	if viewer != "" {
+		// Only a client that identified itself reads this frame; it tells it
+		// that this server applies the size owner and answer rules.
+		hello = map[string]any{"type": "viewer", "protocol": terminalViewerProtocol}
+	}
 	subscription := session.subscribeFrom(after)
 	pongs, stop, done := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		defer ws.Close()
-		writeTerminalStream(ws, subscription, after != nil, pongs, stop)
+		writeTerminalStream(ws, subscription, after != nil, hello, pongs, stop, func(data []byte) { session.showQueries(peer, data) })
 	}()
 	defer func() {
 		close(stop)
@@ -199,16 +212,20 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 			default:
 			}
 		case "input":
+			data, err := session.peerInput(peer, input.Data)
+			if err != nil {
+				return
+			}
 			// A full queue holds this viewer here, unread, until the guest
 			// takes input again; the sender is held back instead of the
 			// input being refused.
-			if err := session.enqueueInputWait(r.Context(), input.Data, done); err != nil {
+			if err := session.enqueueInputWait(r.Context(), data, done); err != nil {
 				return
 			}
 			_ = ws.SetReadDeadline(time.Now().Add(terminalReadTimeout))
 		case "resize":
 			if validTerminalSize(input.Cols, input.Rows) {
-				if err := session.file.Resize(input.Cols, input.Rows); err != nil {
+				if err := session.peerResize(peer, input.Cols, input.Rows); err != nil {
 					return
 				}
 			}
@@ -220,7 +237,9 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 // coalesced into frames of at most terminalFrameLimit bytes; the PTY never
 // waits for this viewer, which falls back to the kept history if its queue
 // overflows.
-func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, pongs, stop <-chan struct{}) {
+// shown hears the history replayed to the viewer, which its terminal
+// answers queries in.
+func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, hello any, pongs, stop <-chan struct{}, shown func([]byte)) {
 	writeJSON := func(value any) bool {
 		_ = ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 		return ws.WriteJSON(value) == nil
@@ -238,6 +257,7 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 	}
 	// Replayed output must render without repeating clipboard side effects.
 	replay := func(data []byte, offset uint64, reset bool) bool {
+		shown(data)
 		if !resume {
 			if len(data) == 0 {
 				return true
@@ -249,6 +269,9 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 			return ws.WriteMessage(websocket.BinaryMessage, data) == nil
 		}
 		return writeJSON(map[string]any{"type": "history", "offset": offset, "reset": reset, "size": len(data)}) && writeBinary(data)
+	}
+	if hello != nil && !writeJSON(hello) {
+		return
 	}
 	if subscription.CLIStartup != nil && !writeJSON(map[string]any{"type": "cli-startup", "pending": subscription.CLIStarting}) {
 		return
@@ -331,6 +354,25 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 			}
 		}
 	}
+}
+
+// terminalViewerQuery reads the optional viewer=<identity> and observe=1 of a
+// client that takes part in the size owner rules. An older client sends
+// neither and keeps its behaviour.
+func terminalViewerQuery(r *http.Request) (viewer string, observe, valid bool) {
+	query := r.URL.Query()
+	ids, present := query["viewer"]
+	modes, observing := query["observe"]
+	if !present {
+		return "", false, !observing
+	}
+	if len(ids) != 1 || !terminalViewerPattern.MatchString(ids[0]) {
+		return "", false, false
+	}
+	if observing && (len(modes) != 1 || modes[0] != "1") {
+		return "", false, false
+	}
+	return ids[0], observing, true
 }
 
 func validTerminalSize(cols, rows uint16) bool {

@@ -106,10 +106,17 @@ try {
     $env:GOARCH = 'amd64'
     $env:GOOS = 'windows'
     $tags = 'external_hcs,external_wsl2,yq_noxml,yq_nolua,yq_noini,yq_nohcl,yq_notoml,yq_noprops,yq_nocsv,yq_nouri,yq_nobase64,yq_nosh,yq_noshell'
-    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion"
+    # One stamp per build in cage.exe and cage-attach.exe: the controller accepts only the cage-attach built with it.
+    $stamp = [guid]::NewGuid().ToString('N')
+    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/sylvinus/agent-vm/internal/version.Stamp=$stamp -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion"
     Invoke-BuildTool $go @('build', '-trimpath', '-tags', $tags, '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage.exe'), './cmd/cage')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-vm-assets')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-web-assets')
+    # cage attach runs the slim cage-attach.exe beside cage.exe (cmd/cage-attach):
+    # the same flags and stamp, never cgo.
+    $cgo = $env:CGO_ENABLED
+    $env:CGO_ENABLED = '0'
+    try { Invoke-BuildTool $go @('build', '-trimpath', '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage-attach.exe'), './cmd/cage-attach') } finally { $env:CGO_ENABLED = $cgo }
     Invoke-BuildTool $dotnet @('publish', 'desktop/windows/Cage.Windows.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
         '-p:EnableWindowsTargeting=true', '-p:PublishSingleFile=true', '-p:RestoreLockedMode=true', "-p:Version=$version", "-p:InformationalVersion=$version", '-o', $app)
     Get-ChildItem -LiteralPath $app -File | Where-Object { $_.Extension -in @('.pdb', '.xml') } | Remove-Item -Force
@@ -192,7 +199,7 @@ try {
     [IO.File]::WriteAllText((Join-Path $app 'version.txt'), $version)
     if ($signed) {
         $signTool = Get-SigningTool
-        foreach ($file in @('Cage.exe', 'resources/cage.exe', 'resources/mihomo.exe')) { Sign-CageFile (Join-Path $app $file) $signTool }
+        foreach ($file in @('Cage.exe', 'resources/cage.exe', 'resources/cage-attach.exe', 'resources/mihomo.exe')) { Sign-CageFile (Join-Path $app $file) $signTool }
         foreach ($file in (Get-WindowsQemuBinaries $qemuTarget)) {
             Sign-CageFile $file.FullName $signTool
             Assert-CageReleaseSignature $file.FullName

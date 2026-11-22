@@ -1,10 +1,13 @@
 import React, { useLayoutEffect, useRef } from "react";
-import { TerminalSquare } from "lucide-react";
+import { ExternalLink, TerminalSquare } from "lucide-react";
 import { ProviderMark } from "./provider-mark";
 
 // codexLabel: "Codex 会话" where the server makes Codex sessions from the menu,
 // "Codex 终端" (a plain Codex terminal) otherwise (codexMenuLabel).
-export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", onClose, onSelect }) {
+// local, when given, is "在本机终端中打开" ({label, detail, enabled, reason,
+// onSelect}): the desktop app only. The application's name is its tooltip;
+// the menu is too narrow to show it beside the label.
+export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", local = null, onClose, onSelect }) {
   const menu = useRef(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -62,6 +65,9 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
       </button>
       {codex && <button role="menuitem" disabled={busy} onClick={() => onSelect("codex")}>
         <ProviderMark provider="codex" decorative />{codexLabel}
+      </button>}
+      {local && <button role="menuitem" className="local-terminal-item" disabled={busy || !local.enabled} title={local.reason || local.detail} onClick={local.onSelect}>
+        <ExternalLink size={16} />{local.label}
       </button>}
     </div>
   );

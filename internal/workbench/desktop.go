@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 	"io"
 	"net"
@@ -36,7 +37,7 @@ type controllerClient struct {
 	dial            func(context.Context, string, string) (net.Conn, error)
 }
 
-var errControllerUnavailable = errors.New("control service is unavailable")
+var errControllerUnavailable = controlclient.ErrUnavailable
 
 const (
 	// Ordinary launcher requests only read controller memory.
@@ -63,29 +64,9 @@ func controllerRequestBudget(path string) time.Duration {
 }
 
 func openController(profile string) (*controllerClient, error) {
-	path := filepath.Join(profile, "control.json")
-	if err := host.CheckPrivateFile(path); err != nil {
-		if os.IsNotExist(err) {
-			return nil, errControllerUnavailable
-		}
-		return nil, err
-	}
-	b, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil, errControllerUnavailable
-	}
+	record, err := controlclient.ReadRecord(profile)
 	if err != nil {
 		return nil, err
-	}
-	var record controlFile
-	if json.Unmarshal(b, &record) != nil || record.Port < 1024 || record.Port > 65535 || len(record.Token) != 64 || record.PID < 1 {
-		return nil, errors.New("后台记录无效，请保留现有环境并检查私有配置。")
-	}
-	if record.Auth > controlAuth {
-		return nil, errClientOutdated
-	}
-	if (record.Auth == controlAuth) != proofSecret.MatchString(record.ProofKey) || record.Auth == 0 && record.ProofKey != "" {
-		return nil, errors.New("后台记录无效，请保留现有环境并检查私有配置。")
 	}
 	jar, _ := cookiejar.New(nil)
 	dial := controllerDial(record)
@@ -120,67 +101,62 @@ var olderControllerGraceCallers = []string{
 // release it also reaches a controller from the release before the identity
 // proof (a record without auth), over 127.0.0.1 and unproven, because saving
 // and stopping that controller's environment is how an update completes.
+// controlclient.Connect holds the checks, shared with cage-attach.
 func connectController(profile string) (*controllerClient, error) {
 	return connectControllerOrOlder(profile, true)
-}
-
-func connectControllerOrOlder(profile string, older bool) (*controllerClient, error) {
-	if controllerLockFree(profile) {
-		return nil, errControllerUnavailable
-	}
-	c, err := openController(profile)
-	if err != nil {
-		if controllerLockFree(profile) {
-			return nil, errControllerUnavailable
-		}
-		return nil, err
-	}
-	record := c.record
-	if record.Auth == 0 && !older {
-		c.close()
-		return nil, errControllerOutdated
-	}
-	status, err := c.call("POST", "/api/launch", map[string]string{"token": record.Token}, &c.launch)
-	if err != nil {
-		c.close()
-		if errors.Is(err, errControllerUnproven) {
-			return nil, errControllerUnproven
-		}
-		var networkError *url.Error
-		if errors.As(err, &networkError) {
-			return nil, errControllerUnavailable
-		}
-		return nil, err
-	}
-	if status != http.StatusOK {
-		c.close()
-		if status == http.StatusServiceUnavailable {
-			return nil, errControllerUnavailable
-		}
-		// A dead controller can leave a record whose port or PID is now reused.
-		// Only a free profile lock permits a new controller to replace that
-		// record. An occupied or inaccessible lock must preserve its owner.
-		if controllerLockFree(profile) {
-			return nil, errControllerUnavailable
-		}
-		return nil, errors.New("无法认证已有后台，未尝试终止或替换它。")
-	}
-	u, err := url.Parse(c.launch.URL)
-	if err != nil || u.Scheme != "http" || u.Host != fmt.Sprintf("localhost:%d", record.Port) || u.User != nil || u.Fragment == "" {
-		c.close()
-		return nil, errors.New("后台返回了无效入口，未连接旧工作台。")
-	}
-	if c.launch.Controller.Protocol != 0 && c.launch.Controller.PID != record.PID {
-		c.close()
-		return nil, errors.New("后台身份已变化，请重试连接。")
-	}
-	return c, nil
 }
 
 // connectProvenController is connectController for automation (the agent
 // transport): it never talks to a controller that cannot prove itself.
 func connectProvenController(profile string) (*controllerClient, error) {
 	return connectControllerOrOlder(profile, false)
+}
+
+func connectControllerOrOlder(profile string, older bool) (*controllerClient, error) {
+	connect := controlclient.Connect
+	if !older {
+		connect = controlclient.ConnectProven
+	}
+	conn, launch, err := connect(profile, openControllerConn)
+	if err != nil {
+		return nil, err
+	}
+	c := conn.(*controllerClient)
+	c.launch = launch
+	return c, nil
+}
+
+func openControllerConn(profile string) (controlclient.Conn, error) {
+	c, err := openController(profile)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func connectControllerConn(profile string) (controlclient.Conn, error) {
+	c, err := connectController(profile)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func connectProvenControllerConn(profile string) (controlclient.Conn, error) {
+	c, err := connectProvenController(profile)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// controllerClient is a controlclient.Conn over net/http.
+func (c *controllerClient) Record() controlFile             { return c.record }
+func (c *controllerClient) Launch() launchResponse          { return c.launch }
+func (c *controllerClient) SetTrustedViewCookie(u *url.URL) { c.setTrustedViewCookie(u) }
+func (c *controllerClient) Close()                          { c.close() }
+func (c *controllerClient) CallContext(ctx context.Context, method, path string, input, output any) (int, error) {
+	return c.callContext(ctx, method, path, input, output)
 }
 
 func (c *controllerClient) close() { c.client.CloseIdleConnections() }
@@ -289,9 +265,9 @@ func desktopLaunch(profile string, gateway bool, options DesktopOptions, start f
 			if err != nil {
 				return DesktopResult{}, err
 			}
-		} else if want.matches(current.launch.Controller) || options.UseExisting {
+		} else if want.Matches(current.launch.Controller) || options.UseExisting {
 			status := "ready"
-			if !want.matches(current.launch.Controller) {
+			if !want.Matches(current.launch.Controller) {
 				status = "existing"
 			}
 			return DesktopResult{Status: status, URL: current.launch.URL, Controller: current.launch.Controller, Legacy: current.launch.Controller.Protocol == 0}, nil
@@ -323,7 +299,7 @@ func desktopLaunch(profile string, gateway bool, options DesktopOptions, start f
 			if c.launch.DesktopGateway != gateway {
 				return DesktopResult{}, errors.New("打开期间控制服务身份发生变化，请重新选择")
 			}
-			if want.matches(c.launch.Controller) {
+			if want.Matches(c.launch.Controller) {
 				return DesktopResult{Status: "ready", URL: c.launch.URL, Controller: c.launch.Controller}, nil
 			}
 			return pendingUpdate(c), nil

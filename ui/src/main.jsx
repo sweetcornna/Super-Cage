@@ -153,6 +153,9 @@ function App() {
     [projectDialog, setProjectDialog] = useState(null),
     [rename, setRename] = useState(null),
     [toast, setToast] = useState(""),
+    [toastAction, setToastAction] = useState(null),
+    [localTerminal, setLocalTerminal] = useState(null),
+    [, setLocalTerminalShown] = useState(0),
     [projectRefreshing, setProjectRefreshing] = useState(false),
     [fatal, setFatal] = useState(""),
     [connectionError, setConnectionError] = useState(""),
@@ -674,8 +677,20 @@ function App() {
   const newTerminalHere = (event) =>
     newTerminal(contentWorkspace, event?.currentTarget?.tagName === "BUTTON"
       ? event.currentTarget : terminalTrigger.current);
+  // In a terminal's heading the item opens that terminal; elsewhere a new
+  // terminal in the menu's project.
+  const localTerminalItem = (location) => {
+    const tab = home ? null : location === "heading" ? (terminal ? current : null) : location.startsWith("heading-") ? tabs.find(item => item.id === location.slice(8)) : null;
+    const target = tab?.kind === "terminal" ? { kind: "terminal", id: tab.id } : { kind: "project", path: terminalChoice.path, run: "shell" };
+    const item = localTerminal?.item(target);
+    return item?.visible ? { ...item, onSelect: () => {
+      setTerminalChoice(null);
+      void localTerminal.open(target, { confirm, notify: (text, action) => { setToastAction(action ? { ...action, text } : null); setToast(text); } });
+    } } : null;
+  };
   const terminalMenuAt = (location) => terminalChoice?.anchor?.dataset.terminalLocation === location && (
     <TerminalMenu choice={terminalChoice} busy={busy} codex={codexTerminalSupported(system)} codexLabel={codexMenuLabel(sessionCapabilities)}
+      local={localTerminalItem(location)}
       onClose={() => setTerminalChoice(null)}
       onSelect={(kind) => createTerminal(terminalChoice.path, kind).catch((e) => notify(e.message))} />
   );
@@ -1093,9 +1108,19 @@ function App() {
   }, [current?.url, current?.title, current?.incognito, active]);
   useEffect(() => {
     if (!toast) return;
-    const timer = setTimeout(() => setToast(""), 4500);
+    const timer = setTimeout(() => setToast(""), toastAction?.text === toast ? 12000 : 4500);
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [toast, toastAction]);
+  // "在本机终端中打开": the desktop app only, loaded apart from the first chunk.
+  useEffect(() => {
+    if (!getClientContext().desktop_gateway) return;
+    let live = true;
+    import("./local-terminal-open.mjs")
+      .then(module => module.localTerminalOpener(() => live && setLocalTerminalShown(n => n + 1)))
+      .then(opener => live && setLocalTerminal(opener))
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     if (!tailnetLogin) return;
     if (!status?.ready || managementPage || showHome || desktopOpen) {
@@ -2181,6 +2206,7 @@ function App() {
           <EnvironmentRestartContext.Provider value={null}>
             <SafetyMessage message={toast} />
           </EnvironmentRestartContext.Provider>
+          {toastAction?.text === toast && <button className="toast-action" onClick={() => { void Promise.resolve(toastAction.run()).then(() => setToast("已复制命令"), () => setToast("无法写入剪贴板")); }}>{toastAction.label}</button>}
         </div>
       )}
       {dialogs}

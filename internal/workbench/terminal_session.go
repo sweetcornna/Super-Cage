@@ -51,6 +51,9 @@ type terminalSession struct {
 	stopping              chan struct{}
 	closeOnce             sync.Once
 	cliStartupDone        chan struct{}
+	sizing                terminalSizing // viewers and the size owner; guarded by mu
+	sizeMu                sync.Mutex     // serialises deciding and applying a size
+	resizer               terminalResizer
 	// origin is "ssh" for a terminal the local SSH entry opened, with the
 	// device's name and id; kept is the owner's "保留", which keeps it past
 	// the connection (a lock sets it too). sshViewers counts the ssh
@@ -71,7 +74,9 @@ func (t *terminalSession) ownsConversation() bool {
 }
 
 func newTerminalSession(file terminalPTY) *terminalSession {
-	return &terminalSession{file: file, exitCode: -1, clients: map[*terminalViewer]bool{}, done: make(chan struct{}), inputReady: make(chan struct{}, 1), stopping: make(chan struct{}), changed: make(chan struct{})}
+	t := &terminalSession{file: file, exitCode: -1, clients: map[*terminalViewer]bool{}, done: make(chan struct{}), inputReady: make(chan struct{}, 1), stopping: make(chan struct{}), changed: make(chan struct{})}
+	t.sizing.init(0, 0)
+	return t
 }
 
 // exitStatus is the process's exit code after the session ends; -1 while it
@@ -144,6 +149,10 @@ func (t *terminalSession) stopPTY() {
 	t.closeOnce.Do(func() {
 		t.mu.Lock()
 		t.closed = true
+		if t.sizing.grace != nil {
+			t.sizing.grace.Stop()
+			t.sizing.grace = nil
+		}
 		t.mu.Unlock()
 		if t.stopping != nil {
 			close(t.stopping)
@@ -462,6 +471,7 @@ func (t *terminalSession) read() {
 		if n > 0 {
 			chunk := append([]byte(nil), buffer[:n]...)
 			t.mu.Lock()
+			t.sizing.noteOutput(chunk)
 			if t.kind != "claude-login" {
 				t.history = append(t.history, chunk...)
 				t.written += uint64(len(chunk))

@@ -11,10 +11,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
-const connectionHeader = "X-Cage-Connection"
+const connectionHeader = controlclient.ConnectionHeader
 
 type remoteGateway struct {
 	mu           sync.Mutex
@@ -111,6 +112,10 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	if path == "browser-extensions" && (r.Method == http.MethodGet || r.Method == http.MethodPost) {
 		s.localBrowserExtensions(w, r)
+		return
+	}
+	if path == "local-terminal" || strings.HasPrefix(path, "local-terminal/") {
+		s.localTerminalRequest(w, r, path)
 		return
 	}
 	if path == "project-shares" || strings.HasPrefix(path, "project-shares/") {

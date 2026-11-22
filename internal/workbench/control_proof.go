@@ -5,8 +5,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,19 +15,22 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 )
 
 // controlAuth is the version of the controller proof that control.json
 // announces. A client reads it from the private record, never from the
 // network, so an impostor cannot talk a client down to an older protocol.
-const controlAuth = 1
+// The proof and its errors are controlclient's, shared with cage-attach.
+const controlAuth = controlclient.ProofVersion
 
-const controllerProofPath = "/api/launch/proof"
+const controllerProofPath = controlclient.ProofPath
 
 var (
-	errControllerUnproven = errors.New("无法确认本机后台身份，未发送凭据。请重新打开 Super Cage。")
-	errControllerOutdated = errors.New("Super Cage 后台需要更新：请打开 Super Cage 完成更新后重试。")
-	errClientOutdated     = errors.New("此 Super Cage 需要更新：本机后台使用了更新的连接协议。")
+	errControllerUnproven = controlclient.ErrControllerUnproven
+	errControllerOutdated = controlclient.ErrControllerOutdated
+	errClientOutdated     = controlclient.ErrClientOutdated
 )
 
 var proofSecret = regexp.MustCompile("^[0-9a-f]{64}$")
@@ -37,9 +38,7 @@ var proofSecret = regexp.MustCompile("^[0-9a-f]{64}$")
 // controllerIdentityError reports the errors whose message the user must see
 // as is (an update is needed, or the server did not prove itself) rather
 // than as an unavailable controller.
-func controllerIdentityError(err error) bool {
-	return errors.Is(err, errControllerUnproven) || errors.Is(err, errControllerOutdated) || errors.Is(err, errClientOutdated)
-}
+func controllerIdentityError(err error) bool { return controlclient.Identity(err) != nil }
 
 func (s *Server) controlRecord(port int) controlFile {
 	return controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity, Auth: controlAuth, ProofKey: s.proofKey}
@@ -50,9 +49,7 @@ func (s *Server) controlRecord(port int) controlFile {
 // challenge to the real controller over its own connection gets an answer
 // for different addresses, which the client rejects.
 func controllerProofMAC(key, host, client, server, nonce string) string {
-	mac := hmac.New(sha256.New, []byte(key))
-	_, _ = io.WriteString(mac, "super-cage controller proof v1\x00"+host+"\x00"+client+"\x00"+server+"\x00"+nonce)
-	return hex.EncodeToString(mac.Sum(nil))
+	return controlclient.ProofMAC(key, host, client, server, nonce)
 }
 
 // controllerProof answers a client's challenge before the client sends any

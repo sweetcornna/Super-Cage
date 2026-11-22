@@ -121,6 +121,9 @@ func run() int {
 	if args[0] == "entry" || args[0] == "ssh" {
 		return runEntry(args)
 	}
+	if args[0] == "attach" {
+		return runAttach(args[1:])
+	}
 	// The guest half of cage-tenant -incus-vsock, started through incus exec;
 	// its configuration and secret arrive on stdin and it ends with stdin.
 	if args[0] == "vsock-relay" && len(args) == 1 {

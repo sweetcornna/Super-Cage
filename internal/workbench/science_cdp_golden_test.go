@@ -18,7 +18,7 @@ import (
 // checks ScienceFrame.cs against the same file. CAGE_UPDATE_GOLDEN=1
 // rewrites it.
 func TestScienceCDPGolden(t *testing.T) {
-	control, _ := json.Marshal(controlFile{Port: 17777, SciencePort: 17840, ScienceIdentity: &testScienceIdentity})
+	control, _ := json.Marshal(scienceControlFile{controlFile: controlFile{Port: 17777}, SciencePort: 17840, ScienceIdentity: &testScienceIdentity})
 	golden := map[string]any{
 		"contract":         scienceFramePolicyContract,
 		"control":          json.RawMessage(control),
