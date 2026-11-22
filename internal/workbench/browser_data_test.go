@@ -526,7 +526,7 @@ func TestBrowserDataSettingsUnreadableAreKeptAndReported(t *testing.T) {
 			if w := request(s, "POST", "/api/browser/data-settings", s.origin, `{"action":"keep-add","domain":"example.org"}`, true); w.Code != http.StatusServiceUnavailable {
 				t.Fatalf("a write over an unreadable file: %d %s", w.Code, w.Body.String())
 			}
-			for _, body := range []string{`{"mode":"clear","range":"all","types":["site"]}`, `{"mode":"clear","range":"all","types":["history","site"],"remember":true}`} {
+			for _, body := range []string{`{"mode":"clear","range":"all","types":["site"]}`, `{"mode":"clear","range":"all","types":["history","site"],"remember":true}`, `{"mode":"clear","range":"all","types":["cache"]}`} {
 				if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "设置暂时读不出来") {
 					t.Fatalf("a clear that needs the kept list: %d %s", w.Code, w.Body.String())
 				}
@@ -535,10 +535,14 @@ func TestBrowserDataSettingsUnreadableAreKeptAndReported(t *testing.T) {
 			if len(calls()) != 0 {
 				t.Fatalf("clears that need the kept list reached the guest: %+v", calls())
 			}
-			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"all","types":["history","cache"],"remember":true}`, true); w.Code != 200 {
-				t.Fatalf("history and cache clears do not need the kept list: %d %s", w.Code, w.Body.String())
+			// History and downloads do not depend on the kept list; a clear the
+			// person asked to run without it does not either.
+			for _, body := range []string{`{"mode":"clear","range":"all","types":["history","downloads"],"remember":true}`, `{"mode":"clear","range":"all","types":["site","cache"],"protect":"none"}`} {
+				if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != 200 {
+					t.Fatalf("a clear that does not need the kept list: %d %s", w.Code, w.Body.String())
+				}
+				awaitJobIdle(t, &s.jobs)
 			}
-			awaitJobIdle(t, &s.jobs)
 			if err := os.Chmod(path, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -767,7 +771,8 @@ func TestBrowserClearReportsWhatTheHostSaw(t *testing.T) {
 
 // Review 3, findings 5 and 10: after a reset the host follows the new
 // controller as after a crash (ready toggles, a hidden picture is minimised
-// again), reports the outcome the controller wrote, and gives up truthfully.
+// again), reports the outcome the controller wrote, gives up truthfully, and
+// says so when the network lease runs out while it waits.
 func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
 	restartLimit := browserRestartLimit
 	defer func() { browserRestartLimit = restartLimit }()
@@ -786,6 +791,7 @@ func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
 			var healthCalls int
 			var readyDuring []bool
 			var visibility []bool
+			var messages []string
 			var server *Server
 			s, _ := browserDataServer(t, func(path string, body map[string]any) (int, string) {
 				mu.Lock()
@@ -798,6 +804,7 @@ func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
 					return 200, `{"ok":true}`
 				case path == "/health":
 					healthCalls++
+					messages = append(messages, server.jobs.snapshot().Message)
 					server.mu.Lock()
 					readyDuring = append(readyDuring, server.ready)
 					server.mu.Unlock()
@@ -820,6 +827,10 @@ func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
 				return 200, `{"ok":true}`
 			})
 			server = s
+			// The network lease runs out while the browser restarts.
+			s.mu.Lock()
+			s.safety.Gate = &cage.GateStatus{Mode: cage.GateOpen, Until: time.Now().Add(300 * time.Millisecond)}
+			s.mu.Unlock()
 			// The picture is hidden: the host told the old controller so.
 			if err := s.browserViews.apply(s.changeBrowserVisibility); err != nil {
 				t.Fatal(err)
@@ -836,6 +847,9 @@ func TestBrowserResetReattachesAndReportsTheOutcome(t *testing.T) {
 			}
 			if !slices.Contains(readyDuring, false) {
 				t.Fatalf("ready never dropped during the restart: %v", readyDuring)
+			}
+			if !slices.ContainsFunc(messages, func(message string) bool { return strings.Contains(message, "联网授权已到期") }) {
+				t.Fatalf("the lapsed lease was not said during the reset: %q", messages)
 			}
 			if c.wantError == "" {
 				if job.Error != "" {

@@ -154,6 +154,25 @@ try {
   await section.getByText('设置暂时读不出来', { exact: false }).waitFor();
   assert.equal(await section.getByRole('textbox', { name: '要保留的网站' }).count(), 0, 'no empty kept list while the settings cannot be read');
   await page.screenshot({ path: fileURLToPath(new URL(`privacy-section-unreadable-${engine}.png`, output)) });
+  // The clear dialog waits for the kept list whenever site data or the cache
+  // is chosen (both skip the kept sites); history alone, or a clear without
+  // the kept list, runs.
+  await page.evaluate(() => document.dispatchEvent(new CustomEvent('cage-browser-data', { detail: { view: 'clear' } })));
+  const dialog = page.getByRole('dialog', { name: '清除浏览数据' });
+  const clear = dialog.getByRole('button', { name: '清除数据', exact: true });
+  await dialog.getByText('设置暂时读不出来', { exact: false }).waitFor();
+  assert.ok(await clear.isDisabled(), 'site data waits for the kept list');
+  await dialog.getByRole('checkbox', { name: /^Cookie 和网站数据/ }).uncheck();
+  await dialog.getByText('缓存', { exact: false }).filter({ hasText: '读出来之前' }).waitFor();
+  assert.ok(await clear.isDisabled(), 'the cache waits for the kept list too');
+  const keep = dialog.getByRole('checkbox', { name: /^跳过/ });
+  await keep.uncheck();
+  assert.ok(await clear.isEnabled(), 'a clear without the kept list runs');
+  await keep.check();
+  await dialog.getByRole('checkbox', { name: /^缓存的图片和文件/ }).uncheck();
+  assert.ok(await clear.isEnabled(), 'history alone runs');
+  await page.keyboard.press('Escape');
+  await dialog.waitFor({ state: 'hidden' });
   unreadable = false;
   await section.getByRole('button', { name: '重试', exact: true }).click();
   await section.getByRole('textbox', { name: '要保留的网站' }).waitFor();
@@ -161,7 +180,7 @@ try {
   assert.equal(await section.locator('.bd-suggest button', { hasText: '127.0.0.1' }).count(), 0, 'the editor is not offered as a site to keep');
   await section.getByText('自动清理还没有成功过', { exact: false }).waitFor();
   await page.screenshot({ path: fileURLToPath(new URL(`privacy-section-${engine}.png`, output)) });
-  checks.push('the browser data section: entries, settings it cannot read shown with 重试 and no empty list, no loopback suggestion, an automatic cleaning failure before any success');
+  checks.push('the browser data section: entries, settings it cannot read shown with 重试 and no empty list, clears of site data or the cache waiting for them, no loopback suggestion, an automatic cleaning failure before any success');
   assert.deepEqual(errors, []);
   await writeFile(new URL(`ui-result-${engine}.json`, output), JSON.stringify({ passed: true, engine, checks }, null, 2) + '\n');
   console.log(JSON.stringify({ passed: true, checks }, null, 2));

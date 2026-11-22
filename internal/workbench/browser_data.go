@@ -440,11 +440,11 @@ func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]a
 	return body
 }
 
-// A regular clear of site data excludes the kept sites, so it needs the
-// settings to be readable. The HTTP cache holds no sign-in: a cache clear
-// without them clears the kept sites' cache too, and nothing else.
+// A regular clear of site data or the cache excludes the kept sites (the
+// guest hands them to Chromium for both), so it needs the settings to be
+// readable. History and downloads do not.
 func (in *browserDataInput) needsKeptSites() bool {
-	return in.Mode == "clear" && in.Protect != "none" && in.Session != "private" && slices.Contains(in.Types, "site")
+	return in.Mode == "clear" && in.Protect != "none" && in.Session != "private" && (slices.Contains(in.Types, "site") || slices.Contains(in.Types, "cache"))
 }
 
 type browserDataGuestError struct{ message string }

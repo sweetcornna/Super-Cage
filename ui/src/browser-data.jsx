@@ -128,8 +128,8 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
     } catch (failure) { setError(failure.message); setPhase("edit"); }
   };
   const kept = settings?.keep?.length || 0;
-  // A clear of site data skips the kept sites; without them it waits.
-  const needsKept = !isPrivate && keepEnabled && chosen.includes("site");
+  // Site data and the cache skip the kept sites; without the list such a clear waits.
+  const needsKept = !isPrivate && keepEnabled && (chosen.includes("site") || chosen.includes("cache"));
   const blocked = needsKept && !settings;
   const footer = phase === "done"
     ? <button className="primary" onClick={onClose} autoFocus>完成</button>
@@ -159,7 +159,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
           </label>}
         </div>
         {isPrivate && <p className="bd-note">无痕会话只在内存中保存，按整个会话清除；它没有浏览记录。</p>}
-        {settingsError && !isPrivate && <div className="bd-unavailable"><p className="error-message" role="alert">{sentence(settingsError)}{needsKept ? "读出来之前不清除 Cookie 和网站数据，以免清掉保持登录的网站。" : ""}</p>
+        {settingsError && !isPrivate && <div className="bd-unavailable"><p className="error-message" role="alert">{sentence(settingsError)}{needsKept ? "读出来之前不清除 Cookie、网站数据和缓存，以免清掉保持登录的网站。" : ""}</p>
           <button className="compact" onClick={retrySettings}><RefreshCw size={14} />重试</button></div>}
         <div className="choice-list bd-categories" role="group" aria-label="要清除的内容">
           {visible.map(item => <label key={item.id} className={"choice" + (types.has(item.id) ? " checked" : "")}>
@@ -167,7 +167,7 @@ function ClearDialog({ tab, tabs, preset, onClose, onInternal, onVault }) {
             <span><strong>{item.title}<em className="bd-meta">{categoryMeta(item.id, summary?.error ? {} : summary, effectiveRange)}</em></strong><small>{item.detail}</small></span>
           </label>)}
         </div>
-        {!isPrivate && types.has("site") && <label className="check-line bd-keep">
+        {!isPrivate && (types.has("site") || types.has("cache")) && <label className="check-line bd-keep">
           <input type="checkbox" checked={keepEnabled} disabled={phase === "clearing"} onChange={event => setKeepEnabled(event.target.checked)} />
           <span>跳过{kept ? ` ${kept} 个` : ""}保持登录的网站和 Super Cage 内置页面（文件编辑器、Claude Science）</span>
           <button type="button" className="text-button" onClick={() => { onClose(); openBrowserData({ view: "privacy", section: "kept" }); }}>管理</button>
@@ -510,7 +510,7 @@ export function BrowserPrivacySection({ tab, tabs, onInternal, onOpenPage, onClo
     </div>
     {notice && <p className="bd-notice" role="status">{notice}</p>}
     {settingsError ? <section className="bd-block" aria-label="保持登录的网站" id="bd-kept"><h3>保持登录的网站和自动清理</h3>
-      <Unavailable value={{ message: sentence(settingsError) + "读出来之前，清除浏览数据不会清除 Cookie 和网站数据。" }} onRetry={retrySettings} /></section> : <>
+      <Unavailable value={{ message: sentence(settingsError) + "读出来之前，清除浏览数据不会清除 Cookie、网站数据和缓存。" }} onRetry={retrySettings} /></section> : <>
       <KeptSites settings={settings} onSettings={setSettings} tabs={tabs} />
       <AutoClean settings={settings} onSettings={setSettings} />
     </>}
