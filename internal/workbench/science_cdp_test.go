@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -197,7 +198,9 @@ func launchTestBrowserIn(t *testing.T, profile string, preferences map[string]an
 		"--log-net-log=" + netLog, "--net-log-capture-mode=Default",
 	}
 	cmd := exec.Command(path, append(append(base, args...), "about:blank")...)
-	cmd.Env = append(os.Environ(), env...)
+	// The teardown tests crash renderers on purpose: their minidumps go to
+	// the profile, not to the machine's own Chrome crash database.
+	cmd.Env = append(append(os.Environ(), "BREAKPAD_DUMP_LOCATION="+filepath.Join(profile, "Crashpad")), env...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
