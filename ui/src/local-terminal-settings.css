@@ -59,6 +59,11 @@
   line-height: 1.5;
   white-space: nowrap;
 }
+/* Herdr linked to the environment: the same green as the entry's 已连接. */
+.local-terminal-chip[data-connected] {
+  background: color-mix(in srgb, var(--green) 13%, var(--surface));
+  color: var(--green);
+}
 /* The group heading of the two switches, as the settings page's own groups;
    the entry's devices and kept terminals use it too. */
 :is(.local-terminal-settings, .local-entry) .local-terminal-subtitle {

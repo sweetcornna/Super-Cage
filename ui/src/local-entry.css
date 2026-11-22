@@ -22,6 +22,20 @@
 .settings-subpage .local-entry-state > button {
   margin-left: auto;
 }
+/* The status line and, while the entry is on, the switch that turns it off. */
+.settings-subpage .local-entry-state-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 16px 0 20px;
+}
+.settings-subpage .local-entry-state-row .local-entry-state {
+  flex: 1;
+  margin: 0;
+}
+.settings-subpage .local-entry-state-row .local-entry-switch {
+  flex: none;
+}
 .settings-subpage .local-entry-dot {
   flex: none;
   width: 7px;
@@ -209,11 +223,6 @@
   min-width: 12em;
 }
 
-.settings-subpage .local-entry-footer {
-  margin: 40px 0 0;
-  padding: 24px 0 0;
-  border-top: 1px solid var(--line);
-}
 
 .local-entry-include-line {
   display: block;
@@ -246,6 +255,18 @@
 }
 .settings-subpage .local-entry .local-entry-unfiltered {
   margin: 4px 0 0;
+}
+.settings-subpage .local-entry .local-entry-guide {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--clay-ink);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.settings-subpage .local-entry .local-entry-guide:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 /* A revocation that did not reach another running environment. */

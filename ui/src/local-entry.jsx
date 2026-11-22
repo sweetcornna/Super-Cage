@@ -1,10 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { Check, Copy, LoaderCircle, Pencil } from "lucide-react";
-import { api, writeClipboard } from "./api";
+import { Check, Copy, ExternalLink, LoaderCircle, Pencil } from "lucide-react";
+import { api, native, nativeAvailable, writeClipboard } from "./api";
 import { EmptyState } from "./drawings";
 import {
   commandRows,
   endKeptConfirm,
+  entryGuide,
   entryStateLine,
   includeDialog,
   includeRow,
@@ -29,7 +30,12 @@ const ENTRY_PART = "从你自己的终端或 Herdr 连进来";
 // section (local-terminal-page.jsx). It never polls:
 // it reads the state when it opens, after each action, when the window comes
 // back into view, and when the environment's readiness changes.
-export default function LocalEntryPage({ onConfirm, environmentReady }) {
+//
+// Once Herdr has added the environment and the page lists it among the
+// applications to open terminals with (herdrElsewhere), its command row
+// goes: Herdr has one place. onView hears each state read, for that and
+// for the page's order.
+export default function LocalEntryPage({ onConfirm, environmentReady, herdrElsewhere = false, onView }) {
   const [view, setView] = useState(null);
   const [failure, setFailure] = useState(null);
   const [busy, setBusy] = useState("");
@@ -48,6 +54,9 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   useEffect(() => {
     load();
   }, [load, environmentReady]);
+  useEffect(() => {
+    onView?.(view);
+  }, [view, onView]);
   useEffect(() => {
     const refresh = () => {
       if (document.visibilityState === "visible") load();
@@ -208,21 +217,27 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
     );
   }
 
-  const rows = commandRows(view);
+  const rows = commandRows(view, { herdrElsewhere });
+  const [shortNote, rawNote] = unfilteredNote();
   const include = includeRow(view);
   const devices = sortedDevices(view.devices);
   const kept = keptRows(view);
   return part(
     <>
-      <p className="local-entry-state" data-tone={line.tone} role="status">
-        <span className="local-entry-dot" aria-hidden="true" />
-        {line.text}
-        {view.revoked && (
-          <button type="button" className="primary" disabled={Boolean(busy)} onClick={turnOn}>
-            重新开启
-          </button>
-        )}
-      </p>
+      <div className="local-entry-state-row">
+        <p className="local-entry-state" data-tone={line.tone} role="status">
+          <span className="local-entry-dot" aria-hidden="true" />
+          {line.text}
+          {view.revoked && (
+            <button type="button" className="primary" disabled={Boolean(busy)} onClick={turnOn}>
+              重新开启
+            </button>
+          )}
+        </p>
+        {busy === "off" && <LoaderCircle size={16} className="spin" aria-hidden="true" />}
+        <input type="checkbox" role="switch" className="local-entry-switch" checked aria-label={ENTRY_PART}
+          title="关闭" disabled={Boolean(busy)} onChange={turnOff} />
+      </div>
       {error && <p className="local-entry-error" role="alert">{error}</p>}
       {notice && <p className="local-entry-notice" role="status">{notice}</p>}
       <ul className="local-entry-commands" aria-label="连接命令">
@@ -248,7 +263,11 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         ))}
       </ul>
       <span className="sr-only" aria-live="polite">{copied ? "已复制" : ""}</span>
-      <p className="field-help local-entry-unfiltered">{unfilteredNote()}</p>
+      <p className="field-help local-entry-unfiltered">
+        {shortNote}
+        <br />
+        {rawNote} <GuideLink onError={setError} />
+      </p>
       {include && (
         <p className="local-entry-include" data-state={include.state}>
           {include.text}
@@ -287,13 +306,25 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
           </ul>
         </section>
       )}
-      <div className="local-entry-footer">
-        <button type="button" disabled={Boolean(busy)} onClick={turnOff}>
-          {busy === "off" && <LoaderCircle size={16} className="spin" aria-hidden="true" />}
-          关闭本机终端
-        </button>
-      </div>
     </>
+  );
+}
+
+// The guide, through the desktop's list of pages when there is one.
+function GuideLink({ onError }) {
+  return (
+    <a className="local-entry-guide" href={entryGuide.url} target="_blank" rel="noopener noreferrer" onClick={async (event) => {
+      if (!nativeAvailable()) return;
+      event.preventDefault();
+      try {
+        await native("appReference", { kind: entryGuide.kind });
+      } catch {
+        onError("无法打开使用说明：" + entryGuide.url);
+      }
+    }}>
+      {entryGuide.text}
+      <ExternalLink size={12} aria-hidden="true" />
+    </a>
   );
 }
 

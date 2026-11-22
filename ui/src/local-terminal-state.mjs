@@ -37,12 +37,12 @@ export const SWITCHES = Object.freeze([
   {
     key: "image_upload",
     title: "上传拖入的图片",
-    help: "把图片拖入本机终端应用的窗口，或粘贴的内容只有图片文件的完整路径时，会上传到环境，并粘贴环境中的路径。只处理 PNG、JPEG、WebP 和 GIF 图片；其他文件和输入的文字原样发送。从你自己的终端 ssh 连进来时不上传，按文字粘贴。",
+    help: "拖入窗口的 PNG、JPEG、WebP 或 GIF 图片上传到环境，粘贴它在环境中的路径。",
   },
   {
     key: "clipboard_write",
     title: "允许环境写入剪贴板",
-    help: "环境中的程序（例如 neovim、tmux）复制的内容会写入这台电脑的剪贴板，与网页终端一致；从你自己的终端 ssh 连进来时也一样。环境始终无法读取这台电脑的剪贴板。",
+    help: "环境中的程序（例如 neovim、tmux）复制的内容写入这台电脑的剪贴板，环境始终读不到它。",
   },
 ]);
 
@@ -73,8 +73,8 @@ const byName = (a, b) => collator.compare(a.name, b.name);
 // found on this computer (alphabetical), then the built-in terminal, then the
 // others greyed out. Herdr is listed only where it can open a terminal of
 // the environment shown (the desktop leaves it out otherwise) and says what
-// it opens.
-export function chooserOptions(apps, selected = BUILT_IN) {
+// it opens; machineState is its link's state on the entry (已连接).
+export function chooserOptions(apps, selected = BUILT_IN, machineState = "") {
   const list = Array.isArray(apps) ? apps : [];
   const usable = app => app.installed && (app.hosts || app.machine);
   const ready = list.filter(usable).sort(byName);
@@ -86,7 +86,8 @@ export function chooserOptions(apps, selected = BUILT_IN) {
     group,
     selectable: group === "ready",
     note: group === "waiting" ? (app.note || "稍后的版本提供") : app.machine ? (app.note || "") : "",
-    chip: group === "missing" ? "未安装" : group === "waiting" ? "稍后提供" : "",
+    chip: group === "missing" ? "未安装" : group === "waiting" ? "稍后提供" : app.machine && machineState === "connected" ? "已连接" : "",
+    connected: group === "ready" && Boolean(app.machine) && machineState === "connected",
     checked: app.id === selected,
   });
   return [

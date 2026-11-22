@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "./api";
 import { getClientContext } from "./client-context.mjs";
@@ -11,7 +11,9 @@ import "./local-terminal-settings.css";
 // uses on this computer, and the two switches its windows (and, for the
 // clipboard, ssh sessions) follow. Loaded lazily with the section:
 // detecting the applications happens only while it is open.
-export default function LocalTerminalSettings({ onSaved, onDirty }) {
+// herdrState is Herdr's link to this environment (the entry's part reads
+// it): its row says 已连接. onApps hears the applications found.
+export default function LocalTerminalSettings({ onSaved, onDirty, herdrState = "", onApps }) {
   const [saved, setSaved] = useState(null);
   const [draft, setDraft] = useState(null);
   const [apps, setApps] = useState(null);
@@ -20,6 +22,8 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
+  const heard = useRef(onApps);
+  heard.current = onApps;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -32,7 +36,9 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
         setDraft(settings);
         setSupported(state?.supported !== false);
         setWarning(state?.warning || "");
-        setApps(Array.isArray(found?.apps) ? found.apps : []);
+        const list = Array.isArray(found?.apps) ? found.apps : [];
+        setApps(list);
+        heard.current?.(list);
       })
       .catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
     return () => controller.abort();
@@ -40,7 +46,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
 
   // Where no application can be used, the built-in terminal is what opens.
   const shown = supported ? draft?.app : BUILT_IN;
-  const options = useMemo(() => chooserOptions(apps, shown), [apps, shown]);
+  const options = useMemo(() => chooserOptions(apps, shown, herdrState), [apps, shown, herdrState]);
   const gone = supported ? goneText(saved, apps) : "";
   const dirty = Boolean(saved && draft && settingsChanged(saved, draft));
   const loading = !error && (!saved || !apps);
@@ -84,7 +90,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
             <strong>{option.name}</strong>
             {option.note && <small>{option.note}</small>}
           </span>
-          {option.chip && <span className="local-terminal-chip">{option.chip}</span>}
+          {option.chip && <span className="local-terminal-chip" data-connected={option.connected || undefined}>{option.chip}</span>}
         </label>)}
       </div>
       {supported && automationNote(apps) && <p className="field-help local-terminal-automation">{automationNote(apps)}</p>}

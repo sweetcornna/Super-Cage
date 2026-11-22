@@ -8,7 +8,9 @@ import {
   includeRow,
   keptRows,
   endKeptConfirm,
+  entryGuide,
   loadError,
+  offConfirm,
   relativeTime,
   revokeConfirm,
   shortFingerprint,
@@ -74,6 +76,16 @@ test("Herdr and attach rows come with their capabilities", () => {
   assert.match(herdr.caption, /空闲 10 分钟后自动停止/);
   const states = ["not_set_up", "ready", "connected"].map((state) => commandRows({ ...on, herdr: { state, command: "hc machine add cage-default" } }).at(-1));
   assert.deepEqual(states.map((row) => [row.status, Boolean(row.connected)]), [["未添加", false], ["已添加", false], ["已连接", true]]);
+  // Once added and listed among the applications, Herdr is only there.
+  const elsewhere = ["not_set_up", "ready", "connected"].map((state) => commandRows({ ...on, herdr: { state, command: "hc machine add cage-default" } }, { herdrElsewhere: true }).some((row) => row.id === "herdr"));
+  assert.deepEqual(elsewhere, [true, false, false]);
+});
+
+test("the switch on the status line turns off the connections in, and says only that", () => {
+  assert.equal(offConfirm.title, "不再从你自己的终端连进来？");
+  assert.match(offConfirm.body, /ssh 和 Herdr 连接会立即断开/);
+  assert.match(offConfirm.body, /用终端应用打开不受影响/);
+  assert.equal(offConfirm.danger, true);
 });
 
 test("include row and dialog", () => {
@@ -99,10 +111,14 @@ test("include row and dialog", () => {
   assert.equal(includeDialog({}).warning, "");
 });
 
-test("the page says exactly what is filtered", () => {
-  const note = unfilteredNote();
-  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s", "和 cage attach 一样的过滤", "拖入的图片不上传", "Herdr 的终端画面同样经过过滤"]) assert.ok(note.includes(word), word);
-  assert.equal(note.includes("会被拒绝"), false);
+test("the page says in two lines what is filtered, the rest in the guide", () => {
+  const lines = unfilteredNote();
+  assert.equal(lines.length, 2);
+  const note = lines.join("");
+  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "和 cage attach 一样的过滤", "Herdr 的终端画面"]) assert.ok(note.includes(word), word);
+  assert.ok(lines.every((line) => line.length <= 50), lines.join(" / "));
+  assert.equal(entryGuide.kind, "local-terminal-guide");
+  assert.match(entryGuide.url, /^https:\/\/github\.com\/sweetcornna\/Super-Cage\/blob\/main\/docs\/guide\/local-terminal\.md$/);
 });
 
 test("a revocation that did not reach another environment says so", () => {

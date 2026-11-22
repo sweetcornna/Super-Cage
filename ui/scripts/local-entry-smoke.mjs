@@ -114,8 +114,10 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
   for (const scheme of ["light", "dark"]) {
     const entry = entryState();
     const chunks = [];
+    const natives = [];
     let clipboard = "";
     const fixture = await createWorkbench({ viewport: { width, height }, nativeRequest: async (body) => {
+      natives.push(body);
       if (body.action === "clipboardWrite") clipboard = body.text;
       return null;
     }, beforeNavigate: async (page) => {
@@ -160,11 +162,16 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText("cage ssh default", { exact: true }).waitFor();
       assert.equal(entry.requests.some((r) => r.method === "POST" && r.path === "/entry/include"), false);
       await content.getByText(/还没有包含 Super Cage 的配置/).waitFor();
-      // What is filtered and what is not is said on the page, exactly:
-      // sessions with a terminal through cage attach's filter, the rest not.
-      await content.getByText(/scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
-      await content.getByText(/带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤/).waitFor();
+      // What is filtered and what is not, in two lines; the details are in
+      // the guide, which the desktop opens from its own list of pages.
+      await content.getByText(/ssh、ssh -t 和 Herdr 的终端画面经过和 cage attach 一样的过滤/).waitFor();
+      await content.getByText(/ssh -T、scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
       assert.equal(await content.getByText(/会被拒绝/).count(), 0);
+      const guide = content.getByRole("link", { name: "使用说明" });
+      assert.equal(await guide.getAttribute("href"), "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/local-terminal.md");
+      await guide.click();
+      assert.deepEqual(natives.filter((body) => body.action === "appReference").map((body) => body.kind), ["local-terminal-guide"]);
+      assert.equal(page.context().pages().length, 1, "the desktop opens the guide, the window does not navigate");
       // cage attach has its row; Herdr's has the one command that adds the
       // environment, its state, and what Herdr leaves running there.
       await content.getByText("cage attach", { exact: true }).waitFor();
@@ -173,7 +180,6 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await herdr.getByText("未添加", { exact: true }).waitFor();
       await herdr.getByText(/装上 herdr-core，空闲 10 分钟后自动停止/).waitFor();
       assert.equal(await herdr.getByRole("button", { name: "复制 hc machine add cage-default" }).count(), 1);
-      await content.getByText(/Herdr 的终端画面同样经过过滤/).waitFor();
       await shot("on-without-include");
       // Writing it later, from the row; a BOM is warned about first.
       entry.bom = true;
@@ -244,10 +250,15 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       entry.view.state = "idle";
       await nav.getByRole("button", { name: "远程连接", exact: true }).click();
       await nav.getByRole("button", { name: "本机终端", exact: true }).click();
-      await content.getByRole("button", { name: "关闭本机终端" }).click();
-      const off = page.getByRole("dialog", { name: "关闭本机终端？" });
-      await off.getByText("所有本机连接会立即断开；环境里的终端继续运行。").waitFor();
-      await off.getByRole("button", { name: "关闭本机终端", exact: true }).click();
+      // Off: the switch on the status line, which says what it ends.
+      assert.equal(await content.getByRole("button", { name: "关闭本机终端" }).count(), 0, "no second off button at the bottom");
+      const toggle = content.locator(".local-entry-state-row").getByRole("switch", { name: "从你自己的终端或 Herdr 连进来" });
+      assert.equal(await toggle.isChecked(), true);
+      await toggle.click();
+      const off = page.getByRole("dialog", { name: "不再从你自己的终端连进来？" });
+      await off.getByText("所有 ssh 和 Herdr 连接会立即断开；环境里的终端继续运行，用终端应用打开不受影响。").waitFor();
+      await shot("off-confirm");
+      await off.getByRole("button", { name: "关闭", exact: true }).click();
       await content.getByRole("heading", { name: "在你自己的终端里使用这个环境" }).waitFor();
       // A controller without the entry, and a window on another computer.
       for (const [variant, text] of [["outdated", "需要更新 Super Cage：正在运行的版本还没有本机终端。"], ["remote", "本机终端只能在这台电脑上的 Super Cage 里管理。"]]) {

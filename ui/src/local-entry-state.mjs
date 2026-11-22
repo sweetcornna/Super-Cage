@@ -48,8 +48,10 @@ const HERDR_STATES = { not_set_up: "未添加", ready: "已添加", connected: "
 // Super Cage's file; until then the first row is the cage ssh form, which
 // needs no Include. The attach row shows when the server offers cage attach
 // for this environment (commands.attach); Herdr's when it sends the
-// command that adds the environment to Herdr (view.herdr).
-export function commandRows(view) {
+// command that adds the environment to Herdr (view.herdr), until Herdr has
+// a place of its own on the page: once added, it is one of the applications
+// to open terminals with (herdrElsewhere), and only there.
+export function commandRows(view, { herdrElsewhere = false } = {}) {
   const commands = view?.commands;
   if (!view?.enabled || !commands) return [];
   const included = Boolean(view.include?.present);
@@ -62,7 +64,7 @@ export function commandRows(view) {
     rows.push({ id: "attach", command: commands.attach, caption: "任何终端：新开一个这个环境的终端，也会出现在 Super Cage 里" });
   }
   const herdr = view.herdr;
-  if (herdr?.command) {
+  if (herdr?.command && !(herdrElsewhere && herdr.state !== "not_set_up")) {
     rows.push({
       id: "herdr",
       command: herdr.command,
@@ -106,13 +108,23 @@ export function includeDialog(preview) {
   };
 }
 
-// What the page says about filtering (design 5.7), exactly as cage entry's
-// help does (entryTerminalNote in entry_cli.go).
+// What the page says about filtering (design 5.7): two lines, the rest in
+// the guide (docs/guide/local-terminal.md), as cage entry's help says it
+// in full (entryTerminalNote in entry_cli.go).
 export function unfilteredNote() {
-  return "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤，剪贴板写入按这台电脑的“允许环境写入剪贴板”；拖入的图片不上传，按文字粘贴。" +
-    "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。" +
-    "Herdr 的终端画面同样经过过滤；环境不能经 Herdr 向这台电脑的终端输入文字或读取它们。";
+  return [
+    "ssh、ssh -t 和 Herdr 的终端画面经过和 cage attach 一样的过滤。",
+    "ssh -T、scp、sftp 和 rsync 原样传送环境的字节，不经过滤。",
+  ];
 }
+
+// The guide, opened through the desktop's own list of pages
+// (appReference) or, in a browser, as a link.
+export const entryGuide = {
+  kind: "local-terminal-guide",
+  url: "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/local-terminal.md",
+  text: "使用说明",
+};
 
 // What the page says when a revocation did not reach a running environment
 // in time: its open connections go on until it next hears of the key.
@@ -191,10 +203,12 @@ export function revokeConfirm(device) {
   };
 }
 
+// Turning the entry off, from the switch on its status line: it ends the
+// connections in, nothing else on the page.
 export const offConfirm = {
-  title: "关闭本机终端？",
-  body: "所有本机连接会立即断开；环境里的终端继续运行。",
-  confirm: "关闭本机终端",
+  title: "不再从你自己的终端连进来？",
+  body: "所有 ssh 和 Herdr 连接会立即断开；环境里的终端继续运行，用终端应用打开不受影响。",
+  confirm: "关闭",
   danger: true,
 };
 

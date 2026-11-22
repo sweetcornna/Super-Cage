@@ -49,6 +49,10 @@ test("the chooser lists found applications, then the built-in terminal, then the
   assert.equal(herdr.selectable, true);
   assert.match(herdr.note, /在项目上新建终端时用 Herdr 打开/);
   assert.equal(chooserOptions(apps.filter(app => app.id !== "herdr")).some(option => option.id === "herdr"), false);
+  // Herdr's link to this environment shows on its row, and only on it.
+  assert.deepEqual(chooserOptions(apps, "wezterm", "connected").filter(option => option.chip === "已连接").map(option => option.id), ["herdr"]);
+  assert.deepEqual(chooserOptions(apps, "wezterm", "connected").filter(option => option.connected).map(option => option.id), ["herdr"]);
+  assert.equal(chooserOptions(apps, "wezterm", "ready").find(option => option.id === "herdr").chip, "");
   assert.equal(chooserOptions(null)[0].id, BUILT_IN);
   assert.equal(chooserOptions(apps)[5].checked, true);
 });
