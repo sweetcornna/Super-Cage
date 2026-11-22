@@ -70,6 +70,11 @@ func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, pat
 	if !validPath(path) {
 		return nil, &controlclient.AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
 	}
+	var request bytes.Buffer
+	// The generation is the target's, as the UI sends it.
+	if err := c.writeHead(&request, "GET", path, controlclient.Connection(target)); err != nil {
+		return nil, &controlclient.AgentError{Code: "invalid_input", Message: "Use a connection generation without control characters", NextAction: "client.context"}
+	}
 	failed := &controlclient.AgentError{Code: "connection_failed", Message: "WebSocket connection failed", NextAction: "status"}
 	conn, err := c.dial(ctx, handshakeTimeout)
 	if identity := controlclient.IdentityAgentError(err); identity != nil {
@@ -82,9 +87,6 @@ func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, pat
 	var nonce [16]byte
 	_, _ = rand.Read(nonce[:])
 	key := base64.StdEncoding.EncodeToString(nonce[:])
-	var request bytes.Buffer
-	// The generation is the target's, as the UI sends it.
-	c.writeHead(&request, "GET", path, controlclient.Connection(target))
 	request.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + key + "\r\n\r\n")
 	r := bufio.NewReaderSize(conn, 4096)
 	var reply reply

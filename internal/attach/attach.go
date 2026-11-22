@@ -224,6 +224,10 @@ func ParseArgs(args []string) (Config, error) {
 	cfg.ConfigPath = path
 	cfg.Target = controlclient.AgentTarget{Scope: "local"}
 	if *connection != "" {
+		// It is sent in a request header: the launcher's alphabet only.
+		if !connectionID(*connection) {
+			return cfg, errors.New("连接编号无效：只能由字母、数字、_ 和 - 组成，最多 128 个字符")
+		}
 		cfg.Target = controlclient.AgentTarget{Scope: "selected", Connection: *connection}
 	}
 	if termfilter.Controls(cfg.Project) {
@@ -250,6 +254,13 @@ type attacher struct {
 
 	sendMu sync.Mutex
 	ws     *controlwire.Conn
+
+	// What the attach writes itself waits while the program has a clipboard
+	// write open in the window (outMu guards these and output writes).
+	outMu     sync.Mutex
+	streaming bool // the last output left a clipboard write open
+	focusOwed bool // focus reports to turn back on after a reset
+	bellOwed  bool // a bell to ring
 
 	restore   func() // the local terminal's mode before the attach
 	leaveOnce sync.Once
@@ -418,12 +429,42 @@ func (a *attacher) noteInput(data []byte) []byte {
 	return out
 }
 
+// connectionID reports whether id has the form the desktop's launcher
+// accepts: ^[A-Za-z0-9_-]{1,128}$.
+func connectionID(id string) bool {
+	if len(id) == 0 || len(id) > 128 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// bell rings the local terminal's bell, once no clipboard write is open in
+// it: inside one the bell would end it early.
+func (a *attacher) bell() {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	if a.streaming {
+		a.bellOwed = true
+		return
+	}
+	_, _ = a.tty.Out.Write([]byte("\a"))
+}
+
 // leave returns the local terminal to how it was, once: the reset, then the
 // terminal mode. Every way out after the first output comes through here, a
 // panic in any of the attach's goroutines included.
 func (a *attacher) leave() {
 	a.leaveOnce.Do(func() {
-		_, _ = a.tty.Out.Write(a.filter.End(nil))
+		cols := 0
+		if a.tty.Size != nil {
+			cols, _, _ = a.tty.Size()
+		}
+		_, _ = a.tty.Out.Write(a.filter.End(nil, cols))
 		if a.restore != nil {
 			a.restore()
 		}
@@ -941,7 +982,10 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 				// The bytes that follow do not continue what this window
 				// shows: start from a clean screen, after ending what the
 				// last bytes left open.
-				if _, err := a.tty.Out.Write(append(a.filter.Abort(nil), "\x1bc"+focusOn...)); err != nil {
+				// Not a full reset: that would erase the owner's scrollback.
+				a.buf = append(a.filter.Abort(a.buf[:0]), termfilter.ClearReset...)
+				a.focusOwed = true
+				if err := a.writeOwn(); err != nil {
 					return err
 				}
 			}
@@ -950,6 +994,27 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 			a.ended = true
 		}
 	}
+}
+
+// writeOwn writes filtered output, then, unless it left a clipboard write
+// open, what the attach owes the window itself.
+func (a *attacher) writeOwn() error {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	a.streaming = a.filter.Streaming()
+	if !a.streaming {
+		if a.focusOwed {
+			a.buf, a.focusOwed = append(a.buf, focusOn...), false
+		}
+		if a.bellOwed {
+			a.buf, a.bellOwed = append(a.buf, '\a'), false
+		}
+	}
+	if len(a.buf) == 0 {
+		return nil
+	}
+	_, err := a.tty.Out.Write(a.buf)
+	return err
 }
 
 // writeOutput filters output for the local application. Replayed history
@@ -966,16 +1031,14 @@ func (a *attacher) writeOutput(data []byte) error {
 		if resets := a.filter.Resets(); resets != a.resets {
 			// A full or soft reset turned focus reports off as well.
 			a.resets = resets
-			a.buf = append(a.buf, focusOn...)
+			a.focusOwed = true
 		}
 		if a.replay > 0 {
 			a.replay -= n
 		}
 		data = data[n:]
-		if len(a.buf) > 0 {
-			if _, err := a.tty.Out.Write(a.buf); err != nil {
-				return err
-			}
+		if err := a.writeOwn(); err != nil {
+			return err
 		}
 	}
 	if cap(a.buf) > 1<<20 {

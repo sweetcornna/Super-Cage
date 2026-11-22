@@ -144,6 +144,10 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, conte
 	fail := func(err error) (int, []byte, error) {
 		return 0, nil, &url.Error{Op: method, URL: c.origin + path, Err: err}
 	}
+	var request bytes.Buffer
+	if err := c.writeHead(&request, method, path, c.ConnectionID); err != nil {
+		return fail(err)
+	}
 	conn, err := c.dial(ctx, timeout)
 	if err != nil {
 		return fail(err)
@@ -151,8 +155,6 @@ func (c *Client) Do(ctx context.Context, method, path string, body []byte, conte
 	defer conn.Close()
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	defer stop()
-	var request bytes.Buffer
-	c.writeHead(&request, method, path, c.ConnectionID)
 	if contentType {
 		request.WriteString("Content-Type: application/json\r\n")
 	}
@@ -244,8 +246,14 @@ func (c *Client) prove(conn net.Conn) error {
 }
 
 // writeHead writes the request line and the headers every request carries,
-// with the connection generation when there is one.
-func (c *Client) writeHead(b *bytes.Buffer, method, path, connection string) {
+// with the connection generation when there is one. A value holding a
+// control character, which could end the header early, is refused.
+func (c *Client) writeHead(b *bytes.Buffer, method, path, connection string) error {
+	for _, value := range []string{method, c.host, c.origin, connection} {
+		if hasControl(value) {
+			return errors.New("invalid request header value")
+		}
+	}
 	b.WriteString(method + " " + path + " HTTP/1.1\r\nHost: " + c.host + "\r\nOrigin: " + c.origin + "\r\n")
 	if connection != "" {
 		b.WriteString(controlclient.ConnectionHeader + ": " + connection + "\r\n")
@@ -262,6 +270,17 @@ func (c *Client) writeHead(b *bytes.Buffer, method, path, connection string) {
 		b.WriteString("\r\n")
 	}
 	c.mu.Unlock()
+	return nil
+}
+
+// hasControl reports whether a header value holds a control character.
+func hasControl(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // validPath accepts an origin-relative request target without spaces or

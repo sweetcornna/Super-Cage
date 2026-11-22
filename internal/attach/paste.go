@@ -143,7 +143,7 @@ func (p *attachPaste) deliver(ctx context.Context, paste []byte) error {
 		if err != nil {
 			// The paste is not sent: it would give the environment this
 			// computer's path. The bell says it did not arrive.
-			_, _ = p.a.tty.Out.Write([]byte("\a"))
+			p.a.bell()
 			return nil
 		}
 		guest = append(guest, path)
