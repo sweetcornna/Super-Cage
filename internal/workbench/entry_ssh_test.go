@@ -391,11 +391,13 @@ const entryHerdrConnectLine = `sh -c 'p=$(command -v herdr-core) || p=$HOME/.loc
 // from this Mac: the core's bytes on stdin, then "server restart".
 const entryHerdrInstallLine = `sh -c 'set -e; d=$HOME/.local/bin; mkdir -p $d; case $(readlink "$d/herdr-core" || true) in */Contents/MacOS/herdr-core) echo "a bundled remote core needs a complete bundle; run hc update on that machine" >&2; exit 5;; esac; rm -f $d/.herdr-core.new.*; t=$d/.herdr-core.new.$$; head -c 6437760 > $t; [ $(($(wc -c < $t))) -eq 6437760 ] || { rm -f $t; echo "the copy arrived incomplete" >&2; exit 3; }; chmod 755 $t; $t --version > /dev/null || { rm -f $t; echo "this hc does not run there" >&2; exit 4; }; mv -f $t $d/herdr-core; command -v hc > /dev/null 2>&1 || [ -e $d/hc ] || ln -s herdr-core $d/hc; $d/herdr-core server restart > /dev/null; $d/herdr-core --version'`
 
-// Herdr is parked: an exec line that names herdr, herdr-core or hc, in any
-// case, also once the shell's quotes and escapes are taken out, is refused
-// with one sentence and never reaches the environment, with a pty or
-// without. Otherwise the owner's Herdr, running on this Mac, would link the
-// environment's core straight to its own through an unfiltered exec.
+// Herdr is parked: an exec line that runs herdr, herdr-core or hc as a
+// command, in any case, also once the shell's quotes and escapes are taken
+// out, is refused with one sentence and never reaches the environment, with
+// a pty or without. Otherwise the owner's Herdr, running on this Mac, would
+// link the environment's core straight to its own through an unfiltered
+// exec. Lines that only name Herdr in an argument run as usual
+// (TestEntryHerdrLineCommandPosition).
 func TestEntryRefusesEveryHerdrLine(t *testing.T) {
 	f := newEntryFixture(t, true)
 	f.on()
@@ -408,10 +410,10 @@ func TestEntryRefusesEveryHerdrLine(t *testing.T) {
 		// line itself is reconstructed).
 		`sh -c 'd=$HOME/.local/bin; head -c 1024 > $d/.bundle.tgz && "$d/herdr-core" --hc-install-bundle $d/.bundle.tgz'`,
 		"herdr-core --version || true",
-		`sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`,
 		// The connect line drifted: spliced by the shell, another verb.
 		strings.Replace(entryHerdrConnectLine, "connect'", `conn""ect'`, 1),
 		strings.Replace(entryHerdrConnectLine, "connect'", "link'", 1),
+		// herdr-core's own path in a variable, then run as "$p".
 		`p=$HOME/.local/bin/herdr-core; exec "$p" link`,
 		`exec "$HOME/.local/bin/her""dr-core" link`,
 		`exec ~/.local/bin/h\c link`,
@@ -425,7 +427,9 @@ func TestEntryRefusesEveryHerdrLine(t *testing.T) {
 	}
 	for _, line := range refused {
 		if !entryHerdrLine(line) {
+			// Never run it: the fixture's guest is this Mac.
 			t.Errorf("%q was not taken for a Herdr line", line)
+			continue
 		}
 		stdout, stderr, status := entryRun(t, client, line, nil, nil)
 		if status != 1 || stdout != "" || stderr != entryHerdrRefusal+"\n" {
@@ -454,13 +458,77 @@ func TestEntryRefusesEveryHerdrLine(t *testing.T) {
 			t.Errorf("a Herdr line reached the guest: %q", line)
 		}
 	}
-	// Lines that only look alike are ordinary commands.
-	for _, line := range []string{"uname -sm", "echo reconnect", "echo hcl chc x.hc", "HC_SESSION=work true", "echo shepherd"} {
+	// Lines that only look alike, or name Herdr in an argument, are ordinary
+	// commands. These run on this Mac (the fixture's guest), in the fixture's
+	// home: only harmless ones.
+	for _, line := range []string{
+		"uname -sm", "echo reconnect", "echo hcl chc x.hc", "HC_SESSION=work true", "echo shepherd", "echo HC_SESSION",
+		"du -hc .", "mkdir -p data/hc && ls data/hc", "touch my-hc-project && ls my-hc-project",
+		"mkdir -p src/herdr-site && cd src/herdr-site && pwd", `printf '%s\n' --model=hc`,
+		`sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`,
+	} {
 		if entryHerdrLine(line) {
 			t.Errorf("%q was taken for a Herdr line", line)
+			continue
 		}
 		if _, stderr, status := entryRun(t, client, line, nil, nil); status != 0 {
 			t.Errorf("%q: status %d %q", line, status, stderr)
+		}
+	}
+}
+
+// The refusal reads only command words (final review B, finding 1): ordinary
+// rsync, scp, git and shell lines with hc or herdr in an argument, a path
+// segment or an option cluster pass; Herdr's programs as a command are
+// refused however the line spells them. Only the predicate runs here.
+func TestEntryHerdrLineCommandPosition(t *testing.T) {
+	for _, line := range []string{
+		// Quotes, escapes, case, white space.
+		`"hc" connect`, `'herdr-core' connect`, `h""c connect`, `h\c connect`, `her'dr'-core connect`,
+		"   hc connect", "\thc\tconnect", "\n  hc connect", "Hc Connect", "HERDR-CORE connect", "HeRdR remote-client-bridge",
+		// Paths.
+		"/usr/local/bin/hc connect", "~/.local/bin/herdr-core connect", `"$HOME/.local/bin/herdr-core" connect`, "./herdr connect",
+		"/Applications/Herdr.app/Contents/MacOS/Herdr", "/Applications/Herdr.app/Contents/Resources/bin/helper --bridge",
+		// What runs the next word.
+		"exec hc connect", "exec -a x herdr-core connect", "env X=1 hc connect", "env -i PATH=/bin hc connect", "env -u HOME hc connect",
+		"nohup hc connect", "command hc connect", "command -v hc", "nice -n 5 hc connect", "nice hc connect", "time hc connect",
+		"X=1 Y=2 hc connect", "2>/dev/null hc connect", "> log hc connect", "hc connect 2>&1 | tee log",
+		// After another command.
+		"true; hc connect", "true && hc connect", "false || hc connect", "echo x | hc connect", "sleep 1 & hc connect",
+		"true\nhc connect", "(hc connect)", "echo $(hc connect)", "echo `hc connect`", `echo "$(hc connect)"`, "x=$(hc list) true",
+		"if hc connect; then :; fi", "! hc connect", "{ hc connect; }", "cat <(hc list)",
+		// Inside a shell's string.
+		`sh -c "hc connect"`, `bash -lc 'hc connect'`, `zsh -c 'exec herdr-core connect'`, `dash -c "$HOME/.local/bin/herdr-core connect"`,
+		`/bin/sh -c 'true; hc connect'`, `sh -o pipefail -c 'hc connect'`, `bash -c "sh -c 'hc connect'"`, `sh -c "echo \"x\"; hc connect"`,
+		// herdr-core's path in a variable.
+		`p=~/.local/bin/herdr-core; "$p" connect`,
+		// Windows.
+		"herdr.exe connect", "HC.EXE link", `C:\Herdr\herdr-core.exe connect`, "cmd.exe /c hc connect", `cmd /C "herdr-core connect"`,
+		`cmd /s /c ""C:\Program Files\Herdr\hc.exe" link"`,
+	} {
+		if !entryHerdrLine(line) {
+			t.Errorf("%q was not taken for a Herdr line", line)
+		}
+	}
+	for _, line := range []string{
+		// The review's samples.
+		"du -hc /var/log", "rsync --server -vlogDtpre.iLsfxCIvu . data/hc/", "rsync --server -vlogDtpre.iLsfxCIvu . data/HC.csv",
+		"scp -t results/hc.csv", "git-upload-pack '~/project/herdr'", "cd ~/src/herdr-site && make", "ls my-hc-project",
+		"python3 train.py --model=hc", "echo HC_SESSION",
+		// Arguments, path segments and option clusters.
+		"echo hc", "cat herdr/README.md", "grep -rn hc .", "find . -name hc", "ls -la ~/.local/bin/herdr-core",
+		"chmod +x ~/.local/bin/herdr-core", "tar -czf hc.tgz herdr/", "git-receive-pack 'herdr.git'",
+		"rsync --server --sender -vlogDtpre.iLsfxCIvu . herdr/", "scp -t herdr/hc.csv", "du -hc /var/log | sort -h",
+		"echo hc > out.txt", "cat < herdr.txt", "echo $(ls herdr)", "echo HC_SESSION=work", "HC_SESSION=work true",
+		"MODEL=hc python3 train.py", "HC=1 make", "x=herdr ls", "env", "nice", "echo hcl chc x.hc", "echo shepherd",
+		// Quoted text is not a command.
+		`git commit -m "wip; hc x"`, `echo 'a | hc'`, `python3 -c "print(hc)"`, `awk '{print(hc)}' notes`,
+		`sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`,
+		// A shell running a script, or a string without Herdr.
+		"sh ./build.sh herdr", `bash -c 'cd ~/src/herdr && make'`, "cmd /c dir herdr", "sh -c ''", "sh -c",
+	} {
+		if entryHerdrLine(line) {
+			t.Errorf("%q was taken for a Herdr line", line)
 		}
 	}
 }

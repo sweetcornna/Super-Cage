@@ -42,7 +42,7 @@ import (
 //                            output through cage attach's escape filter;
 //       exec, shell        -> the guest's run script over Cage's own hop;
 //       subsystem sftp     -> the guest's sftp-server over the same hop;
-//       an exec line that names Herdr -> refused while Herdr is parked.
+//       an exec line that runs Herdr -> refused while Herdr is parked.
 //   - no handler for any forwarding, agent, X11, tunnel or client
 //     environment: those channels are rejected, those requests answered no.
 
@@ -479,22 +479,229 @@ type entryWindowChange struct {
 	Cols, Rows, Width, Height uint32
 }
 
-// entryHerdrName finds Herdr in an exec line: herdr anywhere (herdr-core,
-// Herdr.app, herdr.exe, …) or hc as a word (hc, hc.exe, --hc-install-bundle;
-// not HC_SESSION), in any case.
-var entryHerdrName = regexp.MustCompile(`(?i)herdr|(^|[^a-z0-9_.])hc([^a-z0-9_]|$)`)
+// The Herdr refusal (Herdr is parked, 2026-11-22). An exec line is refused
+// when it runs one of Herdr's programs as a command: the first word of the
+// line, or of a command after ; & | ( $( a backtick or a newline, past
+// NAME=value words, a shell keyword and exec, env, nohup, command or nice
+// with their options, and the same inside the string of sh -c (bash, zsh,
+// dash) and cmd /c. A command word is Herdr's when its last path segment,
+// in any case, without .exe and with the shell's quotes, escapes and cmd's
+// ^ taken out, is herdr, herdr-core or hc, or when it lies inside
+// Herdr.app/Contents/. Words in argument position never count: du -hc,
+// data/hc/, --model=hc, a repository named herdr. One shape more is refused:
+// an assignment of herdr-core's own path (p=$HOME/.local/bin/herdr-core,
+// the connect line's fallback), which the line then runs as "$p". This says
+// "not supported" to the owner's own Herdr through its connect, install and
+// bridge lines; it is no boundary, and a shell's stdin is never read.
 
-// entryShellQuotes are what a shell (sh or cmd) takes out of a word before
-// it runs it: conn""ect, her\dr, h^c.
-var entryShellQuotes = strings.NewReplacer(`"`, "", "'", "", `\`, "", "^", "", "`", "")
+// entryHerdrNames are the last path segments of Herdr's programs.
+var entryHerdrNames = map[string]bool{"herdr": true, "herdr-core": true, "hc": true}
 
-// entryHerdrLine: Herdr is parked (2026-11-22), so any exec line that names
-// it is refused, as written or once the shell's quotes are out: its connect
-// line, its install and update scripts, its TUI's bridge and whatever a newer
-// Herdr sends instead. Through an unfiltered exec the owner's Herdr on this
-// computer would link the environment's core straight to its own.
+// entryCommandPrefixes run the word after them, past their options; the
+// shell keywords before a command count the same.
+var entryCommandPrefixes = map[string]bool{
+	"exec": true, "env": true, "nohup": true, "command": true, "nice": true, "time": true,
+	"if": true, "then": true, "else": true, "elif": true, "while": true, "until": true, "do": true, "!": true, "{": true,
+}
+
+// entryPrefixValues are the prefixes' options that take the next word:
+// exec -a NAME, nice -n N, env -u NAME, env -C DIR.
+var entryPrefixValues = map[string]bool{"-a": true, "-n": true, "-u": true, "-C": true}
+
+var entryAssignment = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*\+?=`)
+
+// entryHerdrProgram returns which of Herdr's programs a command word runs,
+// or "". The word keeps its backslashes: a folder separator in cmd, an
+// escape in sh (h\c), so both readings are tried.
+func entryHerdrProgram(word string) string {
+	word = strings.ToLower(strings.ReplaceAll(word, "^", ""))
+	for _, w := range []string{word, strings.ReplaceAll(word, `\`, "")} {
+		if name := strings.TrimSuffix(w[strings.LastIndexAny(w, `/\`)+1:], ".exe"); entryHerdrNames[name] {
+			return name
+		}
+		if strings.Contains(w, "herdr.app/contents/") {
+			return "herdr"
+		}
+	}
+	return ""
+}
+
+// entryHerdrLine: whether an exec line runs Herdr (above).
 func entryHerdrLine(command string) bool {
-	return entryHerdrName.MatchString(command) || entryHerdrName.MatchString(entryShellQuotes.Replace(command))
+	return entryHerdrScan(command, 0)
+}
+
+// entryHerdrScan reads line as sh would, as far as finding its command
+// words takes, and reads the sh -c and cmd /c strings in it the same way, at
+// most four deep.
+func entryHerdrScan(line string, depth int) bool {
+	if depth > 4 {
+		return false
+	}
+	const (
+		atCommand = iota // the next word is the command or runs it
+		inArguments
+		inShell     // sh, bash, zsh or dash, before its -c
+		inShellText // the next word is the -c string
+		inCmd       // cmd, before its /c or /k
+	)
+	state, prefixed, skip, redirect, found, done := atCommand, false, false, false, false, false
+	var saved []int // the states around $( … ), ( … ) and backticks
+	ticks := 0
+	var word strings.Builder
+	inWord := false
+	look := func(s string) { found = found || entryHerdrScan(s, depth+1) }
+	begin := func() { state, prefixed, skip, redirect = atCommand, false, false, false }
+	end := func() {
+		if n := len(saved); n > 0 {
+			state, saved = saved[n-1], saved[:n-1]
+		} else {
+			state = inArguments
+		}
+		prefixed, skip, redirect = false, false, false
+	}
+	take := func(at int) {
+		if !inWord {
+			return
+		}
+		text := word.String()
+		word.Reset()
+		inWord = false
+		switch {
+		case redirect: // a redirection's file
+			redirect = false
+		case skip: // an option's value
+			skip = false
+		case state == atCommand && entryAssignment.MatchString(text):
+			found = found || entryHerdrProgram(text[strings.IndexByte(text, '=')+1:]) == "herdr-core"
+		case state == atCommand && prefixed && strings.HasPrefix(text, "-"):
+			skip = entryPrefixValues[text]
+		case state == atCommand && entryCommandPrefixes[strings.ToLower(text)]:
+			prefixed = true
+		case state == atCommand:
+			found = found || entryHerdrProgram(text) != ""
+			state = inArguments
+			lower := strings.ToLower(text)
+			switch strings.TrimSuffix(lower[strings.LastIndexAny(lower, `/\`)+1:], ".exe") {
+			case "sh", "bash", "zsh", "dash":
+				state = inShell
+			case "cmd":
+				state = inCmd
+			}
+		case state == inShell && (text == "-o" || text == "+o"):
+			skip = true
+		case state == inShell && len(text) > 1 && text[0] == '-' && text[1] != '-' && strings.Contains(text, "c"):
+			state = inShellText
+		case state == inShell && !strings.HasPrefix(text, "-") && !strings.HasPrefix(text, "+"):
+			state = inArguments // a script and its arguments
+		case state == inShellText && !strings.HasPrefix(text, "-"):
+			look(text)
+			state = inArguments
+		case state == inCmd && (strings.EqualFold(text, "/c") || strings.EqualFold(text, "/k")):
+			// cmd runs the rest of the line, as it is or with the quotes
+			// around all of it taken out (cmd /s /c ""C:\a b\x.exe" y").
+			rest := strings.TrimSpace(line[at:])
+			look(rest)
+			if len(rest) > 1 && rest[0] == '"' && rest[len(rest)-1] == '"' {
+				look(rest[1 : len(rest)-1])
+			}
+			done = true
+		}
+	}
+	for i := 0; i < len(line) && !found && !done; i++ {
+		switch c := line[i]; c {
+		case '\'':
+			// As it is, to the next quote.
+			n := strings.IndexByte(line[i+1:], '\'')
+			if n < 0 {
+				n = len(line) - i - 1
+			}
+			word.WriteString(line[i+1 : i+1+n])
+			inWord = true
+			i += n + 1
+		case '"':
+			// To the next quote not escaped; $( and backticks in it run.
+			n := i + 1
+			for n < len(line) && line[n] != '"' {
+				if line[n] == '\\' {
+					n++
+				}
+				n++
+			}
+			text := line[i+1 : min(n, len(line))]
+			word.WriteString(text)
+			inWord = true
+			if at := strings.Index(text, "$("); at >= 0 {
+				look(text[at+2:])
+			}
+			if at := strings.IndexByte(text, '`'); at >= 0 {
+				look(text[at+1:])
+			}
+			i = n
+		case '\\':
+			word.WriteByte(c)
+			inWord = true
+			if i+1 < len(line) {
+				i++
+				word.WriteByte(line[i])
+			}
+		case ' ', '\t':
+			take(i)
+		case ';', '|', '\n', '\r':
+			take(i)
+			begin()
+		case '&':
+			take(i)
+			if i+1 < len(line) && line[i+1] == '>' { // &> file
+				i++
+				redirect = true
+			} else {
+				begin()
+			}
+		case '<', '>':
+			if inWord && strings.Trim(word.String(), "0123456789") == "" { // the 2 of 2>
+				word.Reset()
+				inWord = false
+			}
+			take(i)
+			for i+1 < len(line) && strings.IndexByte("<>&|", line[i+1]) >= 0 {
+				i++
+			}
+			redirect = true
+		case '$':
+			if i+1 < len(line) && line[i+1] == '(' {
+				take(i)
+				saved = append(saved, state)
+				begin()
+				i++
+			} else {
+				word.WriteByte(c)
+				inWord = true
+			}
+		case '(':
+			take(i)
+			saved = append(saved, state)
+			begin()
+		case '`':
+			take(i)
+			if ticks++; ticks%2 == 1 {
+				saved = append(saved, state)
+				begin()
+			} else {
+				end()
+			}
+		case ')':
+			take(i)
+			end()
+		default:
+			word.WriteByte(c)
+			inWord = true
+		}
+	}
+	if !found && !done {
+		take(len(line))
+	}
+	return found
 }
 
 // entryOutput is one ssh window's side of the escape filter, written the way
