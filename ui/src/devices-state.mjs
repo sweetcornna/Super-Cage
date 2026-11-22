@@ -5,6 +5,7 @@
 //   GET /api/devices/invite?wait=25          held read: waiting | request | joined | failed | expired
 //   POST /api/devices/invite/approve|reject, DELETE /api/devices/invite, DELETE /api/devices/{id}
 //   GET /api/client/devices, POST /api/client/devices/join, GET …/join?wait=25, POST …/{id}/open|close
+//   DELETE /api/client/devices               only when the list answered a problem (unreadable): moved aside
 import { MIN_SPACING_MS, backoffDelay } from "./session-poll.mjs";
 import { DEVICE_KEY, DEVICE_NAME_KEY } from "./mobile-cli/device-link.mjs";
 export { DEVICE_KEY, DEVICE_NAME_KEY };

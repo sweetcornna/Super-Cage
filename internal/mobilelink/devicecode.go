@@ -29,9 +29,14 @@ import (
 // lookup key only. The code is never written to disk or logs.
 
 // DeviceCodeDigits is the length of a short code; it lives as long as its
-// relay room (the relay's PairTimeout, 2 minutes by default) and serves one
-// device.
+// relay room (the relay's PairTimeout, 2 minutes by default), never more than
+// deviceCodeLife whatever the relay answers, and serves one device.
 const DeviceCodeDigits = 8
+
+// deviceCodeLife bounds a code, its QR and the host's wait for the joiner's
+// proof. The relay's expires_at is only an upper bound it may lower: a relay
+// that answered a longer life would buy itself time to search the code.
+const deviceCodeLife = 2 * time.Minute
 
 const deviceCodeSalt = "super-cage device code v1\x00"
 
@@ -46,6 +51,13 @@ var deviceCodeKDF = struct {
 // deviceCodeSlot runs one derivation at a time per process, so repeated
 // requests cannot stack 64 MiB allocations.
 var deviceCodeSlot = make(chan struct{}, 1)
+
+// deviceJoinWindow bounds the joiner from the room lookup to the host's proof
+// and the check number: joining the seat, TLS and the first proofs. The host
+// speaks first right after TLS, so the relay's expires_at never extends it.
+// The approval and the joiner's confirmation have their own bounds. Tests
+// shorten it.
+var deviceJoinWindow = 30 * time.Second
 
 // DeviceApprovalTimeout bounds the host's 允许 / 拒绝 once a joiner has proven
 // the code. The joiner waits 15 seconds longer for the answer. Tests shorten it.
@@ -185,6 +197,10 @@ func NewDeviceInvite(ctx context.Context, origin, admin string, host *remotelink
 			clear(confirm)
 			return nil, err
 		}
+		// The QR's e, the dialog's countdown and AcceptDevice all follow this.
+		if bound := time.Now().Add(deviceCodeLife); room.ExpiresAt.After(bound) {
+			room.ExpiresAt = bound
+		}
 		pair, raw, err := NewPairCode(origin, room, host.Pin)
 		if err != nil {
 			clear(confirm)
@@ -193,7 +209,7 @@ func NewDeviceInvite(ctx context.Context, origin, admin string, host *remotelink
 		// The code carries whole seconds and expires at that second, for the
 		// QR (PairCode.identity) and the short code alike.
 		return &DeviceInvite{
-			Code: code, Pair: pair, Raw: raw, Manual: "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: time.Unix(pair.Expires, 0),
+			Code: code, Pair: pair, Raw: raw, Manual: pairCodePasted + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: time.Unix(pair.Expires, 0),
 			origin: origin, hostToken: room.HostToken, confirm: confirm,
 		}, nil
 	}
@@ -369,7 +385,9 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 	if err != nil {
 		return none, err
 	}
-	codeCtx, cancel := context.WithDeadline(ctx, room.ExpiresAt)
+	// Not room.ExpiresAt: the relay chose it, and a relay that withholds the
+	// host's proof must not keep this side waiting for it.
+	codeCtx, cancel := context.WithTimeout(ctx, deviceJoinWindow)
 	defer cancel()
 	ws, err := join(codeCtx, selectedRelay, room.ID, "client", room.ClientToken)
 	if relayConflict(err) {

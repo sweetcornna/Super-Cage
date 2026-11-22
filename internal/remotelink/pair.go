@@ -38,6 +38,8 @@ const (
 	maxPairFrame      = 4 << 10
 	maxPairRecord     = 2 << 10
 	maxPairName       = 64
+	// maxPairNameBytes is what the device list keeps (a name in UTF-8).
+	maxPairNameBytes = 160
 )
 
 // A refused short-code pairing ends with one of these. ErrPairFailed covers a
@@ -325,10 +327,11 @@ func checkNumber(digest [32]byte) string {
 }
 
 // ValidPairName reports whether a device name may be shown in the approval
-// prompt: trimmed, 1 to 64 characters, printable (no control, format or
-// line-separator characters, so no bidirectional overrides).
+// prompt: trimmed, 1 to 64 characters and at most 160 bytes (what the device
+// list keeps), printable (no control, format or line-separator characters, so
+// no bidirectional overrides).
 func ValidPairName(name string) bool {
-	if !utf8.ValidString(name) || name != strings.TrimSpace(name) {
+	if len(name) > maxPairNameBytes || !utf8.ValidString(name) || name != strings.TrimSpace(name) {
 		return false
 	}
 	count := utf8.RuneCountInString(name)

@@ -36,6 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/host"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 	"github.com/sylvinus/agent-vm/internal/mobilelink/nativeclient"
 	"github.com/sylvinus/agent-vm/internal/remotelink"
@@ -57,7 +58,10 @@ const (
 )
 
 var (
-	joinedComputerID = regexp.MustCompile("^[0-9a-f]{32}$")
+	// errJoinedUnreadable: joined-computers.json exists but cannot be read.
+	// Nothing in it can be opened; clearing the list moves it aside.
+	errJoinedUnreadable = errors.New("已加入的电脑列表无法读取")
+	joinedComputerID    = regexp.MustCompile("^[0-9a-f]{32}$")
 
 	errDeviceWindowOnly = errors.New("加入和打开其他电脑只能在这台电脑的 Super Cage 窗口里操作")
 	errDeviceLocked     = errors.New("Super Cage 已锁定，请先登录")
@@ -167,11 +171,11 @@ func (s *Server) loadJoinedComputers() ([]joinedComputer, error) {
 	}
 	var record joinedComputersRecord
 	if json.Unmarshal(b, &record) != nil || record.Version != 1 {
-		return nil, errors.New("无法读取已加入的电脑记录")
+		return nil, errJoinedUnreadable
 	}
 	for _, c := range record.Computers {
 		if !joinedComputerID.MatchString(c.ID) || len(c.Seed) != ed25519.SeedSize || !mobilelink.ValidRelayOrigin(c.Relay) || c.HostPin == "" || c.Lookup == "" {
-			return nil, errors.New("无法读取已加入的电脑记录")
+			return nil, errJoinedUnreadable
 		}
 	}
 	return record.Computers, nil
@@ -209,11 +213,17 @@ func (s *Server) deviceRelaySetting() string {
 }
 
 // deviceWindow is the gate of every joining-side route and of a window's
-// requests to a joined computer: the SSH entry's own pair of checks
-// (entryLocal), kept in every process kind. An agent session carries the
-// trusted-view cookie too, so its header is what tells it apart.
+// requests to a joined computer, after the session cookie that every /api/
+// request needs. No process kind answers an agent: an agent session carries
+// the window's cookies too, so its header is what tells it apart. A workload
+// also requires the trusted view, the SSH entry's pair of checks
+// (entryLocal), since SSH-entry and tenant sessions hold its session cookie.
+// The desktop gateway and the client-only process give their window the
+// session cookie only (POST /api/session): the trusted view stays in the
+// launcher's jar (trusted_login.go), where it also gates POST
+// /api/agent/native, so there the session is the window.
 func (s *Server) deviceWindow(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get(agentRequestHeader) != "" || !s.hasTrustedView(r) {
+	if r.Header.Get(agentRequestHeader) != "" || (!s.desktopEntry && !s.clientOnly && !s.hasTrustedView(r)) {
 		http.Error(w, errDeviceWindowOnly.Error(), http.StatusForbidden)
 		return false
 	}
@@ -295,6 +305,8 @@ func (s *Server) clientDevicesRequest(w http.ResponseWriter, r *http.Request, pa
 	switch {
 	case r.Method == http.MethodGet && path == "devices":
 		s.listJoinedComputers(w)
+	case r.Method == http.MethodDelete && path == "devices":
+		s.clearJoinedComputers(w)
 	case r.Method == http.MethodPost && path == "devices/join":
 		s.joinComputer(w, r)
 	case r.Method == http.MethodGet && path == "devices/join":
@@ -326,7 +338,10 @@ func (s *Server) listJoinedComputers(w http.ResponseWriter) {
 	}
 	d.mu.Unlock()
 	if err != nil {
-		requestError(w, err)
+		// Said in the answer, as the host's list does, so the window can offer
+		// to clear it (DELETE /api/client/devices) and join again.
+		diagnostics.Log("warn", "devices", "could not read the joined computers: "+err.Error())
+		jsonReply(w, map[string]any{"computers": []joinedComputerView{}, "problem": errJoinedUnreadable.Error()})
 		return
 	}
 	views := make([]joinedComputerView, 0, len(computers))
@@ -338,6 +353,33 @@ func (s *Server) listJoinedComputers(w http.ResponseWriter) {
 		views = append(views, joinedComputerView{ID: c.ID, Name: c.Name, Platform: c.Platform, Relay: c.Relay, AddedAt: c.AddedAt, LastOpen: c.LastOpen, State: state})
 	}
 	jsonReply(w, map[string]any{"computers": views})
+}
+
+// clearJoinedComputers is DELETE /api/client/devices, for a list that cannot
+// be read only: the file is moved aside (joined-computers.json.unreadable-
+// <unix time>, private) rather than written over, so the person can join
+// again. A readable list is removed one computer at a time.
+func (s *Server) clearJoinedComputers(w http.ResponseWriter) {
+	d := &s.devices
+	d.mu.Lock()
+	_, err := s.loadJoinedComputers()
+	if err == nil {
+		d.mu.Unlock()
+		http.Error(w, "已加入的电脑列表可以读取，请逐台移除。", http.StatusConflict)
+		return
+	}
+	aside := s.joinedComputersPath() + ".unreadable-" + strconv.FormatInt(time.Now().Unix(), 10)
+	err = os.Rename(s.joinedComputersPath(), aside)
+	if err == nil {
+		err = host.ProtectFile(aside)
+	}
+	d.mu.Unlock()
+	if err != nil {
+		requestError(w, err)
+		return
+	}
+	d.closeAll()
+	jsonReply(w, map[string]bool{"ok": true})
 }
 
 func joinedComputerName(name string) (string, error) {
@@ -948,7 +990,8 @@ func (l *deviceLink) report() {
 func deviceSelfName() string {
 	name, _ := os.Hostname()
 	name = strings.TrimSuffix(strings.TrimSpace(name), ".local")
-	if name == "" || len(name) > 160 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+	// What the other computer's prompt shows and its list keeps.
+	if !remotelink.ValidPairName(name) {
 		name = "Super Cage"
 	}
 	return name

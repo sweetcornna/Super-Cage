@@ -22,6 +22,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/clipboardfiles"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/mobilelink"
 	"github.com/sylvinus/agent-vm/internal/transfermeta"
 )
 
@@ -300,6 +301,13 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 		defer timeout.Stop()
 		return json.NewEncoder(in).Encode(payload)
 	}
+	var windowMu sync.Mutex
+	writeWindow := func(payload clipboardPayload) error {
+		windowMu.Lock()
+		defer windowMu.Unlock()
+		_ = ws.SetWriteDeadline(time.Now().Add(15 * time.Second))
+		return ws.WriteJSON(payload)
+	}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -349,8 +357,7 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 				payload.Files, _ = json.Marshal(s.registerClipboardFiles(paths, payload.Source))
 				payload.Source = ""
 			}
-			_ = ws.SetWriteDeadline(time.Now().Add(15 * time.Second))
-			if ws.WriteJSON(payload) != nil {
+			if writeWindow(payload) != nil {
 				return
 			}
 		}
@@ -381,6 +388,15 @@ func (s *Server) sharedClipboard(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			payload.Files, _ = json.Marshal(paths)
+		}
+		// A long pairing code never reaches the environment, where an agent
+		// could redeem it: the window hears what a guest answers for a text
+		// it took (ui/src/shared-clipboard.mjs does not send one either).
+		if payload.Text != nil && mobilelink.ContainsPairCode(*payload.Text) {
+			if writeWindow(clipboardPayload{Ack: payload.Serial}) != nil {
+				return
+			}
+			continue
 		}
 		if writeGuest(payload) != nil {
 			return

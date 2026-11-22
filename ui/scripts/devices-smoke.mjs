@@ -21,7 +21,7 @@ const LONG = "CAGE-7QK2-M9XT-4HNA-WB3E-0RCP-YL6D";
 async function desktopRun({ theme, viewport, only }) {
   const host = createDevicesHost({ devices: [], computers: [] });
   const fixture = await createWorkbench({
-    viewport, clientContext: context,
+    viewport, clientContext: only === "portal" ? { ...context, tenant_workspace: true } : context,
     beforeNavigate: async (page, state) => {
       await page.emulateMedia({ colorScheme: theme });
       if (only === "custom") state.settings.mobile_relay = "https://relay.example.com";
@@ -78,6 +78,32 @@ async function desktopRun({ theme, viewport, only }) {
       assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).isDisabled(), true);
       assert.deepEqual(errors, []);
       console.log("PASS: " + name + " custom relay: the line in the dialog, unsaved address holds 添加设备");
+      return;
+    }
+    if (only === "portal") {
+      // A portal (tenant) workspace: nothing to add and nothing to join from here; one sentence says so, once. The
+      // devices already paired stay listed and can be removed.
+      const sentence = "这是门户里的环境，不能在这里添加设备。手机请在 Super Cage 应用里用门户账号登录。";
+      await page.getByRole("button", { name: "设置", exact: true }).click();
+      await nav.getByRole("button", { name: "设备", exact: true }).click();
+      await page.getByRole("heading", { name: "还没有设备", exact: true }).waitFor();
+      assert.equal(await page.getByText(sentence, { exact: true }).count(), 1, "the sentence, once, in the empty view");
+      assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "加入其他电脑", exact: true }).count(), 0);
+      await shot("portal-empty");
+      host.devices = sampleDevices();
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByText("3 台设备 · 1 台在线", { exact: true }).waitFor();
+      assert.equal(await page.getByText(sentence, { exact: true }).count(), 1, "the sentence, once, with devices listed");
+      assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).count(), 0);
+      await shot("portal-list");
+      await page.getByRole("button", { name: "移除 Google Pixel 9 Pro", exact: true }).click();
+      await page.getByRole("dialog").last().getByRole("button", { name: "移除", exact: true }).click();
+      await page.getByText("2 台设备 · 1 台在线", { exact: true }).waitFor();
+      assert.equal(host.count(/^DELETE \/devices\/d2$/), 1);
+      assert.equal(host.count(/^(POST \/devices\/invite|GET \/client\/devices)/), 0, "no code asked for, no joined computers read");
+      assert.deepEqual(errors, []);
+      console.log("PASS: " + name + " portal workspace: no 添加设备, the sentence once, the list and 移除 stay");
       return;
     }
 
@@ -181,8 +207,18 @@ async function desktopRun({ theme, viewport, only }) {
     const first = await add.locator(".devices-countdown").innerText();
     await page.waitForTimeout(2200);
     assert.notEqual(await add.locator(".devices-countdown").innerText(), first);
+    // The window shares its clipboard with the environment (the desktop app does while one is ready): a program there
+    // reads what is copied without anyone pasting. The long code, which pairs without approval, is not offered for
+    // copying; the 8 digits, which need 允许, stay on show.
+    await page.evaluate(() => { window.cageSyncClipboard = () => Promise.resolve(); });
+    await add.getByText("共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码，或使用 8 位配对码。", { exact: true }).waitFor();
+    assert.equal(await add.getByRole("button", { name: "复制长配对码", exact: true }).count(), 0, "no copying of the long code");
+    assert.match(await add.locator(".devices-digits").innerText(), /^\d{4} \d{4}$/);
+    await shot("add-shared-clipboard");
+    await page.evaluate(() => { delete window.cageSyncClipboard; });
     await add.getByRole("button", { name: "复制长配对码", exact: true }).click();
     await add.getByText("长配对码已复制，可以粘贴到另一台电脑或手机。").waitFor();
+    assert.equal(await add.getByText("共享剪贴板已开启", { exact: false }).count(), 0);
     // A new code replaces the old one.
     await add.getByRole("button", { name: "重新生成", exact: true }).click();
     await add.getByText("已换成新的配对码，之前的已失效。").waitFor();
@@ -281,6 +317,13 @@ async function desktopRun({ theme, viewport, only }) {
     assert.equal(await add.locator(".devices-digits").count(), 0);
     await add.getByText("点「复制长配对码」，在那台电脑的 Super Cage 里点「设备」→「加入其他电脑」，粘贴。").waitFor();
     await shot("add-long-only");
+    // With the clipboard shared and no 8 digits, nothing names a button or a code that is not there.
+    await page.evaluate(() => { window.cageSyncClipboard = () => Promise.resolve(); });
+    await add.getByText("共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码。", { exact: true }).waitFor();
+    await add.getByText("需要长配对码；共享剪贴板开启时不提供复制。").waitFor();
+    assert.equal(await add.getByRole("button", { name: "复制长配对码", exact: true }).count(), 0);
+    await page.evaluate(() => { delete window.cageSyncClipboard; });
+    await add.getByRole("button", { name: "复制长配对码", exact: true }).waitFor();
     await add.getByRole("button", { name: "关闭", exact: true }).click();
     await add.waitFor({ state: "detached" });
     host.short = true;
@@ -449,6 +492,27 @@ async function desktopRun({ theme, viewport, only }) {
     await join.waitFor({ state: "detached" });
     await quiet("after the join dialogs closed");
 
+    // The list of joined computers cannot be read: one line says so, and its one button clears it (the gateway moves
+    // the file aside) and opens 加入其他电脑.
+    const keptComputers = host.computers;
+    host.joinedProblem = "已加入的电脑列表无法读取";
+    host.computers = [];
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    const joinedProblem = page.getByRole("alert").filter({ hasText: "已加入的电脑列表无法读取" });
+    await joinedProblem.waitFor();
+    assert.equal(await page.getByRole("heading", { name: "我加入的电脑", exact: true }).count(), 0);
+    await page.getByRole("button", { name: "加入其他电脑", exact: true }).waitFor();
+    await shot("joined-unreadable");
+    await joinedProblem.getByRole("button", { name: "清除并重新加入", exact: true }).click();
+    await field.waitFor();
+    await joinedProblem.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/client\/devices$/), 1, "cleared once");
+    await join.getByRole("button", { name: "关闭", exact: true }).click();
+    await join.waitFor({ state: "detached" });
+    host.computers = keptComputers;
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.locator(".devices-row", { hasText: "家里的 Mac mini" }).first().waitFor();
+
     // 打开: a refusal is told on the row; success keeps the connection and goes to the phone page.
     host.failNext["POST /client/devices/h2/open"] = { status: 502, body: "连接不上那台电脑，请确认它已打开 Super Cage 并联网。" };
     await page.locator(".devices-row", { hasText: "实验室的 Linux 工作站" }).getByRole("button", { name: "打开", exact: true }).click();
@@ -579,16 +643,19 @@ async function phoneRun({ theme, viewport }) {
   } finally { await browser.close(); }
 }
 
-// CAGE_DEVICES_ONLY=desktop|phone runs one half.
+// CAGE_DEVICES_ONLY=desktop|phone runs one half, portal only the portal workspace.
 const only = process.env.CAGE_DEVICES_ONLY || "";
+const portalRun = () => desktopRun({ theme: "light", viewport: { width: 1440, height: 900 }, only: "portal" });
 if (only === "one") await desktopRun({ theme: "light", viewport: { width: 1440, height: 900 } });
+else if (only === "portal") await portalRun();
 else if (only !== "phone") {
   for (const theme of ["light", "dark"]) {
     for (const viewport of [{ width: 1440, height: 900 }, { width: 1000, height: 700 }]) await desktopRun({ theme, viewport });
   }
   await desktopRun({ theme: "light", viewport: { width: 1000, height: 700 }, only: "custom" });
+  await portalRun();
 }
-if (only !== "desktop") {
+if (only !== "desktop" && only !== "portal") {
   for (const theme of ["light", "dark"]) await phoneRun({ theme, viewport: { width: 1440, height: 900 } });
   await phoneRun({ theme: "light", viewport: { width: 1000, height: 700 } });
 }

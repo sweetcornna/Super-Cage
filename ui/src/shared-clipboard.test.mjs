@@ -346,3 +346,24 @@ test("a failing guest clipboard reconnects with backoff that resets after a succ
   assert.equal(clipboardReconnectDelay(0), 1500);
   assert.equal(clipboardReconnectDelay(100), 30000);
 });
+
+test("a long pairing code on the host clipboard is never sent to the environment", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    const raw = 'CAGE1:{"r":"https://relay.example.com","i":"room","t":"token","s":"c2VlZA==","h":"host-pin","e":1795358648}';
+    const manual = "CAGE-" + Buffer.from(raw).toString("base64url");
+    for (const text of ["配对码 " + raw + " 请勿外传", "请输入\n" + manual + "\n", manual]) {
+      f.host({ text });
+      await f.controller.sync();
+      assert.ok(!f.sent.some(value => value.text?.includes("CAGE")), "sent " + JSON.stringify(f.sent));
+    }
+    // A code held on the host is not tried again; the next copy is shared.
+    const before = f.sent.length;
+    await f.controller.poll();
+    assert.equal(f.sent.length, before);
+    f.host({ text: "after the code" });
+    await f.controller.sync();
+    assert.deepEqual(f.sent.at(-1), { text: "after the code" });
+  } finally { f.controller.dispose(); }
+});
