@@ -35,8 +35,9 @@ const pasteLimit = 4 << 20
 //
 // Bracketed pastes are tracked: their text, end marker included, is
 // InputPaste, whatever it holds. ESC [200~ starts one only while PasteOn
-// reports bracketed paste on; a paste is over at its end marker, when
-// PasteOn turns false, or after pasteLimit bytes.
+// reports bracketed paste on (a window without it sends pastes bare, and a
+// pasted ESC [200~ is text); a paste is over at its end marker or after
+// pasteLimit bytes.
 //
 // When the rest of a held sequence does not come within InputHold, the
 // caller calls Release: the held bytes are given as InputFragment, and so is
@@ -59,10 +60,6 @@ type InputReader struct {
 // and holds a unit cut at its end. The units' bytes are data's and the held
 // ones, never more: bytes given are bytes read.
 func (r *InputReader) Read(data []byte, each func(unit []byte, kind InputKind, reply Reply)) {
-	if r.paste && !r.pasteOn() {
-		// Bracketed paste went off: no end marker is coming.
-		r.endPaste()
-	}
 	skip, long := 0, r.long
 	r.long = false
 	if len(r.held) == 1 && r.given == 1 && !r.paste && len(data) > 0 && !answerIntroducer(data[0]) {
@@ -117,7 +114,11 @@ func (r *InputReader) Read(data []byte, each func(unit []byte, kind InputKind, r
 			switch {
 			case done && skip > i:
 				// The rest of a sequence given up on: a fragment, to its
-				// end, whatever NextInput would make of it.
+				// end, whatever NextInput would make of it. A paste start
+				// is still one.
+				if string(data[i:i+n]) == pasteStart && r.pasteOn() {
+					r.paste, r.pasted = true, 0
+				}
 				emit(i, i+n, InputFragment, ReplyNone)
 				i += n
 				continue
@@ -193,16 +194,6 @@ func (r *InputReader) Release(each func(unit []byte, kind InputKind, reply Reply
 func (r *InputReader) InPaste() bool { return r.paste }
 
 func (r *InputReader) pasteOn() bool { return r.PasteOn == nil || r.PasteOn() }
-
-// endPaste ends an open paste where it is: what is held and not given yet is
-// read as usual.
-func (r *InputReader) endPaste() {
-	r.paste, r.pasted = false, 0
-	if r.held = r.held[r.given:]; len(r.held) == 0 {
-		r.held = nil
-	}
-	r.given = 0
-}
 
 // seqEnd measures the escape sequence at the start of data by its structure
 // alone, and reports false when data ends before it does.

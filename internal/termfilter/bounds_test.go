@@ -56,8 +56,8 @@ func TestRefusedAnswersAreFragments(t *testing.T) {
 }
 
 // Review round 4, finding 2: ESC [200~ starts a paste only while the window
-// has bracketed paste on; a paste ends at its end marker, when bracketed
-// paste goes off, or after pasteLimit bytes.
+// has bracketed paste on; a paste ends at its end marker or after
+// pasteLimit bytes.
 func TestPasteNeedsBracketedPasteOn(t *testing.T) {
 	on := false
 	r := InputReader{PasteOn: func() bool { return on }}
@@ -72,10 +72,13 @@ func TestPasteNeedsBracketedPasteOn(t *testing.T) {
 	if !r.InPaste() {
 		t.Fatal("with bracketed paste on: no paste")
 	}
+	// Turned off during a paste: the window bracketed it already, so it
+	// runs to its end marker.
 	on = false
-	r.Read([]byte("\x1b[12;145R"), each)
-	if r.InPaste() || fmt.Sprint(units) != fmt.Sprint([]inputUnit{{"\x1b[200~", InputKey}, {"abc", InputPaste}, {"\x1b[12;145R", InputReply}}) {
-		t.Fatalf("bracketed paste turned off: in paste %v, %q", r.InPaste(), units)
+	r.Read([]byte("\x1b[12;145R\x1b[201~\x1b[12;145R"), each)
+	want := []inputUnit{{"\x1b[200~", InputKey}, {"abc", InputPaste}, {"\x1b[12;145R\x1b[201~", InputPaste}, {"\x1b[12;145R", InputReply}}
+	if r.InPaste() || fmt.Sprint(units) != fmt.Sprint(want) {
+		t.Fatalf("bracketed paste turned off during a paste: in paste %v, %q", r.InPaste(), units)
 	}
 }
 

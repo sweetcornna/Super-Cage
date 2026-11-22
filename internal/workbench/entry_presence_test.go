@@ -145,8 +145,8 @@ func TestEntryWindowPasteFollowsBracketedPaste(t *testing.T) {
 		t.Fatal("no paste with bracketed paste on")
 	}
 	output.filter.Append(nil, []byte("\x1b[?2004l"))
-	presence.note([]byte("def"), output.filter.GuestFocus)
+	presence.note([]byte("def\x1b[201~\x1b[200~ghi"), output.filter.GuestFocus)
 	if presence.input.InPaste() {
-		t.Fatal("still a paste after bracketed paste went off")
+		t.Fatal("a paste started after bracketed paste went off")
 	}
 }

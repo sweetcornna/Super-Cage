@@ -26,10 +26,12 @@ const (
 	// InputPaste is text inside a bracketed paste, its end marker included
 	// (InputReader only): typed, whatever it holds.
 	InputPaste
-	// InputFragment is the start of an escape sequence an InputReader gave
-	// up waiting for the rest of, and the rest when it comes: passed on as
-	// typed, but never a sign the owner is at the window, since an answer
-	// cut by a read looks the same.
+	// InputFragment is passed on as typed, but never a sign the owner is at
+	// the window: the start of an escape sequence an InputReader gave up
+	// waiting for the rest of, and the rest when it comes (an answer cut by
+	// a read looks the same), and a complete sequence shaped like an answer
+	// that the answer grammar refuses (NextInput). A viewer's message holding
+	// one is typing (terminal_viewers.go), as keys are.
 	InputFragment
 )
 
