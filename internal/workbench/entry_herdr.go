@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -191,7 +192,9 @@ func (s *Server) entryHerdrLink(ctx context.Context, conn *entryConn, channel ss
 	errorsDone := make(chan struct{})
 	go func() {
 		defer close(errorsDone)
-		_, _ = io.Copy(&entryPlainWriter{w: channel.Stderr(), left: entryHerdrStderrLimit}, stderr)
+		errs := &entryHerdrErrors{plain: &entryPlainWriter{w: channel.Stderr(), left: entryHerdrStderrLimit}}
+		_, _ = io.Copy(errs, stderr)
+		_ = errs.Close()
 	}()
 	counts := map[string]int{}
 	var countsMu sync.Mutex
@@ -323,6 +326,17 @@ func (p *entryPlainWriter) Write(b []byte) (int, error) {
 	if p.left <= 0 {
 		return n, nil
 	}
+	out := entryPlainText(b)
+	if len(out) > p.left {
+		out = out[:p.left]
+	}
+	p.left -= len(out)
+	_, err := p.w.Write(out)
+	return n, err
+}
+
+// entryPlainText keeps printable characters, tabs and line breaks.
+func entryPlainText(b []byte) []byte {
 	out := make([]byte, 0, len(b))
 	for len(b) > 0 {
 		r, size := utf8.DecodeRune(b)
@@ -331,12 +345,58 @@ func (p *entryPlainWriter) Write(b []byte) (int, error) {
 		}
 		b = b[size:]
 	}
-	if len(out) > p.left {
-		out = out[:p.left]
+	return out
+}
+
+// entryHerdrErrors passes the environment's error output on a Herdr link to
+// the owner's core line by line as plain words (entryPlainWriter), without a
+// line that would tell the owner's core that ssh wants a login typed by a
+// person (machines.rs wants_login): the entry, not the environment, decides
+// who logs in, and a faked one would send the owner to hc machine login.
+// Close passes an unfinished last line.
+type entryHerdrErrors struct {
+	plain   *entryPlainWriter
+	partial []byte
+}
+
+func (e *entryHerdrErrors) Write(b []byte) (int, error) {
+	n := len(b)
+	e.partial = append(e.partial, b...)
+	for {
+		i := bytes.IndexByte(e.partial, '\n')
+		if i < 0 {
+			break
+		}
+		if err := e.line(e.partial[:i+1]); err != nil {
+			return n, err
+		}
+		e.partial = e.partial[i+1:]
 	}
-	p.left -= len(out)
-	_, err := p.w.Write(out)
-	return n, err
+	if len(e.partial) > entryHerdrStderrLimit {
+		// Longer than all the owner may get: its start uses that up.
+		err := e.line(e.partial)
+		e.partial = nil
+		return n, err
+	}
+	return n, nil
+}
+
+func (e *entryHerdrErrors) Close() error {
+	if len(e.partial) == 0 {
+		return nil
+	}
+	err := e.line(e.partial)
+	e.partial = nil
+	return err
+}
+
+func (e *entryHerdrErrors) line(text []byte) error {
+	plain := entryPlainText(text)
+	if bytes.Contains(plain, []byte("Permission denied")) || bytes.Contains(plain, []byte("Too many authentication failures")) {
+		return nil
+	}
+	_, err := e.plain.Write(plain)
+	return err
 }
 
 // entryHerdrView is the Herdr row of the page.

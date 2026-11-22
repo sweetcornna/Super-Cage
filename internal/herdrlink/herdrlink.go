@@ -12,9 +12,14 @@
 //   - owner to guest: the hello's params.core.name (the owner's host name)
 //     becomes a neutral name; everything else passes. The owner's core is
 //     trusted: it is the owner's own program.
-//   - guest to owner: replies, $/cancelRequest and stream bytes pass;
-//     every other JSON-RPC message the guest sends is dropped, and a dropped
-//     request is answered "denied" to the guest. These are Herdr's call-backs
+//   - guest to owner: nothing structural the guest wrote reaches the owner
+//     byte for byte. The hello reply and every channel-0 message are read
+//     and written again as Go encodes them (canonical): the owner's core
+//     reads JSON with its own parser, and wherever the two parsers disagree
+//     the guest could choose what the owner's core reads (review 3, H1).
+//   - guest to owner: one reply per call the owner made, and
+//     $/cancelRequest, pass; every other JSON-RPC message the guest sends is
+//     dropped, and a dropped request is answered "denied" to the guest. These are Herdr's call-backs
 //     (terminal.send, get, read, wait, notes): without the filter a program in
 //     the environment can type into a terminal on the owner's computer (E14).
 //   - stream bytes reach the owner only from channels a reply announced for
@@ -34,10 +39,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"strconv"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sylvinus/agent-vm/internal/termfilter"
@@ -68,6 +74,16 @@ const (
 	MaxClose = 64 << 10
 	// MaxStreams bounds the streams open at once.
 	MaxStreams = 1024
+	// MaxDepth bounds how deeply a JSON value from the guest nests: the
+	// owner's JSON reader (serde_json) refuses 128 levels.
+	MaxDepth = 64
+	// MaxPending bounds the owner's calls waiting for their replies.
+	MaxPending = 4096
+	// callTTL and waitingTTL are how long a call waits for its reply before
+	// a late one is dropped: Herdr gives a call its machine timeout plus
+	// the wait it asks for, at most a day (remote.rs deadline_for).
+	callTTL    = time.Hour
+	waitingTTL = 25 * time.Hour
 	// piece is how much of a stream frame is filtered at a time: a stream
 	// frame is never held whole.
 	piece = 32 << 10
@@ -113,10 +129,12 @@ type Link struct {
 	toGuest   io.Writer
 
 	mu          sync.Mutex
-	helloID     string // the owner's hello id, as a JSON token
+	helloID     string // the owner's hello id, canonical
 	helloFramed bool
-	pending     map[string]streamKind // owner calls whose reply opens a stream
-	streams     map[uint32]*stream
+	// pending are the owner's calls still waiting for their reply, by
+	// canonical id: one reply each reaches the owner.
+	pending map[string]ownerCall
+	streams map[uint32]*stream
 	// closing are streams the owner closed: the guest's core answers with
 	// a CLOSE of its own, which passes; nothing else on them does.
 	closing map[uint32]bool
@@ -127,6 +145,12 @@ type Link struct {
 }
 
 type streamKind uint8
+
+// ownerCall is one of the owner's calls waiting for its reply.
+type ownerCall struct {
+	opens streamKind // the stream its reply announces; 0 for none
+	until time.Time
+}
 
 const (
 	streamTerminal streamKind = iota + 1 // terminal.attach
@@ -144,7 +168,7 @@ type stream struct {
 
 // New returns a link that writes toward the guest with toGuest.
 func New(opts Options, toGuest io.Writer) *Link {
-	return &Link{opts: opts, toGuest: toGuest, pending: map[string]streamKind{}, streams: map[uint32]*stream{}, closing: map[uint32]bool{}}
+	return &Link{opts: opts, toGuest: toGuest, pending: map[string]ownerCall{}, streams: map[uint32]*stream{}, closing: map[uint32]bool{}}
 }
 
 func (l *Link) count(event string) {
@@ -227,7 +251,9 @@ func (l *Link) Up(owner io.Reader) error {
 		if err != nil {
 			return err
 		}
-		l.ownerFrame(channel, kind, payload)
+		if err := l.ownerFrame(channel, kind, payload); err != nil {
+			return err
+		}
 		if err := l.writeGuest(frame(channel, kind, payload)); err != nil {
 			return err
 		}
@@ -264,7 +290,7 @@ func (l *Link) ownerLine(line []byte) (framed bool, out []byte) {
 	var on bool
 	_ = json.Unmarshal(params["framed"], &on)
 	l.mu.Lock()
-	l.helloID, l.helloFramed = token(message["id"]), on
+	l.helloID, l.helloFramed = canonicalToken(message["id"]), on
 	l.mu.Unlock()
 	rewritten, err := json.Marshal(message)
 	if err != nil {
@@ -273,40 +299,50 @@ func (l *Link) ownerLine(line []byte) (framed bool, out []byte) {
 	return on, append(rewritten, '\n')
 }
 
-// ownerFrame learns from a frame the owner sends: its stream-opening calls,
-// and its panes' focus and typing.
-func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
+// ownerFrame learns from a frame the owner sends: its calls (which open
+// streams), and its panes' focus and typing. Too many calls waiting for
+// replies the guest withholds end the link.
+func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) error {
 	if channel == 0 {
 		if kind != KindData {
-			return
+			return nil
 		}
 		fields, ok := topLevel(payload)
 		if !ok {
-			return
+			return nil
 		}
 		var method string
 		if json.Unmarshal(fields["method"], &method) != nil {
-			return
+			return nil
 		}
-		id := token(fields["id"])
-		if id == "" {
-			return
+		id := canonicalToken(fields["id"])
+		if id == "" || id == "null" {
+			return nil
 		}
-		var opens streamKind
+		now := time.Now()
+		c := ownerCall{until: now.Add(callTTL)}
 		switch method {
 		case "terminal.attach":
-			opens = streamTerminal
+			c.opens = streamTerminal
 		case "events.subscribe":
-			opens = streamEvents
-		default:
-			return
+			c.opens = streamEvents
+		case "terminal.wait", "terminal.run", "terminal.send", "terminal.put", "machine.exec":
+			c.until = now.Add(waitingTTL)
 		}
 		l.mu.Lock()
-		if len(l.pending) < MaxStreams {
-			l.pending[id] = opens
+		defer l.mu.Unlock()
+		if len(l.pending) >= MaxPending {
+			for id, waiting := range l.pending {
+				if now.After(waiting.until) {
+					delete(l.pending, id)
+				}
+			}
+			if len(l.pending) >= MaxPending {
+				return ErrProtocol
+			}
 		}
-		l.mu.Unlock()
-		return
+		l.pending[id] = c
+		return nil
 	}
 	l.mu.Lock()
 	s := l.streams[channel]
@@ -318,7 +354,7 @@ func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
 	}
 	l.mu.Unlock()
 	if s == nil || s.presence == nil {
-		return
+		return nil
 	}
 	switch kind {
 	case KindFocus:
@@ -326,6 +362,7 @@ func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
 	case KindData:
 		s.presence.Input(payload)
 	}
+	return nil
 }
 
 // --- guest to owner ---
@@ -339,7 +376,10 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 	for {
 		line, err := readLine(r)
 		if len(line) > 0 {
-			out, reply := l.guestLine(line, answered)
+			out, reply, lerr := l.guestLine(line, answered)
+			if lerr != nil {
+				return lerr
+			}
 			switch {
 			case reply:
 				answered = true
@@ -473,12 +513,14 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 }
 
 // plainReason keeps the printable text of a CLOSE frame's reason: the
-// owner's hc may print it on a terminal.
+// owner's core hands it to the viewer as words, and hc may print it on a
+// terminal. No control or format character (a bidirectional override)
+// passes.
 func plainReason(reason []byte) []byte {
 	out := reason[:0]
 	for len(reason) > 0 {
 		r, n := utf8.DecodeRune(reason)
-		if r >= 0x20 && r != 0x7f && (r < 0x80 || r > 0x9f) && r != utf8.RuneError {
+		if r != utf8.RuneError && unicode.IsPrint(r) {
 			out = append(out, reason[:n]...)
 		}
 		reason = reason[n:]
@@ -507,85 +549,139 @@ func (l *Link) creditBack(channel uint32, s *stream, removed int64) error {
 	return nil
 }
 
-// guestLine handles one plain line from the guest: before the hello reply
-// everything else is a banner and is dropped; after it, replies pass and
-// messages with a method are dropped.
-func (l *Link) guestLine(line []byte, answered bool) (out []byte, reply bool) {
-	fields, ok := topLevel(bytes.TrimSpace(line))
-	if !ok {
-		if !answered {
-			l.count("dropped:banner")
-		} else {
-			l.count("dropped:plain")
-		}
-		return nil, false
-	}
-	if _, has := fields["method"]; has {
-		l.count("dropped:plain-method")
-		return nil, false
-	}
+// guestLine handles one plain line from the guest. Before the hello reply
+// every other line is a banner and is dropped. The reply reaches the owner
+// only as this filter writes it again, alone on its line: the owner's core
+// takes the first line its own JSON reader accepts, so with the guest's own
+// bytes the two could disagree about where frames start (review 3, H1). A
+// line with the hello's id that is not a well-formed reply ends the link.
+// After a reply that does not switch to frames (a probe) nothing more
+// passes: the owner hangs up.
+func (l *Link) guestLine(line []byte, answered bool) (out []byte, reply bool, err error) {
 	if answered {
-		return line, false
+		l.count("dropped:plain")
+		return nil, false, nil
 	}
 	l.mu.Lock()
 	helloID, helloFramed := l.helloID, l.helloFramed
 	l.mu.Unlock()
-	if helloID == "" || token(fields["id"]) != helloID {
+	fields, ok := topLevel(bytes.TrimSpace(line))
+	if !ok || helloID == "" || canonicalToken(fields["id"]) != helloID {
 		l.count("dropped:banner")
-		return nil, false
+		return nil, false, nil
 	}
-	if _, failed := fields["error"]; !failed && helloFramed {
-		if _, ok := fields["result"]; ok {
-			l.framed.Store(true)
+	value, out, err := canonical(bytes.TrimSpace(line))
+	if err != nil {
+		l.count("ended:hello")
+		return nil, false, ErrProtocol
+	}
+	message := value.(map[string]any)
+	for key := range message {
+		switch key {
+		case "jsonrpc", "id", "result", "error":
+		default:
+			l.count("ended:hello")
+			return nil, false, ErrProtocol
 		}
 	}
-	return line, true
+	result, hasResult := message["result"]
+	failure, hasError := message["error"]
+	_, resultObject := result.(map[string]any)
+	_, errorObject := failure.(map[string]any)
+	if hasResult == hasError || hasResult && !resultObject || hasError && !errorObject {
+		l.count("ended:hello")
+		return nil, false, ErrProtocol
+	}
+	if hasResult && helloFramed {
+		l.framed.Store(true)
+	}
+	return append(out, '\n'), true, nil
 }
 
 // guestMessage handles one JSON-RPC message from the guest on channel 0.
+// The owner gets it only as Go writes it again; one that does not read
+// ends the link. A reply passes once, to a call the owner made; a reply to
+// the owner's terminal.attach or events.subscribe announces its stream.
 func (l *Link) guestMessage(payload []byte, toOwner io.Writer) error {
-	fields, ok := topLevel(payload)
+	value, out, err := canonical(payload)
+	if err != nil {
+		l.count("ended:malformed")
+		return ErrProtocol
+	}
+	message, ok := value.(map[string]any)
 	if !ok {
+		// A batch or a bare value: Herdr's core reads it as a reply
+		// without an id, and drops it.
 		l.count("dropped:malformed")
 		return nil
 	}
-	if raw, has := fields["method"]; has {
-		var method string
-		if json.Unmarshal(raw, &method) == nil && method == "$/cancelRequest" {
-			_, err := toOwner.Write(frame(0, KindData, payload))
+	if raw, has := message["method"]; has {
+		method, _ := raw.(string)
+		if method == "$/cancelRequest" {
+			_, err := toOwner.Write(frame(0, KindData, out))
 			return err
 		}
 		l.count("dropped:" + knownMethod(method))
-		if id, has := fields["id"]; has && token(id) != "null" {
+		if id, has := message["id"]; has && id != nil {
+			idText, _ := encode(id)
 			reply := []byte(`{"jsonrpc":"2.0","id":`)
-			reply = append(reply, bytes.TrimSpace(id)...)
+			reply = append(reply, idText...)
 			reply = append(reply, `,"error":{"code":-32000,"message":`...)
-			message, _ := json.Marshal(DeniedMessage)
-			reply = append(reply, message...)
+			denied, _ := json.Marshal(DeniedMessage)
+			reply = append(reply, denied...)
 			reply = append(reply, `,"data":{"kind":"denied","hint":""}}}`...)
 			return l.writeGuest(frame(0, KindData, reply))
 		}
 		return nil
 	}
-	// A reply: one that answers the owner's attach or subscribe call
-	// announces the stream it opened.
-	if id := token(fields["id"]); id != "" {
-		l.mu.Lock()
-		opens, pending := l.pending[id]
-		delete(l.pending, id)
-		l.mu.Unlock()
-		if pending {
-			if channel, ok := resultChannel(fields["result"]); ok && channel != 0 {
-				l.open(channel, opens)
+	id := ""
+	if raw, has := message["id"]; has {
+		idText, _ := encode(raw)
+		id = string(idText)
+	}
+	l.mu.Lock()
+	asked, pending := l.pending[id]
+	delete(l.pending, id)
+	l.mu.Unlock()
+	if !pending {
+		// Herdr's core would take a second reply to its events.subscribe
+		// call for a new mirror channel (remote.rs hold): only the first
+		// reply to a call passes.
+		l.count("dropped:unasked")
+		return nil
+	}
+	if asked.opens != 0 {
+		if result, ok := message["result"].(map[string]any); ok {
+			if raw, has := result["channel"]; has {
+				channel, ok := streamChannel(raw)
+				if !ok {
+					l.count("ended:channel")
+					return ErrProtocol
+				}
+				if err := l.open(channel, asked.opens); err != nil {
+					return err
+				}
 			}
 		}
 	}
-	_, err := toOwner.Write(frame(0, KindData, payload))
+	_, err = toOwner.Write(frame(0, KindData, out))
 	return err
 }
 
-// open starts filtering a stream a reply announced.
-func (l *Link) open(channel uint32, kind streamKind) {
+// streamChannel is a stream's channel as a reply announces it: an integer
+// from 1 to 2^32-1 (Herdr's core cuts a larger one to 32 bits).
+func streamChannel(raw any) (uint32, bool) {
+	n, ok := raw.(float64)
+	if !ok || n < 1 || n > math.MaxUint32 || n != math.Trunc(n) {
+		return 0, false
+	}
+	return uint32(n), true
+}
+
+// open starts filtering a stream a reply announced. A channel already open,
+// or closed by the owner and not yet answered, ends the link: the owner's
+// core would give it to the new stream, the filter to the old one.
+func (l *Link) open(channel uint32, kind streamKind) error {
 	s := &stream{}
 	if kind == streamTerminal {
 		s.presence = &Presence{window: l.opts.Window}
@@ -596,12 +692,16 @@ func (l *Link) open(channel uint32, kind streamKind) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if _, open := l.streams[channel]; !open && len(l.streams) >= MaxStreams {
+	if _, open := l.streams[channel]; open || l.closing[channel] {
+		l.count("ended:channel")
+		return ErrProtocol
+	}
+	if len(l.streams) >= MaxStreams {
 		l.count("dropped:too-many-streams")
-		return
+		return nil
 	}
 	l.streams[channel] = s
-	delete(l.closing, channel)
+	return nil
 }
 
 func (l *Link) writeGuest(data []byte) error {
@@ -756,21 +856,78 @@ func topLevel(data []byte) (map[string]json.RawMessage, bool) {
 	return fields, true
 }
 
-// resultChannel reads result.channel of a stream-opening reply.
-func resultChannel(raw json.RawMessage) (uint32, bool) {
-	fields, ok := topLevel(raw)
-	if !ok {
-		return 0, false
+// canonical reads one JSON value the guest wrote and writes it again as Go
+// encodes it: compact, valid UTF-8, no raw line break, no lone surrogate,
+// numbers within float64's range, keys in order. The owner's core reads
+// only these bytes, never the guest's own, so its JSON reader and Go's
+// cannot disagree about them (review 3, H1). A value nested deeper than
+// MaxDepth, a number out of range, or an encoding over MaxPayload is
+// refused.
+func canonical(data []byte) (any, []byte, error) {
+	if depth(data) > MaxDepth {
+		return nil, nil, ErrProtocol
 	}
-	n, err := strconv.ParseUint(string(bytes.TrimSpace(fields["channel"])), 10, 32)
-	if err != nil {
-		return 0, false
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, nil, ErrProtocol
 	}
-	return uint32(n), true
+	out, err := encode(value)
+	if err != nil || len(out) > MaxPayload {
+		return nil, nil, ErrProtocol
+	}
+	return value, out, nil
 }
 
-// token is a JSON value's text, the form ids are compared in.
-func token(raw json.RawMessage) string { return string(bytes.TrimSpace(raw)) }
+// encode writes a decoded value compactly, without HTML escapes.
+func encode(value any) ([]byte, error) {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
+}
+
+// depth is how deeply a JSON text nests, strings aside.
+func depth(data []byte) int {
+	deepest, level := 0, 0
+	inString, escaped := false, false
+	for _, c := range data {
+		switch {
+		case inString:
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+		case c == '"':
+			inString = true
+		case c == '{' || c == '[':
+			level++
+			deepest = max(deepest, level)
+		case c == '}' || c == ']':
+			level--
+		}
+	}
+	return deepest
+}
+
+// canonicalToken is a JSON value's canonical text, the form ids are
+// compared in; "" for one that does not read.
+func canonicalToken(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	_, out, err := canonical(raw)
+	if err != nil {
+		return ""
+	}
+	return string(out)
+}
 
 // knownMethod names a dropped method for the counters; anything else the
 // guest made up counts as "other".

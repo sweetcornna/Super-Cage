@@ -35,11 +35,11 @@ func FuzzGuestToOwner(f *testing.F) {
 		toOwner := &pipeEnd{}
 		_ = l.Down(bytes.NewReader(append(prefix, data...)), toOwner)
 		out := toOwner.bytes()
-		if !bytes.HasPrefix(out, []byte(guestHello)) {
+		if !bytes.HasPrefix(out, []byte(guestHelloCanonical)) {
 			t.Fatalf("no hello reply first: %q", out)
 		}
 		streams := map[uint32][]byte{}
-		for _, fr := range parseAll(t, out[len(guestHello):]) {
+		for _, fr := range parseAll(t, out[len(guestHelloCanonical):]) {
 			if len(fr.payload) > MaxPayload {
 				t.Fatal("oversized frame")
 			}

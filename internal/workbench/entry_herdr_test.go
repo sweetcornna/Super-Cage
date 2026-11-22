@@ -451,3 +451,29 @@ func TestEntryHerdrLeavesNothingRunning(t *testing.T) {
 		return os.IsNotExist(armed) && len(marks) == 0
 	})
 }
+
+// What the environment writes to a Herdr line's error output reaches the
+// owner's core as plain words, without the lines that would make it believe
+// ssh wants a login (review 3, H1's class: guest bytes the owner's core
+// reads).
+func TestEntryHerdrErrorsArePlainWordsWithoutLoginLines(t *testing.T) {
+	var got bytes.Buffer
+	errs := &entryHerdrErrors{plain: &entryPlainWriter{w: &got, left: entryHerdrStderrLimit}}
+	for _, chunk := range []string{
+		"herdr-core is not \x1b]52;c;aGk=\x07installed here\n",
+		"Permission den", "ied (publickey).\n",
+		"Permission\u200b denied (password)\n",
+		"Received disconnect: Too many authentication failures\n",
+		"last words\u202e without an end",
+	} {
+		if _, err := errs.Write([]byte(chunk)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := errs.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if want := "herdr-core is not ]52;c;aGk=installed here\nlast words without an end"; got.String() != want {
+		t.Fatalf("got %q, want %q", got.String(), want)
+	}
+}

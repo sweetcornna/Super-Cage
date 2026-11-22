@@ -128,6 +128,10 @@ func afterLines(data []byte, n int) ([]byte, bool) {
 const ownerHello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"generation\":1,\"framed\":true,\"core\":{\"id\":\"c0ffee\",\"name\":\"owners-macbook-pro\"},\"calls_you\":\"cage-default\",\"features\":[\"automatic_input\"]}}\n"
 const guestHello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"core\":{\"id\":\"beef\",\"name\":\"lima-default\"},\"version\":\"0.1.21\",\"framed\":true}}\n"
 
+// guestHelloCanonical is guestHello as the filter writes it again for the
+// owner: compact, keys in order.
+const guestHelloCanonical = "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"core\":{\"id\":\"beef\",\"name\":\"lima-default\"},\"framed\":true,\"version\":\"0.1.21\"}}\n"
+
 func call(id int, method string, params string) []byte {
 	return Frame(0, KindData, []byte("{\"jsonrpc\":\"2.0\",\"id\":"+itoa(id)+",\"method\":\""+method+"\",\"params\":"+params+"}"))
 }
@@ -150,7 +154,7 @@ func framedRig(t *testing.T, opts Options) *rig {
 	r.owner([]byte(ownerHello))
 	await(t, "hello at the guest", r.toGuest, func(b []byte) bool { return bytes.HasSuffix(b, []byte("\n")) })
 	r.guest([]byte(guestHello))
-	await(t, "hello reply at the owner", r.toOwner, func(b []byte) bool { return bytes.Equal(b, []byte(guestHello)) })
+	await(t, "hello reply at the owner", r.toOwner, func(b []byte) bool { return bytes.Equal(b, []byte(guestHelloCanonical)) })
 	r.owner(call(2, "events.subscribe", "{}"))
 	r.owner(call(7, "terminal.attach", "{\"terminal\":\"t1\"}"))
 	await(t, "calls at the guest", r.toGuest, func(b []byte) bool {
@@ -221,7 +225,7 @@ func TestHelloLosesTheOwnersHostName(t *testing.T) {
 
 func TestBannerDroppedReplyPassesFramesFollow(t *testing.T) {
 	r := framedRig(t, Options{})
-	if !strings.HasPrefix(string(r.toOwner.bytes()), guestHello) {
+	if !strings.HasPrefix(string(r.toOwner.bytes()), guestHelloCanonical) {
 		t.Fatalf("the banner reached the owner: %q", r.toOwner.bytes())
 	}
 	if fs := r.ownerFrames(); len(fs) != 2 {
@@ -231,26 +235,38 @@ func TestBannerDroppedReplyPassesFramesFollow(t *testing.T) {
 
 func TestCallBacksAreDroppedAndDenied(t *testing.T) {
 	r := framedRig(t, Options{})
+	// Replies pass to calls the owner made, once each, as the filter
+	// writes them again.
+	for _, id := range []int{9, 10, 11, 99} {
+		r.owner(call(id, "server.status", "{}"))
+	}
+	await(t, "the owner's calls at the guest", r.toGuest, func(b []byte) bool { return strings.Contains(string(b), "\"id\":99") })
 	messages := []struct {
 		json string
-		pass bool
+		pass string
 		deny string
 	}{
-		{"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"terminal.send\",\"params\":{\"terminal\":\"t3\",\"text\":\"rm -rf ~\"}}", false, "40"},
-		{"{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"terminal.read\",\"params\":{\"terminal\":\"t3\"}}", false, "\"x\""},
-		{"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"terminal.get\",\"params\":{}}", false, "41"},
-		{"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"terminal.wait\",\"params\":{}}", false, "42"},
-		{"{\"jsonrpc\":\"2.0\",\"method\":\"notes\",\"params\":{\"parent\":\"t3\",\"text\":\"typed\"}}", false, ""},
-		{"{\"jsonrpc\":\"2.0\",\"method\":\"$/orphaned\",\"params\":{\"parent\":\"x/t1\"}}", false, ""},
-		{"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"made.up\",\"params\":{}}", false, "43"},
-		{"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"terminal.send\",\"method\":\"$/cancelRequest\"}", false, ""},
-		{"[{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"terminal.send\"}]", false, ""},
-		{"not json", false, ""},
-		{"{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":9}}", true, ""},
-		{"{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"ok\":true}}", true, ""},
-		{"{\"jsonrpc\":\"2.0\",\"id\":10,\"error\":{\"code\":-32000,\"message\":\"no\"}}", true, ""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":40,\"method\":\"terminal.send\",\"params\":{\"terminal\":\"t3\",\"text\":\"rm -rf ~\"}}", "", "40"},
+		{"{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"terminal.read\",\"params\":{\"terminal\":\"t3\"}}", "", "\"x\""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":41,\"method\":\"terminal.get\",\"params\":{}}", "", "41"},
+		{"{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"terminal.wait\",\"params\":{}}", "", "42"},
+		{"{\"jsonrpc\":\"2.0\",\"method\":\"notes\",\"params\":{\"parent\":\"t3\",\"text\":\"typed\"}}", "", ""},
+		{"{\"jsonrpc\":\"2.0\",\"method\":\"$/orphaned\",\"params\":{\"parent\":\"x/t1\"}}", "", ""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"made.up\",\"params\":{}}", "", "43"},
+		{"{\"jsonrpc\":\"2.0\",\"id\":43.0,\"method\":5}", "", "43"},
+		// The owner reads only what the filter writes: the last of a
+		// repeated key, as Go read it.
+		{"{\"jsonrpc\":\"2.0\",\"id\":44,\"method\":\"terminal.send\",\"method\":\"$/cancelRequest\"}", "{\"id\":44,\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\"}", ""},
+		{"[{\"jsonrpc\":\"2.0\",\"id\":45,\"method\":\"terminal.send\"}]", "", ""},
+		{"{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":9}}", "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"id\":9}}", ""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"ok\":true}}", "{\"id\":9,\"jsonrpc\":\"2.0\",\"result\":{\"ok\":true}}", ""},
+		// A second reply to the same call, and a reply to none, are dropped.
+		{"{\"jsonrpc\":\"2.0\",\"id\":9,\"result\":{\"ok\":false}}", "", ""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{}}", "", ""},
+		{"{\"jsonrpc\":\"2.0\",\"id\":10,\"error\":{\"code\":-32000,\"message\":\"no\"}}", "{\"error\":{\"code\":-32000,\"message\":\"no\"},\"id\":10,\"jsonrpc\":\"2.0\"}", ""},
 		// Herdr's parser is case-sensitive, like this filter: no method.
-		{"{\"jsonrpc\":\"2.0\",\"id\":11,\"Method\":\"terminal.send\",\"result\":{}}", true, ""},
+		// Space, line breaks and escapes do not survive.
+		{"{\"jsonrpc\":\"2.0\",\"id\":11 ,\n\"Method\":\"terminal.send\",\"result\":{\"t\":\"\\ud800\\u0041\\n<\"}}", "{\"Method\":\"terminal.send\",\"id\":11,\"jsonrpc\":\"2.0\",\"result\":{\"t\":\"\ufffdA\\n<\"}}", ""},
 	}
 	before := len(r.ownerFrames())
 	beforeGuest := len(r.guestFrames())
@@ -265,11 +281,11 @@ func TestCallBacksAreDroppedAndDenied(t *testing.T) {
 	}
 	want := []string{}
 	for _, m := range messages {
-		if m.pass {
-			want = append(want, m.json)
+		if m.pass != "" {
+			want = append(want, m.pass)
 		}
 	}
-	want = append(want, "{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}")
+	want = append(want, "{\"id\":99,\"jsonrpc\":\"2.0\",\"result\":{}}")
 	if strings.Join(passed, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("at the owner:\n%s\nwant:\n%s", strings.Join(passed, "\n"), strings.Join(want, "\n"))
 	}
@@ -296,6 +312,49 @@ func TestCallBacksAreDroppedAndDenied(t *testing.T) {
 	if strings.Join(denied, ",") != strings.Join(wantDenied, ",") {
 		t.Fatalf("denied %v, want %v", denied, wantDenied)
 	}
+}
+
+// A channel-0 message that does not read, or a stream announced twice,
+// ends the link: the owner's core would read it its own way.
+func TestMalformedMessagesEndTheLink(t *testing.T) {
+	for name, guest := range map[string][]byte{
+		"not json":         Frame(0, KindData, []byte("not json")),
+		"out of range":     Frame(0, KindData, []byte("{\"id\":9,\"result\":{\"n\":1e400}}")),
+		"deep":             Frame(0, KindData, []byte("{\"id\":9,\"result\":"+strings.Repeat("[", MaxDepth)+strings.Repeat("]", MaxDepth)+"}")),
+		"channel again":    Frame(0, KindData, []byte("{\"id\":9,\"result\":{\"channel\":3}}")),
+		"channel too big":  Frame(0, KindData, []byte("{\"id\":9,\"result\":{\"channel\":4294967299}}")),
+		"channel not int":  Frame(0, KindData, []byte("{\"id\":9,\"result\":{\"channel\":5.5}}")),
+		"channel a string": Frame(0, KindData, []byte("{\"id\":9,\"result\":{\"channel\":\"5\"}}")),
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := framedRig(t, Options{})
+			r.owner(call(9, "terminal.attach", "{}"))
+			await(t, "the call at the guest", r.toGuest, func(b []byte) bool { return strings.Contains(string(b), "\"id\":9") })
+			go r.guestW.Write(guest)
+			if err := <-r.done; !errors.Is(err, ErrProtocol) {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("hello reply", func(t *testing.T) {
+		for _, line := range []string{
+			"{\"id\":1,\"result\":{\"x\":1e400}}",
+			"{\"id\":1,\"result\":" + strings.Repeat("[", 100) + strings.Repeat("]", 100) + "}",
+			"{\"id\":1}",
+			"{\"id\":1,\"result\":{},\"error\":{}}",
+			"{\"id\":1,\"result\":[]}",
+			"{\"id\":1,\"error\":null}",
+			"{\"id\":1,\"method\":\"x\",\"result\":{}}",
+		} {
+			r := newRig(t, Options{})
+			r.owner([]byte(ownerHello))
+			await(t, "hello", r.toGuest, func(b []byte) bool { return bytes.HasSuffix(b, []byte("\n")) })
+			go r.guestW.Write([]byte(line + "\n"))
+			if err := <-r.done; !errors.Is(err, ErrProtocol) || len(r.toOwner.bytes()) != 0 {
+				t.Fatalf("%s: %v, owner got %q", line, err, r.toOwner.bytes())
+			}
+		}
+	})
 }
 
 func TestStreamsAreFilteredAndCreditedBack(t *testing.T) {
@@ -412,8 +471,8 @@ func TestClipboardWritesFollowTheOwnersPane(t *testing.T) {
 		r.owner(call(8, "server.status", "{}"))
 		await(t, "owner frames at the guest", r.toGuest, func(b []byte) bool { return strings.Contains(string(b), "server.status") })
 		r.guest(Frame(3, KindData, []byte("a"+set+"b")))
-		r.guest(Frame(0, KindData, []byte("{\"jsonrpc\":\"2.0\",\"id\":99,\"result\":{}}")))
-		await(t, "reply", r.toOwner, func(b []byte) bool { return strings.Contains(string(b), "\"id\":99") })
+		r.guest(Frame(0, KindData, []byte("{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}")))
+		await(t, "reply", r.toOwner, func(b []byte) bool { return strings.Contains(string(b), "\"id\":8") })
 		if got := streamText(r.ownerFrames(), 3); got != "ab" {
 			t.Fatalf("got %q", got)
 		}
@@ -425,6 +484,8 @@ func TestSplitFramesGiveTheSameOutput(t *testing.T) {
 	var outputs []string
 	for _, step := range []int{1 << 20, 1, 7} {
 		r := framedRig(t, Options{})
+		r.owner(call(99, "server.status", "{}"))
+		await(t, "the call at the guest", r.toGuest, func(b []byte) bool { return strings.Contains(string(b), "server.status") })
 		var wire []byte
 		for start := 0; start < len(stream); start += 5 {
 			wire = append(wire, Frame(3, KindData, stream[start:min(start+5, len(stream))])...)
@@ -491,11 +552,11 @@ func TestAProbeStaysPlain(t *testing.T) {
 	r.guest([]byte("{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"core\":{\"id\":\"beef\",\"name\":\"g\"}}}\n"))
 	r.guest([]byte("{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"terminal.send\",\"params\":{}}\n"))
 	r.guest([]byte("{\"jsonrpc\":\"2.0\",\"id\":4,\"result\":{}}\n"))
-	got := await(t, "replies", r.toOwner, func(b []byte) bool { return strings.Contains(string(b), "\"id\":4") })
-	if strings.Contains(string(got), "terminal.send") {
-		t.Fatalf("a plain call-back passed: %s", got)
-	}
 	r.guestW.Close()
+	// After a probe's reply the owner hangs up: nothing more passes.
+	if got := string(r.toOwner.bytes()); got != "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{\"core\":{\"id\":\"beef\",\"name\":\"g\"}}}\n" {
+		t.Fatalf("at the owner: %q", got)
+	}
 	if err := <-r.done; err != nil || r.result.Framed {
 		t.Fatal(err, r.result)
 	}
