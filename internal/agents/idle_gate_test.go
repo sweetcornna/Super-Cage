@@ -4,8 +4,11 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -50,5 +53,51 @@ func TestPackageStartsNoGoroutineAndArmsNoTimer(t *testing.T) {
 	}
 	if checked == 0 {
 		t.Fatal("no non-test source file was checked")
+	}
+}
+
+// Guarantee G: only two places can parse the catalog at all, the routes of the
+// optional clients and the guest script of their jobs. Nothing the Claude path
+// runs (start, attach, a terminal) imports it. An allowed importer that goes
+// away or a new one fails here, so the list is looked at when it changes.
+func TestOnlyTheOptionalClientCodeImportsTheCatalog(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipped := []string{".git", ".claude", "node_modules", "ui", "output", "dist"}
+	var importers []string
+	err = filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if slices.Contains(skipped, entry.Name()) && path != root {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		relative := filepath.ToSlash(strings.TrimPrefix(path, root+string(filepath.Separator)))
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") || strings.HasPrefix(relative, "internal/agents/") {
+			return nil
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, parser.ImportsOnly)
+		if err != nil {
+			return nil // a file that does not parse here cannot be told apart; the build will say
+		}
+		for _, spec := range parsed.Imports {
+			if value, err := strconv.Unquote(spec.Path.Value); err == nil && strings.HasSuffix(value, "/internal/agents") {
+				importers = append(importers, relative)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slices.Sort(importers)
+	want := []string{"internal/cage/agent_install.go", "internal/workbench/agents.go"}
+	if !slices.Equal(importers, want) {
+		t.Fatalf("the importers of the catalog are %v, want %v: another importer may parse it on the Claude path (design 9.1)", importers, want)
 	}
 }

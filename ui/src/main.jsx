@@ -905,7 +905,8 @@ function App() {
             if (live && install.activate) setGuestSystem(previous => ({ ...previous, activate:true }));
           }
           // A clear reports its outcome in the browser data window that runs it.
-          if (next.job.error && next.job.kind !== "browser-clear") notify(next.job.error);
+          // A failed agent job says so in its row (Settings → 其他客户端); a toast would say it twice.
+          if (next.job.error && next.job.kind !== "browser-clear" && !/^agent-(install|update|remove):/.test(next.job.kind || "")) notify(next.job.error);
         }
         if (next.ready) {
           const supportsBrowser = guestCapability(next, "browser");

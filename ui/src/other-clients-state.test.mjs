@@ -169,6 +169,13 @@ test("installed: the version, remove behind the menu; the one-time line after an
   assert.equal(row({ present: { by: "cage", version: "0.171.0" } }, { added: "other" }).meta, "");
 });
 
+test("repaired: its own one-time line, never the added one", () => {
+  const present = { by: "cage", version: "0.171.0", state: "ok" };
+  assert.equal(row({ present }, { repaired: "codex" }).meta, "已修复。");
+  assert.equal(row({ present }, { repaired: "other" }).meta, "");
+  assert.equal(row({ present }, { added: "codex" }).meta, "已添加。可以在 新建 中打开。");
+});
+
 test("update available: 更新 beside the menu; the new version is named", () => {
   const update = row({ present: { by: "cage", version: "0.171.0" }, update_available: true, pinned_version: "0.180.0" });
   assert.equal(update.state, "update");
@@ -213,6 +220,24 @@ test("withdrawn and installed: 不再受支持, only 移除", () => {
   assert.equal(withdrawn.meta, "不再受支持");
   assert.deepEqual(withdrawn.actions, []);
   assert.deepEqual(withdrawn.menu.map((item) => item.id), ["remove"]);
+});
+
+test("installed and then unsupported or withdrawn: still removable, nothing else", () => {
+  const unsupported = row({ supported: false, unsupported_reason: "Codex 没有适用于 arm64 的版本，无法添加。", present: { by: "cage", version: "0.170.0", state: "ok" } });
+  assert.equal(unsupported.state, "unsupported");
+  assert.equal(unsupported.muted, true);
+  assert.deepEqual(unsupported.parts, ["0.170.0"]);
+  assert.equal(unsupported.meta, "Codex 没有适用于 arm64 的版本，无法添加。");
+  assert.deepEqual(unsupported.actions, []);
+  assert.deepEqual(unsupported.menu.map((item) => item.id), ["remove"]);
+  assert.equal(unsupported.menu[0].disabled, false);
+  // The environment stopped: the item is there and off, as every other button.
+  const stopped = rowFor(normalizeAgents({ agents: [raw({ supported: false, present: { by: "cage", version: "0.170.0" } })] }).entries[0], { environment: { running: false } });
+  assert.deepEqual(stopped.menu.map((item) => [item.id, item.disabled]), [["remove", true]]);
+  // Nothing installed, or installed by the person: nothing to remove.
+  assert.deepEqual(row({ supported: false }).menu, []);
+  assert.deepEqual(row({ supported: false, present: { by: "own", version: "0.170.0" } }).menu, []);
+  assert.deepEqual(row({ status: "withdrawn", present: { by: "own", version: "0.170.0" } }).menu, []);
 });
 
 test("marks: Codex keeps its drawn mark, others their monogram (derived when the entry sends none)", () => {

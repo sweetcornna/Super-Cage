@@ -316,6 +316,10 @@ var catalogJSON []byte
 // decodes counts catalog parses; tests use it to prove the parse is lazy.
 var decodes atomic.Int64
 
+// Decodes is how many catalogs this process has parsed. A session that only
+// uses Claude keeps it at zero; the workbench tests assert that.
+func Decodes() int64 { return decodes.Load() }
+
 func lazy(data []byte) func() (Catalog, error) {
 	return sync.OnceValues(func() (Catalog, error) {
 		decodes.Add(1)

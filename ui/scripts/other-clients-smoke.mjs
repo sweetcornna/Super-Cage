@@ -7,8 +7,10 @@
 //   - the states: available, installing with progress and 取消, failed (each
 //     failure line of design 4.4, with or without 重试), installed with the
 //     one-time line, update available, drifted, own install, unsupported, not
-//     allowed, withdrawn, a long name, the environment stopped, another job
-//     running;
+//     allowed, withdrawn, installed-then-unsupported (still removable), a long
+//     name, the environment stopped, another job running; a failed agent job
+//     raises no toast (its row's line is the one message), other jobs still do;
+//     a repair says 已修复, an add 已添加;
 //   - the add and remove dialogs, and the requests they make;
 //   - both themes at 1440x900 and 1000x700, no overflow, no page error.
 // Screenshots go to CAGE_SHOTS (default output/other-clients/). Needs a Vite dev
@@ -77,9 +79,10 @@ async function reopenSection(page) {
 
 async function run({ theme, viewport }) {
   const tag = theme + "-" + viewport.width + "x" + viewport.height;
-  // A failed job also toasts (main.jsx): outside the failure shots, wait for it to go.
+  // A failed agent job raises no toast (the row's line is the one message); any other toast is waited out.
   const shot = async (page, name) => {
-    if (!name.startsWith("failed-")) await page.locator(".toast").waitFor({ state: "detached", timeout: 8000 }).catch(() => {});
+    if (name.startsWith("failed-")) assert.equal(await page.locator(".toast").count(), 0, "no toast in " + name);
+    else await page.locator(".toast").waitFor({ state: "detached", timeout: 8000 }).catch(() => {});
     await page.screenshot({ path: fileURLToPath(new URL(tag + "-" + name + ".png", output)) });
   };
   const model = createAgents([codex(), antigravity()]);
@@ -158,6 +161,28 @@ async function run({ theme, viewport }) {
     const overflow = () => page.evaluate(() => { const box = document.querySelector(".settings-content"); return box.scrollWidth > box.clientWidth; });
     assert.equal(await overflow(), false, "no horizontal overflow");
 
+    // Installed, then no longer supported by this environment: still removable (the menu), nothing else.
+    model.entries = [codex({ present: present("0.170.0"), supported: false, unsupported_code: "architecture", unsupported_reason: "Codex 没有适用于这个环境的版本，无法添加或更新。" })];
+    await reopenSection(page);
+    const stale = rowOf(page, "codex");
+    assert.equal(await stale.getAttribute("data-state"), "unsupported");
+    assert.deepEqual(await titleOf(stale), ["Codex", "0.170.0"]);
+    assert.equal(await stale.locator(".other-client-meta").innerText(), "Codex 没有适用于这个环境的版本，无法添加或更新。");
+    assert.deepEqual(await stale.getByRole("button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label"))), ["更多操作：Codex"], "only the menu");
+    await stale.getByRole("button", { name: "更多操作：Codex" }).click();
+    assert.equal(await page.getByRole("menuitem", { name: "移除", exact: true }).isEnabled(), true);
+    // The app's icon hint ("更多操作：Codex") stays under a focused ⋯ button and covers the top of the menu; the shot is of the menu, so the pointer and the focus leave the button.
+    await page.mouse.move(720, 600);
+    await page.evaluate(() => document.activeElement?.blur());
+    await page.locator(".icon-hint").waitFor({ state: "hidden" });
+    await page.waitForTimeout(250);
+    await shot(page, "unsupported-installed");
+    await page.getByRole("menuitem", { name: "移除", exact: true }).click();
+    const staleDialog = page.getByRole("dialog", { name: "移除 Codex？" });
+    await staleDialog.waitFor();
+    await staleDialog.getByRole("button", { name: "取消", exact: true }).click();
+    await staleDialog.waitFor({ state: "detached" });
+
     // One entry: add, installing, cancel, failed, again, added.
     model.entries = [codex()];
     await reopenSection(page);
@@ -233,6 +258,23 @@ async function run({ theme, viewport }) {
     state.status.job = { ...failing, running: false, error: failures.digest, message: "添加 Codex失败" };
     await pollNow(page);
     await codexRow.getByText(failures.digest, { exact: true }).waitFor();
+    // The row's line is the one message: no toast beside it, and the text is on screen once.
+    await page.waitForTimeout(800);
+    assert.equal(await page.locator(".toast").count(), 0, "a failed agent job raises no toast");
+    // On screen: the Home page stays mounted behind the settings page (its own generic error block), so an element only counts when it is what shows at its centre.
+    const saidIn = await page.evaluate((line) => [...document.querySelectorAll("body *")].filter((node) => {
+      if (!node.checkVisibility() || ![...node.childNodes].some((child) => child.nodeType === 3 && child.textContent.includes(line))) return false;
+      const box = node.getBoundingClientRect();
+      const top = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+      return Boolean(top) && (node.contains(top) || top.contains(node));
+    }).map((node) => node.tagName.toLowerCase() + (node.className ? "." + String(node.className).split(" ").join(".") : "") + " in " + (node.closest("[class]:not(.other-client-meta)")?.className || "")), failures.digest);
+    assert.equal(saidIn.length, 1, "the failure is said once, found in: " + saidIn.join(" | "));
+    // Every other kind of job still toasts its error.
+    state.status.job = { id: "other-fail", kind: "settings", running: false, error: "保存设置失败（测试）", message: "" };
+    await pollNow(page);
+    await page.locator(".toast").getByText("保存设置失败（测试）").waitFor();
+    state.status.job = { ...failing, running: false, error: failures.digest, message: "添加 Codex失败" };
+    await pollNow(page);
     // 重试 repeats the operation that was asked.
     await codexRow.getByRole("button", { name: "重试", exact: true }).click();
     assert.deepEqual(model.calls.filter((call) => call.method === "POST").at(-1).path, "/agents/codex/install");
@@ -252,6 +294,23 @@ async function run({ theme, viewport }) {
     assert.equal(await codexRow.getByRole("button", { name: "添加" }).count(), 0);
     await page.waitForTimeout(300);
     await shot(page, "installed");
+
+    // 修复: an install onto a client whose files changed; its one-time line says so, not "已添加".
+    model.entries = [codex({ present: present("0.171.0", { state: "drifted" }) })];
+    await reopenSection(page);
+    await codexRow.getByRole("button", { name: "修复", exact: true }).click();
+    assert.equal(model.calls.filter((call) => call.method === "POST").at(-1).path, "/agents/codex/install");
+    const repair = model.lastJob;
+    state.status.job = { ...repair, running: true, setup_progress: progress("verify", "验证", 0, 0) };
+    await pollNow(page);
+    await codexRow.getByText("正在验证", { exact: true }).waitFor();
+    model.entries = [codex({ present: present() })];
+    state.status.job = { ...repair, running: false, error: "" };
+    await pollNow(page);
+    await codexRow.getByText("已修复。", { exact: true }).waitFor();
+    assert.equal(await codexRow.getByText("已添加", { exact: false }).count(), 0, "a repair is no add");
+    await page.waitForTimeout(300);
+    await shot(page, "repaired");
 
     // Update and remove.
     model.entries = [codex({ present: present(), update_available: true, pinned_version: "0.180.0" })];
