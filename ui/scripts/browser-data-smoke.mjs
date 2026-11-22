@@ -30,7 +30,7 @@ const fields = ["mode", "session", "range", "since", "types", "protect", "keep",
 // Downloads whose save failed, as the guest counts them (browser-downloads.mjs
 // keeps them; its own tests cover that): set to show them in the dialog.
 let unsavedDownloads = 0;
-const opened = [];
+const opened = [], openedTabs = [];
 const settingsFields = ["action", "domain", "range", "types", "enabled", "trigger", "days"];
 const strict = (body, known) => { const extra = Object.keys(body || {}).filter(name => !known.includes(name)); if (extra.length) throw new Error("请求格式无效: " + extra.join(",")); };
 const dataRoute = async body => {
@@ -83,7 +83,7 @@ try {
     try {
       if (path === "/browser/data") { requests.push({ at: Date.now(), mode: body.mode }); return route.fulfill({ json: await dataRoute(body) }); }
       if (path === "/browser/data-settings") return route.fulfill({ json: settingsRoute(body) });
-      if (path === "/browser/new") opened.push(body?.url || "");
+      if (path === "/browser/new") { opened.push(body?.url || ""); const reply = await c.api("/new", body ?? undefined); openedTabs.push(reply.id); return route.fulfill({ json: reply }); }
       return route.fulfill({ json: await c.api(path.replace("/browser", ""), body ?? undefined) });
     } catch (error) { return route.fulfill({ status: /请求格式无效/.test(error.message) ? 400 : 409, contentType: "text/plain; charset=utf-8", body: error.message }); }
   } });
@@ -298,6 +298,9 @@ try {
   await longRow.locator(".bd-history-open").click();
   for (let i = 0; i < 100 && !opened.some(url => url.length > 6000); i++) await delay(50);
   check("opening it fetches the whole address", opened.some(url => url.length > 6000 && url.includes("/long?")));
+  // The opened page adds a visit of its own when it commits; wait for it, or
+  // a slow machine shows that new visit after the deletion below.
+  await c.waitFor(async () => openedTabs.length && await c.evaluate(openedTabs.at(-1), "document.readyState === 'complete'").catch(() => false), "the opened page");
   // Opening showed the page; back to the history to delete the entry.
   await openPrivacy("history");
   await history.getByRole("textbox", { name: "搜索浏览记录" }).fill("s8.localhost/long");
