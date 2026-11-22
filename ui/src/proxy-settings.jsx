@@ -416,7 +416,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
           {proxy.state_label}
         </span>
       </div>
-      {networkState(status).explanation && <NetworkExplanation explanation={networkState(status).explanation} compact
+      {networkState(status).explanation && <NetworkExplanation explanation={networkState(status).explanation} inline
         canRecheck={Boolean(status.ready && status.safety?.gate && !status.job?.running)} />}
       {proxy.active && status.location && (
         <p className="field-help">

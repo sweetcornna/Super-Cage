@@ -28,6 +28,7 @@
 .network-countdown {
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .network-explanation-advice {
   display: grid;

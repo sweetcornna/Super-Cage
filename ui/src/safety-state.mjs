@@ -58,6 +58,12 @@ function networkExplanation(value, mode, now, gate) {
   // The unconfirmed lease is the gate's own: its remaining time when the
   // server sent it, else lease_until as before.
   const leaseUntil = value.state === "unconfirmed" && Number.isFinite(gate?.lease_end) ? gate.lease_end : at(value.lease_until);
+  // A newer server's stable sentences plus the one moment they count down to
+  // (deadline_ms, unix milliseconds). The unconfirmed lease keeps the gate's
+  // own clock reading.
+  const deadline = Number.isFinite(value.deadline_ms)
+    ? value.state === "unconfirmed" && Number.isFinite(leaseUntil) ? leaseUntil : value.deadline_ms
+    : null;
   return {
     state: value.state,
     reason: typeof value.reason === "string" ? value.reason : "",
@@ -69,6 +75,7 @@ function networkExplanation(value, mode, now, gate) {
     recheckInSeconds: seconds(recheckAt),
     leaseUntil,
     leaseEndsInSeconds: seconds(leaseUntil),
+    deadline,
   };
 }
 
@@ -109,15 +116,50 @@ export function countdownText(seconds) {
   return rest ? `约 ${minutes} 分 ${rest} 秒后` : `约 ${minutes} 分钟后`;
 }
 
+// The live countdown inside the next-step sentence: exact, not rounded.
+export function countdownWords(seconds) {
+  if (seconds < 60) return `${seconds} 秒后`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes} 分 ${rest} 秒后` : `${minutes} 分钟后`;
+}
+
+// What the recheck waits for, as the next sentence names it.
+const MEMORY_SUBJECTS = { environment: "环境内存", browser: "浏览器内存", machine: "这台机器的内存" };
+
+// The next-step sentence for a state that has a deadline, as [before, timer,
+// after]: the one live countdown sits in the middle (null timer: the time has
+// come). Other states are described by the server's own sentence.
+function nextParts(explanation, seconds) {
+  const when = seconds > 0 ? countdownWords(seconds) : null;
+  switch (explanation.state) {
+    case "waiting_memory": {
+      const subject = MEMORY_SUBJECTS[explanation.memoryCause] || "内存";
+      return when ? [`${subject}回落后会自动重检并恢复联网，最迟 `, when, "。"] : [`${subject}回落后会自动重检并恢复联网，马上就会重检。`, null, ""];
+    }
+    case "recheck_scheduled":
+      return when ? ["将在 ", when, "自动重检，通过后恢复联网。"] : ["即将自动重检，通过后恢复联网。", null, ""];
+    case "unconfirmed":
+      return when ? ["监测恢复后会自动延长联网许可，否则外网将在 ", when, "自动暂停。"] : ["联网许可即将到期，监测确认后会自动延长。", null, ""];
+    default:
+      return null;
+  }
+}
+
 export function explanationView(explanation, now = Date.now()) {
   if (!explanation) return null;
   const kind = EXPLAINED[explanation.state] || EXPLAINED.check_required;
-  const at = kind.countdown === "lease" ? explanation.leaseUntil : kind.countdown === "recheck" ? explanation.recheckAt : null;
+  // A newer server's explanation carries its deadline: the reason is the
+  // server's stable sentence and the next step one sentence with the single
+  // live countdown in it. An older server's text and countdown stay as they were.
+  const stable = explanation.deadline !== null && explanation.deadline !== undefined && Boolean(nextParts(explanation, 1));
+  const at = stable ? explanation.deadline : kind.countdown === "lease" ? explanation.leaseUntil : kind.countdown === "recheck" ? explanation.recheckAt : null;
   const seconds = at === null || at === undefined ? null : Math.max(0, Math.ceil((at - now) / 1000));
   const when = countdownText(seconds);
+  const parts = stable ? nextParts(explanation, seconds) : null;
   const countdown = seconds === null ? null : {
     at, seconds,
-    text: kind.countdown === "lease"
+    text: stable ? "" : kind.countdown === "lease"
       ? (seconds > 0 ? `联网许可${when}到期，监测确认后会自动延长。` : "联网许可即将到期，监测确认后会自动延长。")
       : explanation.state === "waiting_memory"
         ? (seconds > 0 ? `最迟${when}自动完整重检。` : "即将自动完整重检。")
@@ -129,7 +171,8 @@ export function explanationView(explanation, now = Date.now()) {
     label: kind.label,
     title: explanation.state === "waiting_memory" && MEMORY_TITLES[explanation.memoryCause] || kind.title,
     reason: explanation.reason,
-    next: explanation.next,
+    next: parts ? parts.filter(Boolean).join("") : explanation.next,
+    nextParts: parts,
     advice: explanation.advice.map((text) => ({ text, action: adviceAction(text) })),
     memoryShort: explanation.memoryShort,
     memoryCause: explanation.memoryCause || "",

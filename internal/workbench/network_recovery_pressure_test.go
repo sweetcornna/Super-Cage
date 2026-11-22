@@ -89,13 +89,13 @@ func TestRecoveryUnderContinuousPressureRunsAfterBoundAndReopens(t *testing.T) {
 	}
 	e := s.safety.Explanation
 	if e == nil || e.State != networkWaitingMemory || !e.MemoryShort || e.RecheckAt == nil || len(e.Advice) == 0 ||
-		!strings.Contains(e.Reason, "环境内存不足") || !strings.Contains(e.Next, "最迟") {
+		!strings.Contains(e.Reason, "环境内存不足") || !strings.Contains(e.Next, "最迟 1 分钟内也会重检") || e.DeadlineMs != e.RecheckAt.UnixMilli() {
 		t.Fatalf("explanation while waiting: %+v", e)
 	}
 	if want := s.recovery.pressureSince.Add(recoveryPressureWait); e.RecheckAt.Sub(want).Abs() > time.Second {
 		t.Fatalf("recheck_at %s, want %s", e.RecheckAt, want)
 	}
-	if message := s.currentNetworkErrorLocked(); !strings.Contains(message, "最多再等待") {
+	if message := s.currentNetworkErrorLocked(); !strings.Contains(message, "最迟 1 分钟内也会进行") {
 		t.Fatalf("network_error does not bound the wait: %s", message)
 	}
 	// Pressure continues inside the bound: still nothing runs.
@@ -170,7 +170,7 @@ func TestNetworkExplanationReachesStatusPhoneAndProxyLabel(t *testing.T) {
 	}
 	e := status.Safety.Explanation
 	if status.Safety.Gate == nil || status.Safety.Gate.Mode != cage.GateClosed || e.State != networkWaitingMemory || !e.MemoryShort ||
-		e.RecheckAt == nil || len(e.Advice) == 0 || strings.Count(e.Reason, "46 MB") != 1 || !strings.Contains(status.NetworkError, "自动重检最多再等待") {
+		e.RecheckAt == nil || len(e.Advice) == 0 || strings.Count(e.Reason, "2.8 GB") != 1 || e.DeadlineMs != e.RecheckAt.UnixMilli() || !strings.Contains(status.NetworkError, "自动重检会等内存回落") {
 		t.Fatalf("/api/status: %s", response.Body.String())
 	}
 	w := request(s, "GET", "/api/mobile/environment", "", "", true)
@@ -211,7 +211,7 @@ func TestMemoryNoteKeepsPressureWhileProbeTimesOut(t *testing.T) {
 		short  bool
 		reason string
 	}{
-		{"fresh pressure", cage.ResourceStatus{ObservedAt: now, Pressure: true, Guest: sample}, nil, true, "环境内存不足（可用约 48 MB，共 3.0 GB）"},
+		{"fresh pressure", cage.ResourceStatus{ObservedAt: now, Pressure: true, Guest: sample}, nil, true, "环境内存不足（共 3.0 GB）"},
 		{"probe timing out after a pressured sample", cage.ResourceStatus{ObservedAt: now.Add(-time.Minute), Pressure: true, Guest: sample, Error: "读取资源用量失败：等待响应超时。自动回收内存已暂停"}, nil, true, "资源读数也暂时超时"},
 		{"host short", cage.ResourceStatus{ObservedAt: now, HostPressure: true, Guest: sample}, nil, true, "这台机器内存不足"},
 		{"no pressure", cage.ResourceStatus{ObservedAt: now, Guest: sample}, nil, false, ""},

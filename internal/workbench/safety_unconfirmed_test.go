@@ -101,9 +101,9 @@ func TestUnconfirmedSettingsReadKeepsLeaseWithoutRenewing(t *testing.T) {
 	}{
 		// The reads classify their failures (guest_reads.go); these are
 		// the ones that returned no answer.
-		{"system settings read timed out", noAnswer(context.DeadlineExceeded), nil, "无法读取系统时区和语言"},
-		{"system settings probe killed", noAnswer(errors.New("客机检测未返回完整结果: signal: killed")), nil, "无法读取系统时区和语言"},
-		{"browser audit returned no settings", nil, noAnswer(errors.New("浏览器检测未返回完整结果，请更新或重启环境")), "无法读取浏览器时区和语言"},
+		{"system settings read timed out", noAnswer(context.DeadlineExceeded), nil, "读不到系统的时区和语言"},
+		{"system settings probe killed", noAnswer(errors.New("客机检测未返回完整结果: signal: killed")), nil, "读不到系统的时区和语言"},
+		{"browser audit returned no settings", nil, noAnswer(errors.New("浏览器检测未返回完整结果，请更新或重启环境")), "读不到浏览器的时区和语言"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, gate := unconfirmedMonitorServer(t)
@@ -137,12 +137,13 @@ func TestUnconfirmedSettingsReadKeepsLeaseWithoutRenewing(t *testing.T) {
 			}
 			e := s.safety.Explanation
 			// lease_until is the remaining lease the gate reported, counted
-			// from when the status request left: at most a few ms early.
+			// from when the status request left, in whole seconds: never
+			// later than the gate's and less than a second early.
 			if e == nil || e.State != networkUnconfirmed || e.LeaseUntil == nil || e.LeaseUntil.After(before.Until) ||
-				before.Until.Sub(*e.LeaseUntil) > 100*time.Millisecond || !strings.Contains(e.Reason, tc.stage) {
+				before.Until.Sub(*e.LeaseUntil) > 1100*time.Millisecond || e.DeadlineMs != e.LeaseUntil.UnixMilli() || !strings.Contains(e.Reason, tc.stage) {
 				t.Fatalf("explanation: %+v", e)
 			}
-			if message := s.currentNetworkErrorLocked(); !strings.Contains(message, "现有联网许可未延长") || !strings.Contains(message, "秒后暂停") {
+			if message := s.currentNetworkErrorLocked(); !strings.Contains(message, "现有联网许可未延长") || !strings.Contains(message, "联网许可到期前仍无法确认时，外网会自动暂停") || strings.ContainsAny(message, "0123456789") {
 				t.Fatalf("status does not say the lease runs out: %s", message)
 			}
 			if label := s.networkStateLabel("ready", "已联网"); label != "已联网，监测重试中" {
@@ -258,10 +259,10 @@ func TestUnconfirmedReadsUntilDeadlineEndWithGateTimer(t *testing.T) {
 	}
 	e := s.safety.Explanation
 	if e == nil || e.State != networkRecheckScheduled || e.RecheckAt == nil || !e.MemoryShort ||
-		strings.Count(e.Reason, "环境内存不足") != 1 || !strings.HasSuffix(e.Reason, "联网许可到期前仍无法读取系统时区和语言，外网已暂停") {
+		strings.Count(e.Reason, "环境内存不足") != 1 || !strings.HasSuffix(e.Reason, "安全检查读不到系统的时区和语言，所以暂时关闭了外网。") {
 		t.Fatalf("explanation after expiry: %+v", e)
 	}
-	if message := s.currentNetworkErrorLocked(); strings.Count(message, "环境内存不足") > 1 || !strings.Contains(message, "自动重检将在") {
+	if message := s.currentNetworkErrorLocked(); strings.Count(message, "环境内存不足") > 1 || !strings.Contains(message, "自动重检稍后进行") {
 		t.Fatalf("network_error after expiry: %s", message)
 	}
 }

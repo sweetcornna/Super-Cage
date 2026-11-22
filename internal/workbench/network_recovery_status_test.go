@@ -15,7 +15,7 @@ func TestFailedNetworkRecoveryShowsLatestCheckReason(t *testing.T) {
 		return errors.New("出口采样不完整：浏览器没有收到检测结果")
 	})
 	message := s.currentNetworkErrorLocked()
-	if err == nil || !strings.Contains(message, "浏览器没有收到检测结果") || !strings.Contains(message, "自动重检将在") || strings.Contains(message, "guest observation timed out") {
+	if err == nil || !strings.Contains(message, "浏览器没有收到检测结果") || !strings.Contains(message, "自动重检稍后进行") || strings.Contains(message, "guest observation timed out") {
 		t.Fatalf("latest failure or next retry was hidden: %s error=%v", message, err)
 	}
 }
@@ -25,8 +25,9 @@ func TestNetworkRecoveryStatusExplainsWaitWithoutChangingPermission(t *testing.T
 	now := time.Now()
 	s.recovery.Next = now.Add(1500 * time.Millisecond)
 	before := gate.Status()
-	if message := s.networkRecoveryMessageLocked(now); !strings.Contains(message, "2 秒") {
-		t.Fatal("missing bounded countdown", message)
+	// The text carries no countdown: it is the same on every read until the situation changes.
+	if message := s.networkRecoveryMessageLocked(now); message != "自动重检稍后进行" || s.networkRecoveryMessageLocked(now.Add(time.Second)) != message {
+		t.Fatal("missing or unstable scheduled wait", message)
 	}
 	if message := s.networkRecoveryMessageLocked(now.Add(2 * time.Second)); !strings.Contains(message, "后台调度") {
 		t.Fatal("missing scheduling wait", message)

@@ -12,15 +12,26 @@ import "./network-explanation.css";
 // block in the home card. Without an explanation (an older server) the
 // workbench keeps today's text and opens the checklist as before.
 
-// Re-renders the caller once a second while active, for the countdowns.
-export function useNow(active, interval = 1000) {
+// Re-renders the caller once a second for a countdown: only while active, only
+// while the window is visible and only until the moment it counts down to has
+// passed. Nothing else runs; a caller that is not mounted has no timer.
+export function useNow(active, until = Infinity, interval = 1000) {
   const [now, setNow] = useState(() => Date.now());
+  const live = active && Date.now() <= until + interval;
   useEffect(() => {
-    if (!active) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), interval);
-    return () => clearInterval(timer);
-  }, [active, interval]);
+    if (!live) return;
+    let timer = 0;
+    const stop = () => { clearInterval(timer); timer = 0; };
+    const start = () => {
+      stop();
+      if (document.visibilityState !== "visible") return;
+      setNow(Date.now());
+      timer = setInterval(() => setNow(Date.now()), interval);
+    };
+    start();
+    document.addEventListener("visibilitychange", start);
+    return () => { stop(); document.removeEventListener("visibilitychange", start); };
+  }, [live, interval]);
   return now;
 }
 
@@ -55,23 +66,52 @@ const memoryNames = { environment: "环境内存", browser: "隔离浏览器内�
 
 // onResources opens 设置 → 环境与恢复 → 计算资源; advice about the memory
 // setting offers it (adviceAction in safety-state.mjs).
-export function NetworkExplanation({ explanation, compact = false, canRecheck = false, onRechecked, onDetails, onResources, titleId }) {
-  const now = useNow(Boolean(explanation?.recheckAt || explanation?.leaseUntil));
+export function NetworkExplanation({ explanation, compact = false, inline = false, canRecheck = false, onRechecked, onDetails, onResources, titleId }) {
+  // The home card (compact) shows the reason and one action; the popover and
+  // the settings block (inline, without the title) show everything and count down.
+  const target = explanation?.deadline ?? explanation?.recheckAt ?? explanation?.leaseUntil ?? null;
+  const now = useNow(!compact && target !== null, target ?? Infinity);
   const recheck = useRecheck(onRechecked);
   const view = explanationView(explanation, now);
   if (!view) return null;
   const offerRecheck = canRecheck && view.recheck;
   const MemoryIcon = memoryIcons[view.memoryCause];
+  if (compact) {
+    // Reason and one action: the check when the user can run it, else the
+    // details. The next step and the advice are in the popover.
+    return (
+      <div className={`network-explanation tone-${view.tone} compact`} data-state={view.state} data-memory-cause={view.memoryCause || undefined}>
+        {(view.reason || view.next) && <p className="network-explanation-reason">{view.reason || view.next}</p>}
+        {(offerRecheck || onDetails) && (
+          <div className="network-explanation-actions">
+            {offerRecheck ? (
+              <button onClick={recheck.run} disabled={recheck.busy} aria-busy={recheck.busy || undefined}>
+                <RefreshCw size={14} className={recheck.busy ? "spin" : undefined} aria-hidden="true" />
+                {recheck.busy ? "正在开始检测…" : "立即重新检测"}
+              </button>
+            ) : <button className="text-button" onClick={onDetails}>查看检查详情</button>}
+          </div>
+        )}
+        {recheck.error && <p className="network-explanation-error" role="alert">{recheck.error}</p>}
+      </div>
+    );
+  }
   return (
-    <div className={`network-explanation tone-${view.tone}${compact ? " compact" : ""}`} data-state={view.state} data-memory-cause={view.memoryCause || undefined}>
-      {!compact && (
+    <div className={`network-explanation tone-${view.tone}${inline ? " compact" : ""}`} data-state={view.state} data-memory-cause={view.memoryCause || undefined}>
+      {!inline && (
         <p className="network-explanation-title" id={titleId}>
           {MemoryIcon && <MemoryIcon size={16} className="network-memory-icon" aria-hidden="true" data-cause={memoryNames[view.memoryCause]} />}
           {view.title}
         </p>
       )}
       {view.reason && <p className="network-explanation-reason">{view.reason}</p>}
-      {(view.next || view.countdown) && (
+      {view.nextParts ? (
+        <p className="network-explanation-next">
+          {view.nextParts[0]}
+          {view.nextParts[1] && <span className="network-countdown" role="timer">{view.nextParts[1]}</span>}
+          {view.nextParts[2]}
+        </p>
+      ) : (view.next || view.countdown) && (
         <p className="network-explanation-next">
           {view.next}
           {view.countdown && <span className="network-countdown" role="timer"> {view.countdown.text}</span>}
