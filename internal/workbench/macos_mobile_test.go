@@ -19,29 +19,28 @@ func TestMacOSPhoneRequiresCurrentRoomAndAccountUnlock(t *testing.T) {
 	}
 	room, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	s.phones.record = &phoneRecord{}
-	s.phones.roomCtx, s.phones.roomProof = room, "current-private-room"
+	installTestDevice(s, room, nil, "current-private-room")
 	path := "/api/mobile/cli/projects"
 	for _, proof := range []string{"", "expired-private-room"} {
 		if response := windowsPhoneRequest(t, s, http.MethodGet, path, "", proof); response.Code != http.StatusForbidden {
 			t.Fatalf("untrusted phone admitted: %d", response.Code)
 		}
 	}
-	response := windowsPhoneRequest(t, s, http.MethodGet, path, "", s.phones.roomProof)
+	response := windowsPhoneRequest(t, s, http.MethodGet, path, "", "current-private-room")
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"shared_sessions":true`) {
 		t.Fatalf("Mac phone could not read shared projects: %d %s", response.Code, response.Body.String())
 	}
-	if response := windowsPhoneRequest(t, s, http.MethodGet, "/api/settings", "", s.phones.roomProof); response.Code != http.StatusForbidden {
+	if response := windowsPhoneRequest(t, s, http.MethodGet, "/api/settings", "", "current-private-room"); response.Code != http.StatusForbidden {
 		t.Fatal("phone proof allowed desktop administration")
 	}
 	if err := s.account.lockAccess(false); err != nil {
 		t.Fatal(err)
 	}
-	if response := windowsPhoneRequest(t, s, http.MethodGet, path, "", s.phones.roomProof); response.Code != http.StatusLocked {
+	if response := windowsPhoneRequest(t, s, http.MethodGet, path, "", "current-private-room"); response.Code != http.StatusLocked {
 		t.Fatal("locked account allowed the phone to read projects")
 	}
 	cancel()
-	if response := windowsPhoneRequest(t, s, http.MethodGet, path, "", s.phones.roomProof); response.Code != http.StatusForbidden {
+	if response := windowsPhoneRequest(t, s, http.MethodGet, path, "", "current-private-room"); response.Code != http.StatusForbidden {
 		t.Fatal("revoked phone retained access")
 	}
 }

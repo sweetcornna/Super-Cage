@@ -3,8 +3,6 @@ package workbench
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,10 +45,6 @@ func (p *mobilePairing) surface(kind phoneSurface) *phoneSurfaceState {
 	return &p.browser
 }
 
-func (p *mobilePairing) pairedRequestLocked(r *http.Request) bool {
-	return p.roomCtx != nil && p.roomCtx.Err() == nil && p.roomProof != "" && equalSecret(p.roomProof, r.Header.Get(mobilelink.PhoneRoomHeader))
-}
-
 func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
 	mux.HandleFunc("GET /api/mobile/browser/favorites", s.serveFavorites)
 	mux.HandleFunc("POST /api/mobile/browser/favorites", s.serveFavorites)
@@ -64,18 +58,10 @@ func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
 	}
 }
 
-// Keep the private guest profile stable across reconnects to the same enrollment.
-func (p *mobilePairing) peerLocked() string {
-	if p.record == nil {
-		return ""
-	}
-	digest := sha256.Sum256(p.record.Seed)
-	return hex.EncodeToString(digest[:])
-}
-
 type phoneSurfaceSession struct {
 	releaseDisplay func()
 	id, token      string
+	holder         string // the id of the paired device that opened it
 	ctx            context.Context
 	cancel         context.CancelFunc
 	stopEpoch      func() bool
@@ -246,10 +232,14 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 	p := &s.phones
 	p.mu.Lock()
 	state := p.surface(surface)
-	room, profile := p.roomCtx, p.peerLocked()
-	allowed := p.pairedRequestLocked(r)
+	device := p.deviceForRequestLocked(r)
+	var room context.Context
+	var profile string
+	if device != nil {
+		room, profile = device.roomCtx, device.guestProfile()
+	}
 	p.mu.Unlock()
-	if !allowed {
+	if device == nil {
 		http.Error(w, "请通过电脑 Super Cage 的二维码或配对码连接这台主机，再打开"+surface.label()+"。", 403)
 		return
 	}
@@ -302,7 +292,7 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 			s.mu.Unlock()
 		}
 	}
-	call := &phoneCall{surface: surface, op: op, input: input, room: room, epoch: epoch, state: state, defaultHome: defaultHome, frame: frame}
+	call := &phoneCall{surface: surface, op: op, input: input, room: room, epoch: epoch, state: state, defaultHome: defaultHome, frame: frame, device: device.ID}
 	if !frame.Stream {
 		s.phoneSurfaceExecute(call, w, r)
 		return
@@ -322,10 +312,16 @@ func (s *Server) phoneSurfaceExecute(call *phoneCall, w http.ResponseWriter, r *
 		http.Error(w, surface.label()+"授权已结束", 403)
 		return
 	}
+	// One guest window per surface for all devices: an open from another
+	// device takes it over, and the device that held it is told so.
 	b := state.session
-	if b != nil && (b.ctx.Err() != nil || op == "open" && b.id != input.ID) {
+	if b != nil && (b.ctx.Err() != nil || op == "open" && (b.id != input.ID || b.holder != call.device)) {
 		s.retirePhoneSurface(surface, b)
 		b = nil
+	}
+	if op != "open" && b != nil && b.holder != call.device {
+		http.Error(w, surface.label()+"已在另一台设备打开", http.StatusGone)
+		return
 	}
 	if op != "open" && (b == nil || b.id != input.ID) {
 		http.Error(w, surface.label()+"会话已结束，请重新打开", 410)
@@ -357,7 +353,7 @@ func (s *Server) phoneSurfaceExecute(call *phoneCall, w http.ResponseWriter, r *
 		if surface == phoneDesktop && (s.macosGuest != nil || s.windowsGuest != nil) {
 			token = randomToken()
 		}
-		b = &phoneSurfaceSession{id: input.ID, token: token, ctx: sessionCtx, cancel: cancel, stopEpoch: context.AfterFunc(epoch, cancel)}
+		b = &phoneSurfaceSession{id: input.ID, token: token, holder: call.device, ctx: sessionCtx, cancel: cancel, stopEpoch: context.AfterFunc(epoch, cancel)}
 		if surface == phoneBrowser && s.windowsGuest != nil {
 			state.nativeBrowser = newWindowsBrowserClient(s.lifetimeContext(), s.profile)
 		}

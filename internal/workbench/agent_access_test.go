@@ -193,7 +193,9 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 		{"POST", "/api/input/files/desktop/open"}, {"POST", "/api/agent/native/x/complete"}, {"GET", "/api/agent/native?consumer=window"},
 		{"POST", "/api/terminals/t1/keep"}, {"GET", "/api/entry/ssh"}, {"POST", "/api/entry/include"}, {"POST", "/api/entry/devices/x/rename"}, {"POST", "/api/entry/off"},
 		{"GET", "/api/client/virtual-machines"},
+		{"POST", "/api/client/devices/join"}, {"POST", "/api/client/devices/0123456789abcdef0123456789abcdef/open"}, {"GET", "/api/client/devices"},
 		{"POST", "/api/agents/codex/install"}, {"POST", "/api/agents/codex/update"}, {"POST", "/api/agents/codex/remove"}, {"POST", "/api/agents/cancel"},
+		{"POST", "/api/devices/invite"}, {"POST", "/api/mobile-pair"},
 	} {
 		refused(route[0], route[1], "native_transport_required")
 	}
@@ -372,10 +374,19 @@ func TestAgentDocumentedOperationsStayOpen(t *testing.T) {
 		}
 		return agentBodyRefusal(agentBodyRulesFor(method, path), []byte(body))
 	}
+	// Kept as shortcuts that send the agent to the desktop window.
+	windowOnly := map[string]bool{"mobile.pair": true}
 	var names []string
 	for _, op := range AgentOperations() {
 		names = append(names, op.Name)
-		if refused := refusal(op.method, op.path, "{}"); refused != nil {
+		refused := refusal(op.method, op.path, "{}")
+		if windowOnly[op.Name] {
+			if refused == nil || refused.Code != "native_transport_required" || refused.NextAction != "open_desktop" {
+				t.Errorf("%s (%s %s) must send the agent to the desktop window: %v", op.Name, op.method, op.path, refused)
+			}
+			continue
+		}
+		if refused != nil {
 			t.Errorf("%s (%s %s): refused %v", op.Name, op.method, op.path, refused)
 		}
 	}
@@ -390,6 +401,8 @@ func TestAgentDocumentedOperationsStayOpen(t *testing.T) {
 		{"GET", "/api/diagnostics/export", ""}, {"GET", "/api/terminals/t1/stream", ""}, {"GET", "/api/agent/native/abc", ""}, {"POST", "/api/agent/native", "{}"},
 		{"GET", "/api/client/local-terminal", ""}, {"GET", "/api/app-update", ""}, {"POST", "/api/claude-science/start", "{}"}, {"HEAD", "/api/status", ""},
 		{"DELETE", "/api/client/project-shares/share-1", ""}, {"GET", "/api/client/project-shares", ""},
+		{"GET", "/api/devices", ""}, {"GET", "/api/devices/invite", ""}, {"DELETE", "/api/devices/invite", ""},
+		{"DELETE", "/api/devices/0123456789abcdef0123456789abcdef", ""}, {"GET", "/api/mobile-pair", ""}, {"DELETE", "/api/mobile-pair", ""},
 	} {
 		if refused := refusal(route[0], route[1], route[2]); refused != nil {
 			t.Errorf("%s %s %s refused: %v", route[0], route[1], route[2], refused)
@@ -402,6 +415,7 @@ func TestAgentDocumentedOperationsStayOpen(t *testing.T) {
 		{"POST", "/api/macos/login", `{"action":"show-password"}`}, {"POST", "/api/macos/first-setup", `{"action":"show-password"}`},
 		{"POST", "/api/macos/maintenance", `{"action":"show-password"}`}, {"POST", "/api/environment/macos-screen-sharing", "{}"},
 		{"POST", "/api/client/project-shares", `{"path":"/Users/x"}`}, {"POST", "/api/client/browser-extensions", "{}"}, {"GET", "/api/client/browser-extensions", ""},
+		{"POST", "/api/devices/invite", "{}"}, {"POST", "/api/mobile-pair", "{}"},
 	} {
 		if refused := refusal(route[0], route[1], route[2]); refused == nil || refused.NextAction == "" {
 			t.Errorf("%s %s %s is open to agents", route[0], route[1], route[2])

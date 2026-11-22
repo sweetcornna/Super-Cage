@@ -249,7 +249,7 @@ func savedRoom(ctx context.Context, state string, h savedHost) (bool, error) {
 	if err != nil {
 		return mobilelink.Retryable(err), err
 	}
-	err = mobilelink.ServeHost(ctx, h.Settings.Relay, room.ID, room.HostToken, id, h.PeerPin, b)
+	err = mobilelink.ServeHost(ctx, h.Settings.Relay, room.ID, room.HostToken, id, h.PeerPin, mobilelink.Opened(b))
 	if mobilelink.Retryable(err) && !time.Now().Before(room.ExpiresAt) {
 		// An unused room reaching its normal pairing deadline is healthy.
 		// Publish the next room without accumulating offline backoff.

@@ -6,6 +6,7 @@ require github.com/sylvinus/agent-vm v0.0.0
 
 require (
 	github.com/gorilla/websocket v1.5.3 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
 	golang.org/x/mobile v0.0.0-20261011034528-197770444867 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/net v0.61.0 // indirect

@@ -271,6 +271,11 @@ func limited(r io.Reader, limit int64) ([]byte, error) {
 	return data, nil
 }
 
+// Operations serves the mobile operation allowlist through client, as the
+// phone's local bridge does. A desktop that opened a joined computer uses it
+// for that computer's link; the caller authenticates the window first.
+func Operations(client OperationClient) http.Handler { return operations(client.Do) }
+
 // operations checks the method and route before reading data. Callers establish
 // the peer identity or the local browser session before invoking this handler.
 func operations(do performFunc) http.Handler {

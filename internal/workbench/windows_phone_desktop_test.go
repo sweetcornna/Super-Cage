@@ -98,9 +98,7 @@ func windowsPhoneDesktopFixture(t *testing.T) (*Server, string, *cage.EgressGate
 	}
 	s.ready = true
 	room, cancel := context.WithCancel(t.Context())
-	s.phones.roomCtx, s.phones.roomProof = room, "phone-window-room"
-	s.phones.serving = cancel
-	s.phones.record = &phoneRecord{}
+	installTestDevice(s, room, cancel, "phone-window-room")
 	t.Setenv("CAGE_TEST_WINDOWS_PHONE_WINDOW", directory)
 	t.Cleanup(func() {
 		cancel()
@@ -274,7 +272,7 @@ func TestWindowsPhoneDesktopRevocationClosesNativeRelay(t *testing.T) {
 		t.Fatalf("open: %d %s", got.Code, got.Body.String())
 	}
 	native := s.phones.desktop.nativeDesktop
-	s.stopPhone()
+	s.stopDevices()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		s.phones.desktop.op.Lock()
