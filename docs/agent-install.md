@@ -266,7 +266,7 @@ test user's: it cannot make root's files.
 0. Codex is still hidden, so the run needs a development build started with the switch on. Only a version
    with `-dev` lists or installs hidden entries, and only when the process serving the window has
    `CAGE_AGENTS_HIDDEN=1` in its environment; a release build refuses them at the route and in `ScriptInput`.
-   Take a number above the newest release, for example `make cage VERSION=0.1.16-dev.agents` while 0.1.15
+   Take a number above the newest release, for example `make cage VERSION=0.1.17-dev.agents` while 0.1.16
    is the newest, and start that `cage` with `CAGE_AGENTS_HIDDEN=1` (`make` needs `npm ci` for the UI;
    this command has not been run). A `-dev` version of the current number is a prerelease older than the
    release, so it would be offered the release as an update, silently from a writable `.app` bundle on macOS,
