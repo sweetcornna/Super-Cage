@@ -3,7 +3,7 @@
 // Synchronous and small; the rest of browser data loads on first use.
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statfsSync, writeFileSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 
 const MiB = 1 << 20;
 export const cacheCeiling = 256 * MiB;
@@ -55,14 +55,15 @@ export function cancelReset(home, id) {
 }
 
 // How the request with this id ended, as written at the controller's start:
-// done, failed (the old profile is still in use), expired or unknown.
+// done, failed (the old profile is still in use), incomplete (the old profile
+// could not be put back; it is kept aside, not deleted), expired or unknown.
 export function resetStatus(home, id) {
   const result = readJSON(resetResult(home));
-  return result && result.id === id && ["done", "failed", "expired"].includes(result.state) ? { state: result.state } : { state: "unknown" };
+  return result && result.id === id && ["done", "failed", "incomplete", "expired"].includes(result.state) ? { state: result.state } : { state: "unknown" };
 }
 
-function writeResult(home, id, state) {
-  try { writeFileSync(resetResult(home), JSON.stringify({ id, state, at: Date.now() }), { mode: 0o600 }); } catch {}
+function writeResult(home, id, state, aside = "") {
+  try { writeFileSync(resetResult(home), JSON.stringify({ id, state, at: Date.now(), ...(aside ? { aside } : {}) }), { mode: 0o600 }); } catch {}
 }
 
 function seedProfile(profile, language) {
@@ -90,7 +91,11 @@ export function seedPreferences(language) {
 export function applyPendingReset(home, language, { removeLater = path => rm(path, { recursive: true, force: true }), rename = renameSync, seed = seedProfile, now = Date.now } = {}) {
   let names = [];
   try { names = readdirSync(home); } catch {}
-  for (const name of names) if (/^profile\.reset-\d+$/.test(name)) void Promise.resolve(removeLater(join(home, name))).catch(() => {});
+  // An old profile a failed reset could not put back stays until a later
+  // reset succeeds.
+  const last = readJSON(resetResult(home));
+  const stranded = last?.state === "incomplete" ? last.aside : "";
+  for (const name of names) if (/^profile\.reset-\d+$/.test(name) && name !== stranded) void Promise.resolve(removeLater(join(home, name))).catch(() => {});
   const marker = resetMarker(home);
   if (!existsSync(marker)) return false;
   const request = readJSON(marker) || {};
@@ -114,8 +119,11 @@ export function applyPendingReset(home, language, { removeLater = path => rm(pat
       if (aside) {
         try { rmSync(profile, { recursive: true, force: true }); rename(aside, profile); aside = ""; } catch {}
       }
-      // Still on the old profile unless it could not be put back.
+      // Still on the old profile unless it could not be put back; then it
+      // stays aside, never removed, and the reset is not reported done.
       if (!aside) { writeResult(home, id, "failed"); return false; }
+      writeResult(home, id, "incomplete", basename(aside));
+      return false;
     }
   } finally {
     rmSync(marker, { force: true });

@@ -72,6 +72,11 @@ export function logFile(batches) {
   return Buffer.concat(records);
 }
 
+// Chromium's CacheStorageIndex protobuf: field 1 one cache (its name, chosen by
+// the page, and its folder), field 2 the origin, field 3 the storage key.
+const field = (number, value) => { const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value, "latin1"); return Buffer.concat([varint(number * 8 + 2), varint(bytes.length), bytes]); };
+export const cacheIndex = (storageKey, names = ["v1"]) => Buffer.concat([...names.map(name => field(1, Buffer.concat([field(1, name), field(2, "dir-" + name.length)]))), field(2, storageKey), field(3, storageKey)]);
+
 const profile = () => mkdtempSync(join(tmpdir(), "cage-storage-"));
 
 test("snappy: literals and copies", () => {
@@ -112,7 +117,7 @@ test("storage origins: Local Storage, service workers, IndexedDB and Cache Stora
   writeFileSync(join(sw, "000003.log"), logFile([{ sequence: 1, ops: [["INITDATA_UNIQUE_ORIGIN:https://worker.example/", ""], ["REG:https://worker.example/\x001", "r"]] }]));
   mkdirSync(join(root, "IndexedDB", "https_db.example_0.indexeddb.leveldb"), { recursive: true });
   mkdirSync(join(root, "Service Worker", "CacheStorage", "abc123"), { recursive: true });
-  writeFileSync(join(root, "Service Worker", "CacheStorage", "abc123", "index.txt"), Buffer.from("\x0a\x1chttps://cached.example:8443/\x12\x04name"));
+  writeFileSync(join(root, "Service Worker", "CacheStorage", "abc123", "index.txt"), cacheIndex("https://cached.example:8443/", ["name"]));
   const origins = await storageOrigins(root);
   assert.deepEqual([...origins].sort(), ["http://app.keep.localhost:8080", "https://cached.example:8443", "https://db.example", "https://third.example", "https://worker.example"]);
   assert.equal(storageKeyOrigin("https://a.example/"), "https://a.example");
@@ -120,8 +125,9 @@ test("storage origins: Local Storage, service workers, IndexedDB and Cache Stora
   assert.equal(storageKeyOrigin("file:///x"), "");
 });
 
-function data(root, evaluations, value = {}) {
+function data(root, evaluations, value = {}, methods = []) {
   const cdp = async (method, params = {}) => {
+    methods.push(method);
     if (method === "Runtime.evaluate") {
       const input = JSON.parse(params.expression.slice("cageBrowsingData(".length, -1));
       evaluations.push(input);
@@ -175,4 +181,62 @@ test("when the profile's storage cannot be read, a clear with kept sites deletes
   const unkept = await finish(browser, await browser.request({ mode: "clear", since: 0, types: ["site"], keep: [] }));
   assert.equal(unkept.state, "done", "nothing kept, nothing to protect");
   unlinkSync(join(ls, "000009.ldb"));
+});
+
+test("review round 2, N1: cache names a page chooses never become origins; a damaged index is unreadable", async () => {
+  const root = profile();
+  const caches = join(root, "Service Worker", "CacheStorage");
+  mkdirSync(join(caches, "evil"), { recursive: true });
+  writeFileSync(join(caches, "evil", "index.txt"), cacheIndex("http://evil.localhost:8080/", ["https://bank.example", "https://app.kept.localhost", "http://victim.localhost:1234"]));
+  mkdirSync(join(caches, "framed"), { recursive: true });
+  writeFileSync(join(caches, "framed", "index.txt"), cacheIndex("https://framed.example/^0https://top.example", ["https://bank.example"]));
+  assert.deepEqual([...await storageOrigins(root)].sort(), ["http://evil.localhost:8080", "https://framed.example"]);
+  mkdirSync(join(caches, "broken"), { recursive: true });
+  writeFileSync(join(caches, "broken", "index.txt"), Buffer.from([0x12, 0x40, 0x68, 0x74]));
+  await assert.rejects(storageOrigins(root), /cache storage/);
+});
+
+test("review round 2, N1: one read returns a bounded number of origins; a clear's read fails closed past it", async () => {
+  const root = profile();
+  const ls = join(root, "Local Storage", "leveldb");
+  mkdirSync(ls, { recursive: true });
+  const ops = [];
+  for (let i = 0; i < 40; i++) ops.push(["META:https://s" + i + ".page.example", "m"]);
+  for (let i = 0; i < 3; i++) ops.push(["META:https://a" + i + ".keep.example", "m"]);
+  writeFileSync(join(ls, "000003.log"), logFile([{ sequence: 1, ops }]));
+  assert.equal((await storageOrigins(root, { limit: 10 })).size, 10, "a listing stops at the limit");
+  await assert.rejects(storageOrigins(root, { limit: 10, strict: true }), /origins/);
+  const kept = await storageOrigins(root, { limit: 10, strict: true, accept: origin => origin.endsWith(".keep.example") });
+  assert.deepEqual([...kept].sort(), ["https://a0.keep.example", "https://a1.keep.example", "https://a2.keep.example"], "only origins under a kept domain count");
+});
+
+test("review round 2, N1: a site list measures at most 500 origins, the ones holding storage first", async () => {
+  const root = profile();
+  const ls = join(root, "Default", "Local Storage", "leveldb");
+  mkdirSync(ls, { recursive: true });
+  const ops = [];
+  for (let i = 0; i < 700; i++) ops.push(["META:https://s" + i + ".many.example", "m"]);
+  writeFileSync(join(ls, "000003.log"), logFile([{ sequence: 1, ops }]));
+  const methods = [];
+  const browser = data(root, [], {}, methods);
+  const list = await browser.request({ mode: "sites", sort: "name" });
+  assert.ok(list.sites.some(item => item.site === "many.example"));
+  const measured = methods.filter(method => method === "Storage.getUsageAndQuota").length;
+  assert.ok(measured > 0 && measured <= 500, "usage calls: " + measured);
+});
+
+test("review round 2, N3: lengths in snappy and table headers are checked against the input before allocating", async () => {
+  const realAlloc = Buffer.alloc, asked = [];
+  Buffer.alloc = (size, ...rest) => { asked.push(size); if (size > 64 * 1024 * 1024) throw new RangeError("test refused " + size); return realAlloc(size, ...rest); };
+  try {
+    assert.throws(() => snappyDecompress(Buffer.from([0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x41])), /snappy/);
+    const dir = join(profile(), "leveldb");
+    mkdirSync(dir);
+    const footer = realAlloc(48);
+    footer[0] = 0; footer[1] = 0; footer[2] = 0; footer[3] = 7;
+    footer.writeUInt32LE(0x8b80fb57, 40); footer.writeUInt32LE(0xdb477524, 44);
+    writeFileSync(join(dir, "000007.ldb"), Buffer.concat([Buffer.from([0xff, 0xff, 0xff, 0xff, 0x07, 0x00, 0x41, 0x01, 0, 0, 0, 0]), footer]));
+    await assert.rejects(liveKeys(dir, ["META:"]), /snappy|leveldb/);
+  } finally { Buffer.alloc = realAlloc; }
+  assert.ok(Math.max(0, ...asked) <= 1 << 20, "largest allocation asked for: " + Math.max(...asked));
 });

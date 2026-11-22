@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserData, builtInOrigins, cookieKey, siteOf, within } from "./browser-data.mjs";
@@ -356,4 +356,23 @@ test("finding 10: a leftover old profile is removed at the next start", () => {
   const removed = [];
   assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path) }), false);
   assert.deepEqual(removed, [join(home, "profile.reset-1700000000000")]);
+});
+
+test("review round 2, N6: a reset whose seeding fails and whose old profile cannot be put back is never done, and the old profile stays", () => {
+  const home = mkdtempSync(join(tmpdir(), "cage-browser-reset-"));
+  mkdirSync(join(home, "profile", "Default"), { recursive: true });
+  writeFileSync(join(home, "profile", "Default", "Cookies"), "old");
+  requestReset(home, "r-stuck");
+  let renames = 0;
+  const removed = [];
+  const rename = (from, to) => { if (renames++ === 0) return renameSync(from, to); throw Object.assign(new Error("busy"), { code: "EBUSY" }); };
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path), rename, seed: () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); } }), false);
+  assert.equal(resetStatus(home, "r-stuck").state, "incomplete");
+  const aside = readdirSync(home).filter(name => name.startsWith("profile.reset-"));
+  assert.equal(aside.length, 1);
+  assert.ok(existsSync(join(home, aside[0], "Default", "Cookies")));
+  assert.deepEqual(removed, [], "the old profile is not deleted");
+  // The next start's sweep of leftover old profiles leaves this one too.
+  assert.equal(applyPendingReset(home, "zh-CN", { removeLater: path => removed.push(path) }), false);
+  assert.deepEqual(removed, []);
 });

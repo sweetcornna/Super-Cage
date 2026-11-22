@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -44,6 +45,9 @@ var (
 	browserDataKey    = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	browserHistoryID  = regexp.MustCompile(`^[0-9]{1,20}$`)
 	errBrowserDataOld = errors.New("浏览器组件不支持管理浏览数据，请更新环境组件")
+	// errBrowserDataNoReply: no reply came back, so the request may or may
+	// not have reached the controller.
+	errBrowserDataNoReply = errors.New("浏览器没有响应，请确认环境仍在运行后重试")
 	// errBrowserDataSettingsUnreadable is a settings file that exists but
 	// cannot be read or understood. It is left as it is: only a missing file
 	// means the defaults, so the kept sites are never replaced by none.
@@ -52,7 +56,10 @@ var (
 	// browserRestartLimit bounds the wait for a reset's restart and
 	// browserClearLimit a clear's; tests shorten them.
 	browserRestartLimit = 90 * time.Second
-	browserClearLimit   = 150 * time.Second
+	// A controller that has not gone down this long after a reset request
+	// whose reply was lost never took the request.
+	browserResetUnanswered = 25 * time.Second
+	browserClearLimit      = 150 * time.Second
 )
 
 type browserDataInput struct {
@@ -282,7 +289,8 @@ func browserDomainForm(value string) (string, error) {
 		value = host
 	}
 	value = strings.TrimSuffix(strings.TrimPrefix(value, "www."), ".")
-	if value == "" || len(value) > 253 || !browserDataHost.MatchString(value) || (!strings.Contains(value, ".") && value != "localhost") {
+	// No IPv6 form: the guest cannot match one to the origins Chromium keeps.
+	if value == "" || len(value) > 253 || !browserDataHost.MatchString(value) || strings.ContainsAny(value, "[]:") || (!strings.Contains(value, ".") && value != "localhost") {
 		return "", errors.New("请输入网站域名，例如 github.com")
 	}
 	return value, nil
@@ -391,6 +399,20 @@ func (in *browserDataInput) validate(now time.Time) error {
 
 // The body the guest receives: what it needs and nothing a client could use
 // to widen an operation. Kept sites come from the host settings only.
+// clearKey is the clear a request asks for: what it removes, from when and
+// with or without the kept list. Two equal keys are one clear.
+func (in *browserDataInput) clearKey() string {
+	types, sites := slices.Clone(in.Types), slices.Clone(in.Sites)
+	slices.Sort(types)
+	slices.Sort(sites)
+	since := in.Since
+	if in.Range != "" {
+		since = 0
+	}
+	key, _ := json.Marshal([]any{in.Mode, cmp.Or(in.Session, "normal"), in.Range, since, types, in.Protect == "none", sites})
+	return string(key)
+}
+
 func (in *browserDataInput) guestBody(settings browserDataSettings) map[string]any {
 	body := map[string]any{"mode": in.Mode}
 	if in.Session != "" {
@@ -458,11 +480,14 @@ func (s *Server) browserDataGuest(ctx context.Context, token string, body any, t
 	response, err := s.browserClient().open(ctx, token, http.MethodPost, "/data", "application/json", bytes.NewReader(payload), int64(len(payload)), timeout)
 	if err != nil {
 		diagnostics.Log("warn", "browser-data", fmt.Sprintf("transport=%v", err))
-		return nil, errors.New("浏览器没有响应，请确认环境仍在运行后重试")
+		return nil, errBrowserDataNoReply
 	}
 	defer response.Body.Close()
 	data, err := io.ReadAll(io.LimitReader(response.Body, browserDataLimit+1))
-	if err != nil || len(data) > browserDataLimit {
+	if err != nil {
+		return nil, errBrowserDataNoReply
+	}
+	if len(data) > browserDataLimit {
 		return nil, errors.New("浏览数据结果不完整，请重试")
 	}
 	if response.StatusCode != http.StatusOK {
@@ -570,13 +595,31 @@ func browserDataFailure(w http.ResponseWriter, err error) {
 type browserClearTracker struct {
 	mu    sync.Mutex
 	job   string
+	key   string // the request the running clear stands for (clearKey)
 	id    string
 	reply []byte
+}
+
+// begin names the clear a host job runs before the guest has a job for it.
+func (t *browserClearTracker) begin(job, key string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.job, t.key, t.id, t.reply = job, key, "", nil
+}
+
+// keyFor is the request of the clear the host job runs, once it has begun.
+func (t *browserClearTracker) keyFor(job string) (string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.key, t.job != "" && t.job == job
 }
 
 func (t *browserClearTracker) set(job, id string, reply []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	if t.job != job {
+		t.key = ""
+	}
 	t.job, t.id, t.reply = job, id, reply
 }
 
@@ -619,13 +662,20 @@ type browserDataJobReply struct {
 // job, which the window then polls. A clear asked for while another runs
 // (another window, a double click) follows that one instead.
 func (s *Server) browserClear(w http.ResponseWriter, token string, input browserDataInput, settings browserDataSettings) {
-	body := input.guestBody(settings)
+	body, key := input.guestBody(settings), input.clearKey()
 	started := make(chan error, 1)
-	job, err := s.submitJob("browser-clear", func() error { return s.runBrowserClear(token, body, started) })
+	job, err := s.submitJob("browser-clear", func() error { return s.runBrowserClear(token, key, body, started) })
 	if err != nil {
+		// A second window asking for the same clear follows the running one;
+		// a different clear waits for it to finish.
 		if running := s.jobs.snapshot(); errors.Is(err, errJobBusy) && running.Running && running.Kind == "browser-clear" {
 			for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-				if reply := s.browserClears.forJob(running.ID); reply != nil {
+				runningKey, begun := s.browserClears.keyFor(running.ID)
+				if begun && runningKey != key {
+					http.Error(w, "另一项清除正在进行，完成后再试", http.StatusConflict)
+					return
+				}
+				if reply := s.browserClears.forJob(running.ID); begun && reply != nil {
 					writeJSONBytes(w, reply)
 					return
 				}
@@ -659,8 +709,9 @@ func (s *Server) browserClear(w http.ResponseWriter, token string, input browser
 
 // runBrowserClear is the browser-clear job: it starts the guest's clear and
 // follows it to the end.
-func (s *Server) runBrowserClear(token string, body map[string]any, started chan<- error) error {
+func (s *Server) runBrowserClear(token, key string, body map[string]any, started chan<- error) error {
 	execution := s.jobs.execution()
+	s.browserClears.begin(execution.id, key)
 	s.setMessage("正在清除浏览数据…")
 	data, err := s.browserDataGuest(execution.ctx, token, body, 15*time.Second)
 	var reply browserDataJobReply
@@ -862,11 +913,18 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 			return errors.New("请先完成或关闭账号授权页面，再重置浏览器")
 		}
 		id := randomToken()[:16]
+		accepted := true
 		if _, err = s.browserDataGuest(ctx, token, map[string]any{"mode": "reset", "id": id}, 10*time.Second); err != nil {
 			if errors.Is(err, errBrowserDataOld) {
 				return errors.New("浏览器组件不支持重置，请先更新环境组件")
 			}
-			return err
+			if !errors.Is(err, errBrowserDataNoReply) {
+				return err
+			}
+			// The reply was lost: the controller may have taken the request
+			// and be restarting, so it is followed as an accepted one.
+			accepted = false
+			diagnostics.Log("warn", "browser-data", "reset reply lost")
 		}
 		diagnostics.Log("info", "browser-data", "reset requested")
 		// The controller restarts now: until it is back, the host and the
@@ -878,12 +936,22 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 		s.setMessage(restarting)
 		wait, cancel := context.WithTimeout(s.lifetimeContext(), browserRestartLimit)
 		defer cancel()
-		if err := s.waitBrowserRestart(wait, token, s.browserLease(restarting)); err != nil {
+		restarted, err := s.waitBrowserRestart(wait, token, s.browserLease(restarting), accepted)
+		if err != nil {
 			giveUp, done := context.WithTimeout(s.lifetimeContext(), 5*time.Second)
 			defer done()
 			_, _ = s.browserDataGuest(giveUp, token, map[string]any{"mode": "reset-cancel", "id": id}, 5*time.Second)
 			diagnostics.Log("warn", "browser-data", "reset restart timed out")
 			return errors.New("浏览器重新启动用时过长，暂时无法确认是否已重置。浏览器恢复后会自动重新连接，请到时再查看")
+		}
+		if !restarted {
+			// The controller never went down: the request did not take
+			// effect, and must not at a later start either.
+			_, _ = s.browserDataGuest(wait, token, map[string]any{"mode": "reset-cancel", "id": id}, 5*time.Second)
+			if err := s.reattachBrowser(wait, token); err != nil {
+				return err
+			}
+			return errors.New("浏览器没有收到重置请求，资料没有改动。请重试")
 		}
 		if err := s.reattachBrowser(wait, token); err != nil {
 			return err
@@ -901,6 +969,8 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 			return nil
 		case "failed":
 			return errors.New("浏览器资料未能重置（客机磁盘空间或权限问题），仍在使用原来的资料。请重试；仍失败时重启环境")
+		case "incomplete":
+			return errors.New("浏览器资料没能完整重置（客机磁盘空间或权限问题），原来的资料仍保留在环境中，没有删除。请重启环境后重试")
 		}
 		return errors.New("浏览器重新启动了，但没有完成重置，仍在使用原来的资料。请重试")
 	})
@@ -914,21 +984,26 @@ func (s *Server) resetBrowser(w http.ResponseWriter) {
 // The controller closes Chromium and exits (or stops a Chromium that does
 // not exit); systemd starts it again after RestartSec. Wait for the old one
 // to stop answering, then for the new one.
-func (s *Server) waitBrowserRestart(ctx context.Context, token string, lease *browserLeaseWatch) error {
-	down := false
+func (s *Server) waitBrowserRestart(ctx context.Context, token string, lease *browserLeaseWatch, accepted bool) (bool, error) {
+	down, began := false, time.Now()
 	for {
 		lease.check()
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		_, err := s.browserClient().request(probe, token, http.MethodGet, "/health", nil)
 		cancel()
-		if err != nil {
+		switch {
+		case err != nil:
 			down = true
-		} else if down {
-			return nil
+		case down:
+			return true, nil
+		case !accepted && time.Since(began) >= browserResetUnanswered:
+			// A request whose reply was lost and that the controller never
+			// acted on (it kills Chromium 20 s after a reset at the latest).
+			return false, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return false, ctx.Err()
 		case <-time.After(400 * time.Millisecond):
 		}
 	}

@@ -222,6 +222,9 @@ func (s *Server) attach() error {
 	s.mu.Unlock()
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
+	// A browser controller that restarted since (a crash, or a reset the host
+	// stopped following) starts with its window shown: tell it again.
+	s.browserViews.reset()
 	s.browserViews.background(s.changeBrowserVisibility)
 	return nil
 }

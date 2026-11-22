@@ -21,6 +21,9 @@ export function snappyDecompress(input) {
     shift += 7;
     if (shift > 28) throw new Error("snappy: length too long");
   }
+  // No snappy element expands more than a three-byte copy of 64 bytes: a
+  // larger length is a damaged header, refused before allocating.
+  if (length > input.length * 22) throw new Error("snappy: length out of range");
   const output = Buffer.alloc(length);
   let written = 0;
   while (position < input.length) {
@@ -195,11 +198,44 @@ export const storageKeyOrigin = key => {
   } catch { return ""; }
 };
 
+// The storage key of a Cache Storage index (Chromium's CacheStorageIndex
+// protobuf): top-level field 3, or the older origin in field 2. The caches in
+// field 1 carry names the page chose, so they are never read.
+export function cacheIndexKey(buffer) {
+  const state = { at: 0 };
+  let key = "", origin = "";
+  while (state.at < buffer.length) {
+    const tag = varint(buffer, state), wire = tag % 8, number = Math.floor(tag / 8);
+    if (wire === 0) varint(buffer, state);
+    else if (wire === 1 || wire === 5) state.at += wire === 1 ? 8 : 4;
+    else if (wire === 2) {
+      const length = varint(buffer, state);
+      if (state.at + length > buffer.length) throw new Error("cache storage: bad index");
+      if (number === 2) origin = buffer.toString("latin1", state.at, state.at + length);
+      if (number === 3) key = buffer.toString("latin1", state.at, state.at + length);
+      state.at += length;
+    } else throw new Error("cache storage: bad index");
+    if (state.at > buffer.length) throw new Error("cache storage: bad index");
+  }
+  return key || origin;
+}
+
+// At most this many origins come from one read: a page can make many origins
+// with storage (frames on its own subdomains), and each costs later work.
+export const storageOriginLimit = 2000;
+
 // Origins with Local Storage, service workers, IndexedDB, Cache Storage or a
-// file system in the profile's Default folder.
-export async function storageOrigins(profileDefault) {
+// file system in the profile's Default folder. Only origins accept takes are
+// counted and returned; past the limit a listing stops adding, and a strict
+// read (a clear that must not miss a kept origin) throws.
+export async function storageOrigins(profileDefault, { accept = () => true, limit = storageOriginLimit, strict = false } = {}) {
   const origins = new Set();
-  const take = (keys, prefix) => { for (const key of keys) { const origin = storageKeyOrigin(key.slice(prefix.length).split("\x00")[0]); if (origin) origins.add(origin); } };
+  const add = origin => {
+    if (!origin || origins.has(origin) || !accept(origin)) return;
+    if (origins.size >= limit) { if (strict) throw new Error("storage: more than " + limit + " origins"); return; }
+    origins.add(origin);
+  };
+  const take = (keys, prefix) => { for (const key of keys) add(storageKeyOrigin(key.slice(prefix.length).split("\x00")[0])); };
   take(await liveKeys(join(profileDefault, "Local Storage", "leveldb"), ["META:"]), "META:");
   take(await liveKeys(join(profileDefault, "Service Worker", "Database"), ["INITDATA_UNIQUE_ORIGIN:"]), "INITDATA_UNIQUE_ORIGIN:");
   take(await liveKeys(join(profileDefault, "File System", "Origins"), ["ORIGIN:"]), "ORIGIN:");
@@ -207,7 +243,7 @@ export async function storageOrigins(profileDefault) {
     for (const name of await readdir(join(profileDefault, "IndexedDB"))) {
       const match = /^(https?)_(.+)_(\d+)\.indexeddb\.(leveldb|blob)$/.exec(name);
       // Chromium names a default port 0.
-      if (match) origins.add(storageKeyOrigin(`${match[1]}://${match[2]}${match[3] === "0" ? "" : ":" + match[3]}`) || "");
+      if (match) add(storageKeyOrigin(`${match[1]}://${match[2]}${match[3] === "0" ? "" : ":" + match[3]}`));
     }
   } catch (error) { if (error.code !== "ENOENT") throw error; }
   try {
@@ -215,9 +251,8 @@ export async function storageOrigins(profileDefault) {
     for (const name of await readdir(caches)) {
       let index;
       try { index = await readFile(join(caches, name, "index.txt")); } catch { continue; }
-      for (const match of index.toString("latin1").matchAll(/https?:\/\/[\x21-\x7e]+/g)) { const origin = storageKeyOrigin(match[0]); if (origin) origins.add(origin); }
+      add(storageKeyOrigin(cacheIndexKey(index)));
     }
   } catch (error) { if (error.code !== "ENOENT") throw error; }
-  origins.delete("");
   return origins;
 }
