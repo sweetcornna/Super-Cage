@@ -21,7 +21,12 @@ import (
 
 func agentTestController(t *testing.T) *Server {
 	t.Helper()
-	s := testServer(t)
+	return agentTestControllerOn(t, testServer(t))
+}
+
+// agentTestControllerOn runs s as this profile's local controller.
+func agentTestControllerOn(t *testing.T, s *Server) *Server {
+	t.Helper()
 	identity, err := currentController()
 	if err != nil {
 		t.Fatal(err)

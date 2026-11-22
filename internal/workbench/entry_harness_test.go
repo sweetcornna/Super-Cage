@@ -235,7 +235,11 @@ type entryFixture struct {
 // project path a terminal checks is the one the profile names.
 func entryTestController(t *testing.T) *Server {
 	t.Helper()
-	s := agentTestController(t)
+	return entryTestControllerOn(t, agentTestController(t))
+}
+
+func entryTestControllerOn(t *testing.T, s *Server) *Server {
+	t.Helper()
 	resolved, err := filepath.EvalSymlinks(s.profile)
 	if err != nil {
 		t.Fatal(err)
@@ -288,7 +292,12 @@ func entryRealHomeGuard(t *testing.T) {
 func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 	t.Helper()
 	entryRealHomeGuard(t)
-	s := entryTestController(t)
+	return newEntryFixtureFor(t, entryTestController(t), guest)
+}
+
+// newEntryFixtureFor is newEntryFixture with a controller of the caller's.
+func newEntryFixtureFor(t *testing.T, s *Server, guest bool) *entryFixture {
+	t.Helper()
 	dir, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

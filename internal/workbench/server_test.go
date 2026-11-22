@@ -18,7 +18,15 @@ import (
 
 func testServer(t *testing.T) *Server {
 	t.Helper()
-	profile := t.TempDir()
+	return testServerAt(t, t.TempDir())
+}
+
+// testServerAt is testServer with its profile in the given folder.
+func testServerAt(t *testing.T, profile string) *Server {
+	t.Helper()
+	if err := os.MkdirAll(profile, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	path := filepath.Join(profile, "config.json")
 	c := cage.DefaultConfig()
 	p, _ := managedproxy.Load(profile)
