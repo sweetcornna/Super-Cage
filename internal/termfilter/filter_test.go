@@ -232,7 +232,7 @@ var forbiddenPatterns = []*regexp.Regexp{
 // at random and cuts the result into random chunks.
 var pieces = []string{
 	"text ", "中文", "\xc2", "\x9b", "\x9d", "\xc2\x9b", "\x05", "\x07", "\x18", "\n", esc, esc + "\\",
-	esc + "[", "?", ">", "=", "q", "c", "t", "20", "21", ";", "0", "1", "8",
+	esc + "[", "?", ">", "=", "q", "c", "t", "20", "21", ";", "0", "1", "8", "3J",
 	esc + "]", "52;c;", "52;c;?", "aGk=", "1337;File=", "8;;", "file:///", "https://x", "7;", "9;", "99;", "a=report", "777;notify;",
 	esc + "P", "tmux;", "+q", "$q", "q#0~", esc + "_G", "t=d", "t=f", ",", "a=T", "AAAA", esc + "^", esc + "X",
 }
@@ -245,7 +245,7 @@ func TestFilterPropertyNeverEmitsDroppedSequences(t *testing.T) {
 			input.WriteString(pieces[rng.Intn(len(pieces))])
 		}
 		in := []byte(input.String())
-		for _, opts := range []Options{{}, {ClipboardWrite: true}} {
+		for _, opts := range []Options{{}, {ClipboardWrite: true}, {KeepScrollback: true}} {
 			for _, replay := range []bool{false, true} {
 				whole := New(opts)
 				whole.SetReplay(replay)
@@ -280,7 +280,7 @@ func FuzzFilter(f *testing.F) {
 	}
 	f.Add([]byte(esc+"]52;c;aGk=\x07"+esc+"_Ga=T,t=f;AA"+esc+"\\\xc2\x9b>q"), uint8(1), false)
 	f.Fuzz(func(t *testing.T, in []byte, cut uint8, clipboard bool) {
-		opts := Options{ClipboardWrite: clipboard}
+		opts := Options{ClipboardWrite: clipboard, KeepScrollback: cut&0x80 != 0}
 		want := New(opts).Append(nil, in)
 		g := New(opts)
 		var got []byte

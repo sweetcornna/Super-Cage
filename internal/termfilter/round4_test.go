@@ -23,6 +23,13 @@ func TestScrollbackClearPassesUnlessKept(t *testing.T) {
 			t.Errorf("%q with KeepScrollback: %q, want %q", in, got, want)
 		}
 	}
+	// Replayed history draws the same way.
+	if got := filterAll(t, Options{}, true, "a"+esc+"[3Jb"); got != "a"+esc+"[3Jb" {
+		t.Errorf("3J dropped in replay: %q", got)
+	}
+	if got := filterAll(t, Options{KeepScrollback: true}, true, "a"+esc+"[3Jb"); got != "ab" {
+		t.Errorf("3J kept in replay with KeepScrollback: %q", got)
+	}
 	for _, in := range []string{esc + "[J", esc + "[2J", esc + "[1J", esc + "[?2J"} {
 		for _, keep := range []bool{false, true} {
 			if got := filterAll(t, Options{KeepScrollback: keep}, false, in); got != in {
