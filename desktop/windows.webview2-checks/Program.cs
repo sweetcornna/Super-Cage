@@ -30,7 +30,7 @@ internal sealed class ChecksForm : Form
     private WebView2 web = new() { Dock = DockStyle.Fill };
     private readonly Stopwatch clock = Stopwatch.StartNew();
     private readonly object gate = new();
-    private readonly JsonArray events = [], reports = [], failures = [], callErrors = [];
+    private readonly JsonArray events = [], reports = [], failures = [], callErrors = [], requests = [];
     private readonly JsonObject results = new();
     private CoreWebView2 core = null!;
     private ScienceFrame.Policy policy = new();
@@ -118,7 +118,7 @@ internal sealed class ChecksForm : Form
         var parts = request.Path.Split('?', 2);
         var path = parts[0];
         var query = parts.Length > 1 ? parts[1] : "";
-        Event("request", new JsonObject { ["host"] = request.Host, ["path"] = request.Path });
+        if (path != "/report") lock (gate) requests.Add(Now + " " + request.Host + " " + request.Path);
         if (path == "/report" && request.Method == "POST")
         {
             JsonObject? body = null;
@@ -156,7 +156,7 @@ internal sealed class ChecksForm : Form
                 ("proxy", ProxyCase), ("remove", () => FrameCase("remove", "")), ("remove-busy", () => FrameCase("remove-busy", "busy")),
                 ("teardown", () => FrameCase("teardown", "")), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
                 ("steady", () => FrameCase("steady", "")), ("storage", StorageCase), ("navigation", NavigationCase),
-                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("kill-sweep", KillSweepCase),
+                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase), ("kill-sweep", KillSweepCase),
             })
             {
                 try { cases[name] = await run(); }
@@ -320,6 +320,8 @@ internal sealed class ChecksForm : Form
     // window (the same storage partition), unarmed, and returns what it found.
     private async Task<string> ProbeStorage(string host)
     {
+        // The window lets frames navigate to the attached origin only.
+        current = "http://" + host;
         await core.ExecuteScriptAsync("(() => { const f = document.createElement('iframe'); f.src = " + JsonSerializer.Serialize("http://" + host + "/?probe") + "; document.body.append(f); return true; })()");
         await Until(10000, () => Reports(host).Any(report => report["from"]?.GetValue<string>() == "probe"));
         return Reports(host).LastOrDefault(report => report["from"]?.GetValue<string>() == "probe")?["storage"]?.GetValue<string>() ?? "no answer";
@@ -365,6 +367,31 @@ internal sealed class ChecksForm : Form
         return record;
     }
 
+    // TwoLabelsCase: two frames of two labels (two session origins) armed at
+    // once: whether they share a renderer process (the locale override is
+    // per process).
+    private async Task<JsonObject> TwoLabelsCase()
+    {
+        var record = new JsonObject();
+        var start = Now;
+        int errors;
+        lock (gate) errors = callErrors.Count;
+        await Open();
+        var first = await Frame("");
+        await Until(10000, () => Reports(first).Any(report => report["from"]?.GetValue<string>() == "nested"));
+        var second = await Frame("");
+        record["reporting"] = await Until(10000, () => new[] { first, second }.All(host => Reports(host).Any(report => report["from"]?.GetValue<string>() == "nested")));
+        await Task.Delay(2500);
+        lock (gate) record["call_errors"] = new JsonArray(callErrors.Skip(errors).Select(item => item!.DeepClone()).ToArray());
+        record["first"] = Summary(first, Now);
+        record["second"] = Summary(second, Now);
+        current = "";
+        await Apply(policy.Detach(), "");
+        await Until(6000, () => !policy.Attached);
+        record["events"] = Since(start);
+        return record;
+    }
+
     private async Task<JsonObject> ProxyCase()
     {
         await LoadWorkbench("/");
@@ -389,10 +416,14 @@ internal sealed class ChecksForm : Form
     {
         var record = new JsonObject();
         await Open();
+        // The control: a session origin that is not in the journal keeps
+        // what it stored across the kill.
+        var control = await Frame("store");
+        await Until(10000, () => Reports(control).Any(report => report["from"]?.GetValue<string>() == "stored"));
         var host = await Frame("store");
         var origin = "http://" + host;
         record["recorded"] = ScienceFrame.Record(data, origin, "http://localhost");
-        record["stored"] = await Until(10000, () => Reports(host).Any(report => report["from"]?.GetValue<string>() == "stored"));
+        record["stored"] = await Until(10000, () => new[] { host, control }.All(item => Reports(item).Any(report => report["from"]?.GetValue<string>() == "stored")));
         await Task.Delay(2000);
         var browser = core.BrowserProcessId;
         var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -417,6 +448,7 @@ internal sealed class ChecksForm : Form
         record["swept"] = new JsonArray(swept.Select(item => (JsonNode)item).ToArray());
         record["journal_left"] = File.Exists(ScienceFrame.JournalPath(data));
         record["left"] = await ProbeStorage(host);
+        record["control_left"] = await ProbeStorage(control);
         return record;
     }
 
@@ -587,6 +619,7 @@ internal sealed class ChecksForm : Form
         {
             results["failures"] = failures.DeepClone();
             results["call_errors"] = callErrors.DeepClone();
+            results["requests"] = requests.DeepClone();
             results["elapsed_ms"] = Now;
         }
         try { File.WriteAllText(output, results.ToJsonString(new JsonSerializerOptions { WriteIndented = true })); }
