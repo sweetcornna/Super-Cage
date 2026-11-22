@@ -254,14 +254,20 @@ try {
   await shot("settings-region-minimum");
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
-  // The folder picker answers with another-project this time.
+  // The folder picker is cancelled this time: the path is typed instead.
   const firstProject = state.chosenFolder;
-  state.chosenFolder = "/Users/shihao/Projects/another-project";
+  state.chosenFolder = "";
   await page
     .getByRole("button", { name: "添加项目", exact: true })
     .click();
   await page.getByRole("button", { name: "添加本机项目…", exact: true }).click();
-  await folders.getByText(state.chosenFolder, { exact: true }).waitFor();
+  await createDialog
+    .getByLabel("添加文件夹", { exact: true })
+    .fill("/Users/shihao/Projects/another-project");
+  await createDialog.getByRole("button", { name: "添加", exact: true }).click();
+  await folders
+    .getByText("/Users/shihao/Projects/another-project", { exact: true })
+    .waitFor();
   await createDialog.getByRole("button", { name: "创建项目", exact: true }).click();
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   state.chosenFolder = firstProject;
