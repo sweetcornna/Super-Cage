@@ -291,6 +291,13 @@ async function desktopRun({ theme, viewport, only }) {
     assert.equal(await add.locator(".devices-digits").count(), 0);
     await add.getByText("点「复制长配对码」，在那台电脑的 Super Cage 里点「设备」→「加入其他电脑」，粘贴。").waitFor();
     await shot("add-long-only");
+    // With the clipboard shared and no 8 digits, nothing names a button or a code that is not there.
+    await page.evaluate(() => { window.cageSyncClipboard = () => Promise.resolve(); });
+    await add.getByText("共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码。", { exact: true }).waitFor();
+    await add.getByText("需要长配对码；共享剪贴板开启时不提供复制。").waitFor();
+    assert.equal(await add.getByRole("button", { name: "复制长配对码", exact: true }).count(), 0);
+    await page.evaluate(() => { delete window.cageSyncClipboard; });
+    await add.getByRole("button", { name: "复制长配对码", exact: true }).waitFor();
     await add.getByRole("button", { name: "关闭", exact: true }).click();
     await add.waitFor({ state: "detached" });
     host.short = true;

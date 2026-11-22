@@ -119,11 +119,12 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
             <li><strong>手机</strong>：打开 Super Cage 手机端，点「连接电脑」→「扫码连接」，扫这个二维码。</li>
             <li><strong>电脑</strong>：{view.short
               ? "在那台电脑的 Super Cage 里点「设备」→「加入其他电脑」，输入上面的 8 位数字。"
-              : "点「复制长配对码」，在那台电脑的 Super Cage 里点「设备」→「加入其他电脑」，粘贴。"}</li>
+              : shared ? "需要长配对码；共享剪贴板开启时不提供复制。"
+                : "点「复制长配对码」，在那台电脑的 Super Cage 里点「设备」→「加入其他电脑」，粘贴。"}</li>
           </ul>
           {customRelay && <p className="devices-relay">{customRelayLine(customRelay)}</p>}
           <p className="devices-privacy">只给你自己的设备看这个配对码；关闭窗口后它立即失效。</p>
-          {shared && <p className="devices-privacy">共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码，或使用 8 位配对码。</p>}
+          {shared && <p className="devices-privacy">共享剪贴板已开启，环境内的程序能读到剪贴板。{view.short ? "请扫码，或使用 8 位配对码。" : "请扫码。"}</p>}
           {view.refreshed && !note && <p className="devices-status" role="status">已换成新的配对码，之前的已失效。</p>}
           {note && <p className="devices-status" role="status">{note}</p>}
         </div>

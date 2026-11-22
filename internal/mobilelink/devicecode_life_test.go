@@ -45,13 +45,19 @@ func TestDeviceInviteBoundsTheRelaysExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Expires is a whole second, taken during the call: at most two minutes
+	// after the call returns, at least two minutes (less the second) after it began.
+	within := func(expires, before, after time.Time, life time.Duration) bool {
+		return !expires.After(after.Add(life)) && !expires.Before(before.Add(life-time.Second))
+	}
 	before := time.Now()
 	inv, err := NewDeviceInvite(context.Background(), generous.URL, "", host)
+	after := time.Now()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if life := inv.Expires.Sub(before); life > 2*time.Minute || life < 2*time.Minute-3*time.Second {
-		t.Fatalf("a relay answering an hour: the code lives %v", life.Round(time.Second))
+	if !within(inv.Expires, before, after, 2*time.Minute) {
+		t.Fatalf("a relay answering an hour: the code lives %v", inv.Expires.Sub(before).Round(time.Second))
 	}
 	var qr PairCode
 	if err := json.Unmarshal([]byte(strings.TrimPrefix(inv.Raw, "CAGE1:")), &qr); err != nil {
@@ -64,11 +70,12 @@ func TestDeviceInviteBoundsTheRelaysExpiry(t *testing.T) {
 	f := newDeviceFixture(t, 30*time.Second)
 	before = time.Now()
 	short, err := NewDeviceInvite(context.Background(), f.relay.URL, "", f.host)
+	after = time.Now()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if life := short.Expires.Sub(before); life > 30*time.Second || life < 27*time.Second {
-		t.Fatalf("a 30-second room: the code lives %v", life.Round(time.Second))
+	if !within(short.Expires, before, after, 30*time.Second) {
+		t.Fatalf("a 30-second room: the code lives %v", short.Expires.Sub(before).Round(time.Second))
 	}
 }
 
