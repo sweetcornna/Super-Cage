@@ -1,0 +1,206 @@
+/* Settings → 其他客户端: one hairline list under the page title, as the other
+   settings pages. Clay appears only in the progress bar. */
+.other-clients-page .other-clients-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.other-clients-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.other-client {
+  display: grid;
+  grid-template-columns: 2.4rem minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
+  min-height: 4.8rem;
+  padding: 16px 0;
+  border-bottom: 1px solid var(--line);
+}
+.other-client:first-child {
+  border-top: 1px solid var(--line);
+}
+.other-client-mark {
+  display: grid;
+  place-items: center;
+  width: 2.4rem;
+  height: 2.4rem;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+}
+.other-client.muted .other-client-mark,
+.other-client.muted .other-client-title strong {
+  color: var(--faint);
+}
+.other-client-monogram {
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-serif);
+  font-size: var(--fs-secondary);
+  font-style: normal;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--muted);
+}
+.other-client-text {
+  min-width: 0;
+  align-self: center;
+  min-height: 2.4rem;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.other-client-title {
+  line-height: 1.4;
+}
+.other-client-title strong {
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.other-client-title span {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.other-client-title span::before {
+  content: "·";
+  margin: 0 0.5em;
+  color: var(--faint);
+}
+.other-client-meta {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.other-client-meta.error {
+  color: var(--error);
+}
+.other-client-meta.added {
+  color: var(--muted);
+}
+.other-client-bar {
+  height: 3px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: var(--soft);
+  overflow: hidden;
+}
+.other-client-bar i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--clay);
+  transition: width var(--dur) var(--ease-out);
+}
+.other-client-actions {
+  display: flex;
+  align-items: center;
+  align-self: center;
+  gap: 6px;
+}
+.other-client-actions > button:not(.quiet-button) {
+  min-height: var(--h-compact);
+  padding: 0 14px;
+  font-size: var(--fs-secondary);
+}
+.other-client-more {
+  position: relative;
+  display: inline-flex;
+}
+.other-client-icon {
+  width: var(--h-compact);
+  padding: 0;
+  color: var(--muted);
+}
+.other-client-menu {
+  top: calc(100% + 4px);
+  min-width: 140px;
+}
+.other-clients-wait {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.other-clients-note {
+  margin: 16px 0 0;
+}
+/* The add and remove dialogs. */
+.other-clients-dialog dl {
+  margin: 0;
+}
+.other-clients-fact {
+  display: grid;
+  grid-template-columns: 5.5em minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-body);
+  line-height: 1.55;
+}
+.other-clients-fact:first-child {
+  border-top: 0;
+}
+.other-clients-fact dt {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.7;
+}
+.other-clients-fact dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.other-clients-fact details {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.other-clients-fact summary {
+  cursor: var(--control-cursor, default);
+  color: var(--muted);
+  list-style: none;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: var(--line-strong);
+}
+.other-clients-fact summary::-webkit-details-marker {
+  display: none;
+}
+.other-clients-fact summary::after {
+  content: " ›";
+}
+.other-clients-fact details[open] summary::after {
+  content: " ‹";
+}
+.other-clients-fact details ul {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.other-clients-fact details li {
+  display: grid;
+  grid-template-columns: 5em minmax(0, 1fr);
+  gap: 8px;
+}
+.other-clients-fact details li span {
+  color: var(--faint);
+}
+.other-clients-check {
+  margin-top: 14px;
+  font-size: var(--fs-secondary);
+}
+@media (prefers-reduced-motion: reduce) {
+  .other-client-bar i {
+    transition: none;
+  }
+}
