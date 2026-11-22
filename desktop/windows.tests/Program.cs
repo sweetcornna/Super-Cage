@@ -283,7 +283,11 @@ assertions = 0;
             {
                 Directory.CreateDirectory(Path.GetDirectoryName(link)!);
                 if (!Junction(link, target)) { Console.WriteLine("junction not created, skipped: " + link); continue; }
-                Check(CrashReports.Sweep(linkedData) == 0 && File.Exists(targetDump), "the sweep followed a junction: " + link);
+                // Removed here, not by the recursive delete of scienceRoot:
+                // .NET's recursive delete reports a junction as an error
+                // (DeleteVolumeMountPoint, invalid parameter).
+                try { Check(CrashReports.Sweep(linkedData) == 0 && File.Exists(targetDump), "the sweep followed a junction: " + link); }
+                finally { Directory.Delete(link); }
             }
             Check(CrashReports.Sweep(linkTarget) == 1 && !File.Exists(targetDump), "the plain folder behind the junctions was not swept");
         }
