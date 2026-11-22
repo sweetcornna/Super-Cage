@@ -157,6 +157,40 @@ func TestAgentClientRoutesBoundary(t *testing.T) {
 	}
 }
 
+// The writes are window only on the server too (final review B, finding 3):
+// with the window's session and Origin, a request that carries the agent
+// transport's header is refused before any job; without it the same route
+// reaches its handler, and listing stays open to agents.
+func TestAgentClientWritesRefuseTheAgentTransport(t *testing.T) {
+	s := agentClientServer(t, true, func(string, io.Writer) error { t.Error("a job ran"); return nil }, "")
+	call := func(method, path, body string, agent bool) *httptest.ResponseRecorder {
+		r := httptest.NewRequest(method, s.origin+path, strings.NewReader(body))
+		r.Header.Set("Origin", s.origin)
+		r.Header.Set("Content-Type", "application/json")
+		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+		if agent {
+			r.Header.Set(agentRequestHeader, "1")
+		}
+		w := httptest.NewRecorder()
+		s.handler().ServeHTTP(w, r)
+		return w
+	}
+	for _, path := range []string{"/api/agents/codex/install", "/api/agents/codex/update", "/api/agents/codex/remove", "/api/agents/cancel"} {
+		if refusal := agentRouteRefusal("POST", path); refusal == nil || refusal.Code != "native_transport_required" {
+			t.Fatalf("the CLI sends POST %s: %v", path, refusal)
+		}
+		if w := call("POST", path, `{"job":"nope"}`, true); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), "只能在桌面窗口操作") {
+			t.Fatalf("POST %s with the agent header: %d %s", path, w.Code, w.Body)
+		}
+	}
+	if w := call("POST", "/api/agents/cancel", `{"job":"nope"}`, false); w.Code != http.StatusNotFound {
+		t.Fatalf("cancel from the window: %d %s", w.Code, w.Body)
+	}
+	if w := call("GET", "/api/agents", "", true); w.Code != http.StatusOK {
+		t.Fatalf("GET /api/agents with the agent header: %d %s", w.Code, w.Body)
+	}
+}
+
 // Admission: what the host knows is refused before any job, with its code
 // in the list; a running job keeps the single slot.
 func TestAgentClientAdmission(t *testing.T) {

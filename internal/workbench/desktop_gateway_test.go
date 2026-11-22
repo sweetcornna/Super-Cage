@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
@@ -363,4 +366,131 @@ func TestDesktopQuitSuspendsLocalViewsLeftBehind(t *testing.T) {
 	if first.unlocked.Load() || second.unlocked.Load() {
 		t.Fatalf("quitting left a local view unlocked: default %v, other %v", first.unlocked.Load(), second.unlocked.Load())
 	}
+}
+
+// quitView is a connected local view whose controller answers each suspend
+// with answer; n counts its suspend requests from 1.
+func quitView(t *testing.T, vmID string, answer func(n int32, w http.ResponseWriter, r *http.Request)) (*desktopTarget, *atomic.Int32) {
+	t.Helper()
+	calls := &atomic.Int32{}
+	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/account/suspend" {
+			http.NotFound(w, r)
+			return
+		}
+		// Read to the end, so the server notices the client giving up.
+		_, _ = io.Copy(io.Discard, r.Body)
+		answer(calls.Add(1), w, r)
+	}))
+	t.Cleanup(endpoint.Close)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	session := &remotehost.Session{Origin: endpoint.URL, Client: endpoint.Client(), Transport: endpoint.Client().Transport, Context: ctx}
+	return &desktopTarget{id: randomToken(), mode: "local", vmID: vmID, ctx: ctx, cancel: cancel, session: session}, calls
+}
+
+// Quitting locks every local view at once, and asks once more, with a
+// longer deadline, a view that failed or did not answer (final review B,
+// finding 4): a controller busy past the first deadline still gets its
+// account locked, and hung controllers hold quit up for one view's two
+// tries, never for each view in turn, and never past the bound. A view
+// still not locked is logged by its environment only.
+func TestDesktopQuitSuspendRetriesEveryViewAtOnceWithinTheBound(t *testing.T) {
+	first, retry, bound := desktopQuitSuspendFirst, desktopQuitSuspendRetry, desktopQuitSuspendBound
+	previous := diagnostics.Default()
+	logs := t.TempDir()
+	diagnostics.SetDefault(diagnostics.New(logs))
+	t.Cleanup(func() {
+		desktopQuitSuspendFirst, desktopQuitSuspendRetry, desktopQuitSuspendBound = first, retry, bound
+		diagnostics.SetDefault(previous)
+	})
+	// A hung controller answers once the client gives up, or at the end of
+	// the subtest (release), before its endpoint closes.
+	hangers := func(release chan struct{}) (hangOnce, hangAlways func(int32, http.ResponseWriter, *http.Request)) {
+		hang := func(r *http.Request) {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+		}
+		hangOnce = func(n int32, _ http.ResponseWriter, r *http.Request) {
+			if n == 1 {
+				hang(r)
+			}
+		}
+		return hangOnce, func(_ int32, _ http.ResponseWriter, r *http.Request) { hang(r) }
+	}
+	ok := func(int32, http.ResponseWriter, *http.Request) {}
+	failOnce := func(n int32, w http.ResponseWriter, _ *http.Request) {
+		if n == 1 {
+			http.Error(w, "busy", http.StatusServiceUnavailable)
+		}
+	}
+	logged := func() string {
+		var all []byte
+		entries, _ := os.ReadDir(filepath.Join(logs, "logs"))
+		for _, entry := range entries {
+			data, _ := os.ReadFile(filepath.Join(logs, "logs", entry.Name()))
+			all = append(all, data...)
+		}
+		return string(all)
+	}
+
+	t.Run("retry", func(t *testing.T) {
+		desktopQuitSuspendFirst, desktopQuitSuspendRetry, desktopQuitSuspendBound = 200*time.Millisecond, 600*time.Millisecond, 5*time.Second
+		release := make(chan struct{})
+		hangOnce, hangAlways := hangers(release)
+		shown, shownCalls := quitView(t, "", hangOnce)
+		failing, failingCalls := quitView(t, "0123456789abcdef", failOnce)
+		fine, fineCalls := quitView(t, "1123456789abcdef", ok)
+		d := &desktopGateway{generation: randomToken(), active: shown, left: map[string]*desktopTarget{"0123456789abcdef": failing, "1123456789abcdef": fine}}
+		hung := map[string]*atomic.Int32{}
+		for _, id := range []string{"2123456789abcdef", "3123456789abcdef", "4123456789abcdef"} {
+			view, calls := quitView(t, id, hangAlways)
+			d.left[id], hung[id] = view, calls
+		}
+		t.Cleanup(func() { close(release) })
+		started := time.Now()
+		d.close()
+		elapsed := time.Since(started)
+		if shownCalls.Load() != 2 || failingCalls.Load() != 2 || fineCalls.Load() != 1 {
+			t.Fatalf("suspends: shown %d, failing once %d, fine %d", shownCalls.Load(), failingCalls.Load(), fineCalls.Load())
+		}
+		for id, calls := range hung {
+			if calls.Load() != 2 {
+				t.Fatalf("hung %s was asked %d times", id, calls.Load())
+			}
+		}
+		// One view after another, the three hung ones alone take 2.4 s.
+		if elapsed < 750*time.Millisecond || elapsed > 1600*time.Millisecond {
+			t.Fatalf("quit took %v", elapsed)
+		}
+		if d.left != nil || d.active != nil {
+			t.Fatalf("closing kept views: left %v, active %v", d.left, d.active)
+		}
+		text := logged()
+		for id := range hung {
+			if !strings.Contains(text, "quitting did not lock local environment "+id+" after a retry") {
+				t.Fatalf("no log line for %s: %s", id, text)
+			}
+		}
+		for _, leak := range []string{"0123456789abcdef", "1123456789abcdef", " default ", "127.0.0.1", shown.id} {
+			if strings.Contains(text, leak) {
+				t.Fatalf("the log names %q: %s", leak, text)
+			}
+		}
+	})
+	t.Run("bound", func(t *testing.T) {
+		desktopQuitSuspendFirst, desktopQuitSuspendRetry, desktopQuitSuspendBound = 200*time.Millisecond, 5*time.Second, 500*time.Millisecond
+		release := make(chan struct{})
+		_, hangAlways := hangers(release)
+		view, calls := quitView(t, "", hangAlways)
+		t.Cleanup(func() { close(release) })
+		d := &desktopGateway{generation: randomToken(), active: view}
+		started := time.Now()
+		d.close()
+		if elapsed := time.Since(started); calls.Load() != 2 || elapsed < 450*time.Millisecond || elapsed > 1500*time.Millisecond {
+			t.Fatalf("a hung view: %d suspends, quit took %v", calls.Load(), elapsed)
+		}
+	})
 }

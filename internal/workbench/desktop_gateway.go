@@ -354,7 +354,9 @@ func suspendLocalView(ctx context.Context, t *desktopTarget) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, session.Origin+"/api/account/suspend", strings.NewReader("{}"))
 	if err != nil {
-		return err
+		// The same sentence as a failed request: quit logs it, and the
+		// origin stays out of the log.
+		return errors.New("未能锁定本机会话，请重新连接本机工作台")
 	}
 	req.Header.Set("Origin", session.Origin)
 	req.Header.Set("Content-Type", "application/json")
@@ -509,6 +511,45 @@ func (d *desktopGateway) acquire(id string) (*remotehost.Session, bool, error) {
 	return session, d.active.mode == "remote", err
 }
 
+// The quit's suspend of the local views (close): a first try, a second
+// with a longer deadline for a view that failed or did not answer, every
+// view at once and the whole step bounded, so quit waits at most
+// desktopQuitSuspendBound however many views there are. Variables for tests.
+var (
+	desktopQuitSuspendFirst = 3 * time.Second
+	desktopQuitSuspendRetry = 10 * time.Second
+	desktopQuitSuspendBound = 15 * time.Second
+)
+
+// suspendLocalViewsOnQuit locks the account of every local view before the
+// app goes, as the window's own quit does for the view it shows (quitting
+// counts as lock for the entry). A view still not locked is logged by its
+// environment: its ssh entry stays open until its controller locks.
+func suspendLocalViewsOnQuit(views []*desktopTarget) {
+	ctx, cancel := context.WithTimeout(context.Background(), desktopQuitSuspendBound)
+	defer cancel()
+	var wg sync.WaitGroup
+	for _, t := range views {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var err error
+			for _, wait := range []time.Duration{desktopQuitSuspendFirst, desktopQuitSuspendRetry} {
+				attempt, stop := context.WithTimeout(ctx, wait)
+				err = suspendLocalView(attempt, t)
+				stop()
+				if err == nil || ctx.Err() != nil {
+					break
+				}
+			}
+			if err != nil {
+				diagnostics.Log("warn", "desktop-quit", "quitting did not lock local environment "+targetLocalVMID(t)+" after a retry: "+err.Error())
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 func (d *desktopGateway) close() {
 	d.change.Lock()
 	defer d.change.Unlock()
@@ -518,17 +559,17 @@ func (d *desktopGateway) close() {
 	d.mu.Lock()
 	d.closed = true
 	d.mu.Unlock()
+	var views []*desktopTarget
 	if t := d.active; t != nil && t.mode == "local" && t.state().State == "connected" {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		_ = suspendLocalView(ctx, t)
-		cancel()
+		views = append(views, t)
 	}
 	for _, t := range d.left {
 		if t.state().State == "connected" {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = suspendLocalView(ctx, t)
-			cancel()
+			views = append(views, t)
 		}
+	}
+	suspendLocalViewsOnQuit(views)
+	for _, t := range d.left {
 		t.close()
 	}
 	d.left = nil
