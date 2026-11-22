@@ -9,7 +9,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +22,6 @@ import (
 	"github.com/sylvinus/agent-vm/internal/remotelink"
 )
 
-// One UI-managed phone per host. CLI-managed devices keep their separate identities.
-type phoneRecord struct {
-	Seed                      []byte
-	Pin, Relay, Lookup, Admin string
-	Device                    *mobilelink.DeviceInfo `json:"device,omitempty"`
-}
 type mobilePairing struct {
 	mu               sync.Mutex
 	browser, desktop phoneSurfaceState
@@ -43,8 +36,6 @@ type mobilePairing struct {
 	powerDone        <-chan struct{}
 	power            keepawake.State
 }
-
-func (s *Server) phoneFile() string { return filepath.Join(s.profile, "mobile-paired-device.json") }
 
 // The transport proof grants only phone operations and is revoked with the
 // active room. It never grants native desktop administration to a session cookie.
@@ -74,6 +65,15 @@ func phoneRoomRoute(path string) bool {
 	return false
 }
 
+// runKeepAwake holds the host awake until ctx ends. Tests replace it.
+func (s *Server) runKeepAwake(ctx context.Context, report func(keepawake.State)) {
+	if s.keepAwake != nil {
+		s.keepAwake(ctx, report)
+		return
+	}
+	keepawake.Run(ctx, report)
+}
+
 func (s *Server) restorePhone() error {
 	b, err := os.ReadFile(s.phoneFile())
 	if os.IsNotExist(err) {
@@ -100,7 +100,7 @@ func (s *Server) attachPhone(r phoneRecord) {
 	s.phones.powerDone = done
 	go func() {
 		defer close(done)
-		keepawake.Run(ctx, func(state keepawake.State) {
+		s.runKeepAwake(ctx, func(state keepawake.State) {
 			s.phones.mu.Lock()
 			if s.phones.powerCtx == ctx {
 				s.phones.power = state

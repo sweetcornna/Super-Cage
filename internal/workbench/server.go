@@ -16,6 +16,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/guestprofile"
 	"github.com/sylvinus/agent-vm/internal/host"
 	"github.com/sylvinus/agent-vm/internal/hostimage"
+	"github.com/sylvinus/agent-vm/internal/keepawake"
 	"io"
 	"io/fs"
 	"log"
@@ -65,6 +66,7 @@ type Server struct {
 	clipboardCancel                                  context.CancelFunc
 	clipboardGuestSession                            string
 	phones                                           mobilePairing
+	keepAwake                                        func(context.Context, func(keepawake.State)) // nil: keepawake.Run
 	instanceID                                       string
 	clientOnly                                       bool
 	desktopEntry                                     bool
