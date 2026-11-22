@@ -28,8 +28,12 @@ EXE := .exe
 endif
 
 ASSETS := internal/limaembed/assets
+# One stamp per build, linked into cage and cage-attach alike: a controller
+# accepts only the cage-attach built with it (internal/controlclient).
+STAMP := $(shell od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
 LDFLAGS := -s -w \
 	-X github.com/sylvinus/agent-vm/internal/version.Version=$(VERSION) \
+	-X github.com/sylvinus/agent-vm/internal/version.Stamp=$(STAMP) \
 	-X github.com/lima-vm/lima/v2/pkg/version.Version=$(LIMA_VERSION)
 # yq only edits Lima's YAML here: without its other formats (Lua, HCL, TOML,
 # XML...), 10% smaller. Tests run with the same tags.
@@ -54,12 +58,19 @@ cage: cage-ui assets tailnet-assets
 ifeq ($(GOOS),darwin)
 	codesign -f --entitlements third_party/lima/vz.entitlements -s - _output/bin/cage
 endif
+	$(MAKE) cage-attach STAMP=$(STAMP)
+
+# cage attach runs the slim cage-attach installed beside cage, so an attached
+# window stays small (cmd/cage-attach). The same flags and stamp as cage:
+# the controller accepts only the cage-attach built with it. Never cgo.
+cage-attach:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o _output/bin/cage-attach$(EXE) ./cmd/cage-attach
 
 cage-ui:
 	npm --prefix ui ci --no-audit --no-fund
 	npm run --prefix ui build
 
-.PHONY: cage cage-ui cage-windows package-windows cage-linux package-linux check-linux
+.PHONY: cage cage-attach cage-ui cage-windows package-windows cage-linux package-linux check-linux
 cage-linux:
 	bash scripts/build-linux.sh
 

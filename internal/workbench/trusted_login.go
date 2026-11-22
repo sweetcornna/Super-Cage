@@ -2,7 +2,6 @@ package workbench
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,15 +11,13 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
 // Only the local launcher possesses the controller token. Its independent
 // cookie jar carries this proof; the browser and SSH tickets never receive it.
-func trustedViewProof(token string) string {
-	digest := sha256.Sum256([]byte("trusted desktop view\x00" + token))
-	return hex.EncodeToString(digest[:])
-}
+func trustedViewProof(token string) string { return controlclient.TrustedViewProof(token) }
 func (s *Server) hasTrustedView(r *http.Request) bool {
 	c, err := r.Cookie(s.cookieName() + "-desktop")
 	return err == nil && equalSecret(c.Value, trustedViewProof(s.token))

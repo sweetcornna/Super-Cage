@@ -40,7 +40,7 @@ func (c *controllerClient) localControl(ctx context.Context, action string, inpu
 	}
 	switch status {
 	case http.StatusOK:
-		if action == "status" && (reply.OwnerID != localControllerID(c.record.Token) || reply.Identity.PID != c.record.PID || reply.Identity.Protocol != controlProtocol || !reply.Identity.matches(c.record.Controller) || !remoteInstanceID.MatchString(reply.InstanceID)) {
+		if action == "status" && (reply.OwnerID != localControllerID(c.record.Token) || reply.Identity.PID != c.record.PID || reply.Identity.Protocol != controlProtocol || !reply.Identity.Matches(c.record.Controller) || !remoteInstanceID.MatchString(reply.InstanceID)) {
 			return reply, errors.New("无法确认本机控制服务身份")
 		}
 		return reply, nil

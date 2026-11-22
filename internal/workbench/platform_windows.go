@@ -7,16 +7,13 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"golang.org/x/sys/windows"
 )
 
-func lockController(f *os.File) error {
-	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, new(windows.Overlapped))
-}
-func unlockController(f *os.File) error {
-	return windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, new(windows.Overlapped))
-}
-func controllerLockContended(err error) bool { return errors.Is(err, windows.ERROR_LOCK_VIOLATION) }
+func lockController(f *os.File) error        { return controlclient.Lock(f) }
+func unlockController(f *os.File) error      { return controlclient.Unlock(f) }
+func controllerLockContended(err error) bool { return controlclient.LockContended(err) }
 
 // The PIDs checked here are Cage's own processes, which the same user can
 // always open for limited queries. Access denied means the PID was reused by
