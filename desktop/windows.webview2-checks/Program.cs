@@ -40,6 +40,9 @@ internal sealed class ChecksForm : Form
     private string heldUri = "";
     private bool heldReload, holdNavigations;
     private long pageDetachedAt = -1;
+    // The session origins framed since auto-attach began: cleared once it
+    // ends, as ScienceFrameHost.ClearFramed does.
+    private readonly List<string> framed = [];
     private LoopbackServer workbench = null!, labels = null!;
     public int ExitCode { get; private set; } = 1;
 
@@ -238,6 +241,7 @@ internal sealed class ChecksForm : Form
     {
         var host = Guid.NewGuid().ToString("N") + ".localhost:" + labels.Port;
         current = "http://" + host;
+        lock (gate) framed.Add(current);
         await core.ExecuteScriptAsync("(() => { const f = document.createElement('iframe'); f.dataset.scienceFrame = ''; f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms'); f.style.cssText = 'width:300px;height:120px;border:0'; f.src = " +
             JsonSerializer.Serialize("http://" + host + "/" + (query.Length == 0 ? "" : "?" + query)) + "; (document.getElementById('pane') || document.body).append(f); return true; })()");
         return host;
@@ -535,13 +539,24 @@ internal sealed class ChecksForm : Form
                 _ = List();
             }
         }
+        List<string>? clear = null;
         if (list.Any(action => action.Session.Length == 0 && action.Call?.Method == "Target.setAutoAttach" && action.Call.Params["autoAttach"]?.GetValue<bool>() == false))
         {
             pageDetachedAt = Now;
             Event("policy page detach", new JsonObject());
+            lock (gate) { clear = framed.ToList(); framed.Clear(); }
         }
         await Task.WhenAll(list.Where(action => action.Call != null).GroupBy(action => action.Session)
             .Select(group => Calls(group.Key, group.Select(action => action.Call!).ToList())));
+        foreach (var origin in clear ?? [])
+        {
+            foreach (var call in ScienceFrame.ClearOrigin(origin, "http://localhost"))
+            {
+                try { await core.CallDevToolsProtocolMethodAsync(call.Method, call.Params.ToJsonString()); }
+                catch (Exception error) { lock (gate) callErrors.Add(new JsonObject { ["session"] = "", ["method"] = call.Method, ["error"] = error.Message }); }
+            }
+            Event("policy cleared", new JsonObject { ["origin"] = origin });
+        }
         if (!list.Any(action => action.Proceed)) return;
         Event("policy proceed", new JsonObject { ["uri"] = heldUri, ["reload"] = heldReload });
         var uri = heldUri;
