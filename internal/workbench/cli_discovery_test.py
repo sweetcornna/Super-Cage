@@ -171,6 +171,43 @@ class DiscoveryTests(unittest.TestCase):
         self.history(session, self.project, "reply")
         self.assertTrue(self.discovery.handle("view-wait", dict(request, key=key, timeout=5, cancelled=threading.Event()))["changed"])
 
+    def test_view_wait_wakes_when_a_running_subagent_writes(self):
+        session, connection = str(uuid.uuid4()), str(uuid.uuid4())
+        path = self.history(session, self.project, "look around")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000Z"
+        with path.open("a") as stream:
+            stream.write(json.dumps({"cwd": self.project, "type": "assistant", "uuid": str(uuid.uuid4()), "timestamp": stamp, "message": {"content": [
+                {"type": "tool_use", "id": "toolu_child", "name": "Agent", "input": {"description": "梳理目录", "prompt": "p"}}]}}) + "\n")
+        folder = path.parent / session / "subagents"
+        folder.mkdir(parents=True)
+        (folder / "agent-a1b2c3.meta.json").write_text(json.dumps({"toolUseId": "toolu_child", "agentType": "Explore"}))
+        child = folder / "agent-a1b2c3.jsonl"
+        child.write_text(json.dumps({"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "tool_use", "id": "c1", "name": "Read", "input": {"file_path": "a.py"}}]}}) + "\n")
+        self.state(connection, cli_id=session, config=str(self.config), workspace=self.project, pid=os.getpid(), channel_pid=os.getpid(), updated_at=1)
+        request = {"cli_id": session, "config": str(self.config), "connection": connection, "account": "default"}
+        view = self.discovery.handle("view", dict(request, cancelled=threading.Event()))
+        key = view.pop("watch_key")
+        self.assertEqual(view, self.plain.view(self.config, session))
+        self.assertEqual(view["tasks"]["running"][0]["now"], {"name": "Read", "detail": "a.py"})
+        self.assertEqual(self.discovery.view_key(self.config, session), key)
+        self.assertFalse(self.discovery.handle("view-wait", dict(request, key=key, timeout=0.3, cancelled=threading.Event()))["changed"])
+        def append(text):
+            with child.open("a") as stream:
+                stream.write(text)
+        threading.Timer(0.2, append, [json.dumps({"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "tool_use", "id": "c2", "name": "Grep", "input": {"pattern": "x"}}]}}) + "\n"]).start()
+        started = time.monotonic()
+        self.assertTrue(self.discovery.handle("view-wait", dict(request, key=key, timeout=5, cancelled=threading.Event()))["changed"])
+        self.assertLess(time.monotonic() - started, 3)
+        view = self.discovery.handle("view", dict(request, cancelled=threading.Event()))
+        self.assertEqual(view["tasks"]["running"][0]["now"], {"name": "Grep", "detail": "x"})
+        # Once the child has ended its files are no longer part of the key.
+        (folder / "agent-a1b2c3.meta.json").write_text(json.dumps({"toolUseId": "toolu_child", "finished": True}))
+        view = self.discovery.handle("view", dict(request, cancelled=threading.Event()))
+        self.assertNotIn("tasks", view)
+        key = view["watch_key"]
+        append("{}\n")
+        self.assertFalse(self.discovery.handle("view-wait", dict(request, key=key, timeout=0.3, cancelled=threading.Event()))["changed"])
+
     def test_server_framing(self):
         code = self.home / ".local/share/cage/cli-channel-code"
         code.mkdir(parents=True)

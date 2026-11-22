@@ -48,6 +48,9 @@ codex = None
 codex_name = ""
 codex_lock = threading.Lock()
 summaries = {}
+# The subagent files each session's latest view read, so a held read wakes
+# when a running child writes; sessions without running children add nothing.
+children = {}
 agents = {}
 agent_locks = {}
 states = {}
@@ -156,7 +159,7 @@ def view_target(request):
     return config, channel.identifier(request["cli_id"])
 
 
-def view_key(config, session_id):
+def view_parts(config, session_id):
     # Everything view() reads: the transcript, the matching channel states,
     # an account switch's frozen history and the liveness of their processes.
     parts = [str(config)]
@@ -169,14 +172,31 @@ def view_key(config, session_id):
         parts.append([path.parent.name, file_key(path), channel.live(state.get("pid")), channel.live(state.get("channel_pid"))])
         if state.get("resume_transcript"):
             parts.append([state["resume_transcript"], file_key(state["resume_transcript"])])
-    return digest(parts)
+    return parts
+
+
+def view_key(config, session_id):
+    # view_parts() and the files of the subagents the latest view found running.
+    with lock:
+        paths = children.get((str(config), session_id), [])
+    return digest(view_parts(config, session_id) + [[path, file_key(path)] for path in paths])
 
 
 def view(request):
     config, session_id = view_target(request)
-    key = view_key(config, session_id)
-    result = channel.view(config, session_id)
-    result["watch_key"] = key
+    # The children's keys are taken by view() as it reads them, so a write
+    # after that read still wakes the next view-wait.
+    watched = []
+    parts = view_parts(config, session_id)
+    result = channel.view(config, session_id, watch=watched)
+    with lock:
+        if watched:
+            if len(children) >= SUMMARY_LIMIT:
+                children.clear()
+            children[(str(config), session_id)] = [path for path, _ in watched]
+        else:
+            children.pop((str(config), session_id), None)
+    result["watch_key"] = digest(parts + watched)
     return result
 
 
