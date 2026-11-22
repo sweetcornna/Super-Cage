@@ -26,9 +26,11 @@ test("Codex surfaces follow presence; unknown shows them as before", () => {
   assert.deepEqual(codexSurfaces(absent, "debian-13"), { presence: "absent", menu: false, link: false, accounts: false, providers: "claude" });
   // Before the first /status nothing is read and nothing shown yet.
   assert.deepEqual(codexSurfaces(null, undefined), { presence: "pending", menu: false, link: false, accounts: false, providers: SESSION_PROVIDERS });
-  // A macOS or Windows guest never had the Codex row.
-  assert.equal(codexSurfaces(unknown, "macos").menu, false);
-  assert.equal(codexSurfaces(present, "windows-11").menu, false);
+  // A macOS or Windows guest is never read: as before, without the Codex row.
+  for (const system of ["macos", "windows-11", "windows-remote"]) {
+    assert.deepEqual(codexSurfaces(absent, system), { presence: "unknown", ...today, menu: false });
+  }
+  assert.equal(codexSurfaces(null, "macos").accounts, false, "still nothing before the first /status");
 });
 
 test("window labels follow the reported window length", () => {

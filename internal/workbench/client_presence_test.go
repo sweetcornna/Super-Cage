@@ -210,7 +210,7 @@ func TestClientPresenceStatusBytes(t *testing.T) {
 	s := testServer(t)
 	before, beforeFields := statusView(t, s)
 	if again, _ := statusView(t, s); again != before {
-		t.Skip("the fixture's status is not stable between two reads")
+		t.Fatalf("the fixture's status is not stable between two reads:\n%s\n%s", before, again)
 	}
 	s.clientsTracked = true
 	s.clients = presenceReading(t, "agent-clients/1 present= receipts=codex")

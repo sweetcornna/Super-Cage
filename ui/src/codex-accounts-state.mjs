@@ -18,9 +18,10 @@ export function codexPresence(status) {
 }
 
 // menu: the 新建 row; link: 账号管理 in the sidebar; accounts: the
-// /codex-accounts read; providers: what the session list asks for.
+// /codex-accounts read; providers: what the session list asks for. A macOS
+// or Windows guest is never read: unknown, so as before (and no 新建 row).
 export function codexSurfaces(status, system) {
-  const presence = codexPresence(status);
+  const presence = status && !codexTerminalSupported(system) ? "unknown" : codexPresence(status);
   const shown = presence === "present" || presence === "unknown";
   return { presence, menu: shown && codexTerminalSupported(system), link: shown, accounts: shown,
     providers: presence === "absent" ? "claude" : "claude,codex" };
