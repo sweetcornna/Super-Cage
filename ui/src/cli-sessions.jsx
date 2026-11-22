@@ -32,8 +32,10 @@ function ArchiveSelection({ items, selected, onToggle, disabled, label, children
 const HIDDEN_STOP_MS = 30000;
 const listRequest = (path, { signal }) => api(path.replace(/^\/api/, ""), undefined, undefined, {}, { signal, empty: true });
 
-export function useCLISessions(enabled, visible) {
-  const [store] = useState(() => createSessionList({ request: listRequest }));
+export function useCLISessions(enabled, visible, providers) {
+  const [store] = useState(() => createSessionList({ request: listRequest, providers }));
+  // Before the effect that starts the list, so it starts with these providers.
+  useEffect(() => { store.setProviders(providers); }, [store, providers]);
   useEffect(() => {
     const refresh = () => store.refresh();
     window.addEventListener("cage-cli-sessions-changed", refresh);

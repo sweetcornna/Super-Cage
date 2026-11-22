@@ -7,6 +7,25 @@ export function codexTerminalSupported(system) {
   return !NATIVE_GUESTS.has(system || "");
 }
 
+// Codex surfaces follow presence (/status "clients" and "clients_unknown",
+// design 2.3, choice C): shown when a codex program was found, and as before
+// while nothing is known. "pending" is the window before its first /status:
+// it shows nothing and asks for nothing yet.
+export function codexPresence(status) {
+  if (!status) return "pending";
+  if (status.clients_unknown === true) return "unknown";
+  return Array.isArray(status.clients) && status.clients.includes("codex") ? "present" : "absent";
+}
+
+// menu: the 新建 row; link: 账号管理 in the sidebar; accounts: the
+// /codex-accounts read; providers: what the session list asks for.
+export function codexSurfaces(status, system) {
+  const presence = codexPresence(status);
+  const shown = presence === "present" || presence === "unknown";
+  return { presence, menu: shown && codexTerminalSupported(system), link: shown, accounts: shown,
+    providers: presence === "absent" ? "claude" : "claude,codex" };
+}
+
 // Codex reports each window's length; label it like the Claude panel's 5h/7d.
 export function codexWindowLabel(minutes, slot = "primary") {
   if (!Number.isInteger(minutes) || minutes <= 0) return slot === "secondary" ? "长周期" : "短周期";

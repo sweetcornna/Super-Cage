@@ -1,13 +1,34 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
-import { codexAccountName, codexActiveCounts, codexQuotaView, codexTerminalDetail,
+import { codexAccountName, codexActiveCounts, codexPresence, codexQuotaView, codexSurfaces, codexTerminalDetail,
   codexTerminalLabel, codexTerminalSupported, codexWindowLabel } from "./codex-accounts-state.mjs";
+import { SESSION_PROVIDERS } from "./session-provider.mjs";
 
 test("Codex terminals are offered only in Linux guests", () => {
   assert.equal(codexTerminalSupported("debian-13"), true);
   assert.equal(codexTerminalSupported(undefined), true);
   for (const system of ["macos", "windows-11", "windows-remote"]) assert.equal(codexTerminalSupported(system), false);
+});
+
+test("Codex surfaces follow presence; unknown shows them as before", () => {
+  const unknown = { clients_unknown: true }, absent = {}, present = { clients: ["codex"] };
+  assert.equal(codexPresence(null), "pending");
+  assert.equal(codexPresence(unknown), "unknown");
+  assert.equal(codexPresence(absent), "absent");
+  assert.equal(codexPresence({ clients: ["antigravity-cli"] }), "absent");
+  assert.equal(codexPresence(present), "present");
+  assert.equal(codexPresence({ clients: ["codex"], clients_unknown: true }), "unknown");
+  const today = { menu: true, link: true, accounts: true, providers: SESSION_PROVIDERS };
+  for (const [status, presence] of [[unknown, "unknown"], [present, "present"]]) {
+    assert.deepEqual(codexSurfaces(status, "debian-13"), { presence, ...today });
+  }
+  assert.deepEqual(codexSurfaces(absent, "debian-13"), { presence: "absent", menu: false, link: false, accounts: false, providers: "claude" });
+  // Before the first /status nothing is read and nothing shown yet.
+  assert.deepEqual(codexSurfaces(null, undefined), { presence: "pending", menu: false, link: false, accounts: false, providers: SESSION_PROVIDERS });
+  // A macOS or Windows guest never had the Codex row.
+  assert.equal(codexSurfaces(unknown, "macos").menu, false);
+  assert.equal(codexSurfaces(present, "windows-11").menu, false);
 });
 
 test("window labels follow the reported window length", () => {

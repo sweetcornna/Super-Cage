@@ -2,7 +2,7 @@
 // session-poll.mjs, kept as a small store so that only the views that show the
 // list re-render when it changes (audit UI-4). An unchanged answer causes no
 // state change at all: the snapshot object stays the same.
-import { codexCapabilities, sessionListPath } from "./session-provider.mjs";
+import { codexCapabilities, SESSION_PROVIDERS, sessionListPath } from "./session-provider.mjs";
 import { afterOutcome, initialPoll, LIST_INTERVAL_MS, pollQuery, requestDeadline, requestDeadlineMs } from "./session-poll.mjs";
 import { reuseItems, sameValue } from "./poll-state.mjs";
 
@@ -17,7 +17,7 @@ const rows = (answer) => (answer.sessions || []).map((session) =>
 // request(path, {signal}) resolves the answer, or null for 204, and rejects
 // with an error carrying .status for an HTTP failure.
 export function createSessionList({ request, now = () => Date.now(), setTimer = setTimeout, clearTimer = clearTimeout,
-  interval = LIST_INTERVAL_MS } = {}) {
+  interval = LIST_INTERVAL_MS, providers = SESSION_PROVIDERS } = {}) {
   let snapshot = idle;
   const listeners = new Set();
   let poll = initialPoll();
@@ -46,7 +46,7 @@ export function createSessionList({ request, now = () => Date.now(), setTimer = 
     let outcome;
     let answer = null;
     try {
-      answer = await request(sessionListPath({ after, wait }), { signal: deadline.signal });
+      answer = await request(sessionListPath({ after, wait, providers }), { signal: deadline.signal });
       outcome = answer ? { status: 200, revision: answer.revision } : { status: 204 };
     } catch (failure) {
       if (signal.aborted || own !== generation) return;
@@ -110,6 +110,16 @@ export function createSessionList({ request, now = () => Date.now(), setTimer = 
       if (user) publish({ loading: true });
       abort();
       schedule(user ? 0 : lastStart + 1000 - now());
+    },
+    // The providers follow Codex presence (codexSurfaces). Another set is
+    // another list: the held request and its revision are dropped.
+    setProviders(value) {
+      if (!value || value === providers) return;
+      providers = value;
+      poll = initialPoll();
+      if (!running) return;
+      abort();
+      schedule(lastStart + 1000 - now());
     },
     get running() { return running; },
     get mode() { return poll.mode; },

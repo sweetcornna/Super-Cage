@@ -31,7 +31,7 @@ import { TerminalMenu } from "./terminal-menu";
 import { InitializationGate } from "./initialization";
 import { ClaudeAccountsPanel, useClaudeAccounts } from "./claude-accounts";
 import { CodexAccountsPanel, useCodexAccounts } from "./codex-accounts";
-import { codexTerminalDetail, codexTerminalLabel, codexTerminalSupported } from "./codex-accounts-state.mjs";
+import { codexSurfaces, codexTerminalDetail, codexTerminalLabel } from "./codex-accounts-state.mjs";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
 import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
@@ -110,7 +110,6 @@ function App() {
     return () => window.removeEventListener("cage-client-preferences", refresh);
   }, []);
   const claudeProfiles = useClaudeAccounts();
-  const codexProfiles = useCodexAccounts();
   const [managementPage, setManagementPage] = useState(() => { try { return Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000 ? "claude-science" : ""; } catch { return ""; } }); // Claude Science reloaded the window once for its frame (claude-science.jsx)
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
@@ -173,6 +172,9 @@ function App() {
     ? { ...clientStatus, job: { running: true, kind: "start", message: "正在启动 Super Cage 环境…" } }
     : clientStatus;
   const system = status?.guest_system || account?.guest_system;
+  // Codex surfaces follow presence (choice C); unknown shows them as before.
+  const codexUI = codexSurfaces(status, system);
+  const codexProfiles = useCodexAccounts(codexUI.accounts);
   const macGuest = system === "macos";
   const nativeGuestLabel = {macos: "macOS", "windows-11": "Windows", "windows-remote": "Windows 云端"}[system];
   const { active } = layout;
@@ -213,7 +215,7 @@ function App() {
     busy = Boolean(status?.job?.running),
     showHome = storageRecovery || !desktopOpen && (home || !status?.vm_running || !current);
   const setupProgress = status?.job?.setup_progress && (busy || status.job.error);
-  const sessionList = useCLISessions(Boolean(status && !busy && !storageRecovery && guestCapability(status, "claude-cli")), windowVisible);
+  const sessionList = useCLISessions(Boolean(status && !busy && !storageRecovery && guestCapability(status, "claude-cli")), windowVisible, codexUI.providers);
   const sessionCapabilities = useSessionSnapshot(sessionList, (list) => list.capabilities);
   const sessionsHeld = useSessionSnapshot(sessionList, (list) => list.held);
   const sessionPane = managementPage.startsWith(sessionPanePrefix) ? managementPage.slice(sessionPanePrefix.length) : "";
@@ -692,7 +694,7 @@ function App() {
     } } : null;
   };
   const terminalMenuAt = (location) => terminalChoice?.anchor?.dataset.terminalLocation === location && (
-    <TerminalMenu choice={terminalChoice} busy={busy} codex={codexTerminalSupported(system)} codexLabel={codexMenuLabel(sessionCapabilities)}
+    <TerminalMenu choice={terminalChoice} busy={busy} codex={codexUI.menu} codexLabel={codexMenuLabel(sessionCapabilities)}
       local={localTerminalItem(location)}
       onClose={() => setTerminalChoice(null)}
       onSelect={(kind) => createTerminal(terminalChoice.path, kind).catch((e) => notify(e.message))} />
@@ -1684,7 +1686,7 @@ function App() {
           <SessionListView store={sessionList}>{(list) => <WorkspaceSidebar
             onClaudeAccounts={() => setManagementPage("claude-accounts")}
             claudeAccountsOpen={managementPage === "claude-accounts"}
-            onCodexAccounts={() => setManagementPage("codex-accounts")}
+            onCodexAccounts={codexUI.link ? () => setManagementPage("codex-accounts") : undefined}
             codexAccountsOpen={managementPage === "codex-accounts"}
             tailscaleOpen={managementPage === "tailscale"}
             updateAction={<AppUpdateButton updates={appUpdates} />}
