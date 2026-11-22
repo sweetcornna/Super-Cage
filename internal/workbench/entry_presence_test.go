@@ -78,3 +78,34 @@ func TestEntryReadInputHoldsCutSequences(t *testing.T) {
 	<-done
 	w.Close()
 }
+
+// entryScript is a window's input: each Read gives the next part, the last
+// with io.EOF.
+type entryScript struct{ parts []string }
+
+func (s *entryScript) Read(b []byte) (int, error) {
+	if len(s.parts) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(b, s.parts[0])
+	if s.parts = s.parts[1:]; len(s.parts) == 0 {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+// When the window's input ends inside a sequence, what was held is still
+// sent: bytes read are bytes sent, and it is not the owner at the window.
+func TestEntryReadInputEndSendsWhatIsHeld(t *testing.T) {
+	p := &entryPresence{}
+	var sent []string
+	entryReadInput(&entryScript{parts: []string{"\x1b[12;1"}}, p, func() bool { return false }, func(data []byte) bool {
+		if len(data) > 0 {
+			sent = append(sent, string(data))
+		}
+		return true
+	})
+	if strings.Join(sent, "") != "\x1b[12;1" || p.lastInput.Load() != 0 {
+		t.Fatalf("sent %q, owner %v", sent, p.lastInput.Load() != 0)
+	}
+}

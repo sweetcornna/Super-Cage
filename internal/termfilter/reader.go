@@ -21,14 +21,16 @@ const (
 // NextInput does. An escape sequence cut at the end of a read is held and
 // completed by the next, so an answer to a query cut anywhere is still an
 // answer and never a key: the program in the environment can ask for many
-// answers, and they come back in reads cut at any byte. Held is at most an
-// answer's length (replyLimit): anything longer is not one, and is given as
-// InputFragment at once. Bracketed pastes are tracked: their text, end
-// marker included, is InputPaste, whatever it holds.
+// answers, and they come back in reads cut at any byte. Held is shorter than
+// any answer can be (replyLimit): anything longer is not one, and is given
+// as InputFragment at once; what follows it is read afresh. Bracketed
+// pastes are tracked: their text, end marker included, is InputPaste,
+// whatever it holds.
 //
 // When the rest does not come within InputHold, the caller calls Release:
 // the held bytes are given as InputFragment, and so is the rest of that
-// sequence when it comes. Nothing the reader gives up on counts as a key.
+// sequence, at once as it comes, up to the longest answer's length. Nothing
+// the reader gives up on counts as a key.
 // The zero value is ready. It is not safe for concurrent use.
 type InputReader struct {
 	held  []byte // the start of a unit cut at the end of the last read
@@ -81,13 +83,19 @@ func (r *InputReader) Read(data []byte, each func(unit []byte, kind InputKind, r
 		}
 		if data[i] == 0x1b {
 			if n, done := seqEnd(data[i:]); !done {
-				if n < replyLimit {
-					r.hold(data[i:], skip-i)
-					return
+				switch {
+				case n >= replyLimit:
+					// Longer than any answer: given up on at once, and
+					// what follows is read afresh.
+					emit(i, len(data), InputFragment, ReplyNone)
+				case skip > i:
+					// Part of it was given up on already: so is the rest,
+					// as it comes.
+					emit(i, len(data), InputFragment, ReplyNone)
+					r.hold(data[i:], len(data)-i)
+				default:
+					r.hold(data[i:], 0)
 				}
-				// Longer than any answer: given up on at once.
-				emit(i, len(data), InputFragment, ReplyNone)
-				r.hold(compact(data[i:]), len(data))
 				return
 			}
 		}
@@ -180,19 +188,6 @@ func seqEnd(data []byte) (int, bool) {
 // answerIntroducer reports whether c after an Esc can begin an answer to a
 // query: CSI, OSC or DCS.
 func answerIntroducer(c byte) bool { return c == '[' || c == ']' || c == 'P' }
-
-// compact keeps of an unfinished sequence given up on only what tells
-// where it ends: its introducer, and for a string an Esc at its end.
-func compact(seq []byte) []byte {
-	out := append([]byte(nil), seq[:2]...)
-	switch {
-	case seq[1] == '[':
-		out = append(out, '0') // past the X10 mouse form
-	case seq[len(seq)-1] == 0x1b:
-		out = append(out, 0x1b)
-	}
-	return out
-}
 
 // markerStart is the length of the longest end of data that begins marker.
 func markerStart(data []byte, marker string) int {

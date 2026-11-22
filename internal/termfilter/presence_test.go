@@ -108,7 +108,8 @@ var readerForms = []struct {
 	{"\x1b[4;2$y", InputReply}, {"\x1b[?2147483647;0$y", InputReply},
 	{"\x1bP1$r0m\x1b\\", InputReply}, {"\x1bP0$r\x1b\\", InputReply}, {"\x1bP1$r61;1\"p\x1b\\", InputReply},
 	{"\x1b]11;rgb:0000/0000/0000\x1b\\", InputReply}, {"\x1b]10;rgb:ffff/ffff/ffff\x07", InputReply},
-	{"\x1b]4;1;rgb:cdcd/0000/0000\x07", InputReply}, {"\x1bP1$r" + strings.Repeat("1", 119) + "m\x1b\\", InputReply},
+	{"\x1b]4;1;rgb:cdcd/0000/0000\x07", InputReply},
+	{"\x1b]12;rgb:d9d9/7777/5757\x1b\\", InputReply}, {"\x1bP1$r" + strings.Repeat("1", 119) + "m\x1b\\", InputReply},
 	{"\x1b[<35;10;5M", InputMotion}, {"\x1b[M" + "C*%", InputMotion}, {"\x1b[67;10;5M", InputMotion},
 	{"\x1b[<0;10;5M", InputMouse}, {"\x1b[<0;10;5m", InputMouse}, {"\x1b[M" + " *%", InputMouse},
 	{"\x1b[I", InputFocusIn}, {"\x1b[O", InputFocusOut},
@@ -155,8 +156,41 @@ func TestInputReaderHoldsOnlyWhatCouldContinue(t *testing.T) {
 		r.Read([]byte(chunk), func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) })
 	}
 	r.Release(func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) })
-	if r.Held() || joined(units) != long || len(presence(units)) != 0 || units[0].data != long[:replyLimit] {
-		t.Fatalf("a sequence longer than any answer: held %v, %q", r.Held(), units)
+	if r.Held() || joined(units) != long || units[0] != (inputUnit{long[:replyLimit], InputFragment}) || joined(units[1:]) != strings.Join(presence(units[1:]), "") {
+		t.Fatalf("a sequence longer than any answer, then read afresh: held %v, %q", r.Held(), units)
+	}
+}
+
+// Once part of a unit was given up on, the rest of it is given at once as it
+// comes, never held again, and only up to the longest answer: past that no
+// answer goes on, and input is read afresh.
+func TestInputReaderGivenUpUnitIsNotHeldAgain(t *testing.T) {
+	for start, filler := range map[string]string{"\x1b]": "j", "\x1bP": "j", "\x1b[12;1": "1"} {
+		var r InputReader
+		var units []inputUnit
+		each := func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) }
+		r.Read([]byte(start[:1]), each)
+		r.Release(each)
+		typed := start[1:] + strings.Repeat(filler, 2*replyLimit)
+		for i := range len(typed) {
+			before := len(units)
+			r.Read([]byte{typed[i]}, each)
+			if r.Held() || len(units) != before+1 || units[before].data != typed[i:i+1] {
+				t.Fatalf("%q given up on, then %q: held %v, units %q", start[:1], typed[:i+1], r.Held(), units[before:])
+			}
+			if fragment := units[before].kind == InputFragment; fragment != (i+1 < replyLimit) {
+				t.Fatalf("%q given up on, then %d bytes: %q is %v", start[:1], i+1, typed[i:i+1], units[before].kind)
+			}
+		}
+	}
+	var r InputReader
+	var units []inputUnit
+	each := func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) }
+	long := "\x1b]" + strings.Repeat("a", replyLimit)
+	r.Read([]byte(long), each)
+	r.Read([]byte("b"), each)
+	if r.Held() || fmt.Sprint(units) != fmt.Sprint([]inputUnit{{long, InputFragment}, {"b", InputKey}}) {
+		t.Fatalf("after a sequence longer than any answer: held %v, %q", r.Held(), units)
 	}
 }
 
