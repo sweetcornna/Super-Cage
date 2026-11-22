@@ -31,7 +31,8 @@ for (const mode of ["light", "dark"]) {
         const address = new URL(request.url());
         if (address.pathname === "/api/cli/sessions") lists.push(address.search);
       });
-      Object.assign(state.status, { ready: true, vm_running: true,
+      // Codex surfaces follow presence: this environment has Codex.
+      Object.assign(state.status, { ready: true, vm_running: true, clients: ["codex"],
         safety: { gate: { mode: "open", until: new Date(Date.now() + 6 * 3600000).toISOString() } } });
       const workspace = state.status.projects[0];
       state.claudeSessions = [{ id: "claude-1", workspace, title: "重构桌面工作台的视觉语言与组件层", updated_at: new Date(Date.now() - 180000).toISOString() }];

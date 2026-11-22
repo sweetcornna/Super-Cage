@@ -21,7 +21,8 @@ const dataRoutes = async (page) => {
   });
 };
 const ready = async (page, state) => {
-  Object.assign(state.status, { ready: true, vm_running: true });
+  // Codex surfaces follow presence: this environment has Codex.
+  Object.assign(state.status, { ready: true, vm_running: true, clients: ["codex"] });
   await page.route("**/api/audio", (route) => route.fulfill({ json: { format: "s16le", sample_rate: 48000, channels: 2 } }));
 };
 
