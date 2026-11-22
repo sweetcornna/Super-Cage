@@ -20,9 +20,11 @@ import (
 const IdleCPUBudget = 0.5
 
 var (
-	idPattern       = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
-	commandPattern  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	versionPattern  = regexp.MustCompile(`^[0-9]+(\.[0-9]+){1,3}([-+][0-9A-Za-z.-]{1,32})?$`)
+	idPattern      = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
+	commandPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	// Three numbers, as the installer's version check reads them, and an
+	// optional pre-release; no build suffix, which would not order.
+	versionPattern  = regexp.MustCompile(`^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$`)
 	sha256Pattern   = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	sha512Pattern   = regexp.MustCompile(`^[0-9a-f]{128}$`)
 	minGlibcPattern = regexp.MustCompile(`^2\.[0-9]{1,2}$`)
@@ -51,6 +53,37 @@ var maintenanceHosts = map[string]bool{
 // workbench must allow it for that entry's jobs (design 3.2, 1.3).
 var extraInstallHosts = map[string][]string{}
 
+// reviewed is what a security review allowed each optional entry beyond the
+// general rules: its launcher name, the vendor prefixes of the environment
+// variables its launcher may set, and data directories that lie one level
+// below the home or inside one of Cage's own folders. A new entry, or a new
+// name for one, is a code change with a review (docs/agent-catalog.md);
+// internal/cage/agent-install.sh holds the same commands and prefixes.
+var reviewed = map[string]allowance{
+	"codex": {command: "codex", envPrefixes: []string{"CODEX_"},
+		dataDirs: []string{"~/.codex", "~/.local/share/cage/codex-accounts", "~/.local/share/cage/codex-sessions"}},
+	"antigravity-cli": {command: "agy", envPrefixes: []string{"AGY_"}},
+}
+
+type allowance struct {
+	command     string
+	envPrefixes []string
+	dataDirs    []string
+}
+
+// ExtraInstallHosts returns e's reviewed download hosts outside today's
+// channel: the hosts the workbench lets that entry's jobs, and only those
+// jobs, reach (CONNECT 443).
+func ExtraInstallHosts(e Entry) []string {
+	var hosts []string
+	for _, h := range e.Hosts.Install {
+		if !maintenanceHosts[h] && slices.Contains(extraInstallHosts[e.ID], h) {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
 // allowedPackages are the Debian packages an entry may ask the job to install.
 var allowedPackages = map[string]bool{"bubblewrap": true}
 
@@ -61,12 +94,16 @@ var systemSettings = map[string]string{"/etc/codex/config.toml": "codex"}
 // reservedCommands are launcher names an entry cannot take: what Cage
 // installs in /usr/local/bin (plus every cage-* name), and programs a
 // launcher earlier on PATH would shadow.
+// It backs up the reviewed list, which alone decides.
 var reservedCommands = map[string]bool{
 	"cage": true, "claude": true, "ssh": true, "xdg-open": true,
 	"sh": true, "bash": true, "dash": true, "zsh": true, "sudo": true, "su": true, "env": true,
 	"login": true, "passwd": true, "scp": true, "sftp": true, "git": true, "python": true, "python3": true,
 	"node": true, "npm": true, "npx": true, "curl": true, "wget": true, "tar": true,
 	"apt": true, "apt-get": true, "dpkg": true, "systemctl": true,
+	"ls": true, "rg": true, "bwrap": true, "gh": true, "mise": true, "code-server": true, "chromium": true,
+	"timeout": true, "flock": true, "pip": true, "pip3": true, "jq": true, "make": true, "unshare": true,
+	"uv": true, "uvx": true, "gpg": true, "tmux": true, "vim": true, "vi": true, "nano": true,
 }
 
 // homeRoots are shared directories no entry may claim as a whole.
@@ -75,8 +112,17 @@ var homeRoots = map[string]bool{
 	".cache": true, ".local/share/cage": true,
 }
 
-// homeProtected are trees no entry may claim or write into.
-var homeProtected = []string{".ssh", ".gnupg", ".pki", ".claude"}
+// homeProtected are trees no entry may claim or write into: logins and
+// credential stores, places that start programs, and Claude's own.
+var homeProtected = []string{
+	".ssh", ".gnupg", ".pki", ".claude", ".aws", ".kube", ".docker", ".netrc", ".gitconfig", ".git-credentials",
+	".password-store", ".config/gh", ".config/gcloud", ".config/git", ".config/systemd", ".config/autostart",
+	".local/share/keyrings", ".mozilla", ".config/chromium",
+}
+
+// cageOwn are Cage's folders in the home: an entry claims a directory in
+// one only when reviewed.
+var cageOwn = []string{".local/share/cage", ".cache/cage", ".claude-cage", ".config/cage"}
 
 var signinMethods = map[string]bool{
 	"browser-code": true, "browser-loopback": true, "device-code": true, "api-key": true, "adc": true,
@@ -225,8 +271,8 @@ func (v *checker) artifacts(e Entry) {
 
 func (v *checker) download(e Entry, field string, a Artifact) {
 	id := e.ID
-	if u, err := url.Parse(a.URL); err != nil || !httpsURL(a.URL) || u.RawQuery != "" || u.ForceQuery {
-		v.add(id, field+".url", "must be https on port 443 without credentials, query or fragment")
+	if u, err := url.Parse(a.URL); err != nil || !httpsURL(a.URL) || u.RawQuery != "" || u.ForceQuery || !plainURLPath(u) {
+		v.add(id, field+".url", "must be https on port 443 without credentials, query, fragment, percent-encoding or dot segments")
 	} else {
 		if !slices.Contains(e.Hosts.Install, u.Hostname()) {
 			v.add(id, field+".url", "host %s is not in hosts.install", u.Hostname())
@@ -284,7 +330,8 @@ func (v *checker) optional(e Entry) {
 		seen[p] = true
 	}
 	for _, key := range slices.Sorted(maps.Keys(e.Env)) {
-		if !envKeyPattern.MatchString(key) || deniedEnv(key) {
+		vendor := slices.ContainsFunc(reviewed[id].envPrefixes, func(p string) bool { return strings.HasPrefix(key, p) })
+		if !envKeyPattern.MatchString(key) || deniedEnv(key) || !vendor {
 			v.add(id, "env."+key, "name is not allowed")
 		}
 		if !envValuePattern.MatchString(e.Env[key]) {
@@ -336,7 +383,7 @@ func (v *checker) setting(e Entry, field string, s Setting) {
 		if systemSettings[s.File] != id {
 			v.add(id, field+".file", "%s is not a system file this entry may write", s.File)
 		}
-	} else if rest, ok := homePath(s.File); !ok || !strings.Contains(rest, "/") || protected(rest) || !ownsFile(e, s.File) {
+	} else if rest, ok := homePath(s.File); !ok || !strings.Contains(rest, "/") || protected(rest) || inCageOwn(rest, true) || !ownsFile(e, s.File) {
 		v.add(id, field+".file", "%q must lie inside one of the entry's data_dirs", s.File)
 	}
 	if len(s.Set) == 0 {
@@ -413,11 +460,18 @@ func (v *checker) hosts(e Entry) {
 	optionalText(v, id, "hosts.note_zh", e.Hosts.NoteZH, 120)
 }
 
+// dataDirs: a dot folder under the home, two levels deep, outside the
+// protected trees and Cage's folders, unless reviewed for this entry; never a
+// shared root or a protected tree.
 func (v *checker) dataDirs(e Entry) {
 	for i, d := range e.DataDirs {
 		rest, ok := homePath(d.Path)
-		if !ok || homeRoots[rest] || protected(rest) {
-			v.add(e.ID, "data_dirs", "%q must be a clean directory under ~/, not a shared root or a protected one", d.Path)
+		ok = ok && strings.HasPrefix(rest, ".") && !homeRoots[rest] && !protected(rest) && !inCageOwn(rest, false)
+		if ok && (!strings.Contains(rest, "/") || inCageOwn(rest, true)) && (!e.Optional() || !slices.Contains(reviewed[e.ID].dataDirs, d.Path)) {
+			ok = false
+		}
+		if !ok {
+			v.add(e.ID, "data_dirs", "%q must be a dot folder under ~/ two levels deep (or reviewed), not a shared root, a credential store or one of Cage's folders", d.Path)
 			continue
 		}
 		for _, earlier := range e.DataDirs[:i] {
@@ -447,8 +501,8 @@ func (v *checker) overlaps(entries []Entry) {
 
 func (v *checker) launch(e Entry) {
 	l, id := e.Launch, e.ID
-	if !commandPattern.MatchString(l.Command) || reservedCommands[l.Command] || strings.HasPrefix(l.Command, "cage-") {
-		v.add(id, "launch.command", "%q is not allowed (pattern, Cage's own names, or a system program it would shadow)", l.Command)
+	if !commandPattern.MatchString(l.Command) || reservedCommands[l.Command] || strings.HasPrefix(l.Command, "cage-") || reviewed[id].command != l.Command {
+		v.add(id, "launch.command", "%q is not allowed (pattern, Cage's own names, a system program it would shadow, or not the reviewed name)", l.Command)
 	}
 	if len(l.Argv) == 0 || l.Argv[0] != path.Join(LauncherDir, l.Command) {
 		v.add(id, "launch.argv", "must start with %s/<command>", LauncherDir)
@@ -510,17 +564,28 @@ func (v *checker) review(e Entry) {
 	}
 }
 
+// deniedEnv backs up the vendor prefixes: never a variable a loader, a shell
+// or Cage reads, and never one that names a path, a file, a command, options
+// or a proxy. internal/cage/agent-install.sh refuses the same.
 func deniedEnv(key string) bool {
-	switch key {
-	case "PATH", "HOME", "SHELL", "BROWSER", "TZ", "LANG", "NODE_OPTIONS":
-		return true
+	return slices.Contains(deniedEnvNames, key) ||
+		slices.ContainsFunc(deniedEnvPrefixes, func(p string) bool { return strings.HasPrefix(key, p) }) ||
+		slices.ContainsFunc(deniedEnvSuffixes, func(s string) bool { return strings.HasSuffix(key, s) })
+}
+
+var (
+	deniedEnvNames    = []string{"PATH", "HOME", "SHELL", "BROWSER", "TZ", "LANG", "NODE_OPTIONS", "ENV", "BASH_ENV", "IFS", "SHELLOPTS"}
+	deniedEnvPrefixes = []string{"LD_", "LC_", "PYTHON", "CAGE_"}
+	deniedEnvSuffixes = []string{"_PROXY", "_HOME", "_PATH", "_DIR", "_FILE", "_COMMAND", "_OPTIONS", "_SOCK", "_CERTS"}
+)
+
+// plainURLPath reports whether the path is what curl fetches: no percent
+// encoding and no empty, "." or ".." segment.
+func plainURLPath(u *url.URL) bool {
+	if u.RawPath != "" || strings.Contains(u.EscapedPath(), "%") || !strings.HasPrefix(u.Path, "/") {
+		return false
 	}
-	for _, prefix := range []string{"LD_", "LC_", "PYTHON", "CAGE_"} {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	return strings.HasSuffix(key, "_PROXY")
+	return !slices.ContainsFunc(strings.Split(u.Path[1:], "/"), func(s string) bool { return s == "" || s == "." || s == ".." })
 }
 
 // httpsURL reports whether raw is an absolute https URL to a hostname on the
@@ -552,6 +617,17 @@ func protected(rest string) bool {
 	return slices.ContainsFunc(homeProtected, func(root string) bool { return within(rest, root) })
 }
 
+// inCageOwn reports whether rest is one of Cage's folders (exact) or lies
+// inside one (inside).
+func inCageOwn(rest string, inside bool) bool {
+	return slices.ContainsFunc(cageOwn, func(root string) bool {
+		if inside {
+			return strings.HasPrefix(rest, root+"/")
+		}
+		return rest == root
+	})
+}
+
 // ownsFile reports whether a home file lies inside one of e's data dirs.
 func ownsFile(e Entry, file string) bool {
 	return slices.ContainsFunc(e.DataDirs, func(d DataDir) bool { return strings.HasPrefix(file, d.Path+"/") })
@@ -565,10 +641,12 @@ func date(s string) bool {
 }
 
 // text reports whether s is 1 to max characters of valid UTF-8 without
-// control characters.
+// control or format characters (bidi overrides, zero-width marks).
 func text(s string, max int) bool {
-	return s != "" && utf8.ValidString(s) && utf8.RuneCountInString(s) <= max && !strings.ContainsFunc(s, unicode.IsControl)
+	return s != "" && utf8.ValidString(s) && utf8.RuneCountInString(s) <= max && !strings.ContainsFunc(s, unsafeRune)
 }
+
+func unsafeRune(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }
 
 func optionalText(v *checker, id, field, s string, max int) {
 	if s != "" && !text(s, max) {

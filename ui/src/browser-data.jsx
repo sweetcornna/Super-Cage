@@ -420,7 +420,10 @@ function KeptSites({ settings, onSettings, tabs }) {
     </form>
     {open.length > 0 && <div className="bd-suggest"><span>从打开的网页添加：</span>{open.map(site => <button key={site} type="button" className="compact" disabled={busy} onClick={() => change("keep-add", site)}><Plus size={14} />{site}</button>)}</div>}
     {error && <p className="error-message" role="alert">{error}</p>}
-    <p className="field-help">{builtInNote} 清除时取消勾选“跳过…”会一并清除内置页面的登录，文件编辑器可用浏览器菜单的“恢复编辑器”重新进入。</p>
+    <details className="bd-details">
+      <summary><ChevronRight size={14} aria-hidden="true" />了解详情</summary>
+      <p className="field-help">{builtInNote} 清除时取消勾选“跳过…”会一并清除内置页面的登录，文件编辑器可用浏览器菜单的“恢复编辑器”重新进入。</p>
+    </details>
   </section>;
 }
 

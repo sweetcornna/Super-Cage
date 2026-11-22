@@ -74,6 +74,9 @@ type Server struct {
 	account                                          *localAccount
 	identity                                         ControllerIdentity
 	guestManifest                                    *cage.GuestManifest
+	clients                                          clientPresence // last good presence reading (client_presence.go)
+	clientsTracked                                   bool           // set for a Linux-guest workload, the only one that reads presence
+	agentState                                       agentState     // 其他客户端 jobs and verify reads (agents.go)
 	guestUpdateRequired                              bool
 	macComponentsChecked                             bool
 	guestUpdateError                                 string
@@ -264,6 +267,10 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			// Preserve the original density of profiles saved before this setting.
 			s.preferences.BalancedDisplay = false
 			_ = json.Unmarshal(b, &s.preferences)
+		}
+		if s.macosGuest == nil && s.windowsGuest == nil {
+			s.clientsTracked = true
+			s.clients = loadClientPresence(profile)
 		}
 		if !s.storageRecoveryStatus().Required {
 			if err = s.prepareEnvironment(); err != nil {
@@ -518,6 +525,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/claude-desktop/vnc", s.claudeDesktopVNC)
 	mux.HandleFunc("POST /api/claude-desktop/resize", s.claudeDesktopResize)
 	mux.HandleFunc("POST /api/claude-desktop/{action}", s.claudeDesktopAction)
+	mux.HandleFunc("GET /api/agents", s.agentsList)
+	mux.HandleFunc("POST /api/agents/cancel", s.agentsCancel)
+	mux.HandleFunc("POST /api/agents/{id}/{action}", s.agentsAction)
 	mux.HandleFunc("GET /api/claude-science", s.claudeScienceStatus)
 	mux.HandleFunc("POST /api/claude-science/{action}", s.claudeScienceAction)
 	mux.HandleFunc("GET /api/claude-science/host-render", s.scienceHostRenderRead)
@@ -773,6 +783,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"safety": s.safetyViewLocked(time.Now()), "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
 		"terminals_revision": terminals,
 	}
+	s.clientPresenceViewLocked(view)
 	if s.windowsGuest != nil {
 		view["guest_system"] = guestos.Windows11
 		if s.windowsGuest.Remote() {

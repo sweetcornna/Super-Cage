@@ -28,7 +28,7 @@ import { displayRestoreAfterMs } from "./display-session.mjs";
 import { displayKey, displaySessions } from "./remote-session.js";
 import { RefreshCw, Clipboard, ArrowUpRight } from "lucide-react";
 import { SessionAccount } from "./session-account";
-import { createTerminalRenderer } from "./terminal-renderer.mjs";
+import { codexLaunchRefused, createTerminalRenderer, terminalLastLine } from "./terminal-renderer.mjs";
 import { cagePerf } from "./display-perf.mjs";
 import { EmptyState } from "./drawings";
 import "@xterm/xterm/css/xterm.css";
@@ -821,6 +821,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     if (visibleRef.current) fit.current?.fit();
   }, [theme, variant, appearance.codeFontSize]);
   const ended = session.closed || link === "ended";
+  // A refused Codex launch is not an ordinary close: the note says it did not open and quotes the
+  // reason, the last line the launch printed.
   return (
     <div className={`terminal-view ${visible ? "" : "concealed"}`}>
       {session.workspace_notice && <p className="connection-banner" role="status">{session.workspace_notice}</p>}
@@ -836,7 +838,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       {link !== "open" && (ended || link === "stalled" || notice) && (
         <div className={`terminal-note ${ended || link === "stalled" ? "" : "terminal-note-quiet"}`} role="status">
           {ended
-            ? "终端会话已结束。可点击项目右侧的终端图标新建终端。"
+            ? codexLaunchRefused(session) ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示") : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
             : link === "stalled" ? "终端连接已断开。" : link === "connecting" ? "正在连接终端…" : "正在重新连接…"}
           {!ended && link === "stalled" && (
             <button onClick={() => reconnectNow.current?.()}>

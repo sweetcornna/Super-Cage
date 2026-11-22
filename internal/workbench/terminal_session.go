@@ -122,6 +122,12 @@ func (t *terminalSession) summary() map[string]any {
 	if t.origin != "" {
 		summary["origin"] = map[string]any{"kind": t.origin, "device": t.originDevice, "kept": t.kept}
 	}
+	// How it ended, once it has: a Codex launch the guest refused ends with 75
+	// and must not look like an ordinary close. Absent while it runs and when
+	// the status is unknown (a signal). The exit code is final before done closes.
+	if closed && t.exitCode >= 0 {
+		summary["exit_code"] = t.exitCode
+	}
 	return summary
 }
 

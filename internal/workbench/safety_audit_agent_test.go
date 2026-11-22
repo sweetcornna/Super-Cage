@@ -79,7 +79,7 @@ func TestBrowserAuditAnswersAreClassifiedByContent(t *testing.T) {
 			if after.Mode != cage.GateOpen || !after.Until.Equal(before.Until) || after.Epoch != before.Epoch {
 				t.Fatalf("an audit that could not run changed the lease: before=%+v after=%+v", before, after)
 			}
-			if e := s.safety.Explanation; e == nil || e.State != networkUnconfirmed || !strings.Contains(e.Reason, "无法读取浏览器时区和语言") {
+			if e := s.safety.Explanation; e == nil || e.State != networkUnconfirmed || !strings.Contains(e.Reason, "读不到浏览器的时区和语言") {
 				t.Fatalf("explanation: %+v", e)
 			}
 		})

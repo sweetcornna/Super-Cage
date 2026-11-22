@@ -26,7 +26,25 @@ agent_proc=/proc
 agent_python=/usr/bin/python3
 agent_etc=/etc
 agent_tmp_root=/tmp
+agent_root_uid=0
 agent_cache_root="$HOME/.cache/cage/downloads"
+
+# What a security review allowed per entry, and the general rules, as in
+# internal/agents/validate.go (TestInstallerListsMatchTheValidator keeps the
+# two equal): the launcher name, the variables' vendor prefixes, data folders
+# beyond the general rule, and the system settings files.
+agent_reviewed_commands='codex:codex antigravity-cli:agy'
+agent_reviewed_env='codex:CODEX_ antigravity-cli:AGY_'
+agent_reviewed_data='codex:~/.codex codex:~/.local/share/cage/codex-accounts codex:~/.local/share/cage/codex-sessions'
+agent_system_settings='codex:/etc/codex/config.toml'
+agent_packages_allowed='bubblewrap'
+agent_reserved_commands='cage claude ssh xdg-open sh bash dash zsh sudo su env login passwd scp sftp git python python3 node npm npx curl wget tar apt apt-get dpkg systemctl ls rg bwrap gh mise code-server chromium timeout flock pip pip3 jq make unshare uv uvx gpg tmux vim vi nano'
+agent_env_denied_names='PATH HOME SHELL BROWSER TZ LANG NODE_OPTIONS ENV BASH_ENV IFS SHELLOPTS'
+agent_env_denied_prefixes='LD_ LC_ PYTHON CAGE_'
+agent_env_denied_suffixes='_PROXY _HOME _PATH _DIR _FILE _COMMAND _OPTIONS _SOCK _CERTS'
+agent_home_roots='.config .local .local/bin .local/share .local/state .cache .local/share/cage'
+agent_protected='.ssh .gnupg .pki .claude .aws .kube .docker .netrc .gitconfig .git-credentials .password-store .config/gh .config/gcloud .config/git .config/systemd .config/autostart .local/share/keyrings .mozilla .config/chromium'
+agent_cage_own='.local/share/cage .cache/cage .claude-cage .config/cage'
 
 agent_say() { printf '%s\n' "$*"; }
 agent_progress() { printf 'CAGE_AGENT_PROGRESS %s %s %s\n' "$1" "${2:-0}" "${3:-0}"; }
@@ -42,19 +60,76 @@ agent_bad_input() {
 # The last line a helper wrote to stderr: its reason, or a traceback's last line.
 agent_reason() { tail -n 1 "$agent_tmp/reason" 2>/dev/null | tr -d '\r'; }
 
-# The input is checked again here, with patterns no looser than the
-# catalog's: a value that reaches a path, a launcher or a message is plain.
+# Whether a word list holds a word.
+agent_listed() {
+  local word
+  for word in $2; do
+    if [ "$word" = "$1" ]; then return 0; fi
+  done
+  return 1
+}
+
+# A path below the home (no ~/) that no job may delete or write into: a
+# shared root, one of Cage's own folders, or a protected tree.
+agent_home_refused() {
+  local root
+  if agent_listed "$1" "$agent_home_roots $agent_cage_own"; then return 0; fi
+  for root in $agent_protected; do
+    case "$1" in "$root" | "$root"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+# A data folder this entry may delete: reviewed for it, or a dot folder two
+# levels deep outside the refused trees and Cage's folders.
+agent_data_allowed() {
+  local rest="${1#\~/}" root
+  if agent_listed "$AGENT_ID:$1" "$agent_reviewed_data"; then return 0; fi
+  case "$rest" in .*/?*) ;; *) return 1 ;; esac
+  if agent_home_refused "$rest"; then return 1; fi
+  for root in $agent_cage_own; do
+    case "$rest" in "$root"/*) return 1 ;; esac
+  done
+  return 0
+}
+
+agent_env_allowed() {
+  local name="$1" pair item
+  for item in $agent_env_denied_prefixes; do
+    case "$name" in "$item"*) return 1 ;; esac
+  done
+  for item in $agent_env_denied_suffixes; do
+    case "$name" in *"$item") return 1 ;; esac
+  done
+  if agent_listed "$name" "$agent_env_denied_names"; then return 1; fi
+  for pair in $agent_reviewed_env; do
+    case "$AGENT_ID:$name" in "$pair"*) return 0 ;; esac
+  done
+  return 1
+}
+
+# The input is checked again here, at least as strictly as the catalog
+# validator: a value that reaches a path, a launcher or a message is plain,
+# and what root writes is on a fixed list.
 agent_check_input() {
   local re_action='^(install|update|remove)$' re_id='^[a-z][a-z0-9-]{1,31}$' re_command='^[a-z][a-z0-9-]{0,31}$'
-  local re_version='^[0-9]+(\.[0-9]+){1,3}([-+][0-9A-Za-z.-]{1,32})?$' re_status='^(available|hidden|withdrawn)$'
+  local re_version='^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$' re_status='^(available|hidden|withdrawn)$'
   local re_arch='^(arm64|amd64)$' re_libc='^(glibc|musl|any)$' re_glibc='^(2\.[0-9]{1,2})?$' re_flag='^[01]$'
-  local re_url='^https://[a-z0-9.-]+/[A-Za-z0-9._~/%+-]+$' re_sha256='^([0-9a-f]{64})?$' re_sha512='^([0-9a-f]{128})?$'
+  local re_url='^https://[a-z0-9.-]+/[A-Za-z0-9._~/+-]+$' re_sha256='^([0-9a-f]{64})?$' re_sha512='^([0-9a-f]{128})?$'
   local re_bytes='^[1-9][0-9]{0,14}$' re_member='^[A-Za-z0-9_+-][A-Za-z0-9._+-]*(/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)*$'
   local re_package='^[a-z0-9][a-z0-9+.-]{1,63}$' re_env='^[A-Z][A-Z0-9_]{1,63}=[A-Za-z0-9_.,:/@%+=-]*$'
-  local word line rest
+  local word line rest name
+  # Every input is declared, even when empty: a missing one is a host bug,
+  # never a quiet install without its settings.
+  for name in AGENT_ACTION AGENT_ID AGENT_NAME AGENT_VENDOR AGENT_STATUS AGENT_VERSION AGENT_COMMAND AGENT_ARCH AGENT_LIBC AGENT_MIN_GLIBC AGENT_URL AGENT_SHA256 AGENT_SHA512 AGENT_SIZE AGENT_UNPACKED AGENT_ENTRY AGENT_PACKAGES AGENT_USERNS AGENT_KEYRING AGENT_ENV AGENT_SETTINGS AGENT_REMOVE_DATA; do
+    declare -p "$name" >/dev/null 2>&1 || agent_bad_input "$name"
+  done
   [[ ${AGENT_ACTION-} =~ $re_action ]] || agent_bad_input AGENT_ACTION
   [[ ${AGENT_ID-} =~ $re_id ]] || agent_bad_input AGENT_ID
   [[ ${AGENT_COMMAND-} =~ $re_command ]] || agent_bad_input AGENT_COMMAND
+  agent_listed "$AGENT_ID:$AGENT_COMMAND" "$agent_reviewed_commands" || agent_bad_input AGENT_COMMAND
+  if agent_listed "$AGENT_COMMAND" "$agent_reserved_commands"; then agent_bad_input AGENT_COMMAND; fi
+  case "$AGENT_COMMAND" in cage-*) agent_bad_input AGENT_COMMAND ;; esac
   [[ ${AGENT_VERSION-} =~ $re_version ]] || agent_bad_input AGENT_VERSION
   [[ ${AGENT_STATUS-} =~ $re_status ]] || agent_bad_input AGENT_STATUS
   [[ ${AGENT_ARCH-} =~ $re_arch ]] || agent_bad_input AGENT_ARCH
@@ -68,17 +143,19 @@ agent_check_input() {
   done
   read -r -a agent_packages <<<"${AGENT_PACKAGES-}"
   for word in ${agent_packages[@]+"${agent_packages[@]}"}; do
-    [[ $word =~ $re_package ]] || agent_bad_input AGENT_PACKAGES
+    if [[ ! $word =~ $re_package ]] || ! agent_listed "$word" "$agent_packages_allowed"; then agent_bad_input AGENT_PACKAGES; fi
   done
   read -r -a agent_env <<<"${AGENT_ENV-}"
   for word in ${agent_env[@]+"${agent_env[@]}"}; do
     rest="${word#*=}"
     # The value's 256-byte limit is a length test: BSD regex stops at {0,255}.
     [[ $word =~ $re_env ]] && [ "${#rest}" -le 256 ] || agent_bad_input AGENT_ENV
-    case "${word%%=*}" in PATH | HOME | SHELL | BROWSER | TZ | LANG | NODE_OPTIONS | LD_* | LC_* | PYTHON* | CAGE_* | *_PROXY) agent_bad_input AGENT_ENV ;; esac
+    agent_env_allowed "${word%%=*}" || agent_bad_input AGENT_ENV
   done
   if [ "$AGENT_ACTION" != remove ]; then
     [[ ${AGENT_URL-} =~ $re_url ]] || agent_bad_input AGENT_URL
+    # What curl fetches is what was reviewed: no empty, . or .. segment.
+    case "${AGENT_URL#https://}/" in *//* | */./* | */../*) agent_bad_input AGENT_URL ;; esac
     [ -n "$AGENT_SHA256$AGENT_SHA512" ] || agent_bad_input AGENT_SHA256
     [[ ${AGENT_SIZE-} =~ $re_bytes && ${AGENT_UNPACKED-} =~ $re_bytes ]] || agent_bad_input AGENT_SIZE
     [[ ${AGENT_ENTRY-} =~ $re_member ]] || agent_bad_input AGENT_ENTRY
@@ -91,8 +168,14 @@ agent_check_input() {
     rest="${line:2}"
     case "/$rest/" in *//* | */./* | */../*) agent_bad_input AGENT_REMOVE_DATA ;; esac
     if [[ $rest == *[[:cntrl:]]* ]]; then agent_bad_input AGENT_REMOVE_DATA; fi
+    agent_data_allowed "$line" || agent_bad_input AGENT_REMOVE_DATA
   done <<<"${AGENT_REMOVE_DATA-}"
-  if ! agent_py settings-check "${AGENT_SETTINGS-}" 2>/dev/null; then agent_bad_input AGENT_SETTINGS; fi
+  # The system settings files this entry may write: from the fixed list only.
+  agent_system_files=''
+  for word in $agent_system_settings; do
+    case "$word" in "$AGENT_ID":/etc/*) agent_system_files="$agent_system_files ${word#*:}" ;; esac
+  done
+  if ! agent_py settings-check "${AGENT_SETTINGS-}" "$agent_system_files" "$agent_protected $agent_cage_own" 2>/dev/null; then agent_bad_input AGENT_SETTINGS; fi
   if [ -n "$AGENT_SHA512" ]; then
     agent_digest="$AGENT_SHA512"
     agent_hash=sha512sum
@@ -104,8 +187,9 @@ agent_check_input() {
 
 # Archive, receipt and settings work, in one reviewed program. Exit 0 done,
 # 1 mismatch, 2 malformed input, 3 refused; the reason is the last stderr line.
+# The program comes on stdin; what the caller pipes in is descriptor 5.
 agent_py() {
-  "$agent_python" -I - "$@" <<'CAGE_AGENT_PY'
+  "$agent_python" -I - "$@" 5<&0 <<'CAGE_AGENT_PY'
 import hashlib
 import json
 import os
@@ -140,6 +224,10 @@ class BadInput(Exception):
 
 class Refuse(Exception):
     """A surprise: the operation stops and changes nothing."""
+
+
+class DigestMismatch(Exception):
+    """The bytes read are not the pinned download."""
 
 
 def plain(text):
@@ -230,17 +318,43 @@ def damaged(run):
         raise Refuse('the archive cannot be read or written (%s)' % error)
 
 
-def archive(path):
-    return tarfile.open(path, 'r|gz', encoding='utf-8', errors='surrogateescape')
+class Hashing:
+    """Reads a file once and hashes every byte read, so that the digest is
+    over exactly the bytes unpacked."""
+
+    def __init__(self, path, sha256='', sha512=''):
+        self.want = artifact(sha256, sha512)
+        self.hashes = {name: hashlib.new(name) for name in self.want}
+        self.f = os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb')
+
+    def read(self, size=-1):
+        data = self.f.read(size)
+        for h in self.hashes.values():
+            h.update(data)
+        return data
+
+    def finish(self):
+        while self.read(CHUNK):
+            pass
+        self.f.close()
+        for name, value in self.want.items():
+            if self.hashes[name].hexdigest() != value:
+                raise DigestMismatch('the %s of the unpacked bytes differs from the pin' % name)
+
+
+def archive(source):
+    return tarfile.open(fileobj=source, mode='r|gz', encoding='utf-8', errors='surrogateescape')
 
 
 def archive_check(path, entry, limit):
     def run():
         members = Members(entry, limit)
-        with archive(path) as tf:
+        source = Hashing(path)
+        with archive(source) as tf:
             for m in tf:
                 members.check(m)
         members.finish()
+        source.finish()
     damaged(run)
 
 
@@ -248,42 +362,60 @@ def progress(done, total):
     print('CAGE_AGENT_PROGRESS unpack %d %d' % (done, total), flush=True)
 
 
-def archive_extract(path, dest, entry, limit):
+def archive_extract(path, dest, entry, limit, sha256, sha512):
+    """Unpacks the pinned bytes and writes, on descriptor 3, the digests of
+    the tree as written (entry sha256, tree sha256), for the check after
+    root takes the tree over."""
     def run():
         members = Members(entry, limit)
         os.mkdir(dest, 0o700)
         written = reported = 0
         step = max(members.limit // 20, 1)
-        with archive(path) as tf:
+        records, entry_sha = {}, None
+        source = Hashing(path, sha256, sha512)
+        with archive(source) as tf:
             for m in tf:
                 name = members.check(m)
                 if not name:
                     continue
-                target = os.path.join(dest, *name.split('/'))
+                parts = name.split('/')
+                for i in range(1, len(parts)):
+                    records.setdefault('/'.join(parts[:i]), ['d', '/'.join(parts[:i]), 0o755])
+                target = os.path.join(dest, *parts)
                 os.makedirs(os.path.dirname(target), mode=0o700, exist_ok=True)
                 if m.isdir():
                     if not os.path.isdir(target):
                         os.mkdir(target, 0o700)
+                    records[name] = ['d', name, 0o755]
                 elif m.issym():
                     os.symlink(m.linkname, target)
+                    records[name] = ['l', name, m.linkname]
                 else:
-                    source = tf.extractfile(m)
+                    data = tf.extractfile(m)
+                    sha, size = hashlib.sha256(), 0
                     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
                     with os.fdopen(fd, 'wb') as out:
                         while True:
-                            chunk = source.read(CHUNK)
+                            chunk = data.read(CHUNK)
                             if not chunk:
                                 break
                             written += len(chunk)
+                            size += len(chunk)
                             if written > members.limit:
                                 raise Refuse('it unpacks to more than the pinned %d bytes' % members.limit)
                             out.write(chunk)
+                            sha.update(chunk)
                             if written - reported >= step:
                                 progress(written, members.limit)
                                 reported = written
                     # Owners, setuid bits and archive modes are never restored.
-                    os.chmod(target, 0o755 if name == entry or m.mode & 0o111 else 0o644)
+                    mode = 0o755 if name == entry or m.mode & 0o111 else 0o644
+                    os.chmod(target, mode)
+                    records[name] = ['f', name, mode, size, sha.hexdigest()]
+                    if name == entry:
+                        entry_sha = sha.hexdigest()
             members.finish()
+        source.finish()
         for root, dirs, _ in os.walk(dest):
             for name in dirs:
                 directory = os.path.join(root, name)
@@ -292,6 +424,8 @@ def archive_extract(path, dest, entry, limit):
         os.chmod(dest, 0o755)
         if written != reported:
             progress(written, members.limit)
+        with os.fdopen(3, 'w') as out:
+            out.write('%s %s\n' % (entry_sha, digest_records(records)))
     damaged(run)
 
 
@@ -304,11 +438,31 @@ def file_sha256(path):
     return digest.hexdigest()
 
 
-def tree(root, entry, limit):
-    """Digest of every name, type, mode, size and content under root; refuses surprises."""
-    limit = int(limit)
-    digest = hashlib.sha256()
-    total, entry_sha, stack = 0, None, ['']
+def digest_records(records):
+    """One digest over the records of a tree, in the order tree() lists it:
+    each directory's names sorted, then its subdirectories, depth first."""
+    children = {}
+    for path in records:
+        children.setdefault(path.rpartition('/')[0], []).append(path)
+    digest, stack = hashlib.sha256(), ['']
+    while stack:
+        subdirs = []
+        for path in sorted(children.get(stack.pop(), []), key=lambda p: p.rpartition('/')[2]):
+            digest.update(json.dumps(records[path]).encode() + b'\n')
+            if records[path][0] == 'd':
+                subdirs.append(path)
+        stack.extend(reversed(subdirs))
+    return digest.hexdigest()
+
+
+def tree(root, entry, limit, uid):
+    """Digest of every name, type, mode, size and content under root;
+    refuses surprises: another owner than uid, a hard link, a linked root."""
+    limit, uid = int(limit), int(uid)
+    st = os.lstat(root)
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != uid:
+        raise Refuse('the folder is not a directory of the expected owner')
+    records, total, entry_sha, stack = {}, 0, None, ['']
     while stack:
         rel = stack.pop()
         base = os.path.join(root, rel) if rel else root
@@ -320,35 +474,38 @@ def tree(root, entry, limit):
             mode = stat.S_IMODE(st.st_mode)
             if mode & 0o7000:
                 raise Refuse('%s has the setuid, setgid or sticky bit' % path_rel)
+            if st.st_uid != uid:
+                raise Refuse('%s belongs to another user' % path_rel)
             if stat.S_ISDIR(st.st_mode):
-                record = ['d', path_rel, mode]
+                records[path_rel] = ['d', path_rel, mode]
                 subdirs.append(path_rel)
             elif stat.S_ISREG(st.st_mode):
+                if st.st_nlink != 1:
+                    raise Refuse('%s has another hard link' % path_rel)
                 total += st.st_size
                 if total > limit:
                     raise Refuse('the files are larger than the pinned %d bytes' % limit)
                 sha = file_sha256(full)
                 if path_rel == entry:
                     entry_sha = sha
-                record = ['f', path_rel, mode, st.st_size, sha]
+                records[path_rel] = ['f', path_rel, mode, st.st_size, sha]
             elif stat.S_ISLNK(st.st_mode):
                 target = os.readlink(full)
                 if target.startswith('/') or '..' in target.split('/'):
                     raise Refuse('%s links outside its own directory' % path_rel)
-                record = ['l', path_rel, target]
+                records[path_rel] = ['l', path_rel, target]
             else:
                 raise Refuse('%s is not a file, directory or link' % path_rel)
-            digest.update(json.dumps(record).encode() + b'\n')
         stack.extend(reversed(subdirs))
     if entry_sha is None:
         raise Refuse('the program %s is missing' % entry)
     st = os.stat(os.path.join(root, entry))
     # The launcher's integrity check compares this with GNU stat -c %i:%s:%Y.
-    return entry_sha, digest.hexdigest(), '%d:%d:%d' % (st.st_ino, st.st_size, st.st_mtime_ns // 1000000000)
+    return entry_sha, digest_records(records), '%d:%d:%d' % (st.st_ino, st.st_size, st.st_mtime_ns // 1000000000)
 
 
-def tree_command(root, entry, limit):
-    print(*tree(root, entry, limit))
+def tree_command(root, entry, limit, uid):
+    print(*tree(root, entry, limit, uid))
 
 
 def digests(path, sha256, sha512):
@@ -356,7 +513,7 @@ def digests(path, sha256, sha512):
     if not want or any(not HEX[name].fullmatch(value) for name, value in want.items()):
         raise BadInput('no digest')
     hashes = {name: hashlib.new(name) for name in want}
-    with open(path, 'rb') as f:
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as f:
         for chunk in iter(lambda: f.read(CHUNK), b''):
             for h in hashes.values():
                 h.update(chunk)
@@ -381,7 +538,7 @@ def read_receipt(path):
     return data if isinstance(data, dict) and data.get('schema') == 1 else None
 
 
-def receipt_check(path, root, id, version, command, entry, limit, sha256, sha512):
+def receipt_check(path, root, id, version, command, entry, limit, sha256, sha512, uid):
     rec = read_receipt(path)
     if rec is None:
         raise Mismatch('no readable receipt')
@@ -390,7 +547,7 @@ def receipt_check(path, root, id, version, command, entry, limit, sha256, sha512
         if rec.get(key) != value:
             raise Mismatch('the receipt records another %s' % key)
     try:
-        entry_sha, tree_sha, stat_key = tree(root, entry, limit)
+        entry_sha, tree_sha, stat_key = tree(root, entry, limit, uid)
     except (Refuse, OSError) as error:
         raise Mismatch(str(error))
     if rec.get('entry_sha256') != entry_sha or rec.get('tree_sha256') != tree_sha:
@@ -398,8 +555,24 @@ def receipt_check(path, root, id, version, command, entry, limit, sha256, sha512
     print(entry_sha, tree_sha, stat_key)
 
 
-def receipt_make(old_path, out, launcher, settings_json, id, version, arch, command, entry,
+def receipt_field(path, key):
+    value = (read_receipt(path) or {}).get(key)
+    if isinstance(value, str) and plain(value):
+        print(value)
+
+
+def plan_lines(plan, count):
+    """The settings plan the shell holds: one line per setting, in order."""
+    lines = [line.split(' ', 8) for line in plan.splitlines() if line]
+    if len(lines) != count or any(len(f) != 9 or f[0] != str(n) or f[3] not in ('0', '1') or f[4] not in ('0', '1')
+                                  or not HEX['sha256'].fullmatch(f[7]) for n, f in enumerate(lines)):
+        raise BadInput('the settings plan')
+    return lines
+
+
+def receipt_make(old_path, launcher, spec, system_files, protected, plan, id, version, arch, command, entry,
                  sha256, sha512, entry_sha, tree_sha, stat_key):
+    """Prints the receipt to write, or 'same' when the one on disk says it all."""
     if not (HEX['sha256'].fullmatch(entry_sha) and HEX['sha256'].fullmatch(tree_sha)
             and re.fullmatch(r'[0-9]+:[0-9]+:[0-9]+', stat_key)):
         raise BadInput('digests')
@@ -407,29 +580,29 @@ def receipt_make(old_path, out, launcher, settings_json, id, version, arch, comm
     previous = {}
     if isinstance(old.get('settings'), list):
         previous = {s.get('file'): s for s in old['settings'] if isinstance(s, dict)}
-    with open(settings_json, encoding='utf-8') as f:
-        written = json.load(f)
+    wanted = parse_settings(spec, system_files, protected)
     settings = []
-    for s in written:
+    for s, f in zip(wanted, plan_lines(plan, len(wanted))):
         before = previous.get(s['file'], {})
-        settings.append({'file': s['file'], 'sha256': s['sha256'],
-                         'created': s['created'] or before.get('created') is True,
-                         'dir_created': s['dir_created'] or before.get('dir_created') is True})
+        existed, pre, sha = f[3] == '1', f[6], f[7]
+        # A file Cage created stays Cage's only while it is what Cage wrote:
+        # once the person edits it, it is theirs and remove keeps it.
+        created = not existed or (before.get('created') is True and pre == before.get('sha256'))
+        settings.append({'file': s['file'], 'sha256': sha, 'created': created,
+                         'dir_created': f[4] == '1' or before.get('dir_created') is True})
     rec = {'schema': 1, 'id': id, 'version': version, 'arch': arch, 'command': command,
            'artifact': artifact(sha256, sha512), 'entry': entry, 'entry_sha256': entry_sha,
            'tree_sha256': tree_sha, 'stat_key': stat_key, 'launcher_sha256': file_sha256(launcher),
            'settings': settings}
     stamp = old.get('installed_at')
-    same = isinstance(stamp, str) and old == dict(rec, installed_at=stamp)
-    if not same:
-        rec['installed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
-        with open(out, 'w', encoding='utf-8') as f:
-            json.dump(rec, f, ensure_ascii=False, indent=1)
-            f.write('\n')
-    print('same' if same else 'changed', stat_key)
+    if isinstance(stamp, str) and old == dict(rec, installed_at=stamp):
+        print('same')
+        return
+    rec['installed_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    print(json.dumps(rec, ensure_ascii=False, indent=1))
 
 
-def parse_settings(spec):
+def parse_settings(spec, system_files='', protected=''):
     try:
         settings = json.loads(spec) if spec else []
     except ValueError:
@@ -447,8 +620,16 @@ def parse_settings(spec):
         if not (file.startswith('/etc/') or file.startswith('~/')):
             raise BadInput('a setting file is neither under /etc nor the home')
         rest = file[5:] if file.startswith('/etc/') else file[2:]
-        if any(part in ('', '.', '..') for part in rest.split('/')):
+        parts = rest.split('/')
+        if any(part in ('', '.', '..') for part in parts):
             raise BadInput('a setting file is not a clean path')
+        # Root writes only the system files on the installer's fixed list; a
+        # home file lies in a dot folder, outside every protected tree.
+        if file.startswith('/etc/') and file not in system_files.split():
+            raise BadInput('a setting names a system file this entry may not write')
+        if file.startswith('~/') and (len(parts) < 2 or not parts[0].startswith('.') or any(
+                rest == root or rest.startswith(root + '/') for root in protected.split())):
+            raise BadInput('a setting names a home file outside the entry\'s folders')
         for key, value in values.items():
             ok = isinstance(value, (bool, int)) or isinstance(value, str) and plain(value) and len(value.encode()) <= 256
             if not KEY.fullmatch(key) or not ok:
@@ -537,49 +718,67 @@ def merge_json(text, values, file):
     return json.dumps(data, indent=2, ensure_ascii=False) + '\n'
 
 
-def settings_merge(spec, home, etc, outdir):
-    """Merged copies in outdir; list.txt for the shell, settings.json for the receipt."""
-    lines, written = [], []
-    for n, s in enumerate(parse_settings(spec)):
-        kind, path = place(s['file'], home, etc)
-        exists = os.path.lexists(path)
-        mode = 0o644 if kind == 'system' else 0o600
+def merged_setting(s, path, kind):
+    """(text before, whether the file existed, its mode, merged text)."""
+    exists = os.path.lexists(path)
+    mode = 0o644 if kind == 'system' else 0o600
+    data = b''
+    if exists:
+        st = os.lstat(path)
+        if not stat.S_ISREG(st.st_mode):
+            raise Refuse('%s is not a regular file' % s['file'])
+        if st.st_size > MAX_SETTINGS:
+            raise Refuse('%s is too large' % s['file'])
+        mode = stat.S_IMODE(st.st_mode) & 0o777
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as f:
+                data = f.read(MAX_SETTINGS + 1)
+            text = data.decode('utf-8')
+        except (OSError, UnicodeDecodeError) as error:
+            raise Refuse('%s cannot be read (%s)' % (s['file'], error))
+    else:
         text = ''
-        if exists:
-            st = os.lstat(path)
-            if not stat.S_ISREG(st.st_mode):
-                raise Refuse('%s is not a regular file' % s['file'])
-            if st.st_size > MAX_SETTINGS:
-                raise Refuse('%s is too large' % s['file'])
-            mode = stat.S_IMODE(st.st_mode) & 0o777
-            try:
-                with open(path, 'rb') as f:
-                    text = f.read().decode('utf-8')
-            except (OSError, UnicodeDecodeError) as error:
-                raise Refuse('%s cannot be read (%s)' % (s['file'], error))
-        merge = merge_toml if s['format'] == 'toml' else merge_json
-        new = merge(text, s['set'], s['file'])
-        with open(os.path.join(outdir, str(n)), 'w', encoding='utf-8') as f:
-            f.write(new)
-        sha = hashlib.sha256(new.encode('utf-8')).hexdigest()
-        created = 'existing' if exists else 'created'
-        folder = 'dir-existing' if os.path.isdir(os.path.dirname(path)) else 'dir-created'
-        lines.append('%d %s %s %s %s %o %s' % (n, kind, 'same' if exists and new == text else 'changed',
-                                              created, folder, mode, path))
-        written.append({'file': s['file'], 'sha256': sha, 'created': not exists, 'dir_created': folder == 'dir-created'})
-    with open(os.path.join(outdir, 'list.txt'), 'w', encoding='utf-8') as f:
-        f.write(''.join(line + '\n' for line in lines))
-    with open(os.path.join(outdir, 'settings.json'), 'w', encoding='utf-8') as f:
-        json.dump(written, f)
+    merge = merge_toml if s['format'] == 'toml' else merge_json
+    return data, exists, mode, merge(text, s['set'], s['file'])
 
 
-def settings_removable(receipt, spec, etc):
+def settings_plan(spec, system_files, protected, home, etc):
+    """One line per setting, for the shell: n kind change existed dir_new mode
+    sha256-before sha256-after path. The path comes from the input, never
+    from a file."""
+    for n, s in enumerate(parse_settings(spec, system_files, protected)):
+        kind, path = place(s['file'], home, etc)
+        before, exists, mode, new = merged_setting(s, path, kind)
+        print(n, kind, 'same' if exists and new.encode('utf-8') == before else 'changed', int(exists),
+              int(not os.path.isdir(os.path.dirname(path))), '%03o' % mode,
+              hashlib.sha256(before).hexdigest() if exists else '-', hashlib.sha256(new.encode('utf-8')).hexdigest(), path)
+
+
+def settings_text(spec, system_files, protected, home, etc, n):
+    """The merged text of setting n, on stdout: the shell pipes it to root."""
+    s = parse_settings(spec, system_files, protected)[int(n)]
+    kind, path = place(s['file'], home, etc)
+    sys.stdout.buffer.write(merged_setting(s, path, kind)[3].encode('utf-8'))
+
+
+def sha256_command(path):
+    if path == '-':
+        digest = hashlib.sha256()
+        with os.fdopen(5, 'rb') as piped:
+            for chunk in iter(lambda: piped.read(CHUNK), b''):
+                digest.update(chunk)
+        print(digest.hexdigest())
+    else:
+        print(file_sha256(path))
+
+
+def settings_removable(receipt, spec, system_files, protected, etc):
     """System files Cage created and nobody changed since: remove; others: keep."""
     rec = read_receipt(receipt) or {}
     recorded = {}
     if isinstance(rec.get('settings'), list):
         recorded = {s.get('file'): s for s in rec['settings'] if isinstance(s, dict)}
-    for s in parse_settings(spec):
+    for s in parse_settings(spec, system_files, protected):
         kind, path = place(s['file'], '/nonexistent', etc)
         if kind != 'system' or not os.path.lexists(path):
             continue
@@ -593,10 +792,39 @@ def settings_removable(receipt, spec, etc):
         print('remove', 1 if r.get('dir_created') is True else 0, path)
 
 
+VERSION = re.compile(r'[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?')
+
+
+def semver(version):
+    if not VERSION.fullmatch(version):
+        raise BadInput('version %r' % version)
+    core, _, pre = version.partition('-')
+    ids = [(0, int(x), '') if x.isdigit() else (1, 0, x) for x in pre.split('.')] if pre else []
+    return [int(x) for x in core.split('.')], not pre, ids
+
+
+def version_gt(a, b):
+    """Exit 0 when a orders above b as semver does: a pre-release orders
+    below its release (dpkg would read it as a Debian revision)."""
+    sys.exit(0 if semver(a) > semver(b) else 1)
+
+
+def version_check(path, pin):
+    """Exit 0 when the first 4 KB a client printed for --version name the pin
+    as a word; else print the first version-like word, if any."""
+    with open(path, 'rb') as f:
+        words = [w.lstrip('v').rstrip(',;:)') for w in f.read(4096).decode('utf-8', 'replace').split()]
+    if pin in words:
+        return
+    print(next((w for w in words if VERSION.fullmatch(w)), ''))
+    sys.exit(1)
+
+
 COMMANDS = {
     'settings-check': parse_settings, 'archive-check': archive_check, 'archive-extract': archive_extract, 'tree': tree_command,
-    'digests': digests, 'receipt-check': receipt_check, 'receipt-make': receipt_make,
-    'settings-merge': settings_merge, 'settings-removable': settings_removable,
+    'digests': digests, 'receipt-check': receipt_check, 'receipt-make': receipt_make, 'receipt-field': receipt_field,
+    'settings-plan': settings_plan, 'settings-text': settings_text, 'settings-removable': settings_removable,
+    'sha256': sha256_command, 'version-gt': version_gt, 'version-check': version_check,
 }
 
 try:
@@ -610,6 +838,9 @@ except BadInput as error:
 except Refuse as error:
     print(error, file=sys.stderr)
     sys.exit(3)
+except DigestMismatch as error:
+    print(error, file=sys.stderr)
+    sys.exit(4)
 CAGE_AGENT_PY
 }
 
@@ -652,14 +883,32 @@ agent_lock() {
   for stale in "$agent_lib"/.stage-*; do
     if [ -e "$stale" ]; then sudo rm -rf -- "$stale"; fi
   done
+  agent_clear_leftovers
 }
 
-# Cage's own launcher: a regular file whose second line names this entry.
+# The temporary names a job writes before it renames them into place: a job
+# stopped in between leaves them, and the next job (or remove) deletes them.
+agent_clear_leftovers() {
+  local file
+  sudo rm -f -- "$agent_bin/.$AGENT_COMMAND.agent-new" "$agent_state/.$AGENT_ID.json.new" "$agent_state/.$AGENT_ID.stat.new"
+  for file in $agent_system_files; do
+    file="$agent_etc/${file#/etc/}"
+    sudo rm -f -- "${file%/*}/.agent-settings-new"
+  done
+}
+
+# Cage's own launcher of this entry: a regular file whose second line names
+# the entry and whose content is what its receipt records, or what this job
+# would write. A marker line alone is not enough.
 agent_is_launcher() {
-  local line=''
+  local line='' sha recorded
   [ -f "$1" ] && [ ! -L "$1" ] || return 1
   { IFS= read -r line && IFS= read -r line; } <"$1" || return 1
-  [ "$line" = "# super-cage-agent-launcher $AGENT_ID" ]
+  [ "$line" = "# super-cage-agent-launcher $AGENT_ID" ] || return 1
+  sha="$(agent_py sha256 "$1" 2>/dev/null)" || return 1
+  recorded="$(agent_py receipt-field "$agent_state/$AGENT_ID.json" launcher_sha256 2>/dev/null)" || recorded=''
+  if [ -n "$recorded" ] && [ "$sha" = "$recorded" ]; then return 0; fi
+  [ -n "$AGENT_ENTRY" ] && [ "$sha" = "$(agent_launcher_text | agent_py sha256 -)" ]
 }
 
 # Prints the first program of this name that is not Cage's launcher: in the
@@ -687,7 +936,7 @@ agent_own_command() {
 
 # The version current points at, when it is a real version directory.
 agent_installed_version() {
-  local re_version='^[0-9]+(\.[0-9]+){1,3}([-+][0-9A-Za-z.-]{1,32})?$' link
+  local re_version='^[0-9]{1,9}\.[0-9]{1,9}\.[0-9]{1,9}(-[0-9A-Za-z][0-9A-Za-z.-]{0,31})?$' link
   link="$(readlink "$agent_lib/$AGENT_ID/current" 2>/dev/null)" || return 0
   if [[ $link =~ $re_version ]] && [ -d "$agent_lib/$AGENT_ID/$link" ] && [ ! -L "$agent_lib/$AGENT_ID/$link" ]; then
     printf '%s\n' "$link"
@@ -821,7 +1070,8 @@ agent_download() {
   agent_fail download '下载中断，已保存进度。重试会继续下载。'
 }
 
-# Every pinned digest, of the exact file about to be unpacked.
+# Every pinned digest, before anything is unpacked (a damaged download is
+# deleted). The extraction checks the digest again over the bytes it reads.
 agent_check_digests() {
   local archive="$1"
   agent_progress digest 0 0
@@ -833,7 +1083,9 @@ agent_check_digests() {
 
 # Every member is checked before anything is unpacked; then the same rules
 # guard the extraction, as the guest user, into a fresh directory under the
-# root-owned tree. Only then does root take the files over.
+# root-owned tree, which reads the archive once and checks the pinned digest
+# over exactly the bytes it unpacked. Then root takes the whole stage over;
+# agent_unpacked holds the digests of the tree as it was written.
 agent_unpack() {
   local archive="$1" status=0
   agent_progress unpack 0 "$AGENT_UNPACKED"
@@ -843,44 +1095,58 @@ agent_unpack() {
   fi
   agent_stage="$(sudo mktemp -d "$agent_lib/.stage-XXXXXX")"
   sudo chown "$(id -u):$(id -g)" -- "$agent_stage"
-  agent_py archive-extract "$archive" "$agent_stage/tree" "$AGENT_ENTRY" "$AGENT_UNPACKED" 2>"$agent_tmp/reason" || status=$?
-  if [ "$status" != 0 ]; then
-    agent_fail archive "安装文件的内容不符合要求（$(agent_reason)），已停止安装，原有版本保持不变。"
-  fi
-  sudo chown -hR 0:0 -- "$agent_stage/tree"
+  { agent_unpacked="$(agent_py archive-extract "$archive" "$agent_stage/tree" "$AGENT_ENTRY" "$AGENT_UNPACKED" \
+    "$AGENT_SHA256" "$AGENT_SHA512" 3>&1 1>&4 2>"$agent_tmp/reason")"; } 4>&1 || status=$?
+  case "$status" in
+    0) ;;
+    4)
+      rm -f -- "$archive"
+      agent_fail digest '安装文件校验失败，已停止安装，原有版本保持不变。'
+      ;;
+    *) agent_fail archive "安装文件的内容不符合要求（$(agent_reason)），已停止安装，原有版本保持不变。" ;;
+  esac
+  sudo chown -hR 0:0 -- "$agent_stage"
+  # mktemp -d made it 0700: the version check and the tree digest run as the
+  # guest user and must still reach the tree.
+  sudo chmod 0755 "$agent_stage"
 }
 
-# The staged copy runs with an empty environment: the job's proxy variables
-# carry the install channel's credential and never reach a vendor program.
+# The staged copy runs with an empty environment from the start (env -i
+# before timeout): the job's proxy variables carry the install channel's
+# credential and never reach a vendor program or its parent. It runs in /,
+# its output goes to a file of at most 64 KB (never a pipe a child it leaves
+# behind could hold open), and at most 4 KB of that is read.
 agent_verify() {
-  local staged="$agent_stage/tree/$AGENT_ENTRY" output version
+  local staged="$agent_stage/tree/$AGENT_ENTRY" out="$agent_tmp/version" timeout_bin status=0 found
   agent_progress verify 0 0
+  timeout_bin="$(command -v timeout)" || agent_fail verify '客机缺少 timeout 命令，无法检查安装文件，已停止安装。'
+  rm -f -- "$out"
   # The job's lock descriptors are closed: a client left running must not hold them.
-  output="$(timeout -k 2 8 env -i HOME="$HOME" PATH=/usr/bin:/bin ${agent_env[@]+"${agent_env[@]}"} "$staged" --version </dev/null 2>/dev/null 8>&- 9<&-)" || output=''
-  version="$(printf '%s\n' "$output" | tr -s ' \t' '\n' | cage_tool_version)" || version=''
-  version="${version#v}"
-  if [ -z "$version" ]; then
+  (cd / && ulimit -f 64 && exec env -i HOME="$HOME" PATH=/usr/bin:/bin ${agent_env[@]+"${agent_env[@]}"} \
+    "$timeout_bin" -k 2 8 "$staged" --version </dev/null >"$out" 2>/dev/null 8>&- 9<&-) || status=$?
+  if [ "$status" != 0 ]; then
     agent_fail verify '安装文件无法在这个客机运行，已停止安装，原有文件保持不变。'
   fi
-  if [ "$version" != "$AGENT_VERSION" ]; then
-    agent_fail verify "安装文件报告的版本（${version}）与固定版本 ${AGENT_VERSION} 不一致，已停止安装，原有文件保持不变。"
+  found="$(agent_py version-check "$out" "$AGENT_VERSION" 2>/dev/null)" && return 0
+  if [ -z "$found" ]; then
+    agent_fail verify '安装文件无法在这个客机运行，已停止安装，原有文件保持不变。'
   fi
+  agent_fail verify "安装文件报告的版本（${found}）与固定版本 ${AGENT_VERSION} 不一致，已停止安装，原有文件保持不变。"
 }
 
-# Digests of a tree into $agent_tmp/digests: entry sha256, tree sha256, stat key.
+# Digests of a tree, owned by root, into agent_digests: entry sha256, tree
+# sha256, stat key.
 agent_tree() {
-  if ! agent_py tree "$1" "$AGENT_ENTRY" "$AGENT_UNPACKED" >"$agent_tmp/digests" 2>"$agent_tmp/reason"; then
+  if ! agent_digests="$(agent_py tree "$1" "$AGENT_ENTRY" "$AGENT_UNPACKED" "$agent_root_uid" 2>"$agent_tmp/reason")"; then
     agent_fail archive "安装后的文件不符合要求（$(agent_reason)），已停止安装，原有版本保持不变。"
   fi
 }
 
-# Merged settings into $agent_tmp/settings: checked before the download, and
-# again right before they are written.
+# The settings plan into agent_plan (settings_plan in agent_py): checked
+# before the download, and again right before the files are written.
 agent_prepare_settings() {
   local status=0
-  rm -rf -- "$agent_tmp/settings"
-  mkdir -- "$agent_tmp/settings"
-  agent_py settings-merge "${AGENT_SETTINGS-}" "$HOME" "$agent_etc" "$agent_tmp/settings" 2>"$agent_tmp/reason" || status=$?
+  agent_plan="$(agent_py settings-plan "${AGENT_SETTINGS-}" "$agent_system_files" "$agent_protected $agent_cage_own" "$HOME" "$agent_etc" 2>"$agent_tmp/reason")" || status=$?
   case "$status" in
     0) ;;
     2) agent_bad_input AGENT_SETTINGS ;;
@@ -888,24 +1154,55 @@ agent_prepare_settings() {
   esac
 }
 
+# A path the plan names, checked against the input: a system file on this
+# entry's fixed list, or a file in a folder below the home.
+agent_setting_path_ok() {
+  local file
+  case "$1" in
+    system)
+      for file in $agent_system_files; do
+        if [ "$2" = "$agent_etc/${file#/etc/}" ]; then return 0; fi
+      done
+      return 1
+      ;;
+    home) case "$2" in "$HOME"/.?*/?*) return 0 ;; esac ;;
+  esac
+  return 1
+}
+
+# Root writes a settings file from a pipe, never from a file the guest user
+# can change; the written copy must hash to what the plan said before it is
+# renamed into place.
 agent_write_settings() {
-  local n kind change folder mode file dir
-  while IFS=' ' read -r n kind change _ folder mode file; do
-    [ -n "$n" ] && [ "$change" = changed ] || continue
+  local n kind change folder mode after file dir new got as=''
+  while IFS=' ' read -r n kind change _ folder mode _ after file; do
+    [ -n "$n" ] || continue
+    if ! agent_setting_path_ok "$kind" "$file" || [[ ! $mode =~ ^[0-7]{3}$ ]]; then agent_bad_input AGENT_SETTINGS; fi
+    [ "$change" = changed ] || continue
     dir="${file%/*}"
+    new="$dir/.agent-settings-new"
     if [ "$kind" = system ]; then
+      as=sudo
       sudo mkdir -p -- "$dir"
-      if [ "$folder" = dir-created ]; then sudo chmod 0755 "$dir"; fi
-      sudo cp -- "$agent_tmp/settings/$n" "$dir/.agent-settings-new"
-      sudo chmod "$mode" "$dir/.agent-settings-new"
-      sudo mv -f -- "$dir/.agent-settings-new" "$file"
+      if [ "$folder" = 1 ]; then sudo chmod 0755 "$dir"; fi
     else
+      as=''
       (umask 077 && mkdir -p -- "$dir")
-      cp -- "$agent_tmp/settings/$n" "$dir/.agent-settings-new"
-      chmod "$mode" "$dir/.agent-settings-new"
-      mv -f -- "$dir/.agent-settings-new" "$file"
     fi
-  done <"$agent_tmp/settings/list.txt"
+    $as rm -f -- "$new"
+    if ! agent_py settings-text "${AGENT_SETTINGS-}" "$agent_system_files" "$agent_protected $agent_cage_own" "$HOME" "$agent_etc" "$n" 2>"$agent_tmp/reason" |
+      $as tee -- "$new" >/dev/null; then
+      $as rm -f -- "$new"
+      agent_fail settings "无法写入 ${AGENT_NAME} 的设置文件（$(agent_reason)），已停止安装。"
+    fi
+    $as chmod "$mode" "$new"
+    got="$(agent_py sha256 "$new" 2>/dev/null)" || got=''
+    if [ "$got" != "$after" ]; then
+      $as rm -f -- "$new"
+      agent_fail settings "${AGENT_NAME} 的设置文件在安装过程中被改动，已停止安装。请重试。"
+    fi
+    $as mv -f -- "$new" "$file"
+  done <<<"$agent_plan"
 }
 
 agent_launcher_text() {
@@ -919,42 +1216,64 @@ agent_launcher_text() {
   printf "exec '%s' -I '%s' '%s' \"\$@\"\n" "$agent_python" "$agent_runtime" "$agent_lib/$AGENT_ID/current/$AGENT_ENTRY"
 }
 
-agent_write_launcher() {
-  local target="$agent_bin/$AGENT_COMMAND" new="$agent_bin/.$AGENT_COMMAND.agent-new"
-  agent_launcher_text >"$agent_tmp/launcher"
-  if [ -f "$target" ] && [ ! -L "$target" ] && cmp -s "$agent_tmp/launcher" "$target"; then return 0; fi
-  sudo cp -- "$agent_tmp/launcher" "$new"
-  sudo chmod 0755 "$new"
-  sudo mv -f -- "$new" "$target"
+# Writes text (and a final newline) as root to path, from a pipe and through
+# path's temporary name: the copy must hash as the text does before it is
+# renamed into place. Called from the main shell, so a failure ends the job.
+agent_root_write() {
+  local path="$1" mode="$2" want new got
+  want="$(printf '%s\n' "$3" | agent_py sha256 -)"
+  new="${path%/*}/.${path##*/}.new"
+  case "$path" in "$agent_bin"/*) new="$agent_bin/.$AGENT_COMMAND.agent-new" ;; esac
+  sudo rm -f -- "$new"
+  printf '%s\n' "$3" | sudo tee -- "$new" >/dev/null
+  sudo chmod "$mode" "$new"
+  got="$(agent_py sha256 "$new" 2>/dev/null)" || got=''
+  if [ "$got" != "$want" ]; then
+    sudo rm -f -- "$new"
+    agent_fail changed "安装文件在写入时被改动（${path##*/}），已停止安装。请重试。"
+  fi
+  # The own-install check again, right before the launcher replaces anything.
+  if [ "$path" = "$agent_bin/$AGENT_COMMAND" ] && agent_own_command >/dev/null; then
+    sudo rm -f -- "$new"
+    agent_fail own-install "已经安装了 ${AGENT_NAME}（自行安装，${path}），Super Cage 不会覆盖它。"
+  fi
+  sudo mv -f -- "$new" "$path"
 }
 
-# Receipt (the full record) and the stat sidecar (one line the launcher reads).
+agent_write_launcher() {
+  local target="$agent_bin/$AGENT_COMMAND" text
+  text="$(agent_launcher_text)"
+  if [ -f "$target" ] && [ ! -L "$target" ] && [ "$(agent_py sha256 "$target" 2>/dev/null)" = "$(printf '%s\n' "$text" | agent_py sha256 -)" ]; then
+    return 0
+  fi
+  agent_root_write "$target" 0755 "$text"
+}
+
+# Receipt (the full record) and the stat sidecar (one line the launcher
+# reads), from what this job computed: nothing is read back from a file the
+# guest user can write.
 agent_write_receipt() {
-  local entry_sha tree_sha stat_key change current=''
-  read -r entry_sha tree_sha stat_key <"$agent_tmp/digests"
-  if ! agent_py receipt-make "$agent_state/$AGENT_ID.json" "$agent_tmp/receipt" "$agent_bin/$AGENT_COMMAND" \
-    "$agent_tmp/settings/settings.json" "$AGENT_ID" "$AGENT_VERSION" "$AGENT_ARCH" "$AGENT_COMMAND" "$AGENT_ENTRY" \
-    "$AGENT_SHA256" "$AGENT_SHA512" "$entry_sha" "$tree_sha" "$stat_key" >"$agent_tmp/receipt.state" 2>"$agent_tmp/reason"; then
+  local entry_sha tree_sha stat_key receipt current=''
+  read -r entry_sha tree_sha stat_key <<<"$agent_digests"
+  if ! receipt="$(agent_py receipt-make "$agent_state/$AGENT_ID.json" "$agent_bin/$AGENT_COMMAND" "${AGENT_SETTINGS-}" \
+    "$agent_system_files" "$agent_protected $agent_cage_own" "$agent_plan" "$AGENT_ID" "$AGENT_VERSION" "$AGENT_ARCH" \
+    "$AGENT_COMMAND" "$AGENT_ENTRY" "$AGENT_SHA256" "$AGENT_SHA512" "$entry_sha" "$tree_sha" "$stat_key" 2>"$agent_tmp/reason")"; then
     agent_fail archive "无法写入安装记录（$(agent_reason)）。"
   fi
-  read -r change stat_key <"$agent_tmp/receipt.state"
-  if [ "$change" = changed ]; then
-    sudo cp -- "$agent_tmp/receipt" "$agent_state/.$AGENT_ID.json.new"
-    sudo chmod 0644 "$agent_state/.$AGENT_ID.json.new"
-    sudo mv -f -- "$agent_state/.$AGENT_ID.json.new" "$agent_state/$AGENT_ID.json"
-  fi
+  if [ "$receipt" != same ]; then agent_root_write "$agent_state/$AGENT_ID.json" 0644 "$receipt"; fi
   if [ -f "$agent_state/$AGENT_ID.stat" ]; then IFS= read -r current <"$agent_state/$AGENT_ID.stat" || current=''; fi
   if [ "$current" != "$stat_key" ] || [ -L "$agent_state/$AGENT_ID.stat" ]; then
-    printf '%s\n' "$stat_key" >"$agent_tmp/stat"
-    sudo cp -- "$agent_tmp/stat" "$agent_state/.$AGENT_ID.stat.new"
-    sudo chmod 0644 "$agent_state/.$AGENT_ID.stat.new"
-    sudo mv -f -- "$agent_state/.$AGENT_ID.stat.new" "$agent_state/$AGENT_ID.stat"
+    agent_root_write "$agent_state/$AGENT_ID.stat" 0644 "$stat_key"
   fi
 }
 
 agent_commit() {
-  local id_dir="$agent_lib/$AGENT_ID" dest old item
+  local id_dir="$agent_lib/$AGENT_ID" dest old item own
   dest="$id_dir/$AGENT_VERSION"
+  # A program of this name may have appeared during the download.
+  if own="$(agent_own_command)"; then
+    agent_fail own-install "已经安装了 ${AGENT_NAME}（自行安装，${own}），Super Cage 不会覆盖它。"
+  fi
   sudo mkdir -p -- "$id_dir"
   sudo chmod 0755 "$id_dir"
   if [ -e "$dest" ] || [ -L "$dest" ]; then
@@ -991,15 +1310,16 @@ agent_install() {
   fi
   agent_lock
   installed="$(agent_installed_version)"
-  # Never go back: a newer version (from a newer Super Cage) stays.
-  if [ -n "$installed" ] && dpkg --compare-versions "$installed" gt "$AGENT_VERSION"; then
+  # Never go back: a newer version (from a newer Super Cage) stays. Semver
+  # order: a pre-release is older than its release.
+  if [ -n "$installed" ] && agent_py version-gt "$installed" "$AGENT_VERSION"; then
     agent_say "${AGENT_NAME} ${installed} 比 Super Cage 固定的 ${AGENT_VERSION} 更新，保留现有版本。"
     agent_done "$installed"
     return 0
   fi
   if [ "$installed" = "$AGENT_VERSION" ]; then
-    if agent_py receipt-check "$agent_state/$AGENT_ID.json" "$agent_lib/$AGENT_ID/$AGENT_VERSION" "$AGENT_ID" "$AGENT_VERSION" \
-      "$AGENT_COMMAND" "$AGENT_ENTRY" "$AGENT_UNPACKED" "$AGENT_SHA256" "$AGENT_SHA512" >"$agent_tmp/digests" 2>"$agent_tmp/reason"; then
+    if agent_digests="$(agent_py receipt-check "$agent_state/$AGENT_ID.json" "$agent_lib/$AGENT_ID/$AGENT_VERSION" "$AGENT_ID" "$AGENT_VERSION" \
+      "$AGENT_COMMAND" "$AGENT_ENTRY" "$AGENT_UNPACKED" "$AGENT_SHA256" "$AGENT_SHA512" "$agent_root_uid" 2>"$agent_tmp/reason")"; then
       agent_prepare_settings
       agent_write_launcher
       agent_write_settings
@@ -1022,7 +1342,12 @@ agent_install() {
   agent_check_digests "$archive"
   agent_unpack "$archive"
   agent_verify
+  # What root commits is what was unpacked: the tree, now root's, against
+  # the digests the extraction wrote.
   agent_tree "$agent_stage/tree"
+  if [ "${agent_digests% *}" != "$agent_unpacked" ]; then
+    agent_fail archive '安装文件在解包后被改动，已停止安装，原有版本保持不变。'
+  fi
   agent_prepare_settings
   agent_commit
   rm -rf -- "${agent_cache_root:?}/$agent_digest"
@@ -1031,19 +1356,18 @@ agent_install() {
 }
 
 # Deletes only the listed paths under the home, never through a link that
-# leaves it, never a shared root or a protected tree.
+# leaves it, never a shared root, one of Cage's folders or a protected tree,
+# as named or as resolved through links.
 agent_remove_data() {
-  local line rest target parent home_real
+  local line rest target parent home_real resolved
   home_real="$(cd -P -- "$HOME" && pwd)"
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     rest="${line:2}"
-    case "$rest" in
-      .ssh | .ssh/* | .gnupg | .gnupg/* | .pki | .pki/* | .claude | .claude/* | .config | .cache | .local | .local/bin | .local/share | .local/state | .local/share/cage)
-        agent_say "${line} 是共用或受保护的目录，没有删除。"
-        continue
-        ;;
-    esac
+    if agent_home_refused "$rest"; then
+      agent_say "${line} 是共用或受保护的目录，没有删除。"
+      continue
+    fi
     target="$HOME/$rest"
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then continue; fi
     parent="$(cd -P -- "${target%/*}" 2>/dev/null && pwd)" || continue
@@ -1054,27 +1378,41 @@ agent_remove_data() {
         continue
         ;;
     esac
+    resolved="${parent#"$home_real"/}/${target##*/}"
+    if [ "$parent" = "$home_real" ]; then resolved="${target##*/}"; fi
+    if agent_home_refused "$resolved"; then
+      agent_say "${line} 经由链接指向共用或受保护的目录，没有删除。"
+      continue
+    fi
     rm -rf -- "$target"
     agent_say "已删除 ${line}。"
   done <<<"${AGENT_REMOVE_DATA-}"
 }
 
 agent_remove() {
-  local launcher="$agent_bin/$AGENT_COMMAND" action flag file
+  local launcher="$agent_bin/$AGENT_COMMAND" action flag file removable
   agent_progress check 0 0
   if [ -d "$agent_state" ] || [ -d "$agent_lib" ]; then
     agent_lock
     if [ -d "$agent_lib/$AGENT_ID" ] && agent_in_use; then
       agent_fail in-use "请先结束正在运行的 ${AGENT_NAME} 终端，再移除。"
     fi
-    # Paths come from the catalog; the receipt only says which file Cage created and its hash.
-    if ! agent_py settings-removable "$agent_state/$AGENT_ID.json" "${AGENT_SETTINGS-}" "$agent_etc" >"$agent_tmp/removable" 2>"$agent_tmp/reason"; then
+    # Paths come from the catalog; the receipt only says which file Cage
+    # created and its hash. The shell checks each path again.
+    if ! removable="$(agent_py settings-removable "$agent_state/$AGENT_ID.json" "${AGENT_SETTINGS-}" "$agent_system_files" \
+      "$agent_protected $agent_cage_own" "$agent_etc" 2>"$agent_tmp/reason")"; then
       agent_bad_input AGENT_SETTINGS
     fi
-    if agent_is_launcher "$launcher"; then sudo rm -f -- "$launcher"; fi
+    if agent_is_launcher "$launcher"; then
+      sudo rm -f -- "$launcher"
+    elif [ -e "$launcher" ] || [ -L "$launcher" ]; then
+      agent_say "${launcher} 不是 Super Cage 写入的，已保留。"
+    fi
     sudo rm -rf -- "${agent_lib:?}/$AGENT_ID"
     sudo rm -f -- "$agent_state/$AGENT_ID.json" "$agent_state/$AGENT_ID.stat"
     while IFS=' ' read -r action flag file; do
+      [ -n "$action" ] || continue
+      agent_setting_path_ok system "$file" || agent_bad_input AGENT_SETTINGS
       case "$action" in
         remove)
           sudo rm -f -- "$file"
@@ -1082,7 +1420,9 @@ agent_remove() {
           ;;
         keep) agent_say "设置文件 ${file} 不是 Super Cage 创建的，或安装后被修改过，已保留。" ;;
       esac
-    done <"$agent_tmp/removable"
+    done <<<"$removable"
+  else
+    agent_clear_leftovers
   fi
   agent_remove_data
   if [ -n "$agent_digest" ]; then rm -rf -- "${agent_cache_root:?}/$agent_digest"; fi
@@ -1095,6 +1435,9 @@ agent_check_input
 agent_tmp="$(mktemp -d "$agent_tmp_root/agent-clients.XXXXXX")"
 agent_stage=''
 agent_locked=0
+agent_plan=''
+agent_digests=''
+agent_unpacked=''
 trap agent_cleanup EXIT
 trap agent_canceled TERM
 trap 'exit 130' INT

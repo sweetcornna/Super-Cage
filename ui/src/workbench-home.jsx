@@ -75,7 +75,7 @@ export function WorkbenchHome({
       : status.job.kind === "storage" ? "正在调整环境存储"
       : status.job.kind === "project" ? "正在打开项目"
       : "正在准备 Super Cage 环境"
-    : running ? !status.ready ? "Super Cage 环境正在连接" : "Super Cage 环境已就绪"
+    : running ? !status.ready ? "Super Cage 环境正在连接" : network.mode === "closed" ? "Super Cage 环境已就绪 · 外网暂停" : "Super Cage 环境已就绪"
     : setupProxy ? "为 Claude 准备独立工作区" : "先启动 Super Cage 环境";
   const subtitle = busy ? status.job.message
     : running ? !status.ready

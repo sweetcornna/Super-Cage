@@ -58,6 +58,9 @@ var agentWindowRoutes = []agentWindowRoute{
 	// it may do so unattended; the confirmation list hands out the ids that
 	// let an update interrupt work.
 	{"/api/app-update/", "Application updates are configured and confirmed only in the desktop window.", "open_desktop"},
+	// Adding, updating or removing an agent client installs software in the
+	// environment (设置 → 其他客户端); listing them (GET) stays open.
+	{"POST /api/agents/", "Installing, updating or removing software in the environment is the person's decision in the desktop window.", "open_desktop"},
 	// Opening a workbench file with a host application (claim and complete).
 	{"POST /api/input/files/desktop/open", "Opening a file with an application on this computer is done by the desktop window.", "open_desktop"},
 	// The terminal app on this computer: choosing it, listing installed

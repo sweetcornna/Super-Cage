@@ -16,20 +16,34 @@ import (
 
 var errGuestUpdateRequired = errors.New("环境组件需要更新，请先保存浏览器和编辑器中的修改。工作台终端与磁盘保留，编辑器内终端可能结束。")
 
-const guestConnectionSnapshot = `sudo cat /etc/claude-cage/browser-control.json; printf '\n'; cat "$HOME/.config/claude-cage/browser-password"; printf '\n'; if sudo test -f /etc/claude-cage/components.json; then sudo cat /etc/claude-cage/components.json; else printf 'null'; fi`
+// guestConnectionSnapshot is the attach read: browser credentials, the VNC
+// password, the presence line of the optional clients (client_presence.go)
+// and the component manifest, in one command.
+var guestConnectionSnapshot = `sudo cat /etc/claude-cage/browser-control.json; printf '\n'; cat "$HOME/.config/claude-cage/browser-password"; printf '\n'; ` + clientPresenceProbe(clientReceiptDir) + `; if sudo test -f /etc/claude-cage/components.json; then sudo cat /etc/claude-cage/components.json; else printf 'null'; fi`
 
-func parseGuestConnection(data []byte) (guestCredentials, *cage.GuestManifest, error) {
+// parseGuestConnection reads the attach read. A missing or malformed
+// presence line leaves presence unknown and never fails the attach.
+func parseGuestConnection(data []byte) (guestCredentials, *cage.GuestManifest, clientPresence, error) {
 	lines := strings.SplitN(strings.TrimSpace(string(data)), "\n", 3)
 	var credentials guestCredentials
+	var presence clientPresence
 	if len(lines) != 3 || json.Unmarshal([]byte(lines[0]), &credentials) != nil || credentials.Token == "" || strings.TrimSpace(lines[1]) == "" {
-		return credentials, nil, errors.New("浏览器控制服务尚未安装")
+		return credentials, nil, presence, errors.New("浏览器控制服务尚未安装")
 	}
 	credentials.VNCPassword = strings.TrimSpace(lines[1])
-	var manifest *cage.GuestManifest
-	if json.Unmarshal([]byte(lines[2]), &manifest) != nil || manifest == nil || !manifest.Current() {
-		return credentials, manifest, errGuestUpdateRequired
+	line, rest, marked := splitClientPresence(lines[2])
+	if marked {
+		presence, _ = parseClientPresence(line)
+		if rest == "" {
+			// No manifest output at all, as the three-part read reported it.
+			return credentials, nil, presence, errors.New("浏览器控制服务尚未安装")
+		}
 	}
-	return credentials, manifest, nil
+	var manifest *cage.GuestManifest
+	if json.Unmarshal([]byte(rest), &manifest) != nil || manifest == nil || !manifest.Current() {
+		return credentials, manifest, presence, errGuestUpdateRequired
+	}
+	return credentials, manifest, presence, nil
 }
 
 type componentVersions struct {
