@@ -59,6 +59,7 @@ ifeq ($(GOOS),darwin)
 	codesign -f --entitlements third_party/lima/vz.entitlements -s - _output/bin/cage
 endif
 	$(MAKE) cage-attach STAMP=$(STAMP)
+	$(MAKE) cage-cloud-entry STAMP=$(STAMP)
 
 # cage attach runs the slim cage-attach installed beside cage, so an attached
 # window stays small (cmd/cage-attach). The same flags and stamp as cage:
@@ -66,11 +67,17 @@ endif
 cage-attach:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o _output/bin/cage-attach$(EXE) ./cmd/cage-attach
 
+# ssh to a cloud workspace runs cage-cloud-entry beside cage, never
+# cage-attach: its TLS would load macOS's Security framework into every
+# attached window (cmd/cage-cloud-entry). Without it cage is the proxy.
+cage-cloud-entry:
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o _output/bin/cage-cloud-entry$(EXE) ./cmd/cage-cloud-entry
+
 cage-ui:
 	npm --prefix ui ci --no-audit --no-fund
 	npm run --prefix ui build
 
-.PHONY: cage cage-attach cage-ui cage-windows package-windows cage-linux package-linux check-linux
+.PHONY: cage cage-attach cage-cloud-entry cage-ui cage-windows package-windows cage-linux package-linux check-linux
 cage-linux:
 	bash scripts/build-linux.sh
 

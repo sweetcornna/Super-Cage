@@ -106,6 +106,45 @@ func (c *Client) DialHandshake(ctx context.Context, target controlclient.AgentTa
 	if err != nil {
 		return nil, answer, failed
 	}
+	ws, answer, err := upgrade(ctx, conn, &request)
+	switch {
+	case err == nil:
+		return ws, answer, nil
+	case answer.Status != 0 && answer.Status != 101:
+		return nil, answer, controlclient.HTTPError(answer.Status)
+	}
+	return nil, answer, failed
+}
+
+// UpgradeConn opens a WebSocket on conn, a connection already made to host
+// (the cloud entry's TLS connection to the portal's gateway), with the
+// request line, Host and the given headers, and nothing else: no Origin, no
+// cookie. A refusal returns the answer, its status and at most 4 KiB of its
+// body, with an error.
+func UpgradeConn(ctx context.Context, conn net.Conn, host, path string, headers [][2]string) (*Conn, Handshake, error) {
+	if !validPath(path) || hasControl(host) || host == "" {
+		conn.Close()
+		return nil, Handshake{}, errors.New("invalid WebSocket request")
+	}
+	var request bytes.Buffer
+	request.WriteString("GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\n")
+	for _, header := range headers {
+		if header[0] == "" || strings.ContainsAny(header[0], ": \t") || hasControl(header[0]) || hasControl(header[1]) {
+			conn.Close()
+			return nil, Handshake{}, errors.New("invalid WebSocket request header")
+		}
+		request.WriteString(header[0] + ": " + header[1] + "\r\n")
+	}
+	_ = conn.SetDeadline(time.Now().Add(handshakeTimeout))
+	return upgrade(ctx, conn, &request)
+}
+
+var errHandshake = errors.New("websocket handshake failed")
+
+// upgrade finishes a client handshake whose request head is in request and
+// closes conn when it fails.
+func upgrade(ctx context.Context, conn net.Conn, request *bytes.Buffer) (*Conn, Handshake, error) {
+	var answer Handshake
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	var nonce [16]byte
 	_, _ = rand.Read(nonce[:])
@@ -113,7 +152,8 @@ func (c *Client) DialHandshake(ctx context.Context, target controlclient.AgentTa
 	request.WriteString("Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: " + key + "\r\n\r\n")
 	r := bufio.NewReaderSize(conn, 4096)
 	var reply reply
-	if _, err = conn.Write(request.Bytes()); err == nil {
+	_, err := conn.Write(request.Bytes())
+	if err == nil {
 		reply, err = readReply(r)
 	}
 	if err == nil {
@@ -125,18 +165,18 @@ func (c *Client) DialHandshake(ctx context.Context, target controlclient.AgentTa
 	}
 	if !stop() || err != nil {
 		conn.Close()
-		return nil, answer, failed
+		return nil, Handshake{}, errHandshake
 	}
 	if reply.status != 101 {
 		conn.Close()
-		return nil, answer, controlclient.HTTPError(reply.status)
+		return nil, answer, errHandshake
 	}
 	digest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	if !strings.EqualFold(reply.header["upgrade"], "websocket") || !hasToken(reply.header["connection"], "upgrade") ||
 		reply.header["sec-websocket-accept"] != base64.StdEncoding.EncodeToString(digest[:]) ||
 		reply.header["sec-websocket-extensions"] != "" || reply.header["sec-websocket-protocol"] != "" {
 		conn.Close()
-		return nil, answer, failed
+		return nil, Handshake{}, errHandshake
 	}
 	_ = conn.SetDeadline(time.Time{})
 	// Frames that arrived with the handshake are already in r.

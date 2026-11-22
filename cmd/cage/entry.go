@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
+	"github.com/sylvinus/agent-vm/internal/cloudproxy"
 	"github.com/sylvinus/agent-vm/internal/workbench"
 )
 
@@ -25,6 +29,18 @@ func runEntry(args []string) int {
 		return 255
 	}
 	if args[0] == "entry" {
+		// A cloud workspace's proxy: cage-cloud-entry beside cage, or cage
+		// itself, which links TLS anyway; never cage-attach (cloudproxy).
+		if len(args) == 3 && args[1] == "proxy" && strings.HasPrefix(args[2], cloudentry.EnvironmentPrefix) {
+			if exe, err := os.Executable(); err == nil {
+				if program := cloudproxy.Beside(exe); program != "" {
+					if code, ok := execAttach(program, args); ok {
+						return code
+					}
+				}
+			}
+			return cloudproxy.Main(context.Background(), args, os.Stdin, os.Stdout, os.Stderr)
+		}
 		if len(args) > 1 && args[1] == "proxy" {
 			// The slim cage-attach beside cage is the proxy, as for cage
 			// attach: a Host block written as cage entry proxy then keeps

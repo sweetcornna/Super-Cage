@@ -11,6 +11,11 @@
 // internal/controlclient and internal/controlwire, never net/http, TLS,
 // x509 or x/crypto/ssh (cmd/cage-attach/main_test.go). The full cage runs
 // the same code for cage entry proxy when no cage-attach is beside it.
+//
+// A cloud environment (cloud-<vm id>) is not this package's: its proxy is
+// internal/cloudproxy, a program of its own (cmd/cage-cloud-entry), because
+// TLS would load macOS's Security and CoreFoundation frameworks into every
+// attached window.
 package entryproxy
 
 import (
@@ -30,6 +35,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/controlwire"
 )
@@ -287,6 +293,17 @@ func pinnedKey(paths Paths, environment string) (string, []byte, bool) {
 	return "", nil, false
 }
 
+// HostKeyPinned reports whether offered, an authorized_keys line, is the
+// key pinned for environment: the same type and key blob.
+func HostKeyPinned(paths Paths, environment, offered string) bool {
+	kind, blob, ok := parseKey(strings.Fields(offered))
+	if !ok {
+		return false
+	}
+	pinnedKind, pinned, ok := pinnedKey(paths, environment)
+	return ok && pinnedKind == kind && bytes.Equal(pinned, blob)
+}
+
 // Dial opens the entry's WebSocket on the controller of configPath and
 // returns it with the host key line the controller answered with.
 func Dial(ctx context.Context, configPath, device string, check controlclient.Check) (*controlwire.Conn, string, error) {
@@ -408,6 +425,16 @@ func Run(ctx context.Context, cfg Config, stdin io.Reader, stdout, stderr io.Wri
 func Main(ctx context.Context, args []string, defaultConfig string, check controlclient.Check, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) != 2 || args[0] != "proxy" {
 		fmt.Fprintln(stderr, "Super Cage：用法 cage entry proxy <环境>")
+		return Failure
+	}
+	if strings.HasPrefix(args[1], cloudentry.EnvironmentPrefix) {
+		// Without TLS: cage entry proxy and cage-cloud-entry connect cloud
+		// environments, never this program.
+		message := cloudentry.ClosedMessage
+		if cloudentry.Open() {
+			message = "云端工作区由 cage-cloud-entry 连接：用 Super Cage 生成的 ssh 配置或 cage ssh 连接"
+		}
+		fmt.Fprintln(stderr, "Super Cage："+message)
 		return Failure
 	}
 	configPath, err := ProfileConfig(defaultConfig, args[1])

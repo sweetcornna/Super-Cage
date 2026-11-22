@@ -40,6 +40,9 @@ var open atomic.Bool
 
 func init() { open.Store(verified == "yes") }
 
+// ClosedMessage is what every part the owner sees says in a closed build.
+const ClosedMessage = "这个版本的 Super Cage 还没有开放云端工作区的本机终端"
+
 // Open reports whether this build offers the cloud entry.
 func Open() bool { return open.Load() }
 
