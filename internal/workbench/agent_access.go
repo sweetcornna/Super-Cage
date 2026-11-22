@@ -95,6 +95,10 @@ var agentWindowRoutes = []agentWindowRoute{
 	{"POST /api/client/project-shares", "Giving a cloud host access to a folder on this computer is done in the desktop window.", "open_desktop"},
 	// The host browser's profiles and extension files.
 	{"/api/client/browser-extensions", "The host browser's profiles and extension files are read only by the desktop window.", "open_desktop"},
+	// Joining another computer redeems its pairing code (that computer then
+	// trusts this one), and an open link is driven only by the window.
+	{"/api/client/devices", "Joining and opening other computers is done by the person in the desktop window.", "open_desktop"},
+	{"/api/client/devices/", "Joining and opening other computers is done by the person in the desktop window.", "open_desktop"},
 }
 
 // agentBodyRule refuses a request to an otherwise open route by a value in

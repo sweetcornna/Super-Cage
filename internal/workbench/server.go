@@ -65,6 +65,7 @@ type Server struct {
 	clipboardCancel                                  context.CancelFunc
 	clipboardGuestSession                            string
 	phones                                           mobilePairing
+	devices                                          deviceLinks
 	instanceID                                       string
 	clientOnly                                       bool
 	desktopEntry                                     bool
@@ -227,6 +228,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 		s.remote.clientOnly = clientOnly
 	}
 	defer s.remote.close()
+	defer s.devices.shutdown()
 	if workload {
 		if err = guestos.RecoverWindowsStorage(context.Background(), profile); err != nil {
 			s.failStorageRecovery(err)
@@ -622,6 +624,10 @@ func (s *Server) handler() http.Handler {
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/agent/native") || r.URL.Path == "/api/agent/routes" {
 			mux.ServeHTTP(w, r)
+			return
+		}
+		// A window's requests to a joined computer (device_links.go).
+		if s.routeDevice(w, r) {
 			return
 		}
 		if s.windowsGuest != nil && (!windowsWorkbenchRoute(r.URL.Path) || s.windowsGuest.Remote() && strings.HasPrefix(r.URL.Path, "/api/projects/")) {
