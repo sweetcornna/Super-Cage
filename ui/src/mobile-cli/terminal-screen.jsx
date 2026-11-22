@@ -7,6 +7,7 @@ import "@xterm/xterm/css/xterm.css";
 import { base64ToBytes, terminals } from "./services.mjs";
 import { accessDenied } from "./transport.mjs";
 import { deviceCommand, haptic } from "./device-navigation.mjs";
+import { openExternal } from "./web-shell.mjs";
 import { Confirm } from "./sheet";
 import { kindInfo } from "./terminals";
 
@@ -66,7 +67,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       scrollback: 5000, theme: darkQuery.matches ? dark : light, allowProposedApi: true, macOptionIsMeta: true });
     const f = new FitAddon();
     t.loadAddon(f);
-    t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) window.open(uri, "_blank", "noopener"); }));
+    t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) openExternal(uri); }));
     t.open(host.current);
     term.current = t; fit.current = f;
     const data = t.onData((value) => {

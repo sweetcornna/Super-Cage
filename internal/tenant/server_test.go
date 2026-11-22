@@ -184,6 +184,10 @@ func fixtureGuest(id string) http.Handler {
 			http.Error(w, "wrong fixture cookie", http.StatusUnauthorized)
 			return
 		}
+		if r.URL.RawQuery == "echo-entry" {
+			_, _ = io.WriteString(w, strings.Join(r.Header.Values("X-Cage-Entry"), ",")+"|"+r.Header.Get("User-Agent")+"|"+r.Header.Get("Cookie"))
+			return
+		}
 		switch r.URL.Path {
 		case "/api/client/about":
 			jsonReply(w, 200, map[string]string{"version": "fixture"})

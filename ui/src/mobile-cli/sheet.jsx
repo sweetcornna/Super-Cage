@@ -1,9 +1,11 @@
 import React, { useEffect, useRef } from "react";
 import { X } from "lucide-react";
+import { useBackDismiss } from "./web-shell.mjs";
 
 // A bottom sheet on phones, a centered card on wide screens.
 export function Sheet({ open = true, title, onClose, children, actions, className = "", full = false }) {
   const panel = useRef(null);
+  useBackDismiss(open, onClose);
   useEffect(() => {
     const dialog = panel.current;
     if (!dialog) return;
