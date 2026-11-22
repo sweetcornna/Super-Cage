@@ -14,7 +14,7 @@ const now = Date.now();
 const ago = (minutes) => new Date(now - minutes * 60000).toISOString();
 const fingerprint = "SHA256:o/+qFR975llb1cjqdgUG0z2vIkIUeG0n2P6A+7yb6/A";
 const bomWarning = "~/.ssh/config 以 BOM（字节顺序标记）开头，多数 OpenSSH 会把带 BOM 的第一行读成未知选项而报错；Super Cage 的这一行会写在 BOM 之后。建议先把文件另存为不带 BOM 的 UTF-8。";
-const hostBlock = "# Super Cage 本机终端 — generated, do not edit. Environment: 默认环境\nHost cage-default\n  HostName cage-default.invalid\n  User cage\n  ProxyCommand '/Applications/Super Cage.app/Contents/MacOS/cage' entry proxy default\n  HostKeyAlias cage-default\n  StrictHostKeyChecking yes\n  IdentitiesOnly yes\n  ControlMaster no\n  ControlPath none\n";
+const hostBlock = "# Super Cage 本机终端 — generated, do not edit. Environment: 默认环境\nHost cage-default\n  HostName cage-default.invalid\n  User cage\n  ProxyCommand '/Applications/Super Cage.app/Contents/MacOS/cage-attach' entry proxy default\n  HostKeyAlias cage-default\n  StrictHostKeyChecking yes\n  IdentitiesOnly yes\n  ControlMaster no\n  ControlPath none\n";
 
 function entryState() {
   return {
@@ -23,7 +23,7 @@ function entryState() {
     view: {
       enabled: false, supported: true, environment: "default", name: "默认环境", state: "off",
       connections: { total: 0, shell: 0, exec: 0, sftp: 0 }, devices: [], herdr: false,
-      settings: { image_upload: true, clipboard_write: true }, revoked: false, pty_sessions: "refused", kept: [], kept_limit: 4,
+      revoked: false, kept: [], kept_limit: 4,
     },
     bom: false,
     unreached: [],
@@ -36,7 +36,7 @@ function turnedOn(entry) {
   view.enabled = true;
   view.state = "idle";
   view.host_alias = "cage-default";
-  view.commands = { ssh: "ssh cage-default", cage_ssh: "cage ssh default", cage_on_path: true };
+  view.commands = { ssh: "ssh cage-default", cage_ssh: "cage ssh default", attach: "cage attach", cage_on_path: true };
   view.include = { line: "Include ~/.ssh/super-cage/config", present: entry.includePresent, display_path: "~/.ssh/config" };
   if (!view.devices.some((device) => device.current)) view.devices.push({ id: "a".repeat(32), name: "shihao 的 MacBook Pro", fingerprint, created: ago(1), current: true, revoked: false });
   view.devices = view.devices.map((device) => (device.current ? { ...device, revoked: false } : device));
@@ -158,10 +158,17 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText("cage ssh default", { exact: true }).waitFor();
       assert.equal(entry.requests.some((r) => r.method === "POST" && r.path === "/entry/include"), false);
       await content.getByText(/还没有包含 Super Cage 的配置/).waitFor();
-      // What is filtered and what is not is said on the page, exactly: no
-      // filter yet, so sessions with a terminal are refused.
+      // What is filtered and what is not is said on the page, exactly:
+      // sessions with a terminal through cage attach's filter, the rest not.
       await content.getByText(/scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
-      await content.getByText(/带终端的会话（ssh、ssh -t）会被拒绝/).waitFor();
+      await content.getByText(/带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤/).waitFor();
+      assert.equal(await content.getByText(/会被拒绝/).count(), 0);
+      // cage attach has its row; Herdr is named, 稍后提供, with nothing to copy.
+      await content.getByText("cage attach", { exact: true }).waitFor();
+      const herdr = content.locator(".local-entry-commands li[data-later]");
+      assert.equal(await herdr.count(), 1);
+      await herdr.getByText("稍后提供", { exact: true }).waitFor();
+      assert.equal(await herdr.getByRole("button").count(), 0);
       await shot("on-without-include");
       // Writing it later, from the row; a BOM is warned about first.
       entry.bom = true;

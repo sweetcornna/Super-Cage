@@ -21,9 +21,12 @@ import {
 } from "./local-entry-state.mjs";
 import "./local-entry.css";
 
-// "本机终端" for the environment this workbench runs (design 6.2): turn the
-// local SSH entry on or off, copy the commands, list and revoke this
-// environment's devices. Loaded lazily by the settings page. It never polls:
+const ENTRY_PART = "从你自己的终端或 Herdr 连进来";
+
+// Settings → 本机终端, its second part, for the environment this workbench
+// runs (design 6.2): turn the local SSH entry on or off, copy the commands,
+// list and revoke this environment's devices. Loaded lazily with the
+// section (local-terminal-page.jsx). It never polls:
 // it reads the state when it opens, after each action, when the window comes
 // back into view, and when the environment's readiness changes.
 export default function LocalEntryPage({ onConfirm, environmentReady }) {
@@ -160,45 +163,34 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   };
 
   const line = entryStateLine(view, { locked: failure?.locked });
-  const intro = (
-    <div className="section-title">
-      <h3>本机终端</h3>
-      <p>用 Ghostty、iTerm2 或任何终端里的 ssh 连接到这个环境，就像在本机工作。环境看不到你的电脑。</p>
-    </div>
+  const part = (children) => (
+    <section className="settings-group local-terminal-part local-entry" aria-label={ENTRY_PART}>
+      <h3>{ENTRY_PART}</h3>
+      <p className="field-help">用 Ghostty、iTerm2 或任何终端里的 ssh 连接到这个环境，就像在本机工作。环境看不到你的电脑。</p>
+      {children}
+    </section>
   );
   if (failure && !failure.locked) {
-    return (
-      <div className="local-entry">
-        {intro}
-        <p className="local-entry-error" role="alert">{failure.text}</p>
-      </div>
-    );
+    return part(<p className="local-entry-error" role="alert">{failure.text}</p>);
   }
   if (!view || failure?.locked) {
-    return (
-      <div className="local-entry">
-        {intro}
-        <p className="local-entry-state" data-tone={line.tone} role="status">
-          <span className="local-entry-dot" aria-hidden="true" />
-          {line.text}
-        </p>
-      </div>
+    return part(
+      <p className="local-entry-state" data-tone={line.tone} role="status">
+        <span className="local-entry-dot" aria-hidden="true" />
+        {line.text}
+      </p>
     );
   }
   if (view.state === "unsupported") {
-    return (
-      <div className="local-entry">
-        {intro}
-        <EmptyState drawing="terminal" title="这个环境暂不支持本机终端">
-          本机终端目前只支持 Linux 环境。
-        </EmptyState>
-      </div>
+    return part(
+      <EmptyState drawing="terminal" title="这个环境暂不支持本机终端">
+        本机终端目前只支持 Linux 环境。
+      </EmptyState>
     );
   }
   if (!view.enabled) {
-    return (
-      <div className="local-entry">
-        {intro}
+    return part(
+      <>
         {error && <p className="local-entry-error" role="alert">{error}</p>}
         <EmptyState
           drawing="terminal"
@@ -210,9 +202,9 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
             </button>
           }
         >
-          用 Ghostty、iTerm2 或 ssh 连接到这个环境，就像在本机工作。环境看不到你的电脑。
+          开启后，这台电脑上的任何终端都能用 ssh 连进这个环境。写入 ~/.ssh/config 之前会先问你。
         </EmptyState>
-      </div>
+      </>
     );
   }
 
@@ -220,9 +212,8 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const include = includeRow(view);
   const devices = sortedDevices(view.devices);
   const kept = keptRows(view);
-  return (
-    <div className="local-entry">
-      {intro}
+  return part(
+    <>
       <p className="local-entry-state" data-tone={line.tone} role="status">
         <span className="local-entry-dot" aria-hidden="true" />
         {line.text}
@@ -235,7 +226,15 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
       {error && <p className="local-entry-error" role="alert">{error}</p>}
       {notice && <p className="local-entry-notice" role="status">{notice}</p>}
       <ul className="local-entry-commands" aria-label="连接命令">
-        {rows.map((row) => (
+        {rows.map((row) => row.later ? (
+          <li key={row.id} data-later="">
+            <div>
+              <strong>{row.name}</strong>
+              <span>{row.caption}</span>
+            </div>
+            <span className="local-terminal-chip">稍后提供</span>
+          </li>
+        ) : (
           <li key={row.id}>
             <div>
               <code>{row.command}</code>
@@ -254,7 +253,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         ))}
       </ul>
       <span className="sr-only" aria-live="polite">{copied ? "已复制" : ""}</span>
-      <p className="field-help local-entry-unfiltered">{unfilteredNote(view.pty_sessions)}</p>
+      <p className="field-help local-entry-unfiltered">{unfilteredNote()}</p>
       {include && (
         <p className="local-entry-include" data-state={include.state}>
           {include.text}
@@ -265,8 +264,8 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
           )}
         </p>
       )}
-      <section className="settings-group local-entry-devices" aria-label="设备">
-        <h3>设备</h3>
+      <section className="local-entry-group local-entry-devices" aria-label="设备">
+        <h4 className="local-terminal-subtitle">设备</h4>
         <p className="field-help">每台电脑一把钥匙。撤销后，那台电脑的连接会立即断开。</p>
         <ul>
           {devices.map((device) => (
@@ -275,8 +274,8 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
         </ul>
       </section>
       {kept.rows.length > 0 && (
-        <section className="settings-group local-entry-kept" aria-label={kept.title}>
-          <h3>{kept.title}</h3>
+        <section className="local-entry-group local-entry-kept" aria-label={kept.title}>
+          <h4 className="local-terminal-subtitle">{kept.title}</h4>
           <p className="field-help">{kept.help}</p>
           <ul>
             {kept.rows.map((row) => (
@@ -299,7 +298,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
           关闭本机终端
         </button>
       </div>
-    </div>
+    </>
   );
 }
 

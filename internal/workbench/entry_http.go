@@ -168,10 +168,15 @@ func (s *Server) entryView() entryStatusView {
 		} else {
 			cage = shellescape.Quote(cage)
 		}
-		// HOOK(attach): Attach stays empty, and the page hides its row,
-		// until cage attach (branch local-terminal-attach) is merged; then
-		// set it to cage + " attach " + view.Environment.
 		view.Commands = &entryCommands{SSH: "ssh " + view.HostAlias, CageSSH: cage + " ssh " + view.Environment, Cage: onPath}
+		// cage attach opens a new terminal of the default environment in
+		// the terminal it runs in. Not offered for a local VM: cage attach
+		// --config <its profile> would read the per-computer settings
+		// (local-terminal.json) beside that profile, not the ones the
+		// desktop saves, so the copied command would not follow them.
+		if view.Environment == defaultLocalVMID {
+			view.Commands.Attach = cage + " attach"
+		}
 	}
 	return view
 }

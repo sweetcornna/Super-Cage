@@ -118,6 +118,29 @@ func TestEntryReadsTheSettingsTheDesktopWrites(t *testing.T) {
 	}
 }
 
+// The page's cage attach row opens the default environment and follows the
+// same per-computer settings: run as copied, cage attach reads them beside
+// ~/.claude-cage/config.json, the default profile the desktop writes to.
+func TestEntryAttachRowFollowsTheDesktopSettings(t *testing.T) {
+	f := newEntryFixture(t, false)
+	view := f.on()
+	if view.Commands == nil || view.Commands.Attach != "/opt/super-cage/cage attach" {
+		t.Fatalf("commands %+v", view.Commands)
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv(attach.ConfigEnv, "")
+	cfg, err := attach.ParseArgs(strings.Fields(view.Commands.Attach)[2:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(home, ".claude-cage")
+	desktop := &Server{appUpdateConfigPath: filepath.Join(profile, "config.json")}
+	if filepath.Dir(cfg.ConfigPath) != desktop.localTerminalDir() || entryComputerProfile(filepath.Dir(cfg.ConfigPath)) != profile || cfg.Target.Scope != "local" {
+		t.Fatalf("cage attach reads %s", cfg.ConfigPath)
+	}
+}
+
 // Saving "允许环境写入剪贴板" off on the desktop's page stops clipboard writes
 // in the next ssh terminal, though the owner is typing in it.
 func TestEntryClipboardFollowsTheDesktopSetting(t *testing.T) {

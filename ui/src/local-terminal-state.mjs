@@ -31,12 +31,12 @@ export const SWITCHES = Object.freeze([
   {
     key: "image_upload",
     title: "上传拖入的图片",
-    help: "把图片拖入本机终端，或粘贴的内容只有图片文件的完整路径时，会上传到环境，并粘贴环境中的路径。只处理 PNG、JPEG、WebP 和 GIF 图片；其他文件和输入的文字原样发送。",
+    help: "把图片拖入本机终端应用的窗口，或粘贴的内容只有图片文件的完整路径时，会上传到环境，并粘贴环境中的路径。只处理 PNG、JPEG、WebP 和 GIF 图片；其他文件和输入的文字原样发送。从你自己的终端 ssh 连进来时不上传，按文字粘贴。",
   },
   {
     key: "clipboard_write",
     title: "允许环境写入剪贴板",
-    help: "环境中的程序（例如 neovim、tmux）复制的内容会写入这台电脑的剪贴板，与网页终端一致。环境始终无法读取这台电脑的剪贴板。",
+    help: "环境中的程序（例如 neovim、tmux）复制的内容会写入这台电脑的剪贴板，与网页终端一致；从你自己的终端 ssh 连进来时也一样。环境始终无法读取这台电脑的剪贴板。",
   },
 ]);
 
@@ -77,9 +77,7 @@ export function chooserOptions(apps, selected = BUILT_IN) {
     name: app.name,
     group,
     selectable: group === "ready",
-    note: group === "ready"
-      ? (app.automation ? "第一次打开时，macOS 会询问是否允许 Super Cage 控制 " + app.name : "")
-      : group === "waiting" ? (app.note || "稍后的版本提供") : "",
+    note: group === "waiting" ? (app.note || "稍后的版本提供") : "",
     chip: group === "missing" ? "未安装" : group === "waiting" ? "稍后提供" : "",
     checked: app.id === selected,
   });
@@ -89,6 +87,14 @@ export function chooserOptions(apps, selected = BUILT_IN) {
     ...waiting.map(app => option(app, "waiting")),
     ...missing.map(app => option(app, "missing")),
   ];
+}
+
+// automationNote says once, under the chooser, which of the applications
+// found here macOS asks about before Super Cage may open a window in it.
+export function automationNote(apps) {
+  const names = (Array.isArray(apps) ? apps : []).filter(app => app.installed && app.hosts && app.automation).sort(byName).map(app => app.name);
+  if (!names.length) return "";
+  return "第一次用 " + names.join("、") + " 打开时，macOS 会询问是否允许 Super Cage 控制它。";
 }
 
 // missingChoice names the saved application when it is no longer installed,
@@ -190,7 +196,7 @@ export function copyCommand(target) {
 
 export function launchFailure(name, reason) {
   const why = String(reason || "未知原因").trim().replace(/[。.]+$/, "");
-  return "没能打开 " + name + "：" + why + "。可在设置 → 本机终端应用里换一个。";
+  return "没能打开 " + name + "：" + why + "。可在设置 → 本机终端里换一个。";
 }
 
 // automationNotice is the dialog before the first launch of an application

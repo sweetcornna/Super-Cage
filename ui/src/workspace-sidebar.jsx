@@ -162,7 +162,7 @@ export function WorkspaceSidebar({
           {getClientContext().virtual_machines && <button className="sidebar-link" aria-haspopup="dialog" onClick={() => setShowVirtualMachines(true)}><Monitor size={17} />虚拟机</button>}
           {ssh && <button className="sidebar-link ssh-navigation" onClick={ssh.open} aria-label="SSH 主机"><Server size={17} />SSH</button>}
           {/* 本机终端 manages this computer's ssh access, so only a window on this computer shows it. */}
-          {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("local-entry")}><SquareTerminal size={17} />本机终端</button>}
+          {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("local-terminal")}><SquareTerminal size={17} />本机终端</button>}
         </div>
         <div className="sidebar-nav-group">
           <button className={`sidebar-link ${claudeAccountsOpen ? "selected" : ""}`} onClick={onClaudeAccounts}

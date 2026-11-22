@@ -1,0 +1,10 @@
+/* Settings → 本机终端: two parts, each a group under the page title. The
+   parts' own rules are in local-terminal-settings.css and local-entry.css. */
+.settings-subpage .local-terminal-page .local-terminal-automation {
+  margin: 12px 0 0;
+}
+/* Herdr's row until its filter exists: named, with 稍后提供, nothing to copy. */
+.settings-subpage .local-entry-commands li[data-later] strong {
+  color: var(--muted);
+  font-weight: 500;
+}

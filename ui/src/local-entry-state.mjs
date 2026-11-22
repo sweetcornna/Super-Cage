@@ -42,8 +42,9 @@ export function connectionSummary(view) {
 
 // The command rows. "ssh cage-x" only works once ~/.ssh/config includes
 // Super Cage's file; until then the first row is the cage ssh form, which
-// needs no Include. Herdr's row waits for its filter (view.herdr) and the
-// attach row for cage attach (commands.attach).
+// needs no Include. The attach row shows when the server offers cage attach
+// for this environment (commands.attach); Herdr's row says 稍后提供 (later)
+// until its filter exists (view.herdr).
 export function commandRows(view) {
   const commands = view?.commands;
   if (!view?.enabled || !commands) return [];
@@ -53,11 +54,13 @@ export function commandRows(view) {
       ? { id: "ssh", command: commands.ssh, caption: "任何终端：直接登录" }
       : { id: "ssh", command: commands.cage_ssh, caption: "任何终端：直接登录（不改动 ~/.ssh/config）" },
   ];
+  if (commands.attach) {
+    rows.push({ id: "attach", command: commands.attach, caption: "在任何终端应用里打开这个环境的新终端（会出现在 Super Cage 的终端列表里）" });
+  }
   if (view.herdr && view.host_alias) {
     rows.push({ id: "herdr", command: "hc machine add " + view.host_alias, caption: view.herdr_installed === false ? "安装 Herdr 后使用" : "Herdr：添加为一台机器，之后在 Herdr 里新建终端即可" });
-  }
-  if (commands.attach) {
-    rows.push({ id: "attach", command: commands.attach, caption: "在任何终端应用里打开这个环境的终端（会出现在 Super Cage 的终端列表里）" });
+  } else {
+    rows.push({ id: "herdr", later: true, name: "Herdr", caption: "把这个环境添加为 Herdr 里的一台机器" });
   }
   return rows;
 }
@@ -94,14 +97,11 @@ export function includeDialog(preview) {
   };
 }
 
-// What the page says about filtering (design 5.7), exactly as the server
-// does it: sessions with a terminal are filtered once the filter exists
-// (pty_sessions "filtered") and refused until then.
-export function unfilteredNote(ptySessions) {
-  const terminal = ptySessions === "filtered"
-    ? "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。"
-    : "带终端的会话（ssh、ssh -t）会被拒绝：这一版还没有终端输出过滤。";
-  return terminal + "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。";
+// What the page says about filtering (design 5.7), exactly as cage entry's
+// help does (entryTerminalNote in entry_cli.go).
+export function unfilteredNote() {
+  return "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤，剪贴板写入按这台电脑的“允许环境写入剪贴板”；拖入的图片不上传，按文字粘贴。" +
+    "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。";
 }
 
 // What the page says when a revocation did not reach a running environment

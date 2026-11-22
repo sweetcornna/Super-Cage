@@ -58,7 +58,7 @@ test("connections split by kind only once Herdr exists", () => {
 });
 
 test("the first command works with and without the Include line", () => {
-  assert.deepEqual(commandRows(on).map((row) => row.command), ["ssh cage-default"]);
+  assert.deepEqual(commandRows(on).filter((row) => !row.later).map((row) => row.command), ["ssh cage-default"]);
   const without = commandRows({ ...on, include: { present: false } });
   assert.equal(without[0].command, "cage ssh default");
   assert.match(without[0].caption, /不改动/);
@@ -66,9 +66,12 @@ test("the first command works with and without the Include line", () => {
 });
 
 test("Herdr and attach rows wait for their capabilities", () => {
-  assert.equal(commandRows(on).some((row) => row.id === "herdr" || row.id === "attach"), false);
-  const later = commandRows({ ...on, herdr: true, commands: { ...on.commands, attach: "cage attach default" } });
-  assert.deepEqual(later.map((row) => row.command), ["ssh cage-default", "hc machine add cage-default", "cage attach default"]);
+  assert.equal(commandRows(on).some((row) => row.id === "attach"), false);
+  // Herdr is named, as 稍后提供, until the server offers it.
+  assert.deepEqual(commandRows(on).filter((row) => row.later).map((row) => [row.id, row.name, row.command]), [["herdr", "Herdr", undefined]]);
+  const later = commandRows({ ...on, herdr: true, commands: { ...on.commands, attach: "cage attach" } });
+  assert.deepEqual(later.map((row) => row.command), ["ssh cage-default", "cage attach", "hc machine add cage-default"]);
+  assert.equal(later.some((row) => row.later), false);
 });
 
 test("include row and dialog", () => {
@@ -95,12 +98,9 @@ test("include row and dialog", () => {
 });
 
 test("the page says exactly what is filtered", () => {
-  for (const pty of ["filtered", "refused", undefined]) {
-    const note = unfilteredNote(pty);
-    for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s"]) assert.ok(note.includes(word), word);
-    assert.equal(note.includes("经过和窗口里一样的过滤"), pty === "filtered", String(pty));
-    assert.equal(note.includes("会被拒绝"), pty !== "filtered", String(pty));
-  }
+  const note = unfilteredNote();
+  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s", "和 cage attach 一样的过滤", "拖入的图片不上传"]) assert.ok(note.includes(word), word);
+  assert.equal(note.includes("会被拒绝"), false);
 });
 
 test("a revocation that did not reach another environment says so", () => {

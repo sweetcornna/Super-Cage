@@ -32,7 +32,7 @@ func TestPinnedKeyComparesTypeAndBlob(t *testing.T) {
 	for line, same := range map[string]bool{
 		pinned + " comment": true,
 		keyLine("ssh-ed25519", "another key of the same length!!"): false,
-		keyLine("ssh-rsa", "0123456789abcdef0123456789abcdef"):  false,
+		keyLine("ssh-rsa", "0123456789abcdef0123456789abcdef"):     false,
 	} {
 		offered, offeredBlob, ok := parseKey(strings.Fields(line))
 		if !ok || (offered == kind && string(offeredBlob) == string(blob)) != same {
