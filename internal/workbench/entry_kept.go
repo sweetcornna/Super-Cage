@@ -62,6 +62,20 @@ func (m *terminalManager) keep(id string) error {
 	return nil
 }
 
+// unkeepAll forgets every kept ssh terminal and returns them.
+func (m *terminalManager) unkeepAll() []*terminalSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var sessions []*terminalSession
+	for id := range m.kept {
+		if session := m.sessions[id]; session != nil {
+			sessions = append(sessions, session)
+		}
+	}
+	m.kept = nil
+	return sessions
+}
+
 // keptCount is how many ssh terminals are kept.
 func (m *terminalManager) keptCount() int {
 	m.mu.Lock()
@@ -82,8 +96,12 @@ func (m *terminalManager) keptSessions() []*terminalSession {
 	return sessions
 }
 
-// entryKeep keeps an ssh terminal and starts the idle check.
+// entryKeep keeps an ssh terminal and starts the idle check; nothing is
+// kept while the entry is off.
 func (s *Server) entryKeep(session *terminalSession) error {
+	if !s.entryEnabled() {
+		return errEntryOff
+	}
 	if err := s.terminals.keep(session.id); err != nil {
 		return err
 	}
@@ -169,6 +187,20 @@ func entryKeepRank(sessions []*terminalSession) []*terminalSession {
 		out[i] = item.session
 	}
 	return out
+}
+
+// entryUnkeepAll is turning the entry off for kept terminals (R3-5): they
+// go on as ordinary Super Cage terminals, without 已保留 and without the
+// idle check, so an entry that is off runs no timer. One whose connection
+// the off is cutting stays too (released). A keep that races with it finds
+// the entry off (entryKeep).
+func (s *Server) entryUnkeepAll() {
+	for _, session := range s.terminals.unkeepAll() {
+		session.mu.Lock()
+		session.kept, session.released = false, true
+		session.mu.Unlock()
+	}
+	s.entryUnkept()
 }
 
 // entryUnkept stops the idle check once nothing is kept.

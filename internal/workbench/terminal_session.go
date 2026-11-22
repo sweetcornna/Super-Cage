@@ -58,10 +58,12 @@ type terminalSession struct {
 	// device's name and id; kept is the owner's "保留", which keeps it past
 	// the connection (a lock sets it too). sshViewers counts the ssh
 	// clients showing it. originPID names the guest file with the shell's
-	// process id of an interactive ssh terminal (entryKeptBusy).
+	// process id of an interactive ssh terminal (entryKeptBusy). released
+	// is a kept one that turning the entry off made ordinary: no hang-up
+	// ends it.
 	origin, originDevice, originID string
 	originPID                      string
-	kept                           bool
+	kept, released                 bool
 	sshViewers                     int
 	// lastInput is when input was last admitted, from any viewer.
 	lastInput time.Time

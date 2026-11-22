@@ -1160,7 +1160,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			entryExitStatus(channel, 255)
 			_ = channel.Close()
 			session.mu.Lock()
-			kept := session.kept
+			kept := session.kept || session.released
 			session.mu.Unlock()
 			if !kept {
 				s.terminals.remove(session.id)
@@ -1231,7 +1231,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		_ = s.entryKeep(session)
 	}
 	session.mu.Lock()
-	kept := session.kept
+	kept := session.kept || session.released
 	session.mu.Unlock()
 	cols, _ := view.size()
 	// The exit reset on every way out; nothing from the guest follows it.
