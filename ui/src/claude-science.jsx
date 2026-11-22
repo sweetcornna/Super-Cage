@@ -1,10 +1,12 @@
-import React, { useEffect, useRef, useState } from "react";
-import { Download, ExternalLink, Play, Power, RefreshCw, RotateCcw } from "lucide-react";
-import { api } from "./api";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Download, ExternalLink, LogIn, Play, Power, RefreshCw, RotateCcw } from "lucide-react";
+import { api, native, nativeAvailable } from "./api";
+import { getClientContext } from "./client-context.mjs";
+import { reportDiagnostic } from "./diagnostics.mjs";
 import { Drawing } from "./drawings";
 import { SafetyMessage } from "./safety-message";
 import { useWindowVisibility } from "./window-visibility";
-import { scienceView } from "./claude-science-state.mjs";
+import { hostFrameStatus, hostRenderGuide, hostRenderHere, hostRenderView, scienceView } from "./claude-science-state.mjs";
 import "./claude-science.css";
 
 // Claude Science (internal/workbench/claude_science.go): install, start, stop
@@ -17,6 +19,209 @@ const confirmations = {
 };
 const icons = { install: Download, start: Play, open: ExternalLink, stop: Power, update: RefreshCw, refresh: RotateCcw };
 
+// Host rendering (science_host.go, desktop/windows/ScienceFrame.cs). The
+// window's bridge answers scienceFrame with op (contract 2):
+//   capabilities -> {contract}: an older window has no such op (F8).
+//   prepare -> {backstop, proxy}: drops any earlier identity; backstop says
+//              the WebView runs with the network switches the frame needs,
+//              proxy is "verified" when the window proved in this WebView
+//              that the proxy switch is in force (F5).
+//   attach {url} -> true: the guest's identity for the frame's own targets
+//              (its workers and frames) and frame navigation allowed to
+//              that session's origin only. The workbench keeps the host's.
+//   detach -> true: no identity for new frames; the window stops watching
+//              once the frame's targets are gone.
+//   restart -> true: the WebView again, with the switches.
+const frameMessages = {
+  restart: "本机渲染已开启，需要重新载入窗口一次才能生效。",
+  reload: "窗口打开时本机渲染还没有就绪，重新载入窗口后生效。",
+  timeout: "本机渲染页面没有在 20 秒内打开，已改用隔离浏览器。",
+  dropped: "与本机渲染页面的连接已结束，已改用隔离浏览器。",
+};
+const frameFixes = { restart: "重新载入窗口", reload: "重新载入窗口", browser: "重试本机渲染", retry: "重试本机渲染" };
+// No allow-modals: alert() does nothing and confirm()/prompt() answer
+// false/null in the frame, since the window shows no dialogs for it.
+const frameSandbox = "allow-scripts allow-same-origin allow-forms";
+const hostMeasure = () => ({
+  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "",
+  offset: new Date().getTimezoneOffset(),
+  languages: [...(navigator.languages || [navigator.language])].filter(Boolean).slice(0, 8),
+});
+// Why the frame gave way, kept across visits to the pane until the switch
+// changes or the window reloads, so a refused probe is not retried on every
+// visit.
+const remembered = { fallback: null, release: Promise.resolve(), contract: null };
+// F8: the bridge's frame contract, asked once per document and only where
+// the switch could show.
+// Quiet: a window without the op is the normal case on integration builds,
+// not an error worth a diagnostic.
+const bridgeContract = () => remembered.contract ??= native("scienceFrame", { op: "capabilities" }, { quiet: true })
+  .then((reply) => Number(reply?.contract) || 0, () => 0);
+// One automatic reload when the window's document predates the front (its
+// frame-src cannot change); a second refusal asks instead.
+const reloadKey = "cage-science-frame-reload";
+const reloadedRecently = () => {
+  try { return Date.now() - Number(sessionStorage.getItem(reloadKey) || 0) < 120000; } catch { return true; }
+};
+class FrameFallback extends Error {
+  constructor(message, fix) { super(message); this.fix = fix; }
+}
+
+function HostRenderSwitch({ toggle, pending, onChange }) {
+  const windows = getClientContext().client_platform === "windows" && nativeAvailable();
+  return (
+    <label className="toggle-row science-host-render">
+      <span>
+        <strong>{toggle.label}</strong>
+        <small>
+          {toggle.explanation}{" "}
+          <a href={hostRenderGuide} target="_blank" rel="noopener noreferrer" onClick={(event) => {
+            if (!windows) return;
+            event.preventDefault();
+            void native("appReference", { kind: "claude-science-host-render" }).catch(() => {});
+          }}>了解详情</a>
+        </small>
+      </span>
+      <input type="checkbox" role="switch" checked={toggle.checked} disabled={toggle.disabled || pending}
+        onChange={(event) => void onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+// ScienceFrame is mounted only while hostRenderView says so; unmounting drops
+// the window's overrides and the front's session.
+function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
+  const [url, setURL] = useState("");
+  const [phase, setPhase] = useState("preparing");
+  const [render, setRender] = useState(data.host_render);
+  const disposed = useRef(false);
+  const phaseRef = useRef("preparing");
+  const retried = useRef(false);
+  const seenSignIn = useRef(data.host_render?.signin?.at || "");
+  const auditHits = useRef(data.host_render?.audit_hits || 0);
+  const fallback = useRef(onFallback);
+  fallback.current = onFallback;
+  const signIn = useRef(onSignIn);
+  signIn.current = onSignIn;
+  const move = (next) => { phaseRef.current = next; setPhase(next); };
+  const start = async () => {
+    move("preparing");
+    setURL("");
+    try {
+      // A release from the previous frame must not land after this ticket.
+      await remembered.release;
+      if (disposed.current) return;
+      const prepared = await native("scienceFrame", { op: "prepare" });
+      if (disposed.current) return;
+      if (!prepared?.backstop) throw new FrameFallback(frameMessages.restart, "restart");
+      // The server refuses a ticket without the window's proxy proof.
+      const ticket = await api("/claude-science/ticket", { host: hostMeasure(), proxy: String(prepared.proxy || ""), contract });
+      if (disposed.current) return;
+      await native("scienceFrame", { op: "attach", url: ticket.url });
+      if (disposed.current) { void native("scienceFrame", { op: "detach" }).catch(() => {}); return; }
+      move("loading");
+      setURL(ticket.url);
+    } catch (error) {
+      if (!disposed.current && error.status !== 423) fallback.current(error.message, error.fix || "retry");
+    }
+  };
+  useEffect(() => {
+    disposed.current = false;
+    // The window ended the frame (a worker could not take the identity).
+    const ended = (event) => fallback.current(event.detail?.error || "本机渲染已停止。", "retry");
+    window.addEventListener("cage-science-frame", ended);
+    void start();
+    return () => {
+      window.removeEventListener("cage-science-frame", ended);
+      disposed.current = true;
+    };
+  }, []);
+  // Round-2 N1: the front ends the session first (release returns once its
+  // requests and sockets are gone), then the window is told to detach. A
+  // layout cleanup runs before React removes the frame element, so the
+  // release is on its way before the frame's targets start to go.
+  useLayoutEffect(() => () => {
+    remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
+    void remembered.release.then(() => native("scienceFrame", { op: "detach" })).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (!url) return;
+    const origin = new URL(url).origin;
+    const blocked = (event) => {
+      if (event.effectiveDirective !== "frame-src" || !event.blockedURI.startsWith(origin)) return;
+      if (!reloadedRecently()) {
+        try { sessionStorage.setItem(reloadKey, String(Date.now())); } catch { /* storage may be off */ }
+        location.reload();
+        return;
+      }
+      fallback.current(frameMessages.reload, "reload");
+    };
+    document.addEventListener("securitypolicyviolation", blocked);
+    let timer;
+    let stopped = false;
+    let baseline = false;
+    const opened = Date.now();
+    const poll = async () => {
+      try {
+        const state = await api("/claude-science/host-render");
+        if (stopped) return;
+        setRender(state);
+        // The audit's counter goes to the diagnostics too (category only).
+        if ((state.audit_hits || 0) > auditHits.current) {
+          auditHits.current = state.audit_hits;
+          reportDiagnostic("claude-science", `本机渲染审计：页面已发出 ${state.audit_hits} 次带有本机时区或语言的请求（最近一次：${state.audit_hit || "未知"}），已放行`);
+        }
+        const event = state.signin;
+        // The first answer for this document only sets the baseline: its
+        // page has not loaded far enough to ask for a sign-in.
+        if (!baseline) { baseline = true; seenSignIn.current = event?.at || seenSignIn.current; }
+        else if (event?.at && event.at !== seenSignIn.current) {
+          seenSignIn.current = event.at;
+          signIn.current(event);
+        }
+        if (state.refused) { fallback.current(state.refused, "browser"); return; }
+        if (phaseRef.current === "loading" && state.session) {
+          move("ready");
+          try { sessionStorage.removeItem(reloadKey); } catch { /* storage may be off */ }
+        } else if (phaseRef.current === "ready" && !state.session) {
+          // The front restarted or dropped the session: one new ticket.
+          if (retried.current) { fallback.current(frameMessages.dropped, "browser"); return; }
+          retried.current = true;
+          void start();
+          return;
+        }
+      } catch (error) {
+        if (stopped || error.status === 423) return;
+      }
+      if (phaseRef.current === "loading" && Date.now() - opened > 20000) { fallback.current(frameMessages.timeout, "browser"); return; }
+      timer = setTimeout(poll, phaseRef.current === "loading" ? 1000 : 2000);
+    };
+    timer = setTimeout(poll, 500);
+    return () => {
+      stopped = true;
+      clearTimeout(timer);
+      document.removeEventListener("securitypolicyviolation", blocked);
+    };
+  }, [url]);
+  const status = hostFrameStatus({ ...data, host_render: render }, phase);
+  return (
+    <>
+      <div className="science-frame-bar" role="toolbar" aria-label="Claude Science 本机渲染">
+        <span className={"status-dot " + status.tone} aria-hidden="true" />
+        {status.chips.map((chip) => <span key={chip.text} className={"chip" + (chip.tone ? " " + chip.tone : "")}>{chip.text}</span>)}
+        <span className="science-frame-status" role="status">{status.text}</span>
+        {toolbar}
+      </div>
+      <div className="science-frame-body">
+        {url ? (
+          <iframe key={url} src={url} title="Claude Science" sandbox={frameSandbox} allow="clipboard-write" referrerPolicy="no-referrer"
+            data-phase={phase} data-science-frame="" />
+        ) : <div className="science-frame-wait"><span className="live-dot" aria-hidden="true" />{status.text}</div>}
+      </div>
+    </>
+  );
+}
+
 export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
   const windowVisible = useWindowVisibility();
   const running = Boolean(status.vm_running);
@@ -25,6 +230,20 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
   const [actionError, setActionError] = useState("");
   const [pending, setPending] = useState("");
   const [jobID, setJobID] = useState("");
+  const [fallback, setFallbackState] = useState(() => remembered.fallback);
+  const setFallback = (value) => { remembered.fallback = value; setFallbackState(value); };
+  const [hostPending, setHostPending] = useState(false);
+  const [hostNotice, setHostNotice] = useState("");
+  const [signInWaiting, setSignInWaiting] = useState(null);
+  const [contract, setContract] = useState(null);
+  const lastSignIn = useRef(0);
+  const probeHere = Boolean(data?.host_render?.available) && hostRenderHere(getClientContext(), nativeAvailable());
+  useEffect(() => {
+    if (!probeHere) return;
+    let live = true;
+    void bridgeContract().then((value) => { if (live) setContract(value); });
+    return () => { live = false; };
+  }, [probeHere]);
   const mounted = useRef(true);
   const request = useRef(null);
   const revision = useRef(0);
@@ -96,11 +315,11 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
       setPending("");
     }
   };
-  const open = async () => {
+  const open = async (fresh = false) => {
     setPending("open");
     setActionError("");
     try {
-      const tab = await api("/claude-science/open", {});
+      const tab = await api("/claude-science/open", fresh ? { fresh: true } : {});
       onOpen({ id: tab.id, kind: tab.kind, title: tab.title });
     } catch (e) {
       if (mounted.current) setActionError(e.message);
@@ -115,9 +334,58 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
     if (ask && !await onConfirm(ask)) return;
     await submit(item.action);
   };
+  const setHostRender = async (enabled) => {
+    setHostPending(true);
+    setActionError("");
+    try {
+      await api("/claude-science/host-render", enabled ? { enabled, contract } : { enabled });
+      revision.current++;
+      request.current = null;
+      await refresh();
+      // Only after the new state is on screen: the frame must not start
+      // again from the old one.
+      if (mounted.current) {
+        setFallback(null);
+        setHostNotice("");
+      }
+    } catch (e) {
+      if (mounted.current) setActionError(e.message);
+    } finally {
+      if (mounted.current) setHostPending(false);
+    }
+  };
+  const frameFallback = (reason, fix) => {
+    if (!mounted.current) return;
+    setFallback({ reason, fix });
+    // The probe's refusal says the isolated browser opens: it does.
+    if (fix === "browser") void open();
+  };
+  const showSignIn = (event) => {
+    setSignInWaiting(null);
+    if (event.tab) onOpen({ id: event.tab.id, kind: event.tab.kind, title: event.tab.title });
+    else if (event.error) setHostNotice(event.error);
+  };
+  // The guest page can ask for a sign-in at any time: the window's focus
+  // moves to it at most once per user action (a click or key in the frame
+  // activates the window too); otherwise the pane asks.
+  const frameSignIn = (event) => {
+    if (navigator.userActivation?.isActive && Date.now() - lastSignIn.current > 5000) {
+      lastSignIn.current = Date.now();
+      showSignIn(event);
+      return;
+    }
+    if (mounted.current) setSignInWaiting(event);
+  };
+  const fixFrame = () => {
+    if (fallback?.fix === "restart") void native("scienceFrame", { op: "restart" }).catch((e) => setActionError(e.message));
+    else if (fallback?.fix === "reload") location.reload();
+    else setFallback(null);
+  };
   // The details dialog reads status.job; offer it only when a job is on record.
   const details = status.job?.log ? onDetails : undefined;
   const view = scienceView({ data, error: readError, actionError, job: status.job, running, ready: Boolean(status.ready), pending });
+  const scienceJob = Boolean(data?.operation) || (status.job?.running && String(status.job.kind || "").startsWith("claude-science")) || ["install", "update", "start", "stop"].includes(pending);
+  const host = hostRenderView({ data, client: getClientContext(), bridge: nativeAvailable(), contract, running, locked: readError?.status === 423, busy: scienceJob, fallback: fallback?.reason || "" });
   const button = (item, className) => {
     const Icon = icons[item.action];
     return (
@@ -127,8 +395,48 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
       </button>
     );
   };
+  const hostSwitch = host.toggle && <HostRenderSwitch toggle={host.toggle} pending={hostPending} onChange={setHostRender} />;
+  if (host.frame) {
+    const tool = (label, Icon, onClick, disabled = false) => (
+      <button className="quiet-button" disabled={disabled || Boolean(pending)} onClick={onClick}>
+        <Icon size={15} aria-hidden="true" />{label}
+      </button>
+    );
+    return (
+      <section className="claude-science" data-state="frame">
+        {(actionError || hostNotice) && (
+          <div className="science-notice" data-tone="error" role="alert"><span><SafetyMessage message={actionError || hostNotice} /></span></div>
+        )}
+        {signInWaiting && (
+          <div className="science-notice" data-tone="warn" role="status">
+            <span>Claude Science 页面请求登录，登录在隔离浏览器中完成。</span>
+            <button className="quiet-button" onClick={() => showSignIn(signInWaiting)}>去登录</button>
+          </div>
+        )}
+        <ScienceFrame key={getClientContext().connection_id} data={data} contract={contract} onFallback={frameFallback} onSignIn={frameSignIn} toolbar={<>
+          {data.signed_in !== true && tool("登录", LogIn, () => void open(true))}
+          {tool("在隔离浏览器中打开", ExternalLink, () => void open())}
+          {tool("停止", Power, () => void act({ action: "stop", confirm: true }))}
+          <label className="science-frame-switch">
+            <input type="checkbox" role="switch" checked disabled={hostPending} aria-label={host.toggle.label}
+              onChange={(event) => void setHostRender(event.target.checked)} />
+            <span>{host.toggle.label}</span>
+          </label>
+        </>} />
+      </section>
+    );
+  }
   return (
     <section className="claude-science" data-state={view.state} aria-busy={view.state === "loading" || undefined}>
+      {host.fallback && (
+        <div className="science-notice" data-tone="warn" role="status">
+          <span><strong>本机渲染</strong><SafetyMessage message={host.fallback} /></span>
+          {frameFixes[fallback?.fix] && <button className="quiet-button" onClick={fixFrame}>{frameFixes[fallback.fix]}</button>}
+        </div>
+      )}
+      {host.notice && !host.fallback && (
+        <div className="science-notice" data-tone="warn" role="status"><span><SafetyMessage message={host.notice} /></span></div>
+      )}
       {view.notices.map((notice, index) => (
         <div key={index} className="science-notice" data-tone={notice.tone} role={notice.tone === "error" ? "alert" : "status"}>
           <span>
@@ -177,6 +485,7 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
         )}
         {view.hint && <p className="science-hint">{view.hint}</p>}
       </div>
+      {hostSwitch}
     </section>
   );
 }

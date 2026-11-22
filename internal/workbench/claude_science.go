@@ -106,6 +106,8 @@ type claudeScienceState struct {
 	DiskFreeMB        int64  `json:"disk_free_mb,omitempty"`
 	DiskRequiredMB    int64  `json:"disk_required_mb,omitempty"`
 	Operation         string `json:"operation,omitempty"`
+	// Phase 2 (science_host.go); absent on hosts and clients that cannot use it.
+	HostRender *scienceHostRenderState `json:"host_render,omitempty"`
 }
 
 const (
@@ -329,6 +331,7 @@ func (s *Server) claudeScienceOperation() string {
 func (s *Server) claudeScienceStatus(w http.ResponseWriter, r *http.Request) {
 	// A local guest has the host's architecture, so the guest is not asked.
 	if unsupported, refused := s.claudeScienceUnsupported(); refused {
+		unsupported.HostRender = s.scienceHostRender(r)
 		jsonReply(w, unsupported)
 		return
 	}
@@ -350,6 +353,7 @@ func (s *Server) claudeScienceStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		state.Operation = s.claudeScienceOperation()
+		state.HostRender = s.scienceHostRender(r)
 		jsonReply(w, state)
 		return
 	}
@@ -369,6 +373,7 @@ func (s *Server) claudeScienceStatus(w http.ResponseWriter, r *http.Request) {
 	state := claudeScienceFromGuest(guest, cage.ClaudeSciencePin().Version)
 	s.scienceLast.set(&state)
 	state.Operation = s.claudeScienceOperation()
+	state.HostRender = s.scienceHostRender(r)
 	jsonReply(w, state)
 }
 
@@ -401,6 +406,15 @@ func (l *claudeScienceLast) get() (claudeScienceState, bool) {
 func (s *Server) claudeScienceAction(w http.ResponseWriter, r *http.Request) {
 	action := r.PathValue("action")
 	switch action {
+	case "host-render":
+		s.scienceHostRenderAction(w, r)
+		return
+	case "ticket":
+		s.scienceTicketAction(w, r)
+		return
+	case "release":
+		s.scienceReleaseAction(w, r)
+		return
 	case "install", "update", "start", "stop", "open":
 	default:
 		http.NotFound(w, r)
@@ -415,6 +429,10 @@ func (s *Server) claudeScienceAction(w http.ResponseWriter, r *http.Request) {
 	if input.Fresh && action != "open" {
 		http.Error(w, "请求格式无效", http.StatusBadRequest)
 		return
+	}
+	if action == "stop" || action == "update" {
+		// The daemon goes away: so do the frame's session and credential.
+		s.resetScienceFront()
 	}
 	if state, refused := s.claudeScienceUnsupported(); refused {
 		http.Error(w, state.UnsupportedReason, http.StatusConflict)

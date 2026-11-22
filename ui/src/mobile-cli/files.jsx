@@ -8,8 +8,9 @@ import { accessDenied } from "./transport.mjs";
 import { haptic, shareFile } from "./device-navigation.mjs";
 import { MessageBody, TranscriptContext } from "./transcript";
 import { deviceCommand } from "./device-navigation.mjs";
+import { openExternal } from "./web-shell.mjs";
 
-const previewContext = { sessionID: "", openWeb: (url) => { if (!deviceCommand("open-url", { url })) window.open(url, "_blank", "noopener"); } };
+const previewContext = { sessionID: "", openWeb: (url) => { if (!deviceCommand("open-url", { url })) openExternal(url); } };
 
 const imageTypes = /\.(png|jpe?g|gif|webp|heic|heif|bmp|svg|avif)$/i;
 const codeTypes = /\.(js|mjs|cjs|jsx|ts|tsx|go|py|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|rb|php|sh|bash|zsh|fish|ps1|sql|toml|ya?ml|json|xml|html|css|scss|lua|r|jl|ipynb|lock|ini|conf|env)$/i;

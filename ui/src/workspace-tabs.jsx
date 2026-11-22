@@ -166,7 +166,8 @@ export function WorkspaceTabs({
     if (!current) return;
     if (!event.buttons) return finishDrag(false);
     let dx = event.clientX - current.startX;
-    if (!current.moved && Math.hypot(dx, event.clientY - current.startY) < 5) return;
+    // A fingertip wanders a few pixels during a tap: only a longer move is a drag.
+    if (!current.moved && Math.hypot(dx, event.clientY - current.startY) < (event.pointerType === "touch" ? 10 : 5)) return;
     current.moved = true;
     const dropSide = tabs.find(tab => tab.id === current.id)?.historySession ? null : splitDrag.hover(current.id, event.clientX, event.clientY);
     if (!horizontal || dropSide) {

@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/webentry"
 )
 
 // The workbench UI is a static build embedded in the executable and reached
@@ -121,10 +123,48 @@ type staticHandler struct {
 	files  fs.FS
 	mu     sync.Mutex
 	assets map[string]*staticAsset
+	// phone, when set, picks the document at "/": true serves the phone UI
+	// (mobile.html) there instead of the desktop workbench (index.html).
+	phone func(*http.Request) bool
+	// offered reports whether this server can serve the phone UI at "/" at all;
+	// its desktop document then carries phoneEntryMeta.
+	offered        func() bool
+	offeredDesktop *staticAsset
 }
+
+// phoneEntryMeta marks the desktop document of a server that can also serve the
+// phone UI at "/" (read by ui/src/entry-layout.mjs).
+const phoneEntryMeta = `<meta name="cage-phone-entry" content="available">`
 
 func newStaticHandler(files fs.FS) http.Handler {
 	return &staticHandler{files: files, assets: map[string]*staticAsset{}}
+}
+
+// newEntryStaticHandler serves files like newStaticHandler and answers "/" with
+// the document phone chooses (see internal/webentry). Both documents live at the
+// same URL, so deep links, reloads and Back are the same in either layout.
+func newEntryStaticHandler(files fs.FS, phone func(*http.Request) bool, offered func() bool) http.Handler {
+	return &staticHandler{files: files, assets: map[string]*staticAsset{}, phone: phone, offered: offered}
+}
+
+// offeredDesktopAsset is index.html with phoneEntryMeta after <head>: its own
+// bytes, validator and (in-memory) compression, never index.html's companions.
+func (h *staticHandler) offeredDesktopAsset(plain *staticAsset) *staticAsset {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.offeredDesktop != nil {
+		return h.offeredDesktop
+	}
+	data := bytes.Replace(plain.identity.data, []byte("<head>"), []byte("<head>"+phoneEntryMeta), 1)
+	if bytes.Equal(data, plain.identity.data) {
+		return plain
+	}
+	h.offeredDesktop = &staticAsset{
+		name: "index.html (phone entry)", contentType: plain.contentType, cacheControl: plain.cacheControl,
+		identity: newStaticRepresentation(data),
+		varies:   staticCompressible[".html"] && len(data) >= staticMinCompressBytes,
+	}
+	return h.offeredDesktop
 }
 
 // companion reports whether name is a build-time compressed copy of another
@@ -319,13 +359,20 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimPrefix(path.Clean(p), "/")
+	root := name == "" && h.phone != nil
 	if name == "" {
 		name = "index.html"
+		if root && h.phone(r) {
+			name = "mobile.html"
+		}
 	}
 	asset := h.lookup(name)
 	if asset == nil {
 		http.NotFound(w, r)
 		return
+	}
+	if root && name == "index.html" && h.offered != nil && h.offered() {
+		asset = h.offeredDesktopAsset(asset)
 	}
 	representation, encoding := h.represent(asset, r)
 	header := w.Header()
@@ -334,6 +381,9 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("ETag", representation.etag)
 	if asset.varies {
 		header.Add("Vary", "Accept-Encoding")
+	}
+	if root {
+		header.Add("Vary", webentry.Vary)
 	}
 	if encoding != "" {
 		// ServeContent leaves Content-Length unset when Content-Encoding is.

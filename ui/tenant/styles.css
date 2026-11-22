@@ -1606,6 +1606,267 @@ button {
   }
 }
 
+/* ---- Phones and tablets: notch, keyboard, touch ---- */
+
+/* Safe-area insets in one place, so a test can stand in for a notch (ui/scripts/mobile-web-matrix.mjs). */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+}
+
+.page-head {
+  padding-top: var(--safe-top);
+  padding-right: max(24px, var(--safe-right));
+  padding-left: max(24px, var(--safe-left));
+  height: calc(64px + var(--safe-top));
+}
+
+.shell > .topbar {
+  padding-top: var(--safe-top);
+  padding-right: max(12px, var(--safe-right));
+  padding-left: max(16px, var(--safe-left));
+}
+
+@media (min-width: 641px) {
+  .shell > .topbar {
+    height: calc(52px + var(--safe-top));
+  }
+}
+
+/* The list and the other pages over the stage keep clear of the side notches (a phone on its side) and the home bar. */
+.shell > .stage > .overlay {
+  padding: 0 var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
+/* A framed workspace cannot see the insets, so its frame stays clear of the home bar and the side notches. */
+.shell > .stage > .frame-host {
+  right: var(--safe-right);
+  bottom: var(--safe-bottom);
+  left: var(--safe-left);
+}
+
+/* Touch screens: 16 px inputs (iOS zooms into smaller ones) and 44 px controls. */
+@media (pointer: coarse) {
+  .field input {
+    height: 44px;
+    font-size: 16px;
+  }
+
+  .icon-btn {
+    min-width: 44px;
+    height: 44px;
+  }
+}
+
+/* A phone-sized window with the workspace's phone UI: the workspace fills the visible area above the
+   keyboard, the notch and the home bar are kept clear, and the portal's bars step back. The phone UI's
+   side panel has the way back to the portal. */
+/* The full-screen workspace is the app: the page behind it never pulls to refresh or rubber-bands. */
+html:has(.shell[data-phone-ui="true"]),
+html:has(.shell[data-phone-ui="true"]) body {
+  overscroll-behavior: none;
+}
+
+@media (max-width: 719px), (max-height: 499px) {
+  .shell[data-phone-ui="true"] > .topbar {
+    display: none;
+  }
+
+  .shell[data-phone-ui="true"] > .stage {
+    position: fixed;
+    left: 0;
+    right: 0;
+    top: var(--vv-top, 0px);
+    height: var(--vv-height, 100dvh);
+    background: var(--paper);
+  }
+
+  .shell[data-phone-ui="true"] > .stage > .frame-host {
+    inset: calc(var(--safe-top) + var(--strip-height)) var(--safe-right) var(--safe-bottom) var(--safe-left);
+  }
+
+  .shell[data-phone-ui="true"] > .banner {
+    position: fixed;
+    z-index: 5;
+    top: calc(var(--vv-top, 0px) + var(--safe-top) + var(--strip-height));
+    left: var(--safe-left);
+    right: var(--safe-right);
+  }
+
+  /* The portal's strip: its own, above the frame (which cannot draw outside its box), with the workspace's
+     name; a tap brings the portal's bar back over the workspace. */
+  .shell[data-phone-ui="true"] > .portal-strip {
+    position: fixed;
+    z-index: 32;
+    top: calc(var(--vv-top, 0px) + var(--safe-top));
+    left: var(--safe-left);
+    right: var(--safe-right);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: var(--strip-height);
+    padding: 0 12px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: var(--chrome);
+    color: var(--muted);
+    font: 500 12px/1 var(--sans);
+    text-align: left;
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* The same colour under the notch, which takes no taps. */
+  .portal-strip::before {
+    content: "";
+    position: absolute;
+    left: calc(-1 * var(--safe-left));
+    right: calc(-1 * var(--safe-right));
+    bottom: 100%;
+    height: var(--safe-top);
+    background: var(--chrome);
+    pointer-events: none;
+  }
+
+  .portal-strip .mark {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    color: var(--ink);
+  }
+
+  .portal-strip-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+
+  .portal-strip-chevron {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    transform: rotate(90deg);
+    transition: transform 0.16s var(--ease);
+  }
+
+  .shell[data-portal-bar="open"] .portal-strip-chevron {
+    transform: rotate(-90deg);
+  }
+
+  .shell[data-phone-ui="true"][data-portal-bar="open"] > .topbar {
+    position: fixed;
+    z-index: 31;
+    top: calc(var(--vv-top, 0px) + var(--safe-top) + var(--strip-height));
+    left: 0;
+    right: 0;
+    display: flex;
+    max-height: calc(var(--vv-height, 100dvh) - var(--safe-top) - var(--strip-height));
+    overflow-y: auto;
+    padding-top: 0;
+    box-shadow: var(--shadow);
+  }
+
+  .shell[data-phone-ui="true"][data-portal-bar="open"] > .portal-scrim {
+    position: fixed;
+    z-index: 30;
+    inset: 0;
+    display: block;
+    background: var(--scrim);
+  }
+}
+
+:root {
+  --strip-height: 28px;
+}
+
+.portal-strip,
+.portal-scrim {
+  display: none;
+}
+
+.link-notice {
+  position: fixed;
+  z-index: 40;
+  left: max(12px, var(--safe-left));
+  right: max(12px, var(--safe-right));
+  bottom: calc(var(--vv-bottom, 0px) + max(12px, var(--safe-bottom)));
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 8px 8px 8px 16px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.link-notice-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.link-notice-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The host in full, wrapped rather than cut, so the part that names the site is always visible. */
+.link-notice-host {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.link-notice-details summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link-notice-url {
+  display: block;
+  max-height: 30vh;
+  overflow-y: auto;
+  margin-top: 4px;
+  font: 12px/1.4 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.link-notice .btn {
+  min-height: 44px;
+}
+
+/* Dialogs rise from the bottom edge on phones and stay above the keyboard. */
+@media (max-width: 640px) {
+  .dialog {
+    position: fixed;
+    top: auto;
+    bottom: var(--vv-bottom, 0px);
+    width: 100%;
+    max-width: none;
+    max-height: calc(var(--vv-height, 100dvh) - var(--safe-top) - 16px);
+    margin: 0;
+    border-width: 1px 0 0;
+    border-radius: 18px 18px 0 0;
+  }
+
+  .dialog-form {
+    padding-bottom: max(24px, calc(var(--safe-bottom) + 12px));
+  }
+
+  .dialog-actions .btn {
+    min-height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

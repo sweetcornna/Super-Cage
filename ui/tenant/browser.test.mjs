@@ -363,7 +363,8 @@ test(
       await shot("06-mobile-dark");
       await click(".add-btn");
       await waitFor(`document.querySelector("dialog").open`, "手机上的新建弹窗");
-      assert.ok(await evaluate(`document.querySelector("dialog").getBoundingClientRect().width <= innerWidth - 16`));
+      // On a phone the dialog is a bottom sheet: full width, resting on the bottom edge.
+      await waitFor(`(() => { const box = document.querySelector("dialog").getBoundingClientRect(); return box.width <= innerWidth && Math.abs(box.bottom - innerHeight) <= 1; })()`, "手机上的新建弹窗贴底", 3000);
       await shot("07-mobile-create");
       await press("Escape");
       await waitFor(`!document.querySelector("dialog").open`, "Esc 关闭弹窗");

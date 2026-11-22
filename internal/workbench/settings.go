@@ -34,6 +34,8 @@ type Preferences struct {
 	Clock12Hour           bool   `json:"clock_12_hour"`
 	AutoTimezone          bool   `json:"auto_timezone"`
 	AutoLanguage          bool   `json:"auto_language"`
+	// Claude Science host rendering (science_host.go), off by default.
+	ScienceHostRender bool `json:"science_host_render,omitempty"`
 }
 
 const defaultBrowserHomeURL = "https://www.bing.com/"

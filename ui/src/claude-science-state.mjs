@@ -239,3 +239,91 @@ export function scienceView({ data = null, error = null, actionError = "", job =
   else if (updatable) view.secondary.push(action("update", updateTo, { confirm: false }));
   return view;
 }
+
+// Host rendering (phase 2, internal/workbench/science_host.go): the Windows
+// window shows the guest's Claude Science page in a frame, with the guest's
+// time zone, language and browser identity. Off by default.
+export const hostRenderLabel = "本机渲染（实验性）";
+export const hostRenderExplanation = "在这个窗口中直接显示 Claude Science，页面看到的仍是环境的时区、语言和浏览器标识。";
+// The scienceFrame bridge version this pane needs (science_host.go
+// scienceBridgeContract): 2 gave the guest's identity to the frame's own
+// targets only; 3 also ends the front session before a frame is torn down
+// and follows nested workers (round-2 N1, N2). The window answers op
+// "capabilities"; one answering 2 is never offered the switch.
+export const hostRenderContract = 3;
+export const hostRenderUpdateNotice = "请更新 Windows 应用后再使用本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
+export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性";
+
+/**
+ * The switch and whether the pane is the frame.
+ * @param {object} input
+ * @param {object|null} input.data       last GET /api/claude-science body (host_render inside)
+ * @param {object} [input.client]        client context (desktop_gateway, mode, client_platform)
+ * @param {boolean} input.bridge         the window's native bridge is present
+ * @param {?number} input.contract       what the bridge's scienceFrame
+ *                                       capabilities op answered (null: not
+ *                                       yet; 0: no such op)
+ * @param {boolean} input.running        the environment runs
+ * @param {boolean} input.locked         the last read answered 423
+ * @param {boolean} input.busy           a Claude Science job runs or is pending
+ * @param {string} [input.fallback]      why this pane went back to the browser pane
+ */
+// hostRenderHere: the Windows window on this computer's environment, the
+// only place the switch can show (and the bridge is asked for its contract).
+export const hostRenderHere = (client = {}, bridge = false) =>
+  Boolean(client.desktop_gateway) && client.mode === "local" && client.client_platform === "windows" && Boolean(bridge);
+
+export function hostRenderView({ data = null, client = {}, bridge = false, contract = 0, running = false, locked = false, busy = false, fallback = "" }) {
+  const view = { toggle: null, frame: false, fallback: "", notice: "" };
+  const render = data?.host_render;
+  if (!render || !data.installed) return view;
+  const here = hostRenderHere(client, bridge);
+  // Only where it can be used: elsewhere (macOS, Linux, a browser, the
+  // phone, a remote host) the pane stays as it was and the server refuses
+  // the switch anyway.
+  if (!render.available || !here || contract === null) return view;
+  // F8: a window whose bridge predates the frame contract is not offered
+  // the switch; one that is already on stays so it can be turned off.
+  const capable = Number(contract) >= hostRenderContract;
+  if (!capable && !render.enabled) return view;
+  view.toggle = {
+    label: hostRenderLabel,
+    checked: Boolean(render.enabled),
+    disabled: busy,
+    explanation: hostRenderExplanation,
+  };
+  if (render.error) view.notice = render.error;
+  if (!capable) {
+    view.notice = hostRenderUpdateNotice;
+    return view;
+  }
+  const daemonReady = Boolean(data.installed && data.running && data.ready);
+  view.frame = Boolean(render.enabled && render.running) && running && !locked && !busy && daemonReady && !fallback;
+  if (render.enabled && fallback) view.fallback = fallback;
+  return view;
+}
+
+/**
+ * The frame's toolbar: version, sign-in state and one line of status.
+ * @param {object} data   GET /api/claude-science body
+ * @param {string} phase  "preparing" | "loading" | "ready"
+ */
+export function hostFrameStatus(data, phase) {
+  const render = data?.host_render || {};
+  const chips = [];
+  if (data?.version) chips.push({ text: "v" + data.version, tone: "" });
+  // The daemon answers the page's API calls with 401 to a good credential
+  // (science_upstream.go setSignedOut): the account needs a sign-in, which
+  // happens in the isolated browser (the toolbar's 登录).
+  if (render.signin_needed) chips.push({ text: "需要登录", tone: "warn" });
+  else if (data?.signed_in === true) chips.push({ text: "已登录", tone: "ok" });
+  if (data?.update_available) chips.push({ text: "有新版本", tone: "busy" });
+  let text = "时区、语言与浏览器标识来自环境";
+  if (phase === "preparing") text = "正在核对页面的时区与语言…";
+  else if (phase === "loading") text = "正在打开…";
+  // The front's audit is a tripwire (science_front.go auditHit): it
+  // reports what an honest page should never send, and lets it through.
+  else if (render.audit_hits) text = `页面发出过 ${render.audit_hits} 次带有本机时区或语言的请求（已记录，未拦截）`;
+  else if (render.audit_note) text = render.audit_note;
+  return { chips, text, tone: render.audit_hits ? "warn" : phase === "ready" ? "ok" : "busy" };
+}

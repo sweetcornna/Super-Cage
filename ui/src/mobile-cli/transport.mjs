@@ -25,7 +25,8 @@ async function requestAPI(path, { body, signal, keepalive, frame } = {}) {
   if (!response.ok) {
     let message;
     const isPlainText = (response.headers.get("Content-Type") || "").startsWith("text/plain");
-    if (response.status === 401) message = "连接授权已失效，请从 Super Cage 重新打开此页面。";
+    // An event, not an import: the desktop workbench shares this module, and the phone web shell listens.
+    if (response.status === 401) { message = "连接授权已失效，请从 Super Cage 重新打开此页面。"; globalThis.dispatchEvent?.(new Event("cage-sign-in-expired")); }
     else if (response.status === 423) {
       const detail = isPlainText ? (await response.text()).trim().slice(0, 1200) : "";
       message = detail && !/^(?:(?:Super )?Cage 已锁定，请先登录|请先解锁 (?:Super )?Cage)$/.test(detail)
