@@ -917,9 +917,8 @@ func (a *attacher) reconnect(ctx context.Context, cause error, inputs <-chan []b
 			if a.cfg.Observe && bytes.ContainsAny(data, "\x03\x04") {
 				return detach()
 			}
-			if !told && typedKey(data) && !a.filter.Streaming() {
-				told = true
-				_, _ = a.tty.Out.Write([]byte(reconnectNotice))
+			if !told && typedKey(data) {
+				told = a.notify(reconnectNotice)
 			}
 		}
 	}
@@ -994,13 +993,7 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 				// The bytes that follow do not continue what this window
 				// shows: start from a clean screen, after ending what the
 				// last bytes left open.
-				// Not a full reset: that would erase the owner's scrollback.
-				a.outMu.Lock()
-				a.buf = append(a.filter.Abort(a.buf[:0]), termfilter.ClearReset...)
-				a.focusOwed = true
-				err := a.flushLocked()
-				a.outMu.Unlock()
-				if err != nil {
+				if err := a.restart(); err != nil {
 					return err
 				}
 			}
@@ -1009,6 +1002,29 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 			a.ended = true
 		}
 	}
+}
+
+// restart ends what the window was in and clears it, for output that does
+// not continue what it shows. Not a full reset: that would erase the
+// owner's scrollback.
+func (a *attacher) restart() error {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	a.buf = append(a.filter.Abort(a.buf[:0]), termfilter.ClearReset...)
+	a.focusOwed = true
+	return a.flushLocked()
+}
+
+// notify writes a line of the attach's own, unless a clipboard write is
+// open in the window or the window was left. It reports whether it did.
+func (a *attacher) notify(text string) bool {
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
+	if a.left || a.filter.Streaming() {
+		return false
+	}
+	_, _ = a.tty.Out.Write([]byte(text))
+	return true
 }
 
 // flushLocked writes filtered output, then, unless it left a clipboard

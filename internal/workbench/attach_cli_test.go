@@ -94,7 +94,7 @@ func TestAttachChild(t *testing.T) {
 			fmt.Print("clip-open-shown\r\n\x1b]52;c;" + strings.Repeat("QUFB", 64))
 			time.Sleep(300 * time.Millisecond)
 			line := strings.Repeat("y", 78) + "\r\n"
-			for i := 0; i < (terminalHistoryLimit+(64<<10))/len(line); i++ {
+			for i := 0; i < 2*terminalHistoryLimit/len(line); i++ {
 				os.Stdout.WriteString(line)
 			}
 			fmt.Print("flood-done\r\n")

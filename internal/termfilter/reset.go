@@ -58,10 +58,15 @@ const ResetSequence = resetStart + resetScreen + resetCursorStyle + cursorVisibl
 	resetPalette + endLink + titlePop
 
 // ClearReset is what the filter writes for a full reset (ESC c): a soft
-// reset, the main screen, mouse and paste modes off, and a cleared screen
-// with the cursor home. A full reset would also erase the owner's
-// scrollback, and in kitty the window's colour schemes.
-const ClearReset = "\x1b[!p\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[H\x1b[2J"
+// reset, spelled out as well for an emulator without one, the main screen,
+// mouse and paste modes off, and a cleared screen with the cursor home. A
+// full reset would also erase the owner's scrollback, and in kitty the
+// window's colour schemes. Everything in it passes the filter.
+const ClearReset = "\x1b[!p" + // DECSTR
+	"\x1b[?2026l\x1b[?1049l\x1b[r" + // no synchronized update, the main screen, a whole-screen region
+	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l" + // mouse, bracketed paste
+	"\x1b[?1l\x1b>\x1b[?7h\x1b[4l\x1b(B\x1b[m\x1b[?25h" + // cursor keys, keypad, wrap, insert, G0, attributes, cursor
+	"\x1b[H\x1b[2J"
 
 // End returns what to write to the local terminal when the stream ends: it
 // spoils a string the application is inside (a clipboard write streaming

@@ -1,5 +1,7 @@
 package termfilter
 
+import "math"
+
 // The other direction: what a terminal application sends back. Besides the
 // owner's keys and pastes it sends mouse and focus reports, and answers to
 // the queries the program wrote. The viewer and the server both need to
@@ -103,7 +105,13 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 	if marker == '?' && len(inter) == 0 && final == 'c' && len(params) > 1 && params[len(params)-1] == ';' {
 		params = params[:len(params)-1]
 	}
-	fields, ok := numbers(params)
+	// A mode report echoes the mode asked for, which xterm.js reads up to
+	// 2^31-1; other answers have short fields.
+	digits := 5
+	if string(inter) == "$" && final == 'y' {
+		digits = 10
+	}
+	fields, ok := numbers(params, digits)
 	switch {
 	case !ok:
 	case marker == '<' && len(inter) == 0 && (final == 'M' || final == 'm') && fields == 3:
@@ -153,8 +161,9 @@ func firstNumber(params []byte) int {
 	return n
 }
 
-// numbers counts the fields of a parameter list made only of numbers.
-func numbers(params []byte) (int, bool) {
+// numbers counts the fields of a parameter list made only of numbers of at
+// most the given digits.
+func numbers(params []byte, most int) (int, bool) {
 	if len(params) == 0 {
 		return 0, true
 	}
@@ -163,7 +172,7 @@ func numbers(params []byte) (int, bool) {
 		switch {
 		case c >= '0' && c <= '9':
 			digits++
-			if digits > 5 {
+			if digits > most {
 				return 0, false
 			}
 		case c == ';' && digits > 0:
@@ -260,16 +269,20 @@ func csiQuery(body []byte, final byte) Reply {
 			break
 		}
 	}
-	n, ok := 0, len(params) <= 5
+	// As xterm.js reads it: the first parameter decides, clamped at
+	// 2^31-1, and the others (and sub-parameters) are ignored.
+	n, first := 0, true
 	for _, c := range params {
-		if c < '0' || c > '9' {
-			ok = false
-			break
+		switch {
+		case c >= '0' && c <= '9':
+			if first {
+				n = min(n*10+int(c-'0'), math.MaxInt32)
+			}
+		case c == ';' || c == ':':
+			first = false
+		default:
+			return ReplyNone
 		}
-		n = n*10 + int(c-'0')
-	}
-	if !ok {
-		return ReplyNone
 	}
 	switch {
 	case final == 'c' && len(inter) == 0 && marker == 0 && n == 0:
@@ -280,7 +293,7 @@ func csiQuery(body []byte, final byte) Reply {
 		return ReplyStatus
 	case final == 'n' && len(inter) == 0 && (marker == 0 || marker == '?') && n == 6:
 		return ReplyCursor
-	case final == 'p' && string(inter) == "$" && (marker == 0 || marker == '?') && len(params) > 0:
+	case final == 'p' && string(inter) == "$" && (marker == 0 || marker == '?'):
 		return ReplyMode
 	}
 	return ReplyNone
