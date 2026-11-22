@@ -28,7 +28,11 @@ func TestScienceCDPGolden(t *testing.T) {
 		"worker":           scienceWorkerCalls(testScienceIdentity),
 		"resume":           scienceResumeCalls(),
 		"settle_ms":        2000,
-		"navigate_wait_ms": 5000,
+		"navigate_wait_ms": scienceNavigateWait.Milliseconds(),
+		// How long the window waits for the front's end and for a crashed
+		// frame's Inspector.targetCrashed before it removes the frame.
+		"end_wait_ms":   scienceShellEndWait.Milliseconds(),
+		"crash_wait_ms": scienceCrashWait.Milliseconds(),
 		// The proxy proof prepare runs (F5) and the preferences the shell
 		// writes before the WebView starts with the switches.
 		"proxy_check": map[string]any{
@@ -64,11 +68,14 @@ func TestScienceCDPGolden(t *testing.T) {
 	}
 }
 
+// A step's target id is "T" + its session unless Target says otherwise;
+// listed gives the target ids Target.getTargets returns.
 type scienceScenarioStep struct {
 	Do      string   `json:"do"`
 	Parent  string   `json:"parent,omitempty"`
 	Session string   `json:"session,omitempty"`
 	Type    string   `json:"type,omitempty"`
+	Targets []string `json:"targets,omitempty"`
 	Expect  []string `json:"expect"`
 }
 
@@ -97,6 +104,14 @@ func scienceScenarios() []scienceScenario {
 	none := []string{}
 	end := []string{"end"}
 	attach, detach := scienceExpect("", sciencePageAttachCalls()), scienceExpect("", sciencePageDetachCalls())
+	// teardown is detach's order for the page-level guest frames given.
+	teardown := func(frames ...string) []string {
+		out := []string{"endfront"}
+		for _, frame := range frames {
+			out = append(out, frame+" crash")
+		}
+		return append(out, "remove")
+	}
 	return []scienceScenario{
 		{"the frame, its worker and its nested frame get the guest's identity", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
@@ -136,28 +151,28 @@ func scienceScenarios() []scienceScenario {
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
 			{Do: "attached", Parent: "F", Session: "X", Type: "shared_worker", Expect: end},
 		}},
-		{"auto-attach ends only after every guest target is gone", []scienceScenarioStep{
+		{"the frame goes in order (end the front, crash, remove); auto-attach ends after every guest target", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
 			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
-			{Do: "detach", Expect: none},
+			{Do: "detach", Expect: teardown("F")},
 			{Do: "detached", Session: "W", Expect: none},
 			{Do: "detached", Session: "F", Expect: detach},
 		}},
 		{"a frame that appears while detaching stays paused and holds auto-attach", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
-			{Do: "detach", Expect: none},
+			{Do: "detach", Expect: teardown("F")},
 			{Do: "attached", Session: "G", Type: "iframe", Expect: none},
 			{Do: "detached", Session: "F", Expect: none},
 			{Do: "detached", Session: "G", Expect: detach},
 		}},
 		{"arming again prepares a paused frame and keeps auto-attach", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
-			{Do: "detach", Expect: detach},
+			{Do: "detach", Expect: append(teardown(), detach...)},
 			{Do: "arm", Expect: attach},
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
-			{Do: "detach", Expect: none},
+			{Do: "detach", Expect: teardown("F")},
 			{Do: "attached", Session: "G", Type: "iframe", Expect: none},
 			{Do: "arm", Expect: scienceExpect("G", frame)},
 			{Do: "detached", Session: "F", Expect: none},
@@ -166,7 +181,7 @@ func scienceScenarios() []scienceScenario {
 			{Do: "arm", Expect: attach},
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
 			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
-			{Do: "navigate", Expect: []string{"remove"}},
+			{Do: "navigate", Expect: teardown("F")},
 			{Do: "arm", Expect: end},
 			{Do: "detached", Session: "W", Expect: none},
 			{Do: "detached", Session: "F", Expect: append(detach, "proceed")},
@@ -175,15 +190,57 @@ func scienceScenarios() []scienceScenario {
 		{"a navigation without a frame goes at once", []scienceScenarioStep{
 			{Do: "navigate", Expect: []string{"proceed"}},
 			{Do: "arm", Expect: attach},
-			{Do: "navigate", Expect: append(detach, "proceed")},
+			{Do: "navigate", Expect: append(append(teardown(), detach...), "proceed")},
 		}},
 		{"a navigation whose frame does not go in time is dropped", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
-			{Do: "navigate", Expect: []string{"remove"}},
+			{Do: "navigate", Expect: teardown("F")},
 			{Do: "navigate_timeout", Expect: end},
 			{Do: "navigate_timeout", Expect: none},
 			{Do: "detached", Session: "F", Expect: detach},
+		}},
+		{"a nested worker's session ends with its parent's", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
+			{Do: "attached", Parent: "W", Session: "V", Type: "worker", Expect: scienceExpect("V", worker)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "detached", Session: "F", Expect: detach},
+		}},
+		{"a paused target under a paused frame goes with it", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "attached", Session: "G", Type: "iframe", Expect: none},
+			{Do: "attached", Parent: "G", Session: "H", Type: "worker", Expect: none},
+			{Do: "detached", Session: "F", Expect: none},
+			{Do: "detached", Session: "G", Expect: detach},
+		}},
+		{"a frame Target.getTargets no longer lists is gone with everything under it", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "listed", Targets: []string{"TF", "TW"}, Expect: none},
+			{Do: "listed", Targets: []string{"TW"}, Expect: detach},
+		}},
+		{"a call that fails while the frame goes ends nothing", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "failed", Session: "W", Expect: none},
+			{Do: "settle", Session: "W", Expect: none},
+			{Do: "detached", Session: "F", Expect: detach},
+		}},
+		{"a second detach or a navigation while the frame goes repeats nothing", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "detach", Expect: none},
+			{Do: "navigate", Expect: none},
+			{Do: "detached", Session: "F", Expect: append(detach, "proceed")},
 		}},
 	}
 }
@@ -201,7 +258,9 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 			case "detach":
 				actions = policy.detach()
 			case "attached":
-				actions = policy.attachedTarget(step.Parent, step.Session, step.Type)
+				actions = policy.attachedTarget(step.Parent, step.Session, step.Type, "T"+step.Session)
+			case "listed":
+				actions = policy.listed(step.Targets)
 			case "failed":
 				actions = policy.callFailed(step.Session)
 			case "settle":
@@ -220,6 +279,12 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 				switch {
 				case action.End:
 					got = append(got, "end")
+					continue
+				case action.EndFront:
+					got = append(got, "endfront")
+					continue
+				case action.Crash:
+					got = append(got, action.Session+" crash")
 					continue
 				case action.Remove:
 					got = append(got, "remove")

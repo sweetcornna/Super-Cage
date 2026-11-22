@@ -149,7 +149,7 @@ func runScienceFrameNeverSeesTheHost(t *testing.T, variant string) {
 	case "re-ticket":
 		time.Sleep(600 * time.Millisecond)
 		before := len(scienceIdentityReports(t, env.daemon))
-		shell.reticket(t, ticket())
+		shell.reticket(t, ticket)
 		waitFor(t, 30*time.Second, "the new session", func() bool { return env.front.snapshot().Session })
 		waitFor(t, 15*time.Second, "the new document's report", func() bool { return len(scienceIdentityReports(t, env.daemon)) > before })
 		time.Sleep(2 * time.Second)

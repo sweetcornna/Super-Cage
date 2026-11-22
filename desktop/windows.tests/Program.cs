@@ -117,10 +117,24 @@ assertions = 0;
         Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity with a value that is not plain text");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
 
+        // Ending a frame's session: the running workload's science_end for the front's port, the label from the origin.
+        Check(ScienceFrame.End(scienceRoot, origin) == null, "an end without science_end");
+        var ending = control.DeepClone().AsObject();
+        ending["science_end"] = "0123456789abcdefABCDEF_-";
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), ending.ToJsonString());
+        var end = ScienceFrame.End(scienceRoot, origin);
+        Check(end != null && end.Address.ToString() == "http://127.0.0.1:" + control["science_port"] + "/_cage/end" &&
+            end.Label == "0123456789abcdef0123456789abcdef" && end.Secret == "0123456789abcdefABCDEF_-", "end of a frame's session");
+        foreach (var other in new[] { origin.Replace(":17840", ":17841"), "http://localhost:17840", origin.Replace("http://", "https://"), "", "not a url" })
+            Check(ScienceFrame.End(scienceRoot, other) == null, "an end for a foreign origin: " + other);
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+
         // The calls and the policy are the ones the Go tests prove in headless Chromium.
         Check(golden["contract"]!.GetValue<int>() == ScienceFrame.Contract, "bridge contract differs");
         Check(golden["settle_ms"]!.GetValue<int>() == ScienceFrame.SettleMilliseconds, "settle time differs");
         Check(golden["navigate_wait_ms"]!.GetValue<int>() == ScienceFrame.NavigateWaitMilliseconds, "navigation wait differs");
+        Check(golden["end_wait_ms"]!.GetValue<int>() == ScienceFrame.EndWaitMilliseconds, "end wait differs");
+        Check(golden["crash_wait_ms"]!.GetValue<int>() == ScienceFrame.CrashWaitMilliseconds, "crash wait differs");
         Check(Same(Calls(ScienceFrame.PageAttach), golden["page_attach"]), "page attach calls differ from the contract");
         Check(Same(Calls(ScienceFrame.PageDetach), golden["page_detach"]), "page detach calls differ from the contract");
         Check(Same(Calls(ScienceFrame.Frame(identity!)), golden["frame"]), "frame calls differ from the contract");
@@ -147,7 +161,8 @@ assertions = 0;
                 {
                     "arm" => policy.Arm(identity!),
                     "detach" => policy.Detach(),
-                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type")),
+                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type"), "T" + Field("session")),
+                    "listed" => policy.Listed(step["targets"]!.AsArray().Select(item => item!.GetValue<string>()).ToList()),
                     "failed" => policy.CallFailed(Field("session")),
                     "settle" => policy.Settle(Field("session")),
                     "detached" => policy.DetachedTarget(Field("session")),
@@ -155,14 +170,14 @@ assertions = 0;
                     "navigate_timeout" => policy.NavigateTimedOut(),
                     var other => throw new InvalidDataException("unknown scenario step " + other),
                 };
-                var got = actions.Select(action => action.End ? "end" : action.Remove ? "remove" : action.Proceed ? "proceed" :
-                    (action.Session.Length == 0 ? "page" : action.Session) + " " + action.Call!.Method).ToArray();
+                var got = actions.Select(action => action.End ? "end" : action.EndFront ? "endfront" : action.Crash ? action.Session + " crash" :
+                    action.Remove ? "remove" : action.Proceed ? "proceed" : (action.Session.Length == 0 ? "page" : action.Session) + " " + action.Call!.Method).ToArray();
                 var want = step["expect"]!.AsArray().Select(item => item!.GetValue<string>()).ToArray();
                 Check(got.SequenceEqual(want), scenario["name"] + ", step " + i + ": " + string.Join(", ", got));
             }
             scenarios++;
         }
-        Check(scenarios == 12, "scenario count " + scenarios);
+        Check(scenarios == 17, "scenario count " + scenarios);
 
         // Preferences: written before the browser starts, the default again without the switches.
         var data = Path.Combine(scienceRoot, "webview2");

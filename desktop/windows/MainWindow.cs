@@ -67,7 +67,7 @@ internal sealed class MainWindow : Form
             SaveWindowPlacement();
             if (!allowQuit && e.CloseReason is not (CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)) { e.Cancel = true; Hide(); }
         };
-        FormClosed += (_, _) => { lifetime.Cancel(); updater.Dispose(); tray.Dispose(); trayMenu.Dispose(); web.Dispose(); };
+        FormClosed += (_, _) => { science?.EndForExit(); lifetime.Cancel(); updater.Dispose(); tray.Dispose(); trayMenu.Dispose(); web.Dispose(); };
     }
 
     protected override void OnLoad(EventArgs e)
@@ -178,6 +178,7 @@ internal sealed class MainWindow : Form
                 var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 void BrowserExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs args) => exited.TrySetResult();
                 if (previous != null) previous.BrowserProcessExited += BrowserExited;
+                science?.EndForExit();
                 science = null;
                 Controls.Remove(web); web.Dispose();
                 web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
@@ -211,7 +212,17 @@ internal sealed class MainWindow : Form
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.WebMessageReceived += Receive;
-            core.ProcessFailed += (_, _) => { webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。"); };
+            core.ProcessFailed += (_, e) => {
+                // A frame's own process (the Claude Science frame's) leaves
+                // the window's document running (N4).
+                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited)
+                {
+                    science?.FrameExited(e.FrameInfosForFailedProcess);
+                    return;
+                }
+                science?.EndForExit();
+                webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。");
+            };
             science = arguments == null ? null : new ScienceFrameHost(core, reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
                 uri => { if (!web.IsDisposed && web.CoreWebView2 == core) core.Navigate(uri); });
@@ -381,8 +392,6 @@ internal sealed class MainWindow : Form
     {
         switch (op)
         {
-            case "capabilities":
-                return new { contract = ScienceFrame.Contract };
             case "prepare":
                 if (science == null) return new { backstop = false, proxy = "" };
                 return await science.Prepare();
@@ -391,7 +400,7 @@ internal sealed class MainWindow : Form
                 await science.Attach(url);
                 return true;
             case "detach":
-                science?.Detach();
+                if (science != null) await science.Detach();
                 return true;
             case "restart":
                 if (ScienceFrame.Arguments(Backend.Root) == webArguments) return true;
@@ -652,10 +661,14 @@ internal sealed class MainWindow : Form
         })();
         """;
 
-    private const string BridgeScript = """
+    // The workbench reads the Claude Science frame contract from
+    // window.cageNativeScienceFrame, so it never has to ask a window that
+    // has no scienceFrame op (and files no error there).
+    private static readonly string BridgeScript = """
         (() => {
           if (window !== window.top || location.protocol !== 'http:' || location.hostname !== 'localhost') return;
           window.cageNativeIMEAvailable = true;
+          Object.defineProperty(window, 'cageNativeScienceFrame', {value: SCIENCE_FRAME_CONTRACT, writable: false});
           const pending = new Map();
           const fileActions = new Set([
             'uploadHostFiles', 'chooseUploadFiles', 'clipboardSyncRead', 'clipboardSyncWrite',
@@ -676,5 +689,5 @@ internal sealed class MainWindow : Form
           }); }};
           Object.defineProperty(window, 'webkit', {value: {messageHandlers: {cage}}, writable: false});
         })();
-        """;
+        """.Replace("SCIENCE_FRAME_CONTRACT", ScienceFrame.Contract.ToString(System.Globalization.CultureInfo.InvariantCulture));
 }

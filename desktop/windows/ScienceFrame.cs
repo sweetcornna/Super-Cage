@@ -14,7 +14,8 @@ namespace Cage.Windows;
 // ScienceFrameHost applies it to the WebView.
 internal static partial class ScienceFrame
 {
-    // The scienceFrame bridge version (op "capabilities"): 2 gives the
+    // The scienceFrame bridge version, published to the workbench as
+    // window.cageNativeScienceFrame (MainWindow.BridgeScript): 2 gives the
     // identity to the frame's targets only; the workbench keeps the host's.
     public const int Contract = 2;
 
@@ -26,9 +27,15 @@ internal static partial class ScienceFrame
 
     // How long a target whose call failed may take to detach before the frame
     // ends, and how long a held top-level navigation waits for the frame's
-    // targets.
+    // targets. Within that wait, the teardown waits at most EndWait for the
+    // front's end and CrashWait for a crashed frame's Inspector.targetCrashed
+    // (WebView2 157 took up to about 1 s) before it removes the frame; while
+    // the frame goes, its targets are listed every ListEvery.
     public const int SettleMilliseconds = 2000;
     public const int NavigateWaitMilliseconds = 5000;
+    public const int EndWaitMilliseconds = 2500;
+    public const int CrashWaitMilliseconds = 1500;
+    public const int ListEveryMilliseconds = 1000;
 
     public sealed record Call(string Method, JsonObject Params);
 
@@ -85,6 +92,33 @@ internal static partial class ScienceFrame
         }
         return null;
     }
+
+    // End is where and how the shell ends the front's session for the frame
+    // of a session origin (POST /_cage/end, science_front.go serveEnd): the
+    // front's loopback address, the label and the running workload's
+    // science_end; null when no running workload publishes that front.
+    public sealed record FrontEnd(Uri Address, string Label, string Secret);
+
+    public static FrontEnd? End(string root, string origin)
+    {
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var url) || url.Scheme != "http" || !Label().IsMatch(url.Host) || url.IsDefaultPort) return null;
+        foreach (var profile in Profiles(root))
+        {
+            var control = ReadObject(Path.Combine(profile, "control.json"));
+            if (control?["science_port"] is not JsonValue value || !value.TryGetValue<int>(out var number) || number != url.Port) continue;
+            if (control["pid"] is not JsonValue pid || !pid.TryGetValue<int>(out var process) || !Running(process)) continue;
+            var secret = Text(control, "science_end");
+            if (secret.Length == 0 || !Plain().IsMatch(secret)) continue;
+            return new FrontEnd(new Uri("http://127.0.0.1:" + url.Port + "/_cage/end"), url.Host[..^".localhost".Length], secret);
+        }
+        return null;
+    }
+
+    // RemoveFrame removes the pane's frame elements of one session origin
+    // (all of them for ""), wherever the pane parked them.
+    public static string RemoveFrame(string origin) =>
+        "document.querySelectorAll('iframe[data-science-frame]').forEach((frame) => { try { if (" + JsonSerializer.Serialize(origin) +
+        " === '' || new URL(frame.src).origin === " + JsonSerializer.Serialize(origin) + ") frame.remove(); } catch {} }); true";
 
     private static bool Running(int pid)
     {
@@ -210,10 +244,12 @@ internal static partial class ScienceFrame
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
     }
 
-    // Action is one thing the window does: calls on a session ("" is the
-    // page), ending the frame, removing the frame element before a held
-    // navigation, or letting the held navigation go.
-    public sealed record Action(string Session, Call? Call, bool End = false, bool Remove = false, bool Proceed = false);
+    // Action is one thing the window does, in list order: calls on a session
+    // ("" is the page), ending the frame (the pane falls back), ending the
+    // front's session for the frame (EndFront), crashing a frame's process
+    // (Crash, on Session), removing the frame element, or letting the held
+    // navigation go.
+    public sealed record Action(string Session, Call? Call, bool End = false, bool Remove = false, bool Proceed = false, bool EndFront = false, bool Crash = false);
 
     // Policy is what the window does with each DevTools target while host
     // rendering may show a frame (science_shell_test.go scienceFramePolicy):
@@ -227,14 +263,23 @@ internal static partial class ScienceFrame
     //    else stays paused and the frame ends.
     //  - A failed call never resumes its target. If the target detaches (it
     //    died), nothing more happens; if it is still attached when the window
-    //    settles it, the frame ends.
-    //  - Detach: auto-attach stays on until the last guest (and paused)
-    //    target has detached.
-    //  - Navigate (the window's document is about to navigate): while a guest
-    //    target is attached the navigation is held, the frame removed, and it
-    //    goes once the targets are gone and auto-attach is off; if they do
-    //    not go in time, the navigation is dropped and the frame ends. Arming
-    //    while a navigation is held is refused.
+    //    settles it, the frame ends. While the frame goes, a failed call ends
+    //    nothing more.
+    //  - Detach: the frame goes in one order (round-2 N1): EndFront (the
+    //    front ends the frame's session, so nothing the frame still sends
+    //    reaches the daemon), Crash for each page-level guest frame (its
+    //    document and workers stop while their overrides are still in place),
+    //    Remove. Auto-attach stays on until the last guest (and paused)
+    //    target has detached. A second Detach while the frame goes repeats
+    //    nothing.
+    //  - A target's detach ends every target under it: a nested worker's
+    //    session ends with its parent's without an event of its own (round-2
+    //    N2). Listed (the page session's Target.getTargets) drops a
+    //    page-level frame whose target is gone, with everything under it.
+    //  - Navigate (the window's document is about to navigate): Detach, and
+    //    the navigation is held until the targets are gone and auto-attach is
+    //    off; if they do not go in time, the navigation is dropped and the
+    //    frame ends. Arming while a navigation is held is refused.
     public sealed class Policy
     {
         private JsonObject? identity;
@@ -242,8 +287,13 @@ internal static partial class ScienceFrame
         private readonly Dictionary<string, JsonObject> guests = new(StringComparer.Ordinal);
         private readonly SortedSet<string> held = new(StringComparer.Ordinal);
         private readonly HashSet<string> failed = new(StringComparer.Ordinal);
+        // Parents ("" for page level) and target ids of every guest and held
+        // target.
+        private readonly Dictionary<string, string> parents = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, string> targets = new(StringComparer.Ordinal);
 
         public bool Attached { get; private set; }
+        public bool Detaching => detaching;
 
         private static IEnumerable<Action> On(string session, IEnumerable<Call> calls) => calls.Select(call => new Action(session, call));
 
@@ -258,7 +308,7 @@ internal static partial class ScienceFrame
                 Attached = true;
                 actions.AddRange(On("", PageAttach));
             }
-            foreach (var session in held.ToList())
+            foreach (var session in held.Where(session => parents.GetValueOrDefault(session) == "").ToList())
             {
                 held.Remove(session);
                 guests[session] = next;
@@ -271,8 +321,14 @@ internal static partial class ScienceFrame
         {
             identity = null;
             if (!Attached) return [];
+            if (detaching) return MaybeDetach();
             detaching = true;
-            return MaybeDetach();
+            var actions = new List<Action> { new("", null, EndFront: true) };
+            foreach (var session in guests.Keys.Where(session => parents.GetValueOrDefault(session) == "").Order(StringComparer.Ordinal))
+                actions.Add(new Action(session, null, Crash: true));
+            actions.Add(new Action("", null, Remove: true));
+            actions.AddRange(MaybeDetach());
+            return actions;
         }
 
         private List<Action> MaybeDetach()
@@ -297,7 +353,6 @@ internal static partial class ScienceFrame
                 return actions;
             }
             navigating = true;
-            actions.Add(new Action("", null, Remove: true));
             return actions;
         }
 
@@ -308,11 +363,13 @@ internal static partial class ScienceFrame
             return [new Action("", null, End: true)];
         }
 
-        public List<Action> AttachedTarget(string parent, string session, string type)
+        public List<Action> AttachedTarget(string parent, string session, string type, string target)
         {
             if (parent.Length == 0)
             {
                 if (type != "iframe") return On(session, Resume).ToList();
+                parents[session] = "";
+                targets[session] = target;
                 if (identity == null)
                 {
                     held.Add(session);
@@ -321,6 +378,8 @@ internal static partial class ScienceFrame
                 guests[session] = identity;
                 return On(session, Frame(identity)).ToList();
             }
+            parents[session] = parent;
+            targets[session] = target;
             if (!guests.TryGetValue(parent, out var inherited))
             {
                 // Under a paused or unknown target: stays paused.
@@ -348,16 +407,43 @@ internal static partial class ScienceFrame
 
         public List<Action> Settle(string session)
         {
-            if (!failed.Remove(session) || !guests.ContainsKey(session)) return [];
+            if (!failed.Remove(session) || !guests.ContainsKey(session) || detaching || navigating) return [];
             return [new Action("", null, End: true)];
         }
 
         public List<Action> DetachedTarget(string session)
         {
-            guests.Remove(session);
-            held.Remove(session);
-            failed.Remove(session);
+            Forget(session);
             return MaybeDetach();
+        }
+
+        // Listed is the page session's Target.getTargets: a page-level frame
+        // whose target is not listed is gone, with everything under it.
+        public List<Action> Listed(IReadOnlyCollection<string> listed)
+        {
+            foreach (var session in parents.Where(pair => pair.Value.Length == 0 && !listed.Contains(targets.GetValueOrDefault(pair.Key, ""))).Select(pair => pair.Key).ToList())
+                Forget(session);
+            return MaybeDetach();
+        }
+
+        // Forget drops a target and every target under it.
+        private void Forget(string session)
+        {
+            var gone = new HashSet<string>(StringComparer.Ordinal) { session };
+            for (var changed = true; changed;)
+            {
+                changed = false;
+                foreach (var (child, parent) in parents)
+                    if (gone.Contains(parent) && gone.Add(child)) changed = true;
+            }
+            foreach (var item in gone)
+            {
+                guests.Remove(item);
+                held.Remove(item);
+                failed.Remove(item);
+                parents.Remove(item);
+                targets.Remove(item);
+            }
         }
     }
 }

@@ -18,8 +18,13 @@ const checks = [];
 
 async function open({ mode, clientContext, claudeScience, csp = false, routes = null, contract = 3 }) {
   const native = [];
-  // contract 0: an older window whose bridge has no capabilities op.
+  // contract 0: an older window, which publishes no frame contract and whose
+  // bridge has no scienceFrame op.
   const bridge = { backstop: false, proxy: "verified", contract };
+  // Where the frame was when the pane asked the window to detach (the pane
+  // parks it first); the stub then removes it as the window would.
+  const parkedAtDetach = [];
+  let pageRef = null;
   // Unless a test drives the agent transport (routes), its consumer's first
   // bridge call never answers, so it does not call again every 750 ms.
   const agent = Boolean(routes);
@@ -31,16 +36,20 @@ async function open({ mode, clientContext, claudeScience, csp = false, routes = 
       if (body.action === "refreshSession") return agent ? { url: new URL(process.env.CAGE_UI_URL || "http://127.0.0.1:5198").origin + "/#agent-window-ticket" } : new Promise(() => {});
       if (body.action !== "scienceFrame") return null;
       native.push({ op: body.op, url: body.url });
-      if (body.op === "capabilities") {
-        if (!bridge.contract) throw new Error("未知原生操作");
-        return { contract: bridge.contract };
-      }
       if (!bridge.contract) throw new Error("未知原生操作");
+      if (body.op === "detach" && pageRef) {
+        parkedAtDetach.push(await pageRef.evaluate(() => [...document.querySelectorAll("iframe[data-science-frame]")]
+          .map((frame) => ({ hidden: frame.hidden, inPane: Boolean(frame.closest(".claude-science")), title: frame.title }))));
+        await pageRef.evaluate(() => document.querySelectorAll("iframe[data-science-frame][hidden]").forEach((frame) => frame.remove()));
+      }
       if (body.op === "prepare") return { backstop: bridge.backstop, proxy: bridge.proxy };
       if (body.op === "attach" && !frameEntry.test(String(body.url))) throw new Error("unexpected frame address");
       return true;
     },
     beforeNavigate: async (page, state) => {
+      pageRef = page;
+      // The window's bridge script publishes its frame contract.
+      if (bridge.contract) await page.addInitScript((value) => Object.defineProperty(window, "cageNativeScienceFrame", { value }), bridge.contract);
       state.appearance.mode = mode;
       state.status.ready = state.status.vm_running = true;
       state.framePort = framePort;
@@ -64,11 +73,11 @@ async function open({ mode, clientContext, claudeScience, csp = false, routes = 
       });
     },
   });
-  return { ...workbench, native, bridge };
+  return { ...workbench, native, bridge, parkedAtDetach };
 }
 
 async function walk(mode) {
-  const { browser, page, state, errors, native, bridge } = await open({ mode, clientContext: windowsWindow, claudeScience: "running-host-render-available" });
+  const { browser, page, state, errors, native, bridge, parkedAtDetach } = await open({ mode, clientContext: windowsWindow, claudeScience: "running-host-render-available" });
   const shot = async name => {
     if (!capture) return;
     await page.waitForTimeout(300);
@@ -108,7 +117,7 @@ async function walk(mode) {
     await pane.getByText("在这个窗口中直接显示 Claude Science，页面看到的仍是环境的时区、语言和浏览器标识。").waitFor();
     assert.equal(await pane.getByRole("link", { name: "了解详情" }).count(), 1);
     assert.equal(await frame.count(), 0);
-    assert.deepEqual(ops(), ["capabilities"], "off asks the bridge only what it can do");
+    assert.deepEqual(ops(), [], "off asks the bridge nothing");
     await shot("1-off");
 
     // 2. On, but the window still runs without the network switches: one
@@ -116,7 +125,7 @@ async function walk(mode) {
     await toggle.click();
     await pane.getByText("本机渲染已开启，需要重新载入窗口一次才能生效。").waitFor({ timeout: 15000 });
     assert.deepEqual(posts("/claude-science/host-render").map(request => request.body), [{ enabled: true, contract: 3 }]);
-    assert.deepEqual(ops(), ["capabilities", "prepare", "detach"]);
+    assert.deepEqual(ops(), ["prepare", "detach"]);
     assert.equal(posts("/claude-science/ticket").length, 0, "no ticket without the switches");
     await shot("2-restart");
     await pane.getByRole("button", { name: "重新载入窗口", exact: true }).click();
@@ -128,13 +137,13 @@ async function walk(mode) {
     await page.reload();
     await enter();
     await frameReady();
-    assert.deepEqual(ops(), ["capabilities", "prepare", "attach"]);
+    assert.deepEqual(ops(), ["prepare", "attach"]);
     const ticket = posts("/claude-science/ticket").at(-1).body;
     assert.deepEqual(Object.keys(ticket.host).sort(), ["languages", "offset", "timezone"]);
     assert.equal(ticket.proxy, "verified");
     assert.equal(ticket.contract, 3);
     assert.equal(typeof ticket.host.offset, "number");
-    assert.equal(native[2].url, await frame.getAttribute("src"));
+    assert.equal(native[1].url, await frame.getAttribute("src"));
     assert.equal(await frame.getAttribute("sandbox"), "allow-scripts allow-same-origin allow-forms");
     assert.equal(await frame.getAttribute("allow"), "clipboard-write");
     assert.equal(await frame.getAttribute("referrerpolicy"), "no-referrer");
@@ -167,6 +176,9 @@ async function walk(mode) {
     await pane.waitFor({ state: "hidden", timeout: 15000 });
     await page.getByRole("tab", { name: "Claude Science", exact: true }).and(page.locator('[aria-selected="true"]')).waitFor({ timeout: 15000 });
     await until(() => ops().at(-1) === "detach" && posts("/claude-science/release").length === releases + 1, "detach and release");
+    // Round-2 N1: when the window was asked to detach, the frame was parked
+    // (alive, hidden, out of the pane) for the window's teardown.
+    assert.deepEqual(parkedAtDetach.at(-1), [{ hidden: true, inPane: false, title: "" }], "the frame parks before the window's teardown");
 
     // 5. Back to the pane: a new ticket and the same sign-in is not replayed.
     const tickets = posts("/claude-science/ticket").length;
@@ -297,9 +309,10 @@ const waitUntil = async (page, check, what) => {
   }
 };
 
-// F8: a window whose bridge predates the frame contract (no capabilities
-// op). Off: no switch. On (set from a newer window): the switch stays so it
-// can be turned off, says why, and the frame never starts.
+// F8: a window whose bridge predates the frame contract (it publishes
+// none). Off: no switch. On (set from a newer window): the switch stays so
+// it can be turned off, says why, and the frame never starts. The bridge is
+// never asked: an older window files no error for a hidden feature.
 async function olderWindow() {
   for (const claudeScience of ["running-host-render-available", "running-host-render"]) {
     const { browser, page, native, errors, state } = await open({ mode: "light", clientContext: windowsWindow, claudeScience, contract: 0 });
@@ -307,8 +320,7 @@ async function olderWindow() {
       await page.getByRole("navigation", { name: "主导航" }).getByRole("button", { name: "Claude Science", exact: true }).click();
       const pane = page.getByRole("main", { name: "Claude Science", exact: true });
       await pane.locator('.claude-science[data-state="running"]').waitFor({ timeout: 15000 });
-      await waitUntil(page, () => native.length > 0, "the capability probe");
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(1000);
       if (claudeScience === "running-host-render-available") {
         assert.equal(await pane.getByRole("switch").count(), 0, "no switch for an older window");
       } else {
@@ -321,7 +333,7 @@ async function olderWindow() {
         assert.deepEqual(state.requests.filter(request => request.path === "/claude-science/host-render" && request.method === "POST").map(request => request.body), [{ enabled: false }]);
       }
       assert.equal(await pane.locator("iframe").count(), 0);
-      assert.deepEqual(native.map(call => call.op), ["capabilities"]);
+      assert.deepEqual(native.map(call => call.op), []);
       assert.deepEqual(errors, []);
     } finally {
       await browser.close();
@@ -398,4 +410,4 @@ await elsewhere();
 await olderWindow();
 await agentRefused();
 await blockedByPolicy();
-console.log(`PASS: switch off by default (only the capability probe), restart asked without the network switches, ticket(proxy, contract)+attach+frame edge to edge, sign-in asks without a user action and moves after a click in the frame, one re-ticket then fallback (remembered), refused probe, off from both switches, audit hits noted in the toolbar and the diagnostics, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; an older window gets no switch (on: only off, with why); the agent transport cannot drive the frame; CSP refusal reloads once, comes back to the page, then asks`);
+console.log(`PASS: switch off by default (no bridge call), restart asked without the network switches, ticket(proxy, contract)+attach+frame edge to edge, sign-in asks without a user action and moves after a click in the frame, one re-ticket then fallback (remembered), refused probe, off from both switches, audit hits noted in the toolbar and the diagnostics, stop from the toolbar; ${checks.join(" and ")}; no switch on macOS or remote; an older window gets no switch (on: only off, with why); the agent transport cannot drive the frame; CSP refusal reloads once, comes back to the page, then asks`);

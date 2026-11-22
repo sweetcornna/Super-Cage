@@ -3,8 +3,12 @@ package workbench
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
+	"net/http"
 	neturl "net/url"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -27,15 +31,26 @@ import (
 //     scienceFrameCalls, anything else stays paused and the frame ends.
 //   - A failed call never resumes its target. If the target detaches (it
 //     died), nothing more happens; if it is still attached when the window
-//     settles it, the frame ends (the pane removes it).
-//   - detach: auto-attach stays on until the last guest (and paused) target
+//     settles it, the frame ends (the pane removes it). While the frame
+//     goes, a failed call ends nothing more.
+//   - detach: the frame goes in one order (round-2 N1). endfront: the front
+//     ends the frame's session, so nothing the frame still sends reaches the
+//     daemon; crash: each page-level guest frame's process is crashed, so
+//     its document and workers stop while their overrides are still in
+//     place (a removed frame's workers can run on for seconds without them:
+//     TestScienceBrowserTeardownOutlivesNoWorker); remove: the frame element
+//     goes. Auto-attach stays on until the last guest (and paused) target
 //     has detached, since turning it off drops every override and lets
-//     paused targets run.
-//   - navigate (the window's top document is about to navigate): while a
-//     guest target is attached the navigation is held, the window removes
-//     the frame, and the navigation goes only once the targets are gone and
-//     auto-attach is off. Letting it commit first leaves the old frame's
-//     document running for a moment after its overrides were dropped
+//     paused targets run. A second detach while the frame goes repeats
+//     nothing.
+//   - A target's detach ends every target under it: a nested worker's
+//     session ends with its parent's without an event of its own (round-2
+//     N2). listed (the page session's Target.getTargets) drops a page-level
+//     frame whose target is gone, with everything under it.
+//   - navigate (the window's top document is about to navigate): detach, and
+//     the navigation is held until the targets are gone and auto-attach is
+//     off. Letting it commit first leaves the old frame's document running
+//     for a moment after its overrides were dropped
 //     (TestScienceBrowserFrameNeverSeesTheHost/top-level navigation). If
 //     the targets do not go in time the navigation is dropped and the frame
 //     ends: fail closed. Arming while a navigation is held is refused.
@@ -47,21 +62,30 @@ type scienceFramePolicy struct {
 	guests     map[string]scienceIdentity
 	held       map[string]bool
 	failed     map[string]bool
+	// parents ("" for page level) and target ids of every guest and held
+	// target.
+	parents map[string]string
+	targets map[string]string
 }
 
-// scienceAction is one thing the window does: a call on a session ("" is
-// the page), ending the frame, removing the frame element before a held
-// navigation, or letting the held navigation go.
+// scienceAction is one thing the window does, in list order: a call on a
+// session ("" is the page), ending the frame (the pane falls back), ending
+// the front's session for the frame (EndFront), crashing a frame's process
+// (Crash, on Session), removing the frame element, or letting the held
+// navigation go.
 type scienceAction struct {
-	Session string
-	Call    cdpCall
-	End     bool
-	Remove  bool
-	Proceed bool
+	Session  string
+	Call     cdpCall
+	End      bool
+	EndFront bool
+	Crash    bool
+	Remove   bool
+	Proceed  bool
 }
 
 func newScienceFramePolicy() *scienceFramePolicy {
-	return &scienceFramePolicy{guests: map[string]scienceIdentity{}, held: map[string]bool{}, failed: map[string]bool{}}
+	return &scienceFramePolicy{guests: map[string]scienceIdentity{}, held: map[string]bool{}, failed: map[string]bool{},
+		parents: map[string]string{}, targets: map[string]string{}}
 }
 
 func scienceActionsOn(session string, calls []cdpCall) []scienceAction {
@@ -82,7 +106,10 @@ func (p *scienceFramePolicy) arm(identity scienceIdentity) []scienceAction {
 		p.attached = true
 		actions = append(actions, scienceActionsOn("", sciencePageAttachCalls())...)
 	}
-	for session := range p.held {
+	for _, session := range slices.Sorted(maps.Keys(p.held)) {
+		if p.parents[session] != "" {
+			continue
+		}
 		delete(p.held, session)
 		p.guests[session] = identity
 		actions = append(actions, scienceActionsOn(session, scienceFrameCalls(identity))...)
@@ -95,8 +122,18 @@ func (p *scienceFramePolicy) detach() []scienceAction {
 	if !p.attached {
 		return nil
 	}
+	if p.detaching {
+		return p.maybeDetach()
+	}
 	p.detaching = true
-	return p.maybeDetach()
+	actions := []scienceAction{{EndFront: true}}
+	for _, session := range slices.Sorted(maps.Keys(p.guests)) {
+		if parent, ok := p.parents[session]; ok && parent == "" {
+			actions = append(actions, scienceAction{Session: session, Crash: true})
+		}
+	}
+	actions = append(actions, scienceAction{Remove: true})
+	return append(actions, p.maybeDetach()...)
 }
 
 func (p *scienceFramePolicy) maybeDetach() []scienceAction {
@@ -118,7 +155,7 @@ func (p *scienceFramePolicy) navigate() []scienceAction {
 		return append(actions, scienceAction{Proceed: true})
 	}
 	p.navigating = true
-	return append(actions, scienceAction{Remove: true})
+	return actions
 }
 
 // navigateTimedOut: the frame's targets outlived the wait (the shell waits
@@ -131,11 +168,12 @@ func (p *scienceFramePolicy) navigateTimedOut() []scienceAction {
 	return []scienceAction{{End: true}}
 }
 
-func (p *scienceFramePolicy) attachedTarget(parent, session, kind string) []scienceAction {
+func (p *scienceFramePolicy) attachedTarget(parent, session, kind, target string) []scienceAction {
 	if parent == "" {
 		if kind != "iframe" {
 			return scienceActionsOn(session, scienceResumeCalls())
 		}
+		p.parents[session], p.targets[session] = "", target
 		if p.identity == nil {
 			p.held[session] = true
 			return nil
@@ -143,6 +181,7 @@ func (p *scienceFramePolicy) attachedTarget(parent, session, kind string) []scie
 		p.guests[session] = *p.identity
 		return scienceActionsOn(session, scienceFrameCalls(*p.identity))
 	}
+	p.parents[session], p.targets[session] = parent, target
 	identity, ok := p.guests[parent]
 	if !ok {
 		// Under a paused or unknown target: stays paused.
@@ -173,17 +212,50 @@ func (p *scienceFramePolicy) settle(session string) []scienceAction {
 		return nil
 	}
 	delete(p.failed, session)
-	if _, ok := p.guests[session]; !ok {
+	if _, ok := p.guests[session]; !ok || p.detaching || p.navigating {
 		return nil
 	}
 	return []scienceAction{{End: true}}
 }
 
 func (p *scienceFramePolicy) detachedTarget(session string) []scienceAction {
-	delete(p.guests, session)
-	delete(p.held, session)
-	delete(p.failed, session)
+	p.forget(session)
 	return p.maybeDetach()
+}
+
+// listed is the page session's Target.getTargets: a page-level frame whose
+// target is not listed is gone, with everything under it.
+func (p *scienceFramePolicy) listed(targets []string) []scienceAction {
+	var gone []string
+	for session, parent := range p.parents {
+		if parent == "" && !slices.Contains(targets, p.targets[session]) {
+			gone = append(gone, session)
+		}
+	}
+	for _, session := range gone {
+		p.forget(session)
+	}
+	return p.maybeDetach()
+}
+
+// forget drops a target and every target under it.
+func (p *scienceFramePolicy) forget(session string) {
+	gone := map[string]bool{session: true}
+	for changed := true; changed; {
+		changed = false
+		for child, parent := range p.parents {
+			if gone[parent] && !gone[child] {
+				gone[child], changed = true, true
+			}
+		}
+	}
+	for session := range gone {
+		delete(p.guests, session)
+		delete(p.held, session)
+		delete(p.failed, session)
+		delete(p.parents, session)
+		delete(p.targets, session)
+	}
 }
 
 var scienceShellTrace = os.Getenv("CAGE_TEST_SHELL_TRACE") == "1"
@@ -250,6 +322,19 @@ func (s *scienceShell) proxyCheck(t *testing.T) (string, string) {
 // targets (ScienceFrameHost.cs waits as long).
 var scienceNavigateWait = 5 * time.Second
 
+// scienceShellEndWait bounds the window's POST /_cage/end (the front itself
+// waits up to scienceEndWait for the session's requests); scienceCrashWait
+// bounds the wait for a crashed frame's Inspector.targetCrashed before the
+// frame element is removed (Chrome 157 took about 220 ms, WebView2 157 up
+// to about 1 s). Both fit in the held navigation's wait, with time left
+// for the frame's targets to go (TestScienceTeardownFitsTheNavigationWait).
+// While the frame goes, the window lists its targets every scienceListEvery.
+var (
+	scienceShellEndWait = 2500 * time.Millisecond
+	scienceCrashWait    = 1500 * time.Millisecond
+	scienceListEvery    = time.Second
+)
+
 // scienceSettleAfter is how long a target whose call failed may take to
 // detach before the window ends the frame (the shell waits as long).
 var scienceSettleAfter = time.Second
@@ -276,6 +361,15 @@ type scienceShell struct {
 	cleared atomic.Int32
 	// site is the window document's site (scheme and host).
 	site string
+	// current is the session origin of the frame the window attached for;
+	// crashed the frames whose Inspector.targetCrashed is awaited.
+	current string
+	crashed map[string]chan struct{}
+	// noEnd and noCrash leave one step out of the teardown (the tests show
+	// each alone keeps host values from the daemon); fronts ended counts the
+	// front ends the window asked for and what they answered.
+	noEnd, noCrash bool
+	endResults     []string
 }
 
 // scienceClearOriginCalls is what the window sends for each session origin
@@ -301,10 +395,19 @@ const scienceFrameSandbox = "allow-scripts allow-same-origin allow-forms"
 
 func newScienceShell(t *testing.T, browser *testBrowser, page string) *scienceShell {
 	t.Helper()
-	s := &scienceShell{t: t, browser: browser, page: page, workers: true, policy: newScienceFramePolicy(), events: make(chan cdpMessage, 4096), origins: map[string]bool{}}
+	s := &scienceShell{t: t, browser: browser, page: page, workers: true, policy: newScienceFramePolicy(), events: make(chan cdpMessage, 4096),
+		origins: map[string]bool{}, crashed: map[string]chan struct{}{}}
 	browser.onOrdered(func(message cdpMessage) {
-		if message.Method == "Target.attachedToTarget" || message.Method == "Target.detachedFromTarget" {
+		switch message.Method {
+		case "Target.attachedToTarget", "Target.detachedFromTarget":
 			s.events <- message
+		case "Inspector.targetCrashed":
+			s.mu.Lock()
+			if done, ok := s.crashed[message.SessionID]; ok {
+				delete(s.crashed, message.SessionID)
+				close(done)
+			}
+			s.mu.Unlock()
 		}
 	})
 	done := make(chan struct{})
@@ -326,7 +429,8 @@ func (s *scienceShell) handle(message cdpMessage) {
 	var event struct {
 		SessionID  string `json:"sessionId"`
 		TargetInfo struct {
-			Type string `json:"type"`
+			TargetID string `json:"targetId"`
+			Type     string `json:"type"`
 		} `json:"targetInfo"`
 	}
 	if json.Unmarshal(message.Params, &event) != nil {
@@ -342,7 +446,7 @@ func (s *scienceShell) handle(message cdpMessage) {
 	s.mu.Lock()
 	var actions []scienceAction
 	if message.Method == "Target.attachedToTarget" {
-		actions = s.policy.attachedTarget(parent, event.SessionID, event.TargetInfo.Type)
+		actions = s.policy.attachedTarget(parent, event.SessionID, event.TargetInfo.Type, event.TargetInfo.TargetID)
 		if !s.workers && event.TargetInfo.Type == "worker" && len(actions) > 0 {
 			// The probe's negative case: workers run without the identity.
 			actions = scienceActionsOn(event.SessionID, scienceResumeCalls())
@@ -351,18 +455,22 @@ func (s *scienceShell) handle(message cdpMessage) {
 		actions = s.policy.detachedTarget(event.SessionID)
 	}
 	s.mu.Unlock()
-	go s.run(actions)
+	go s.run(actions, "")
 }
 
-// run performs actions in order per session; a failed call stops that
-// session's calls and is settled later.
-func (s *scienceShell) run(actions []scienceAction) {
+// run performs actions in list order (ScienceFrameHost.Apply): ending the
+// front for the frame of origin ending (the session origin the frame was
+// attached for), crashing frames without waiting for an answer (Page.crash
+// never answers), removing the frame once they crashed (or after
+// scienceCrashWait), then the calls, in order per session; a failed call
+// stops that session's calls and is settled later.
+func (s *scienceShell) run(actions []scienceAction, ending string) {
 	bySession := map[string][]cdpCall{}
 	var order []string
 	if scienceShellTrace {
 		for _, action := range actions {
-			if action.Session == "" || action.End {
-				s.t.Logf("%s action %q end=%v", time.Now().Format("05.000"), action.Call.Method, action.End)
+			if action.Session == "" || action.End || action.Crash {
+				s.t.Logf("%s action %q end=%v endfront=%v crash=%v remove=%v", time.Now().Format("05.000"), action.Call.Method, action.End, action.EndFront, action.Crash, action.Remove)
 			}
 		}
 	}
@@ -378,23 +486,35 @@ func (s *scienceShell) run(actions []scienceAction) {
 		}
 	}
 	proceed := false
+	var crashes []chan struct{}
 	for _, action := range actions {
-		if action.End {
+		switch {
+		case action.End:
 			s.end()
-			continue
-		}
-		if action.Remove {
-			_ = s.browser.call(s.page, "Runtime.evaluate", map[string]any{"expression": "document.getElementById('science')?.remove(); true"}, nil)
-			continue
-		}
-		if action.Proceed {
+		case action.EndFront:
+			s.endFront(ending)
+		case action.Crash:
+			crashes = append(crashes, s.crash(action.Session))
+		case action.Remove:
+			deadline := time.After(scienceCrashWait)
+		wait:
+			for _, crashed := range crashes {
+				select {
+				case <-crashed:
+				case <-deadline:
+					break wait
+				}
+			}
+			_ = s.browser.call(s.page, "Runtime.evaluate", map[string]any{"expression": scienceRemoveFrameScript(ending)}, nil)
+			go s.list()
+		case action.Proceed:
 			proceed = true
-			continue
+		default:
+			if _, ok := bySession[action.Session]; !ok {
+				order = append(order, action.Session)
+			}
+			bySession[action.Session] = append(bySession[action.Session], action.Call)
 		}
-		if _, ok := bySession[action.Session]; !ok {
-			order = append(order, action.Session)
-		}
-		bySession[action.Session] = append(bySession[action.Session], action.Call)
 	}
 	var wg sync.WaitGroup
 	for _, session := range order {
@@ -418,7 +538,7 @@ func (s *scienceShell) run(actions []scienceAction) {
 					s.mu.Lock()
 					settled := s.policy.settle(session)
 					s.mu.Unlock()
-					s.run(settled)
+					s.run(settled, "")
 				})
 				return
 			}
@@ -443,11 +563,93 @@ func (s *scienceShell) run(actions []scienceAction) {
 	}
 }
 
-// end is the shell telling the pane: the pane removes its frame and lets
-// the window detach.
+// scienceRemoveFrameScript removes the pane's frame elements of one session
+// origin (all of them for ""), wherever the pane put them.
+func scienceRemoveFrameScript(origin string) string {
+	return fmt.Sprintf(`document.querySelectorAll("iframe[data-science-frame]").forEach((frame) => { try { if (%q === "" || new URL(frame.src).origin === %q) frame.remove(); } catch {} }); true`, origin, origin)
+}
+
+// endFront is the window's POST /_cage/end for the frame of a session
+// origin: the front's port names the workload, whose control.json has the
+// secret (here: the test front on that port).
+func (s *scienceShell) endFront(origin string) {
+	if s.noEnd || origin == "" {
+		return
+	}
+	parsed, err := neturl.Parse(origin)
+	if err != nil {
+		return
+	}
+	port, _ := strconv.Atoi(parsed.Port())
+	value, ok := scienceTestFronts.Load(port)
+	if !ok {
+		return
+	}
+	request, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/_cage/end", port), nil)
+	request.Header.Set("X-Cage-End", value.(*scienceFront).endSecret)
+	request.Header.Set("X-Cage-End-Label", strings.TrimSuffix(parsed.Hostname(), ".localhost"))
+	client := &http.Client{Timeout: scienceShellEndWait, Transport: &http.Transport{Proxy: nil}}
+	result := "failed"
+	if response, err := client.Do(request); err == nil {
+		response.Body.Close()
+		result = response.Header.Get("X-Cage-Ended")
+	}
+	s.mu.Lock()
+	s.endResults = append(s.endResults, result)
+	s.mu.Unlock()
+}
+
+// crash sends Page.crash to a frame's session without waiting for its
+// answer (there is none while the frame lives); the channel closes on the
+// frame's Inspector.targetCrashed.
+func (s *scienceShell) crash(session string) chan struct{} {
+	done := make(chan struct{})
+	if s.noCrash {
+		close(done)
+		return done
+	}
+	s.mu.Lock()
+	s.crashed[session] = done
+	s.mu.Unlock()
+	go func() { _ = s.browser.call(session, "Page.crash", map[string]any{}, nil) }()
+	return done
+}
+
+// list is the window's reconciliation while the frame goes: the page
+// session's Target.getTargets, every scienceListEvery, until auto-attach
+// has ended (at most five times).
+func (s *scienceShell) list() {
+	for range 5 {
+		time.Sleep(scienceListEvery)
+		s.mu.Lock()
+		going := s.policy.attached && s.policy.detaching
+		s.mu.Unlock()
+		if !going {
+			return
+		}
+		var reply struct {
+			TargetInfos []struct {
+				TargetID string `json:"targetId"`
+			} `json:"targetInfos"`
+		}
+		if s.browser.call(s.page, "Target.getTargets", map[string]any{}, &reply) != nil {
+			continue
+		}
+		var targets []string
+		for _, info := range reply.TargetInfos {
+			targets = append(targets, info.TargetID)
+		}
+		s.mu.Lock()
+		actions := s.policy.listed(targets)
+		s.mu.Unlock()
+		s.run(actions, "")
+	}
+}
+
+// end is the shell telling the pane its frame ended: the pane falls back
+// and lets the window detach.
 func (s *scienceShell) end() {
 	s.endings.Add(1)
-	_ = s.browser.call(s.page, "Runtime.evaluate", map[string]any{"expression": "document.getElementById('science')?.remove(); true"}, nil)
 	s.detach()
 }
 
@@ -455,14 +657,18 @@ func (s *scienceShell) arm() {
 	s.mu.Lock()
 	actions := s.policy.arm(testScienceIdentity)
 	s.mu.Unlock()
-	s.run(actions)
+	s.run(actions, "")
 }
 
+// detach is the window's detach op: it returns once the frame's teardown
+// (end, crash, removal) has run.
 func (s *scienceShell) detach() {
 	s.mu.Lock()
 	actions := s.policy.detach()
+	ending := s.current
+	s.current = ""
 	s.mu.Unlock()
-	s.run(actions)
+	s.run(actions, ending)
 }
 
 func (s *scienceShell) eval(t *testing.T, expression string) any {
@@ -493,7 +699,7 @@ func (s *scienceShell) load(t *testing.T, url string) {
 }
 
 func scienceAddFrame(url string) string {
-	return fmt.Sprintf(`(() => { const f = document.createElement("iframe"); f.id = "science"; f.setAttribute("sandbox", %q); f.setAttribute("allow", "clipboard-write"); f.setAttribute("referrerpolicy", "no-referrer"); f.style.cssText = "width:900px;height:600px;border:0"; f.src = %q; document.getElementById("pane").append(f); return true })()`, scienceFrameSandbox, url)
+	return fmt.Sprintf(`(() => { const f = document.createElement("iframe"); f.id = "science"; f.setAttribute("sandbox", %q); f.setAttribute("allow", "clipboard-write"); f.setAttribute("referrerpolicy", "no-referrer"); f.dataset.scienceFrame = ""; f.style.cssText = "width:900px;height:600px;border:0"; f.src = %q; document.getElementById("pane").append(f); return true })()`, scienceFrameSandbox, url)
 }
 
 // open is the pane opening its frame: arm, then the entry URL.
@@ -501,27 +707,63 @@ func (s *scienceShell) open(t *testing.T, url string) {
 	t.Helper()
 	s.mu.Lock()
 	s.origins[scienceSessionOrigin(url)] = true
+	s.current = scienceSessionOrigin(url)
 	s.mu.Unlock()
 	s.arm()
 	s.eval(t, scienceAddFrame(url))
 }
 
-// close is the pane unmounting: the frame goes, then the window detaches
-// (which waits for the frame's targets to be gone).
+// scienceParkFrame is the pane's park step (claude-science.jsx): before
+// React removes the frame's wrapper, the frame element moves out of it with
+// moveBefore, which keeps the frame's document and workers (and their
+// overrides), hidden, until the window's teardown removes it.
+const scienceParkFrame = `(() => { const frame = document.querySelector("iframe[data-science-frame]:not([hidden])"); if (!frame) return false; frame.hidden = true; document.body.moveBefore(frame, null); return frame.isConnected })()`
+
+// close is the pane unmounting: the frame parks, then the release (to the
+// workbench) and the window's detach go together; it returns once both
+// have, as the pane's next start() waits for them.
 func (s *scienceShell) close(t *testing.T) {
 	t.Helper()
-	s.eval(t, "document.getElementById('science')?.remove(); true")
+	s.park(t)
+	s.mu.Lock()
+	ending := s.current
+	s.mu.Unlock()
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		if parsed, err := neturl.Parse(ending); err == nil {
+			port, _ := strconv.Atoi(parsed.Port())
+			if value, ok := scienceTestFronts.Load(port); ok {
+				value.(*scienceFront).endSession("", scienceEndWait)
+			}
+		}
+	}()
+	s.detach()
+	<-released
+}
+
+// vanish is the pane gone without its release (the request failed or never
+// left): the window's own end has to do.
+func (s *scienceShell) vanish(t *testing.T) {
+	t.Helper()
+	s.park(t)
 	s.detach()
 }
 
-// reticket is the pane's one re-ticket (start() in claude-science.jsx):
-// the frame goes with its URL, prepare detaches, attach arms for the new
-// label, and only then is the new frame added.
-func (s *scienceShell) reticket(t *testing.T, url string) {
+func (s *scienceShell) park(t *testing.T) {
 	t.Helper()
-	s.eval(t, "document.getElementById('science')?.remove(); true")
-	s.detach()
-	s.open(t, url)
+	if s.eval(t, scienceParkFrame) != true {
+		t.Fatal("the frame did not park")
+	}
+}
+
+// reticket is the pane's one re-ticket (start() in claude-science.jsx):
+// the frame goes as on unmount, and start() awaits the release and the
+// detach before it asks for the new ticket and attaches for its label.
+func (s *scienceShell) reticket(t *testing.T, ticket func() string) {
+	t.Helper()
+	s.close(t)
+	s.open(t, ticket())
 }
 
 // navigateTop is the window's top document navigating. Its frame targets
@@ -535,14 +777,16 @@ func (s *scienceShell) navigateTop(t *testing.T, url string) {
 	s.mu.Lock()
 	s.target = url
 	actions := s.policy.navigate()
+	ending := s.current
+	s.current = ""
 	s.mu.Unlock()
 	time.AfterFunc(scienceNavigateWait, func() {
 		s.mu.Lock()
 		timedOut := s.policy.navigateTimedOut()
 		s.mu.Unlock()
-		s.run(timedOut)
+		s.run(timedOut, "")
 	})
-	s.run(actions)
+	s.run(actions, ending)
 	waitFor(t, scienceNavigateWait+time.Second, "the held navigation to go", func() bool { return s.navigated.Load() > before })
 }
 

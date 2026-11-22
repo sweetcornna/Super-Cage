@@ -248,8 +248,9 @@ export const hostRenderExplanation = "在这个窗口中直接显示 Claude Scie
 // The scienceFrame bridge version this pane needs (science_host.go
 // scienceBridgeContract): 2 gave the guest's identity to the frame's own
 // targets only; 3 also ends the front session before a frame is torn down
-// and follows nested workers (round-2 N1, N2). The window answers op
-// "capabilities"; one answering 2 is never offered the switch.
+// and follows nested workers (round-2 N1, N2). The window publishes it as
+// window.cageNativeScienceFrame; one publishing 2 (or nothing) is never
+// offered the switch.
 export const hostRenderContract = 3;
 export const hostRenderUpdateNotice = "请更新 Windows 应用后再使用本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。";
 export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性";
@@ -260,9 +261,9 @@ export const hostRenderGuide = "https://github.com/sweetcornna/Super-Cage/blob/m
  * @param {object|null} input.data       last GET /api/claude-science body (host_render inside)
  * @param {object} [input.client]        client context (desktop_gateway, mode, client_platform)
  * @param {boolean} input.bridge         the window's native bridge is present
- * @param {?number} input.contract       what the bridge's scienceFrame
- *                                       capabilities op answered (null: not
- *                                       yet; 0: no such op)
+ * @param {?number} input.contract       the window's frame contract
+ *                                       (window.cageNativeScienceFrame; null:
+ *                                       not asked here; 0: none)
  * @param {boolean} input.running        the environment runs
  * @param {boolean} input.locked         the last read answered 423
  * @param {boolean} input.busy           a Claude Science job runs or is pending

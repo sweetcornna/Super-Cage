@@ -21,18 +21,28 @@ internal sealed class ScienceFrameHost
 {
     private const string Ended = "页面的一个后台线程或子页面没能使用环境的时区与语言，已停止本机渲染。";
     private const string NavigationDropped = "本机渲染页面没有及时关闭，窗口没有跳转。请再试一次。";
-    // The pane marks its frame element (claude-science.jsx).
-    private const string RemoveFrame = "document.querySelectorAll('iframe[data-science-frame]').forEach(frame => frame.remove());";
+    private const string FrameGone = "本机渲染页面的进程意外退出，已改用隔离浏览器。";
+    // POST /_cage/end goes straight to the front's loopback port: never
+    // through a proxy.
+    private static readonly HttpClient Front = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromMilliseconds(ScienceFrame.EndWaitMilliseconds),
+    };
 
     private readonly CoreWebView2 core;
     private readonly Action<string> failed;
     private readonly Action<string> navigate;
     private readonly ScienceFrame.Policy policy = new();
-    private readonly CoreWebView2DevToolsProtocolEventReceiver attached, detached;
+    private readonly CoreWebView2DevToolsProtocolEventReceiver attached, detached, crashed;
     private string origin = "";
     private readonly HashSet<string> framed = new(StringComparer.Ordinal);
     private string heldUri = "";
     private int navigation;
+    // Frames this host crashed (their Inspector.targetCrashed is awaited) and
+    // the session origins whose frame process exit it caused (N4).
+    private readonly Dictionary<string, TaskCompletionSource> crashing = new(StringComparer.Ordinal);
+    private readonly HashSet<string> dead = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, DateTime> expected = new(StringComparer.Ordinal);
 
     // failed tells the pane its frame ended; navigate re-issues a navigation
     // this host held.
@@ -53,13 +63,18 @@ internal sealed class ScienceFrameHost
         attached.DevToolsProtocolEventReceived += Attached;
         detached = core.GetDevToolsProtocolEventReceiver("Target.detachedFromTarget");
         detached.DevToolsProtocolEventReceived += Detached;
+        crashed = core.GetDevToolsProtocolEventReceiver("Inspector.targetCrashed");
+        crashed.DevToolsProtocolEventReceived += (_, e) => {
+            var session = e.SessionId ?? "";
+            dead.Add(session);
+            if (crashing.Remove(session, out var seen)) seen.TrySetResult();
+        };
     }
 
     // Prepare drops any earlier identity and proves the proxy switch (F5).
     public async Task<object> Prepare()
     {
-        origin = "";
-        Apply(policy.Detach());
+        await Detach();
         return new { backstop = true, proxy = await ProxyCheck() };
     }
 
@@ -84,32 +99,66 @@ internal sealed class ScienceFrameHost
         }
         finally
         {
-            Apply(actions.Where(action => !(action.Session.Length == 0 && action.Call != null)));
+            _ = Apply(actions.Where(action => !(action.Session.Length == 0 && action.Call != null)), "");
         }
     }
 
-    public void Detach()
+    // Detach is the pane's detach op: it returns once the frame's teardown
+    // (the front's end, the crash, the removal) has run; the targets'
+    // detaches and the end of auto-attach follow.
+    public Task Detach()
     {
+        var ending = origin;
         origin = "";
-        Apply(policy.Detach());
+        return Apply(policy.Detach(), ending);
     }
 
     // Hold answers NavigationStarting for the window's own document: true
     // cancels it, and it is issued again once the frame's targets are gone.
     public bool Hold(string uri)
     {
+        var ending = origin;
         origin = "";
         var actions = policy.Navigate();
         if (actions.Any(action => action.Proceed))
         {
-            Apply(actions.Where(action => !action.Proceed));
+            _ = Apply(actions.Where(action => !action.Proceed), ending);
             return false;
         }
         heldUri = uri;
         var current = ++navigation;
-        Apply(actions);
+        _ = Apply(actions, ending);
         _ = DropAfter(current);
         return true;
+    }
+
+    // FrameExited answers ProcessFailed of kind FrameRenderProcessExited
+    // (N4): a frame's process is gone, the window's document is not. The
+    // exit of a frame this host crashed says nothing; any other exit of the
+    // Science frame ends its front and tells the pane, which falls back to
+    // the browser pane. It never fails the window.
+    public void FrameExited(IReadOnlyList<CoreWebView2FrameInfo>? frames)
+    {
+        if (origin.Length == 0) return;
+        var now = DateTime.UtcNow;
+        foreach (var stale in expected.Where(pair => now - pair.Value > TimeSpan.FromSeconds(10)).Select(pair => pair.Key).ToList()) expected.Remove(stale);
+        var origins = (frames ?? []).Select(frame => Uri.TryCreate(frame.Source, UriKind.Absolute, out var url) ? url.GetLeftPart(UriPartial.Authority) : "").ToList();
+        if (origins.Count != 0 ? origins.All(expected.ContainsKey) : expected.Count != 0) return;
+        if (origins.Count != 0 && !origins.Contains(origin)) return;
+        _ = EndFront(origin);
+        failed(FrameGone);
+    }
+
+    // EndForExit ends the front's session before the WebView goes (the
+    // window quits or recreates it, or its document's process is gone): its
+    // processes end asynchronously and a worker must not reach the daemon
+    // without its overrides meanwhile.
+    public void EndForExit()
+    {
+        var ending = origin;
+        origin = "";
+        try { EndFront(ending).Wait(ScienceFrame.EndWaitMilliseconds); }
+        catch (AggregateException) { }
     }
 
     private async Task DropAfter(int current)
@@ -121,7 +170,12 @@ internal sealed class ScienceFrameHost
         failed(NavigationDropped);
     }
 
-    private async void Apply(IEnumerable<ScienceFrame.Action> actions)
+    // Apply performs actions in list order: the front's end for the frame of
+    // origin ending, crashes (Page.crash never answers while the frame
+    // lives: its Inspector.targetCrashed is awaited, at most CrashWait), the
+    // removal of that origin's frame elements, then the calls, in order per
+    // session.
+    private async Task Apply(IEnumerable<ScienceFrame.Action> actions, string ending)
     {
         var list = actions.ToList();
         // The origins to clear are the ones framed when the page detach was
@@ -132,10 +186,18 @@ internal sealed class ScienceFrameHost
             clear = framed.ToList();
             framed.Clear();
         }
+        var crashes = new List<Task>();
         foreach (var action in list)
         {
             if (action.End) failed(Ended);
-            else if (action.Remove) await Script(RemoveFrame);
+            else if (action.EndFront) await EndFront(ending);
+            else if (action.Crash) crashes.Add(Crash(action.Session, ending));
+            else if (action.Remove)
+            {
+                await Task.WhenAny(Task.WhenAll(crashes), Task.Delay(ScienceFrame.CrashWaitMilliseconds));
+                await Script(ScienceFrame.RemoveFrame(ending));
+                _ = List();
+            }
         }
         await Task.WhenAll(list.Where(action => action.Call != null).GroupBy(action => action.Session)
             .Select(group => Run(group.Key, group.Select(action => action.Call!).ToList())));
@@ -145,6 +207,59 @@ internal sealed class ScienceFrameHost
         var uri = heldUri;
         heldUri = "";
         if (uri.Length != 0) navigate(uri);
+    }
+
+    // EndFront asks the front of a session origin to end that frame's
+    // session (POST /_cage/end) and waits for its answer, at most EndWait. A
+    // failure is left to the crash and the removal that follow.
+    private static async Task EndFront(string ending)
+    {
+        var end = ending.Length == 0 ? null : ScienceFrame.End(Backend.Root, ending);
+        if (end == null) return;
+        using var request = new HttpRequestMessage(HttpMethod.Post, end.Address);
+        request.Headers.Add("X-Cage-End", end.Secret);
+        request.Headers.Add("X-Cage-End-Label", end.Label);
+        try { using var _ = await Front.SendAsync(request).ConfigureAwait(false); }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or InvalidOperationException) { }
+    }
+
+    // Crash sends Page.crash to a frame's session without awaiting it (it
+    // never answers) and returns once the frame's Inspector.targetCrashed
+    // arrived. The frame's process exit is expected (FrameExited).
+    private Task Crash(string session, string ending)
+    {
+        if (dead.Contains(session)) return Task.CompletedTask;
+        var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        crashing[session] = seen;
+        if (ending.Length != 0) expected[ending] = DateTime.UtcNow;
+        try
+        {
+            _ = core.CallDevToolsProtocolMethodForSessionAsync(session, "Page.crash", "{}")
+                .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+        }
+        catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { seen.TrySetResult(); }
+        return seen.Task;
+    }
+
+    // List reconciles while the frame goes: the page session's
+    // Target.getTargets every ListEvery until auto-attach has ended (at most
+    // five times).
+    private async Task List()
+    {
+        for (var i = 0; i < 5; i++)
+        {
+            await Task.Delay(ScienceFrame.ListEveryMilliseconds);
+            if (!policy.Attached || !policy.Detaching) return;
+            var listed = new List<string>();
+            try
+            {
+                using var reply = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Target.getTargets", "{}"));
+                foreach (var info in reply.RootElement.GetProperty("targetInfos").EnumerateArray())
+                    listed.Add(info.GetProperty("targetId").GetString() ?? "");
+            }
+            catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or COMException or ArgumentException) { continue; }
+            await Apply(policy.Listed(listed), "");
+        }
     }
 
     // Run sends one session's calls in order. A failed call never resumes
@@ -158,7 +273,7 @@ internal sealed class ScienceFrameHost
             {
                 policy.CallFailed(session);
                 await Task.Delay(ScienceFrame.SettleMilliseconds);
-                Apply(policy.Settle(session));
+                await Apply(policy.Settle(session), "");
                 return;
             }
         }
@@ -197,14 +312,18 @@ internal sealed class ScienceFrameHost
         catch (Exception error) when (error is InvalidOperationException or COMException) { }
     }
 
-    private static bool Read(string json, out string session, out string type)
+    private static bool Read(string json, out string session, out string type, out string target)
     {
-        session = type = "";
+        session = type = target = "";
         try
         {
             using var data = JsonDocument.Parse(json);
             session = data.RootElement.GetProperty("sessionId").GetString() ?? "";
-            if (data.RootElement.TryGetProperty("targetInfo", out var info)) type = info.GetProperty("type").GetString() ?? "";
+            if (data.RootElement.TryGetProperty("targetInfo", out var info))
+            {
+                type = info.GetProperty("type").GetString() ?? "";
+                target = info.GetProperty("targetId").GetString() ?? "";
+            }
             return session.Length != 0;
         }
         catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException) { return false; }
@@ -212,12 +331,15 @@ internal sealed class ScienceFrameHost
 
     private void Attached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
     {
-        if (Read(e.ParameterObjectAsJson, out var session, out var type)) Apply(policy.AttachedTarget(e.SessionId ?? "", session, type));
+        if (Read(e.ParameterObjectAsJson, out var session, out var type, out var target)) _ = Apply(policy.AttachedTarget(e.SessionId ?? "", session, type, target), "");
     }
 
     private void Detached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
     {
-        if (Read(e.ParameterObjectAsJson, out var session, out _)) Apply(policy.DetachedTarget(session));
+        if (!Read(e.ParameterObjectAsJson, out var session, out _, out _)) return;
+        dead.Remove(session);
+        if (crashing.Remove(session, out var seen)) seen.TrySetResult();
+        _ = Apply(policy.DetachedTarget(session), "");
     }
 
     // ProxyCheck loads ScienceFrame.ProxyCheckURL under the window's main
