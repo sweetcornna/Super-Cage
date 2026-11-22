@@ -266,11 +266,14 @@ test user's: it cannot make root's files.
 0. Codex is still hidden, so the run needs a development build started with the switch on. Only a version
    with `-dev` lists or installs hidden entries, and only when the process serving the window has
    `CAGE_AGENTS_HIDDEN=1` in its environment; a release build refuses them at the route and in `ScriptInput`.
-   For example `make cage VERSION="$(tr -d '\r\n' < VERSION)-dev.agents"`, then start that `cage` with
-   `CAGE_AGENTS_HIDDEN=1`. A `-dev` version is a prerelease, so the build will report the release of
-   the same number as an update and stamps the guest manifest's `app_version` differently; neither
-   matters for the run. A hidden client installed from such a build gets 404 on remove from a release
-   build; remove it before switching back.
+   Take a number above the newest release, for example `make cage VERSION=0.1.16-dev.agents` while 0.1.15
+   is the newest, and start that `cage` with `CAGE_AGENTS_HIDDEN=1` (`make` needs `npm ci` for the UI;
+   this command has not been run). A `-dev` version of the current number is a prerelease older than the
+   release, so it would be offered the release as an update, silently from a writable `.app` bundle on macOS,
+   and the update would drop the switch. The guest manifest's `app_version` changes but does not mark the
+   guest stale (`Current` compares protocol and revision only). The switch took when `GET /api/agents`
+   lists `codex`. A hidden client installed from such a build gets 404 on remove from a release build;
+   remove it before switching back.
 1. Paused at the version check: owner and mode of the stage folder and its tree (all root's). After install:
    `find /usr/local/lib/agent-clients /var/lib/agent-clients -not -user root`, `-perm /7000`, `-type f -links +1`
    all print nothing.

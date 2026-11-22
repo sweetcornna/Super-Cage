@@ -75,7 +75,9 @@ var agentsHostArch = runtime.GOARCH
 // agentsHiddenAllowed: a developer build started with CAGE_AGENTS_HIDDEN=1
 // lists and installs hidden entries (their real-guest acceptance, design
 // 11 step 1.8). A release build never does.
-var agentsHiddenAllowed = func() bool {
+var agentsHiddenAllowed = agentsHiddenSwitch
+
+func agentsHiddenSwitch() bool {
 	return strings.Contains(version.Version, "-dev") && os.Getenv("CAGE_AGENTS_HIDDEN") == "1"
 }
 

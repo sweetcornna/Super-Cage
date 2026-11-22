@@ -21,6 +21,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/version"
 )
 
 // agentClientServer is a test server whose environment runs (a live marker
@@ -459,6 +460,28 @@ func statKeyOf(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// Hidden entries need both a development version and the switch; a
+// release build never lists or installs them.
+func TestAgentClientHiddenSwitch(t *testing.T) {
+	old := version.Version
+	t.Cleanup(func() { version.Version = old })
+	for _, c := range []struct {
+		version, env string
+		want         bool
+	}{
+		{"0.1.15", "1", false},
+		{"0.1.16-dev.agents", "", false},
+		{"0.1.16-dev.agents", "0", false},
+		{"0.1.16-dev.agents", "1", true},
+	} {
+		version.Version = c.version
+		t.Setenv("CAGE_AGENTS_HIDDEN", c.env)
+		if got := agentsHiddenSwitch(); got != c.want {
+			t.Errorf("%s with %q: %v", c.version, c.env, got)
+		}
+	}
 }
 
 // Neither a paired phone's room nor any /api/mobile route reaches these
