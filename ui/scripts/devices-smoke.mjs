@@ -181,8 +181,18 @@ async function desktopRun({ theme, viewport, only }) {
     const first = await add.locator(".devices-countdown").innerText();
     await page.waitForTimeout(2200);
     assert.notEqual(await add.locator(".devices-countdown").innerText(), first);
+    // The window shares its clipboard with the environment (the desktop app does while one is ready): a program there
+    // reads what is copied without anyone pasting. The long code, which pairs without approval, is not offered for
+    // copying; the 8 digits, which need 允许, stay on show.
+    await page.evaluate(() => { window.cageSyncClipboard = () => Promise.resolve(); });
+    await add.getByText("共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码，或使用 8 位配对码。", { exact: true }).waitFor();
+    assert.equal(await add.getByRole("button", { name: "复制长配对码", exact: true }).count(), 0, "no copying of the long code");
+    assert.match(await add.locator(".devices-digits").innerText(), /^\d{4} \d{4}$/);
+    await shot("add-shared-clipboard");
+    await page.evaluate(() => { delete window.cageSyncClipboard; });
     await add.getByRole("button", { name: "复制长配对码", exact: true }).click();
     await add.getByText("长配对码已复制，可以粘贴到另一台电脑或手机。").waitFor();
+    assert.equal(await add.getByText("共享剪贴板已开启", { exact: false }).count(), 0);
     // A new code replaces the old one.
     await add.getByRole("button", { name: "重新生成", exact: true }).click();
     await add.getByText("已换成新的配对码，之前的已失效。").waitFor();

@@ -15,6 +15,10 @@ const heldRead = (path) => (wait, signal) => {
   return api(path + "?wait=" + wait, undefined, undefined, {}, { signal: deadline.signal }).finally(deadline.done);
 };
 const decisions = new Set(["joined", "failed", "expired", "none"]);
+// The desktop window shares its clipboard with the environment it shows (main.jsx, shared-clipboard.mjs): it sends
+// every copy into the environment within a moment, where any program can read it, nobody has to paste. The long code
+// pairs without approval, so it is not offered for copying then; the 8 digits need 允许 and stay on show.
+const clipboardShared = () => typeof window.cageSyncClipboard === "function" || window.cageSharedClipboardActive === true;
 // A host that cannot answer a held read any more (the code is gone, the route is not there) ends the wait.
 const lastRead = (status) => status === 404 || status === 410;
 
@@ -89,6 +93,7 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
     } catch (error) { dispatch({ type: "error", error }); }
   }
   async function copyLong() {
+    if (clipboardShared()) return;
     try {
       await writeClipboard(view.manual);
       setNote("长配对码已复制，可以粘贴到另一台电脑或手机。");
@@ -96,6 +101,8 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
   }
 
   const { request } = view;
+  // Read at every render: while a code is on show the countdown renders each second.
+  const shared = clipboardShared();
   const again = <button type="button" className="primary" onClick={() => mint()}><RefreshCw size={15} aria-hidden="true" />重新生成</button>;
   const close = <button type="button" onClick={onClose}>关闭</button>;
   let footer = close;
@@ -116,6 +123,7 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
           </ul>
           {customRelay && <p className="devices-relay">{customRelayLine(customRelay)}</p>}
           <p className="devices-privacy">只给你自己的设备看这个配对码；关闭窗口后它立即失效。</p>
+          {shared && <p className="devices-privacy">共享剪贴板已开启，环境内的程序能读到剪贴板。请扫码，或使用 8 位配对码。</p>}
           {view.refreshed && !note && <p className="devices-status" role="status">已换成新的配对码，之前的已失效。</p>}
           {note && <p className="devices-status" role="status">{note}</p>}
         </div>
@@ -124,7 +132,7 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
     );
     footer = (
       <>
-        <button type="button" className="devices-copy" onClick={copyLong}><Copy size={15} aria-hidden="true" />复制长配对码</button>
+        {!shared && <button type="button" className="devices-copy" onClick={copyLong}><Copy size={15} aria-hidden="true" />复制长配对码</button>}
         <button type="button" onClick={() => mint(true)}><RefreshCw size={15} aria-hidden="true" />重新生成</button>
         {close}
       </>
