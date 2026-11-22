@@ -521,18 +521,14 @@ func (o *entryOutput) frame(out, data []byte, replay, restart bool) []byte {
 type entryPresence struct {
 	focus     atomic.Int32 // entryFocusUnknown, entryFocusIn or entryFocusOut
 	lastInput atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
-	inPaste   bool         // the input goroutine's: inside a bracketed paste
+	// input is the input goroutine's: the window's input across reads.
+	input termfilter.InputReader
 }
 
 const (
 	entryFocusUnknown int32 = iota
 	entryFocusIn
 	entryFocusOut
-)
-
-const (
-	entryPasteStart = "\x1b[200~"
-	entryPasteEnd   = "\x1b[201~"
 )
 
 func (p *entryPresence) here() bool {
@@ -553,23 +549,7 @@ func (p *entryPresence) here() bool {
 func (p *entryPresence) note(data []byte, guestFocus func() bool) []byte {
 	out := make([]byte, 0, len(data))
 	owner := false
-	for i := 0; i < len(data); {
-		if p.inPaste {
-			owner = true
-			end := bytes.Index(data[i:], []byte(entryPasteEnd))
-			if end < 0 {
-				out = append(out, data[i:]...)
-				break
-			}
-			end += len(entryPasteEnd)
-			out = append(out, data[i:i+end]...)
-			i += end
-			p.inPaste = false
-			continue
-		}
-		n, kind, _ := termfilter.NextInput(data[i:])
-		unit := data[i : i+n]
-		i += n
+	p.input.Read(data, func(unit []byte, kind termfilter.InputKind, _ termfilter.Reply) {
 		switch kind {
 		case termfilter.InputFocusIn, termfilter.InputFocusOut:
 			state := entryFocusIn
@@ -578,16 +558,13 @@ func (p *entryPresence) note(data []byte, guestFocus func() bool) []byte {
 			}
 			p.focus.Store(state)
 			if !guestFocus() {
-				continue
+				return
 			}
-		case termfilter.InputKey:
-			owner = true
-			p.inPaste = string(unit) == entryPasteStart
-		case termfilter.InputMouse:
+		case termfilter.InputKey, termfilter.InputPaste, termfilter.InputMouse:
 			owner = true
 		}
 		out = append(out, unit...)
-	}
+	})
 	if owner {
 		p.lastInput.Store(time.Now().UnixNano())
 	}
@@ -1118,7 +1095,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	outputDone := make(chan struct{})
 	go func() {
 		send := func(data []byte) bool {
-			if data = presence.note(data, output.filter.GuestFocus); len(data) == 0 {
+			if len(data) == 0 {
 				return true
 			}
 			input, err := session.peerInput(peer, string(data))
@@ -1127,19 +1104,10 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			}
 			return input == "" || session.enqueueInputWait(ctx, input, outputDone) == nil
 		}
-		if len(typed) > 0 && !send(typed) {
+		if len(typed) > 0 && !send(presence.note(typed, output.filter.GuestFocus)) {
 			return
 		}
-		buffer := make([]byte, 32<<10)
-		for {
-			n, err := channel.Read(buffer)
-			if n > 0 && !send(buffer[:n]) {
-				return
-			}
-			if err != nil {
-				return
-			}
-		}
+		entryReadInput(channel, presence, output.filter.GuestFocus, send)
 	}()
 	// History only draws, as in cage attach; a re-joined terminal's does not
 	// continue what the client's window shows.
