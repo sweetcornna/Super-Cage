@@ -15,28 +15,31 @@ import (
 
 // The system ssh takes its home from the user database, not from $HOME:
 // any run of it without -F reads the owner's real ~/.ssh/config, known
-// hosts, agent and control sockets. So every real ssh these tests run, and
-// every one a program they start runs (a Herdr core, scp, sftp, rsync), is
-// a shim first: sshExecutable() is the shim, the shim's folder comes first
-// on PATH (here and in each environment a test builds), and scp and sftp get
-// it with -S. The shim logs each call and runs the real ssh with
+// hosts, default keys, agent and control sockets. So every real ssh these
+// tests run, and every one a program they start runs (a Herdr core, scp,
+// sftp, rsync), is a shim first: sshExecutable() is the shim, the shim's
+// folder comes first on PATH (here and in each environment a test builds),
+// and scp and sftp get it with -S. The shim logs each call (and each
+// refusal), and:
 //
-//	-F <its own empty configuration>        (the caller's -F, given later, wins)
-//	-o UserKnownHostsFile=<temporary files> (its own and the fixtures')
-//	-o GlobalKnownHostsFile=/dev/null
-//	-o ControlPath=none
-//	-o IdentityAgent=none
+//   - refuses a configuration (-F, and the files its Include lines name),
+//     key, certificate, known hosts file, control socket or agent the
+//     command line names outside a temporary folder (none and /dev/null are
+//     fine, and so is an Include of the system's /etc/ssh);
+//   - runs the real ssh with -F <its own empty configuration> first (the
+//     caller's -F, given later, wins);
+//   - asks ssh -G what that command line would use, and sets on the command
+//     line what would come from outside a temporary folder: its own known
+//     hosts (with those a test named, testSSHKnown), GlobalKnownHostsFile
+//     /dev/null, ControlPath none, IdentityAgent none (no agent named means
+//     $SSH_AUTH_SOCK's), and for ssh's default keys (nothing names a key, or
+//     -i names one that is not there) a key that does not exist; what the
+//     command line or the configuration sets inside a temporary folder stays;
+//   - asks ssh -G again and refuses anything still outside one.
 //
-// unless the command line sets one of these itself to none, /dev/null or
-// files inside a temporary folder (a test's own agent, a -S socket); set to
-// anything else, the shim refuses to run. A configuration (-F), key (-i,
-// IdentityFile) or certificate outside a temporary folder is refused too,
-// and so is a configuration whose Include names a file outside one.
-// Before the real run the shim asks ssh -G what the command line would use:
-// ssh's default keys in the user database's home (nothing named a key for
-// the host) give way to a key that does not exist, and any other file
-// outside a temporary folder is refused. An ssh -G only prints a
-// configuration: it runs as given, and only with -F.
+// An ssh -G only prints a configuration: it runs as given, and only with -F.
+// What ssh -G itself refuses (a configuration gone), the shim answers as ssh
+// does, with ssh's words and exit status 255.
 
 var testSSH struct {
 	dir   string
@@ -114,7 +117,11 @@ shim='%[1]s'
 real='%[2]s'
 printf '%%s %%s\n' "$real" "$*" >> "$shim/calls.log"
 set -f
-refuse() { echo "ssh shim: $1" >&2; exit 96; }
+refuse() {
+	echo "ssh shim: $1" >&2
+	printf 'ssh shim refused: %%s\n' "$1" >> "$shim/calls.log"
+	exit 96
+}
 # one: none, /dev/null or a file inside a temporary folder, never climbing
 # out of it; safe: each of a list of them.
 one() {
@@ -129,15 +136,16 @@ safe() {
 		one "$p" || return 1
 	done
 }
-known= global= control= agent= identity=
 # config: a configuration file inside a temporary folder whose Include lines
-# stay inside one too (ssh reads ~ as the user database's home).
+# stay inside one too (ssh reads ~ as the user database's home, ${HOME} as
+# the variable) or name the system's own files.
 config() {
 	one "$1" || refuse "a configuration outside a temporary folder: $1"
-	includes=$(sed -n 's/^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]=][[:space:]=]*//p' "$1" 2>/dev/null)
+	includes=$(sed -n 's/^[[:space:]]*[Ii][Nn][Cc][Ll][Uu][Dd][Ee][[:space:]=][[:space:]=]*//p' "$1" 2>/dev/null |
+		awk '{ h = ENVIRON["HOME"]; while ((i = index($0, "${HOME}")) > 0) $0 = substr($0, 1, i - 1) h substr($0, i + 7); print }')
 	while IFS= read -r include; do
-		[ -n "$include" ] || continue
 		case "$include" in
+		""|/etc/ssh/*|\"/etc/ssh/*) continue ;;
 		\"*) one "$include" ;;
 		*) safe "$include" ;;
 		esac || refuse "an Include outside a temporary folder: $include"
@@ -149,27 +157,27 @@ option() {
 	name=$(printf '%%s' "$1" | sed 's/[ =].*//' | tr 'A-Z' 'a-z')
 	value=$(printf '%%s' "$1" | sed 's/^[^ =]*[ =]//')
 	case "$name" in
-	userknownhostsfile) safe "$value" || refuse "known hosts outside a temporary folder: $value"; known=1 ;;
-	globalknownhostsfile) safe "$value" || refuse "global known hosts outside a temporary folder: $value"; global=1 ;;
-	controlpath) one "$value" || refuse "a control socket outside a temporary folder: $value"; control=1 ;;
-	identityagent) one "$value" || refuse "an agent outside a temporary folder: $value"; agent=1 ;;
-	identityfile) one "$value" || refuse "a key outside a temporary folder: $value"; identity=1 ;;
+	userknownhostsfile) safe "$value" || refuse "known hosts outside a temporary folder: $value" ;;
+	globalknownhostsfile) safe "$value" || refuse "global known hosts outside a temporary folder: $value" ;;
+	controlpath) one "$value" || refuse "a control socket outside a temporary folder: $value" ;;
+	identityagent) one "$value" || refuse "an agent outside a temporary folder: $value" ;;
+	identityfile) one "$value" || refuse "a key outside a temporary folder: $value" ;;
 	certificatefile) one "$value" || refuse "a certificate outside a temporary folder: $value" ;;
 	esac
 }
 g= f= prev=
 for a in "$@"; do
 	case "$prev" in
-	-S) one "$a" || refuse "a control socket outside a temporary folder: $a"; control=1 ;;
+	-S) one "$a" || refuse "a control socket outside a temporary folder: $a" ;;
 	-o) option "$a" ;;
 	-F) config "$a" ;;
-	-i) one "$a" || refuse "a key outside a temporary folder: $a"; identity=1 ;;
+	-i) one "$a" || refuse "a key outside a temporary folder: $a" ;;
 	esac
 	case "$a" in
 	-G) g=1 ;;
 	-F) f=1 ;;
 	-F?*) f=1; config "${a#-F}" ;;
-	-i?*) one "${a#-i}" || refuse "a key outside a temporary folder: ${a#-i}"; identity=1 ;;
+	-i?*) one "${a#-i}" || refuse "a key outside a temporary folder: ${a#-i}" ;;
 	-o?*) option "${a#-o}" ;;
 	esac
 	prev=$a
@@ -178,46 +186,66 @@ if [ -n "$g" ]; then
 	[ -n "$f" ] || refuse "-G without -F"
 	exec "$real" "$@"
 fi
+# What ssh would use for this command line and its configuration, from
+# ssh -G, and one value of it.
+look() {
+	effective=$("$real" -G -F "$shim/config" "$@" 2>&1) && return
+	# What ssh itself refuses (a configuration gone, say) it says as ssh.
+	printf '%%s\n' "$effective" >&2
+	printf 'ssh shim: ssh -G failed\n' >> "$shim/calls.log"
+	exit 255
+}
+value() {
+	printf '%%s\n' "$effective" | sed -n "s/^$1 //p"
+}
+look "$@"
+# What ssh would take from outside a temporary folder the shim sets itself:
+# known hosts (its own and those the tests named), no global ones, no
+# control socket, no agent (none named is $SSH_AUTH_SOCK's), and for ssh's
+# default keys in the user database's home (nothing names a key, or -i names
+# one that is not there, which ssh drops), a key that does not exist. What
+# the command line or the configuration set inside one stays.
+changed=
 list="$shim/known_hosts"
 if [ -f "$shim/known.list" ]; then
 	while IFS= read -r line; do
 		[ -n "$line" ] && list="$list $line"
 	done < "$shim/known.list"
 fi
-# What the caller set to something safe stays; the rest is the shim's.
-[ -n "$agent" ] || set -- -o IdentityAgent=none "$@"
-[ -n "$control" ] || set -- -o ControlPath=none "$@"
-[ -n "$global" ] || set -- -o GlobalKnownHostsFile=/dev/null "$@"
-[ -n "$known" ] || set -- -o "UserKnownHostsFile=$list" "$@"
-# What ssh would use, as ssh -G reads this command line and its
-# configuration: the first file outside a temporary folder, if any.
-unsafe() {
-	effective=$("$real" -G -F "$shim/config" "$@" 2>/dev/null) || { echo "a command line ssh -G refuses"; return; }
-	while read -r key value; do
-		case "$key" in
-		userknownhostsfile|globalknownhostsfile)
-			safe "$value" || { printf '%%s %%s\n' "$key" "$value"; return; } ;;
-		identityfile|certificatefile|controlpath|identityagent|revokedhostkeys)
-			one "$value" || { printf '%%s %%s\n' "$key" "$value"; return; } ;;
-		esac
-	done <<EOF
+v=$(value userknownhostsfile)
+[ -n "$v" ] && safe "$v" || { set -- -o "UserKnownHostsFile=$list" "$@"; changed=1; }
+v=$(value globalknownhostsfile)
+[ -n "$v" ] && safe "$v" || { set -- -o GlobalKnownHostsFile=/dev/null "$@"; changed=1; }
+v=$(value controlpath)
+[ -z "$v" ] || one "$v" || { set -- -o ControlPath=none "$@"; changed=1; }
+v=$(value identityagent)
+[ -n "$v" ] && one "$v" || { set -- -o IdentityAgent=none "$@"; changed=1; }
+case "$(value identityfile)" in
+"~/.ssh/id_"*) set -- -o "IdentityFile=$shim/no-identity" "$@"; changed=1 ;;
+esac
+[ -z "$changed" ] || look "$@"
+while read -r key v; do
+	case "$key" in
+	userknownhostsfile|globalknownhostsfile) safe "$v" || refuse "ssh would use $key $v" ;;
+	identityfile|certificatefile|controlpath|identityagent|revokedhostkeys) one "$v" || refuse "ssh would use $key $v" ;;
+	esac
+done <<EOF
 $effective
 EOF
-}
-bad=$(unsafe "$@")
-# With no key named for the host, ssh tries its default keys in the home
-# of the user database, the owner's: a key that does not exist takes
-# their place.
-case "$bad" in
-"identityfile ~/.ssh/id_"*)
-	if [ -z "$identity" ]; then
-		set -- -o "IdentityFile=$shim/no-identity" "$@"
-		bad=$(unsafe "$@")
-	fi ;;
-esac
-[ -z "$bad" ] || refuse "ssh would use $bad"
+[ -n "$(value identityagent)" ] || refuse "ssh would use the agent of SSH_AUTH_SOCK"
 exec "$real" -F "$shim/config" "$@"
 `
+
+// testSSHEcho is a shim whose ssh prints what it was given, except that
+// ssh -G is the real one: what the shim hands ssh, seen without a server.
+func testSSHEcho(t *testing.T) string {
+	t.Helper()
+	real := filepath.Join(t.TempDir(), "echo-ssh")
+	if err := os.WriteFile(real, []byte("#!/bin/sh\ncase \"$1\" in -G) exec /usr/bin/ssh \"$@\" ;; esac\necho \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return testSSHShim(real)
+}
 
 // testSSHKnown adds a test's known_hosts files to the shim's, for as long as
 // the test runs. They are temporary files without spaces.
@@ -307,10 +335,14 @@ func TestSSHShimIsTheSSHTheTestsRun(t *testing.T) {
 		t.Fatalf("ssh on PATH: %q %v", found, err)
 	}
 	// What the shim hands the real ssh, seen through echo in its place.
-	echo := testSSHShim("/bin/echo")
+	echo := testSSHEcho(t)
 	out, err = exec.Command(echo, "-F", config, "probe", "true").Output()
-	want := "-F " + filepath.Join(testSSH.dir, "config") + " -o UserKnownHostsFile=" + filepath.Join(testSSH.dir, "known_hosts")
-	if err != nil || !strings.HasPrefix(string(out), want) || !strings.HasSuffix(string(out), " -o GlobalKnownHostsFile=/dev/null -o ControlPath=none -o IdentityAgent=none -F "+config+" probe true\n") {
+	for _, want := range []string{" -o UserKnownHostsFile=" + filepath.Join(testSSH.dir, "known_hosts"), " -o GlobalKnownHostsFile=/dev/null ", " -o IdentityAgent=none ", " -o IdentityFile=" + filepath.Join(testSSH.dir, "no-identity") + " "} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("the shim ran %q (%v), without %q", out, err, want)
+		}
+	}
+	if err != nil || !strings.HasPrefix(string(out), "-F "+filepath.Join(testSSH.dir, "config")+" -o ") || strings.Contains(string(out), "ControlPath") || !strings.HasSuffix(string(out), " -F "+config+" probe true\n") {
 		t.Fatalf("the shim ran %q (%v)", out, err)
 	}
 	// A test's own agent and control socket, inside a temporary folder, stay.
@@ -329,11 +361,7 @@ func TestSSHShimIsTheSSHTheTestsRun(t *testing.T) {
 // for -G and echo for the run.
 func TestSSHShimKeepsToTemporaryFiles(t *testing.T) {
 	dir := t.TempDir()
-	real := filepath.Join(dir, "real-ssh")
-	if err := os.WriteFile(real, []byte("#!/bin/sh\ncase \"$1\" in -G) exec /usr/bin/ssh \"$@\" ;; esac\necho \"$@\"\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	shim := testSSHShim(real)
+	shim := testSSHEcho(t)
 	write := func(name, text string) string {
 		path := filepath.Join(dir, name)
 		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
@@ -369,8 +397,29 @@ func TestSSHShimKeepsToTemporaryFiles(t *testing.T) {
 			t.Errorf("%s: the shim ran %q (%v)", filepath.Base(config), out, err)
 		}
 	}
-	// With no -F at all, the shim's own configuration names no key either.
+	// Files a configuration names inside a temporary folder stay: its own
+	// known hosts, an Include through ${HOME} (the test's) and the
+	// system's own configuration.
+	known := write("known", "")
+	own := write("own", "Include \"${HOME}/*.conf\"\nInclude /etc/ssh/ssh_config\nHost probe\n HostName probe.invalid\n IdentityFile "+key+"\n UserKnownHostsFile "+known+"\n GlobalKnownHostsFile /dev/null\n")
+	cmd := exec.Command(shim, "-F", own, "probe", "true")
+	cmd.Env = append(os.Environ(), "HOME="+dir)
+	if out, err := cmd.Output(); err != nil || strings.Contains(string(out), "KnownHostsFile=") || strings.Contains(string(out), "IdentityFile=") || !strings.Contains(string(out), " -o IdentityAgent=none ") {
+		t.Errorf("own files: the shim ran %q (%v)", out, err)
+	}
+	// With no -F at all, the shim's own configuration names no key either;
+	// nor does -i with a key that is not there (ssh drops it).
 	if out, err := exec.Command(shim, "probe", "true").Output(); err != nil || !strings.Contains(string(out), noKey) {
 		t.Errorf("no -F: the shim ran %q (%v)", out, err)
+	}
+	if out, err := exec.Command(shim, "-F", "/dev/null", "-i", filepath.Join(dir, "missing"), "probe").Output(); err != nil || !strings.Contains(string(out), noKey) {
+		t.Errorf("-i missing: the shim ran %q (%v)", out, err)
+	}
+	if out, err := exec.Command(shim, "-F", "/dev/null", "-i", key, "probe").Output(); err != nil || strings.Contains(string(out), noKey) {
+		t.Errorf("-i key: the shim ran %q (%v)", out, err)
+	}
+	// What ssh -G refuses, ssh's words and exit.
+	if out, err := exec.Command(shim, "-F", filepath.Join(dir, "gone"), "probe").CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 255 || !strings.Contains(string(out), "gone") {
+		t.Errorf("a configuration gone: %v %s", err, out)
 	}
 }
