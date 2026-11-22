@@ -2,7 +2,6 @@ package localterm
 
 import (
 	"errors"
-	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -10,7 +9,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
-// App is one terminal application this build knows.
+// App is one terminal application this build can open a window in.
 type App struct {
 	ID   string `json:"id"`
 	Name string `json:"name"`
@@ -22,48 +21,24 @@ type App struct {
 	// Automation: opening a window asks macOS once for permission to
 	// control the application, and the owner should be told first.
 	Automation bool `json:"automation"`
-	// Hosts: the application can show "cage attach" in this build. Herdr
-	// cannot (it needs the SSH entry of a later step).
-	Hosts bool   `json:"hosts"`
-	Note  string `json:"note,omitempty"`
 }
 
-// macApps is the table of design section 5.8, macOS.
+// macApps is macOS's table, in the order of preference: there is no choice
+// to make. Ghostty opens the window when it is installed, the system
+// Terminal otherwise.
 var macApps = []App{
-	{ID: "ghostty", Name: "Ghostty", BundleIDs: []string{"com.mitchellh.ghostty"}, Automation: true, Hosts: true,
+	{ID: "ghostty", Name: "Ghostty", BundleIDs: []string{"com.mitchellh.ghostty"}, Automation: true,
 		Evidence: "ghostty macos/Ghostty.xcodeproj/project.pbxproj PRODUCT_BUNDLE_IDENTIFIER (release; the tip channel ships the same id per Homebrew cask ghostty@tip)"},
-	{ID: "iterm2", Name: "iTerm2", BundleIDs: []string{"com.googlecode.iterm2"}, Automation: true, Hosts: true,
-		Evidence: "iTerm2.xcodeproj/project.pbxproj PRODUCT_BUNDLE_IDENTIFIER = com.googlecode.iterm2; Homebrew cask iterm2 uninstall quit; AppleScript 'create window with default profile command' in the iTerm2 scripting docs"},
-	{ID: "terminal", Name: "终端", BundleIDs: []string{"com.apple.Terminal"}, Hosts: true,
+	{ID: "terminal", Name: "系统终端", BundleIDs: []string{"com.apple.Terminal"},
 		Evidence: "detected on this Mac at /System/Applications/Utilities/Terminal.app (experiment E11)"},
-	{ID: "warp", Name: "Warp", BundleIDs: []string{"dev.warp.Warp-Stable", "dev.warp.Warp-Preview"}, Hosts: true,
-		Evidence: "Homebrew casks warp and warp@preview: ~/Library/Preferences/dev.warp.Warp-Stable.plist, dev.warp.Warp-Preview.plist"},
-	{ID: "wezterm", Name: "WezTerm", BundleIDs: []string{"com.github.wez.wezterm"}, Hosts: true,
-		Evidence: "wezterm assets/macos/WezTerm.app/Contents/Info.plist CFBundleIdentifier; Homebrew casks wezterm and wezterm@nightly"},
-	{ID: "kitty", Name: "kitty", BundleIDs: []string{"net.kovidgoyal.kitty"}, Hosts: true,
-		Evidence: "kitty setup.py CFBundleIdentifier=f'net.kovidgoyal.{appname}', kitty/constants.py appname = 'kitty'; Homebrew cask kitty (Contents/MacOS/kitty); --single-instance in kitty/simple_cli_definitions.py"},
-	{ID: "alacritty", Name: "Alacritty", BundleIDs: []string{"org.alacritty"}, Hosts: true,
-		Evidence: "alacritty extra/osx/Alacritty.app/Contents/Info.plist CFBundleIdentifier; Homebrew cask alacritty"},
-	{ID: "herdr", Name: "Herdr", BundleIDs: []string{"dev.herdr.app"}, Hosts: false,
-		Note:     "Herdr 通过本机终端的 SSH 入口连接，稍后的版本提供",
-		Evidence: "herdr-app scripts/package CFBundleIdentifier; detected on this Mac at /Applications/Herdr.app (E11)"},
 }
 
-// Apps are the applications known on this operating system. Windows and
-// Linux tables arrive with their desktops (design step 5).
+// Apps are the applications this build can use on this operating system, in
+// the order of preference. Windows and Linux tables arrive with their
+// desktops (design step 5).
 func Apps() []App {
 	if runtime.GOOS == "darwin" {
 		return macApps
-	}
-	return nil
-}
-
-// Lookup finds a known application by id.
-func Lookup(id string) *App {
-	for i := range Apps() {
-		if Apps()[i].ID == id {
-			return &Apps()[i]
-		}
 	}
 	return nil
 }
@@ -76,8 +51,8 @@ type Installed struct {
 	BundleID string `json:"-"`
 }
 
-// Detect finds the known applications installed on this computer, without
-// asking for any permission and without starting anything.
+// Detect finds the applications of the table installed on this computer,
+// without asking for any permission and without starting anything.
 func Detect() []Installed {
 	var found []Installed
 	for _, app := range Apps() {
@@ -89,6 +64,20 @@ func Detect() []Installed {
 		}
 	}
 	return found
+}
+
+// Pick is the application "在本机终端中打开" uses among those found: the
+// first of the table (Ghostty), else the next (the system Terminal). It
+// reports false when none is installed.
+func Pick(found []Installed) (Installed, bool) {
+	for _, app := range Apps() {
+		for _, candidate := range found {
+			if candidate.ID == app.ID {
+				return candidate, true
+			}
+		}
+	}
+	return Installed{}, false
 }
 
 // Command is what the window runs: an absolute program and its arguments.
@@ -138,23 +127,4 @@ func (c Command) ShellLine() string {
 // AppleScriptString quotes text as an AppleScript string literal.
 func AppleScriptString(text string) string {
 	return "\"" + strings.NewReplacer("\\", "\\\\", "\"", "\\\"").Replace(text) + "\""
-}
-
-// YAMLString quotes text as a double-quoted YAML scalar.
-func YAMLString(text string) string {
-	var b strings.Builder
-	b.WriteByte('"')
-	for _, r := range text {
-		switch {
-		case r == '"' || r == '\\':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		case r < 0x20 || r == 0x7f:
-			fmt.Fprintf(&b, "\\x%02x", r)
-		default:
-			b.WriteRune(r)
-		}
-	}
-	b.WriteByte('"')
-	return b.String()
 }

@@ -34,7 +34,7 @@ Super Cage 把终端、浏览器、编辑器和官方 Claude Desktop 放进同�
 | 使用与主机同类的系统、选择原生开发工具 | [选择客机系统](guest-systems.md) |
 | 导入订阅、连接住宅代理、设置出口规则 | [网络与代理](network.md) |
 | 打开项目、启动 Claude 终端、传文件与截图 | [项目、终端与文件](workbench.md) |
-| 用 Ghostty、iTerm2 等本机终端应用打开环境中的终端 | [本机终端](local-terminal.md) |
+| 用 Ghostty（没有时用系统终端）打开环境中的终端 | [本机终端](local-terminal.md) |
 | 添加多个订阅、查看额度、分配或接续会话 | [多账号与额度](accounts.md) |
 | 收藏网页、无痕浏览、清理 Cookie、安装扩展 | [浏览器与网站数据](browser.md) |
 | 在 Super Cage 内使用 Claude Desktop | [Claude Desktop](desktop.md) |

@@ -31,7 +31,7 @@ func TestLaunchScriptWaitsOnlyAfterAFailure(t *testing.T) {
 		status int
 		wait   bool
 	}{{"0", 0, false}, {"3", 3, true}, {"KILL", 137, true}} {
-		plan, err := PlanLaunch(PlanInput{App: installed(t, "terminal"), Command: Command{stub, "attach", "--terminal", "0123456789abcdef"}, Name: "0123456789abcdef", Scratch: dir, Home: dir})
+		plan, err := PlanLaunch(PlanInput{App: installed(t, "terminal"), Command: Command{stub, "attach", "--terminal", "0123456789abcdef"}, Name: "0123456789abcdef", Scratch: dir})
 		if err != nil {
 			t.Fatal(err)
 		}

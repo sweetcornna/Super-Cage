@@ -22,7 +22,7 @@ function entryState() {
     includePresent: false,
     view: {
       enabled: false, supported: true, environment: "default", name: "默认环境", state: "off",
-      connections: { total: 0, shell: 0, exec: 0, sftp: 0 }, devices: [], herdr: false,
+      connections: { total: 0, shell: 0, exec: 0, sftp: 0 }, devices: [],
       revoked: false, kept: [], kept_limit: 4,
     },
     bom: false,
@@ -140,6 +140,8 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       assert.ok(chunks.length > 0, "the page chunk loads on demand");
       assert.equal(await content.locator("button.clay").count(), 1);
       assert.deepEqual(entry.requests.map((r) => r.method + " " + r.path), ["GET /entry"]);
+      await content.getByRole("region", { name: "从你自己的终端连进来", exact: true }).waitFor();
+      assert.equal(await content.getByText(/Herdr/).count(), 0);
       await shot("off");
       // The dialog shows the exact line; 取消 writes nothing.
       await content.getByRole("button", { name: "开启本机终端" }).click();
@@ -163,12 +165,12 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText(/scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
       await content.getByText(/带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤/).waitFor();
       assert.equal(await content.getByText(/会被拒绝/).count(), 0);
-      // cage attach has its row; Herdr is named, 稍后提供, with nothing to copy.
+      // cage attach has its row after ssh's: two rows, each with its copy button.
       await content.getByText("cage attach", { exact: true }).waitFor();
-      const herdr = content.locator(".local-entry-commands li[data-later]");
-      assert.equal(await herdr.count(), 1);
-      await herdr.getByText("稍后提供", { exact: true }).waitFor();
-      assert.equal(await herdr.getByRole("button").count(), 0);
+      const rows = content.locator(".local-entry-commands li");
+      assert.equal(await rows.count(), 2);
+      assert.equal(await rows.getByRole("button").count(), 2);
+      assert.equal(await page.getByText(/Herdr|稍后提供/).count(), 0, "nothing on the page names another application");
       await shot("on-without-include");
       // Writing it later, from the row; a BOM is warned about first.
       entry.bom = true;

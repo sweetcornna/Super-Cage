@@ -18,23 +18,17 @@ type Plan struct {
 }
 
 // PlanFile is a file a plan writes before its steps run. Its directory is
-// made private (0700, this user's, not a link) unless AppDir marks it as
-// another application's (Warp's), which is only created private if missing.
+// made private (0700, this user's, not a link).
 type PlanFile struct {
 	Path    string
 	Content string
 	Mode    os.FileMode
-	AppDir  bool
 }
 
-// Step is one program to run. Detach marks a program that may become the
-// application itself (it keeps running): it is started on its own and
-// counted as done once it is still running after a moment. Prompt marks an
-// AppleScript step, which waits while macOS asks the owner whether Super
-// Cage may control the application.
+// Step is one program to run. Prompt marks an AppleScript step, which waits
+// while macOS asks the owner whether Super Cage may control the application.
 type Step struct {
 	Argv   []string
-	Detach bool
 	Prompt bool
 }
 
@@ -46,8 +40,6 @@ type PlanInput struct {
 	Name string
 	// Scratch is a private directory (0700) for the one-shot launch script.
 	Scratch string
-	// Home is the owner's home directory, for Warp's launch configurations.
-	Home string
 }
 
 var planName = regexp.MustCompile("^[a-z0-9-]{1,64}$")
@@ -64,25 +56,16 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 	if !planName.MatchString(in.Name) || !filepath.IsAbs(in.Scratch) || !filepath.IsAbs(in.App.Path) {
 		return Plan{}, errors.New("启动信息无效")
 	}
-	if !in.App.Hosts {
-		return Plan{}, errors.New(in.App.Name + " 暂时不能在本机终端中打开 Super Cage 终端")
-	}
 	// Every application runs a one-shot script, so the command needs no
 	// quoting beyond the script's own. It removes itself, then runs cage
 	// attach as a child: a clean exit closes the window at once, any other
 	// keeps cage attach's message on screen until a key is pressed.
 	script := filepath.Join(in.Scratch, ScriptPrefix+in.Name+".command")
 	scriptFile := PlanFile{Path: script, Mode: 0o700, Content: launchScript(in.Command)}
-	shScript := []string{"/bin/sh", script}
-	bundle := in.App.Path
-	binary := func(name string) string { return filepath.Join(bundle, "Contents", "MacOS", name) }
 	switch in.App.ID {
 	case "terminal":
 		// Terminal runs a .command file in a new window; no permission is asked.
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/open", "-a", bundle, script}}}}, nil
-	case "iterm2":
-		source := "tell application id " + AppleScriptString(in.App.bundleID()) + " to create window with default profile command " + AppleScriptString(ShellQuote(script))
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}, Prompt: true}}}, nil
+		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/open", "-a", in.App.Path, script}}}}, nil
 	case "ghostty":
 		// Ghostty 1.3 and later: a new window with a surface configuration.
 		// Without Automation permission it fails and says so: a second
@@ -95,30 +78,6 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 			"end tell",
 		}, "\n")
 		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}, Prompt: true}}}, nil
-	case "warp":
-		if !filepath.IsAbs(in.Home) {
-			return Plan{}, errors.New("启动信息无效")
-		}
-		config := ScriptPrefix + in.Name + ".yaml"
-		scheme := "warp"
-		if in.App.bundleID() == "dev.warp.Warp-Preview" {
-			scheme = "warppreview"
-		}
-		yaml := "---\nname: " + YAMLString("Super Cage "+in.Name) + "\nwindows:\n  - tabs:\n      - title: \"Super Cage\"\n        layout:\n          cwd: " + YAMLString(in.Home) + "\n          commands:\n            - exec: " + YAMLString(ShellQuote(script)) + "\n"
-		return Plan{Files: []PlanFile{scriptFile, {Path: filepath.Join(warpConfigDir(in.Home), config), Content: yaml, Mode: 0o600, AppDir: true}},
-			Steps: []Step{{Argv: []string{"/usr/bin/open", scheme + "://launch/" + config}}}}, nil
-	case "wezterm":
-		// wezterm start asks a running WezTerm for a new window, or starts one.
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: append([]string{binary("wezterm"), "start", "--"}, shScript...), Detach: true}}}, nil
-	case "kitty":
-		// --single-instance hands the window to a running kitty.
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: append([]string{binary("kitty"), "--single-instance"}, shScript...), Detach: true}}}, nil
-	case "alacritty":
-		// A running Alacritty opens a window over its socket; otherwise a new one.
-		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{
-			{Argv: append([]string{binary("alacritty"), "msg", "create-window", "-e"}, shScript...)},
-			{Argv: append([]string{"/usr/bin/open", "-na", bundle, "--args", "-e"}, shScript...)},
-		}}, nil
 	}
 	return Plan{}, errors.New("不支持这个本机终端应用")
 }
@@ -155,17 +114,13 @@ func (a Installed) bundleID() string {
 	return a.BundleIDs[0]
 }
 
-// warpConfigDir is where Warp reads launch configurations on macOS.
-func warpConfigDir(home string) string { return filepath.Join(home, ".warp", "launch_configurations") }
-
 // Runner runs one step. Tests record steps instead of running them.
 type Runner interface {
 	Run(ctx context.Context, step Step) error
 }
 
 // launchFileLife is how long a launch's files stay when the application
-// does not take them: a script never run (the owner refused Automation, say)
-// or a Warp launch configuration, which Warp would keep listing.
+// does not take them: a script never run (the owner refused Automation, say).
 var launchFileLife = 10 * time.Minute
 
 // Launch writes a plan's files and runs its steps until one succeeds. Files
@@ -222,10 +177,8 @@ func writeExclusive(f PlanFile) (writtenFile, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return writtenFile{}, err
 	}
-	if !f.AppDir {
-		if err := privateDir(dir); err != nil {
-			return writtenFile{}, err
-		}
+	if err := privateDir(dir); err != nil {
+		return writtenFile{}, err
 	}
 	file, err := os.OpenFile(f.Path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|openNoFollow, f.Mode)
 	if err != nil {
@@ -267,13 +220,9 @@ func privateDir(dir string) error {
 
 // PruneScratch removes what earlier launches left behind once it is older
 // than age: scripts that were never run (the owner refused the Automation
-// permission, say) and Warp launch configurations, which Warp would
-// otherwise keep listing.
-func PruneScratch(dir, home string, age time.Duration) {
+// permission, say).
+func PruneScratch(dir string, age time.Duration) {
 	pruneFiles(dir, ".command", age)
-	if filepath.IsAbs(home) {
-		pruneFiles(warpConfigDir(home), ".yaml", age)
-	}
 }
 
 func pruneFiles(dir, suffix string, age time.Duration) {

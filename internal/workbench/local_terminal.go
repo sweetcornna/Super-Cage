@@ -23,13 +23,14 @@ import (
 )
 
 // The "本机终端" client routes belong to the desktop on the owner's computer:
-// the choice of application and two switches, kept in the desktop's local
-// client configuration, and opening a Cage terminal in that application.
-// They never reach an environment or the portal.
+// two switches, kept in the desktop's local client configuration, and opening
+// a Cage terminal in the owner's terminal application. There is nothing to
+// choose: Ghostty opens it when it is installed, the system Terminal
+// otherwise. They never reach an environment or the portal.
 //
 //	GET  /api/client/local-terminal        this computer's settings
 //	PUT  /api/client/local-terminal        save them
-//	GET  /api/client/local-terminal/apps   known applications, detected now
+//	GET  /api/client/local-terminal/app    the application that opens, detected now
 //	POST /api/client/local-terminal/open   open a terminal, project or session
 
 // localTerminalRunner runs launch steps; tests replace it so that nothing
@@ -38,10 +39,6 @@ var localTerminalRunner localterm.Runner = localterm.ExecRunner{}
 
 // localTerminalDetect finds the installed applications; tests replace it.
 var localTerminalDetect = localterm.Detect
-
-// localTerminalHome is the owner's home, where Warp reads its launch
-// configurations; tests replace it.
-var localTerminalHome = os.UserHomeDir
 
 // localTerminalOpenEvery and localTerminalOpenPerMinute bound the launches
 // of one desktop: each can open a window or raise macOS's Automation prompt.
@@ -119,11 +116,6 @@ var localTerminalConnection = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
 func (s *Server) localTerminalDir() string { return filepath.Dir(s.localTerminalConfig()) }
 
-type localTerminalApp struct {
-	localterm.App
-	Installed bool `json:"installed"`
-}
-
 func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, path string) {
 	if s.remote == nil || s.remote.desktop == nil {
 		http.Error(w, "本机终端只能在 Super Cage 桌面应用里使用", http.StatusNotFound)
@@ -155,29 +147,18 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 				return
 			}
 		}
-		if err := settings.Validate(); err != nil {
-			requestError(w, err)
-			return
-		}
-		if app := localterm.Lookup(settings.App); app != nil && !app.Hosts {
-			requestError(w, errors.New(app.Note))
-			return
-		}
 		if err := writePrivate(filepath.Join(s.localTerminalDir(), localterm.SettingsFile), settings); err != nil {
 			requestError(w, err)
 			return
 		}
 		jsonReply(w, map[string]any{"settings": settings, "supported": len(localterm.Apps()) > 0})
-	case path == "local-terminal/apps" && r.Method == http.MethodGet:
-		installed := map[string]bool{}
-		for _, app := range localTerminalDetect() {
-			installed[app.ID] = true
+	case path == "local-terminal/app" && r.Method == http.MethodGet:
+		// Detection runs only when this is asked, never with the settings.
+		var app any
+		if found, ok := localterm.Pick(localTerminalDetect()); ok {
+			app = found.App
 		}
-		apps := []localTerminalApp{}
-		for _, app := range localterm.Apps() {
-			apps = append(apps, localTerminalApp{App: app, Installed: installed[app.ID]})
-		}
-		jsonReply(w, map[string]any{"apps": apps})
+		jsonReply(w, map[string]any{"app": app})
 	case path == "local-terminal/open" && r.Method == http.MethodPost:
 		s.openLocalTerminal(w, r)
 	default:
@@ -258,22 +239,9 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, localTerminalLocked, http.StatusLocked)
 		return
 	}
-	dir := s.localTerminalDir()
-	settings, _ := localterm.LoadSettings(dir)
-	app := localterm.Lookup(settings.App)
-	if app == nil {
-		http.Error(w, "还没有选择本机终端应用：在设置的“本机终端应用”里选择一个", http.StatusConflict)
-		return
-	}
-	var found *localterm.Installed
-	for _, candidate := range localTerminalDetect() {
-		if candidate.ID == app.ID {
-			found = &candidate
-			break
-		}
-	}
-	if found == nil {
-		http.Error(w, app.Name+" 没有安装在这台电脑上", http.StatusConflict)
+	found, ok := localterm.Pick(localTerminalDetect())
+	if !ok {
+		http.Error(w, "这台电脑上找不到 Ghostty 或系统终端", http.StatusConflict)
 		return
 	}
 	args, err := localTerminalArgs(s.localTerminalConfig(), connection, input)
@@ -286,11 +254,6 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	home, err := localTerminalHome()
-	if err != nil {
-		requestError(w, err)
-		return
-	}
 	// Every window has its own files, even for one terminal opened twice.
 	var b [8]byte
 	_, _ = rand.Read(b[:])
@@ -298,9 +261,9 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	if input.TerminalID != "" {
 		name = strings.ToLower(input.TerminalID) + "-" + name[:8]
 	}
-	scratch := filepath.Join(dir, "local-terminal")
-	localterm.PruneScratch(scratch, home, 10*time.Minute)
-	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(command, args...), Name: name, Scratch: scratch, Home: home})
+	scratch := filepath.Join(s.localTerminalDir(), "local-terminal")
+	localterm.PruneScratch(scratch, 10*time.Minute)
+	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: found, Command: append(command, args...), Name: name, Scratch: scratch})
 	if err != nil {
 		requestError(w, err)
 		return
@@ -323,18 +286,16 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 150*time.Second)
 	defer cancel()
 	if err := localterm.Launch(ctx, plan, localTerminalRunner); err != nil {
-		http.Error(w, "无法在 "+app.Name+" 中打开："+err.Error(), http.StatusBadGateway)
+		http.Error(w, "无法在 "+found.Name+" 中打开："+err.Error(), http.StatusBadGateway)
 		return
 	}
-	jsonReply(w, map[string]any{"app": app.Name, "automation": app.Automation})
+	jsonReply(w, map[string]any{"app": found.Name})
 }
 
 // pruneLocalTerminal removes what launches of an earlier run left behind:
 // the desktop is starting, so none of it is still on its way to a window.
 func (s *Server) pruneLocalTerminal() {
-	if home, err := localTerminalHome(); err == nil {
-		localterm.PruneScratch(filepath.Join(s.localTerminalDir(), "local-terminal"), home, 0)
-	}
+	localterm.PruneScratch(filepath.Join(s.localTerminalDir(), "local-terminal"), 0)
 }
 
 func (s *Server) localTerminalConfig() string {

@@ -268,7 +268,7 @@ export function SettingsPanel({
           {section === "appearance" && <AppearanceSettings />}
           {section === "about" && <AboutSettings />}
           {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
-            <LocalTerminalPage apps={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />
+            <LocalTerminalPage opener={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />
           </Suspense>}
           {section === "archived-sessions" && <>
             <div className="section-title"><h3>已归档会话</h3><p>归档的会话不在侧栏显示，可以随时取消归档；永久删除后无法恢复。</p></div>
