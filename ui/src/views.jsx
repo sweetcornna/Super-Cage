@@ -18,7 +18,7 @@ import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareCli
 import { terminalClipboardText } from "./terminal-clipboard.mjs";
 import {
   terminalConnectTimeoutMs, terminalHistoryPlan, terminalKeepaliveMessage, terminalKeepaliveMs, terminalLiveness,
-  terminalNoticeDelayMs, terminalProbeMs, terminalReconnectPlan, terminalStreamPath, terminalSuspendMs, terminalWatchdogMs,
+  terminalNoticeDelayMs, terminalProbeMs, terminalReconnectPlan, terminalStreamPath, terminalSuspendMs, terminalViewer, terminalWatchdogMs,
 } from "./terminal-reconnect.mjs";
 import { sendFiles, shellFilePaths } from "./file-transfer";
 import { installRemoteInput } from "./remote-input";
@@ -564,7 +564,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       if (disposed || ended || ws || suspended) return;
       // A retry or a wake-up of a view hidden long enough suspends it instead.
       if (dormant()) return void suspendStream();
-      const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset)));
+      const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset, terminalViewer(session.id))));
       current.binaryType = "arraybuffer";
       ws = current;
       socket.current = current;

@@ -26,7 +26,7 @@ func (d *desktopLocal) handoffOldLocal(ctx context.Context) (bool, error) {
 	}
 	defer c.close()
 	id := c.launch.Controller
-	if c.launch.DesktopGateway || id.Protocol != controlProtocol || id.PID != c.record.PID || !id.matches(c.record.Controller) || !remoteInstanceID.MatchString(id.Build) {
+	if c.launch.DesktopGateway || id.Protocol != controlProtocol || id.PID != c.record.PID || !id.Matches(c.record.Controller) || !remoteInstanceID.MatchString(id.Build) {
 		return false, errors.New("已有本机后台身份或协议不兼容。" + previousLocalWorkbench)
 	}
 	u, _ := url.Parse(c.launch.URL) // connectController verified the origin and ticket.

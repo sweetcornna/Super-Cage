@@ -117,6 +117,10 @@ var agentBodyRules = []agentBodyRule{
 	{"POST /api/macos/login", "action", []string{"show-password"}, agentGuestPasswordReason},
 	{"POST /api/macos/first-setup", "action", []string{"show-password"}, agentGuestPasswordReason},
 	{"POST /api/macos/maintenance", "action", []string{"show-password"}, agentGuestPasswordReason},
+	// Resetting the guest browser drops its profile, and a clear that skips
+	// the kept list signs the person out of the sites they chose to keep.
+	{"POST /api/browser/data", "mode", []string{"reset"}, "Resetting the browser is done in the desktop window."},
+	{"POST /api/browser/data", "protect", []string{"none"}, "Clearing browsing data without the kept sites is done in the desktop window."},
 }
 
 // agentBodyRulesFor returns the body rules of method path.
@@ -198,18 +202,15 @@ var agentRoutes = []string{
 	"POST /api/client/candidate", "POST /api/client/commit", "POST /api/client/cancel", "POST /api/client/local-stop",
 	"DELETE /api/client/project-shares/{id}",
 	"POST /api/client/tenant/login", "POST /api/client/tenant/vms",
-	// Routes of the browser-data branch, classified ahead of its merge:
-	// the guest browser's browsing data.
+	// The guest browser's browsing data (reset and clears that skip the kept
+	// sites are window only: agentBodyRules).
 	"POST /api/browser/data", "POST /api/browser/data-settings",
 }
 
 // agentRoutesAhead are open routes of branches not merged yet, by branch. The
 // route test fails once one of them is registered here, so the entry is
 // dropped from this list when its branch merges.
-var agentRoutesAhead = map[string]string{
-	"POST /api/browser/data":          "browser-data",
-	"POST /api/browser/data-settings": "browser-data",
-}
+var agentRoutesAhead = map[string]string{}
 
 // agentRouteFamilies are registered {action} routes whose values differ:
 // only the values listed in agentRoutes are open, the rest are refused.

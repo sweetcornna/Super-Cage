@@ -6,7 +6,7 @@ import { KeyRound } from "lucide-react";
 import { InlineSelect } from "./inline-select";
 import { clientKeyboard, getClientContext, isCloudWorkbench, isRemoteClient, saveClientKeyboard } from "./client-context.mjs";
 import { shortcut, usesControl } from "./platform.mjs";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe2,
   Clock3,
@@ -20,6 +20,7 @@ import {
   UserRound,
   Archive,
   Info,
+  SquareTerminal,
 } from "lucide-react";
 import { api } from "./api";
 import "./settings.css";
@@ -39,6 +40,9 @@ import { AccountSettings } from "./account";
 import { AboutSettings } from "./about-settings";
 import { EmptyState } from "./drawings";
 import "./settings-pages.css";
+// Detecting this computer's terminal applications runs only while this
+// section is open, so its code loads with it.
+const LocalTerminalSettings = lazy(() => import("./local-terminal-settings.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
@@ -46,6 +50,7 @@ const sections = [
   ["keyboard", "通用", Settings],
   ["appearance", "外观", Palette],
   ["mobile", "远程连接", Smartphone],
+  ["local-terminal", "本机终端应用", SquareTerminal],
   ["network", "网络与代理", Globe2],
   ["region", "时区与语言", Clock3],
   ["project", "环境与恢复", RotateCcw],
@@ -66,6 +71,9 @@ export function SettingsPanel({
   const [accountDirty, setAccountDirty] = useState(false);
   const [proxyDirty, setProxyDirty] = useState(false);
   const [resourceDirty, setResourceDirty] = useState(false);
+  const [localTerminalDirty, setLocalTerminalDirty] = useState(false);
+  // 本机终端应用 belongs to the desktop app on this computer.
+  const shownSections = vmContext.desktop_gateway ? sections : sections.filter(([id]) => id !== "local-terminal");
   const [draft, setDraft] = useState({ ...current }),
     [section, setSection] = useState(initialSection),
     [probe, setProbe] = useState(null),
@@ -115,7 +123,7 @@ export function SettingsPanel({
       return;
     }
     if (
-      (!changed && !accountDirty && !proxyDirty && !resourceDirty) ||
+      (!changed && !accountDirty && !proxyDirty && !resourceDirty && !localTerminalDirty) ||
       (await onConfirm({
         title: "放弃尚未保存的修改？",
         body: "当前环境不会改变。关闭后会丢弃这次表单修改。",
@@ -232,7 +240,7 @@ export function SettingsPanel({
         <h2>设置</h2>
         {vmName && <p className="settings-scope" title={vmName}>虚拟机 · {vmName}</p>}
         <nav aria-label="设置分组">
-          {sections.map(([id, label, Icon]) => (
+          {shownSections.map(([id, label, Icon]) => (
             <button
               key={id}
               className={section === id ? "selected" : ""}
@@ -240,6 +248,7 @@ export function SettingsPanel({
               onClick={async () => {
                 if (id !== section && accountDirty && !(await onConfirm({ title: "放弃尚未保存的修改？", body: "已保存的资料和密码保持不变。", confirm: "放弃修改" }))) return;
                 if (id !== section && proxyDirty && !(await onConfirm({ title: "放弃尚未应用的代理修改？", body: "当前代理仍按已应用的链路运行。离开会丢弃这次节点选择。", confirm: "放弃修改" }))) return;
+                if (id !== section && localTerminalDirty && !(await onConfirm({ title: "放弃尚未保存的本机终端设置？", body: "已保存的选择保持不变。", confirm: "放弃修改" }))) return;
                 setSection(id);
               }}
             >
@@ -253,6 +262,7 @@ export function SettingsPanel({
         <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "mobile" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
           {section === "appearance" && <AppearanceSettings />}
           {section === "about" && <AboutSettings />}
+          {section === "local-terminal" && <Suspense fallback={null}><LocalTerminalSettings onDirty={setLocalTerminalDirty} /></Suspense>}
           {section === "archived-sessions" && <>
             <div className="section-title"><h3>已归档会话</h3><p>归档的会话不在侧栏显示，可以随时取消归档；永久删除后无法恢复。</p></div>
             <ArchivedSessions ready={status.ready && !busy} empty={<EmptyState drawing="tray" title="归档里还没有会话"><span>暂无已归档会话。</span>归档后的会话会收在这里。</EmptyState>} />

@@ -28,7 +28,8 @@ try {
   assert.equal(exits(), 0);
   await quit();
   await dialog.getByRole("button", { name: "仅退出桌面应用" }).click();
-  await page.waitForFunction(async () => (await window.testDesktopExits()) === 1, null, { timeout: 5000 });
+  // Polled here: a predicate that returns a promise is truthy at once, so it would not wait for the call.
+  for (let i = 0; i < 200 && exits() !== 1; i++) await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(exits(), 1);
 
   // Initial context cannot be loaded on reopening the page.

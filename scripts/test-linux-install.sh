@@ -57,7 +57,7 @@ verify_personal_data
 runuser -u "$test_user" -- xvfb-run -a dbus-run-session -- node "$PWD/desktop/linux/test-smoke.mjs" /usr/lib/claude-cage/cage-desktop "$report_dir/after-reinstall.json"
 wait_for_package_exit
 dpkg --remove claude-cage
-[[ ! -e /usr/bin/cage-desktop && ! -e /usr/lib/claude-cage/cage ]] || { echo 'Uninstall left installed executables.' >&2; exit 1; }
+[[ ! -e /usr/bin/cage-desktop && ! -e /usr/lib/claude-cage/cage && ! -e /usr/lib/claude-cage/cage-attach ]] || { echo 'Uninstall left installed executables.' >&2; exit 1; }
 verify_personal_data
 printf '{"success":true,"install":true,"nativeWorkbench":true,"runningUpgradeRefused":true,"runningRemovalRefused":true,"reinstall":true,"uninstallPreservedData":true}\n' > "$report_dir/install.json"
 printf 'PASS: package install, native workbench, running-update refusal, reinstall and data-preserving removal. Reports: %s\n' "$report_dir"

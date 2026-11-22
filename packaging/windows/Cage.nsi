@@ -361,6 +361,7 @@ Function CheckDestination
     ; Never stop processes by their name or force-close user workloads.
     !insertmacro CheckStopped "Cage.exe"
     !insertmacro CheckStopped "resources\cage.exe"
+    !insertmacro CheckStopped "resources\cage-attach.exe"
     !insertmacro CheckStopped "resources\mihomo.exe"
     !insertmacro CheckStopped "resources\runtime\qemu\qemu-system-x86_64.exe"
     Goto done
@@ -623,6 +624,7 @@ Function un.onInit
   !insertmacro UninstallPhase "checking_stopped_processes"
   !insertmacro CheckStopped "Cage.exe"
   !insertmacro CheckStopped "resources\cage.exe"
+  !insertmacro CheckStopped "resources\cage-attach.exe"
   !insertmacro CheckStopped "resources\mihomo.exe"
   !insertmacro CheckStopped "resources\runtime\qemu\qemu-system-x86_64.exe"
 FunctionEnd

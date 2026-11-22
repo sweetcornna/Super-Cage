@@ -34,6 +34,7 @@ import { CodexAccountsPanel, useCodexAccounts } from "./codex-accounts";
 import { codexTerminalDetail, codexTerminalLabel, codexTerminalSupported } from "./codex-accounts-state.mjs";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
+import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
 import { useDownloadNotifications, useDesktopFiles } from "./browser-downloads";
 import { BrowserUploads } from "./browser-uploads";
 import { AudioControls, useAudioOutput } from "./audio";
@@ -113,6 +114,7 @@ function App() {
   const [managementPage, setManagementPage] = useState(() => { try { return Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000 ? "claude-science" : ""; } catch { return ""; } }); // Claude Science reloaded the window once for its frame (claude-science.jsx)
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
+  const [browserStreamEpoch, setBrowserStreamEpoch] = useState(0);
   const [terminalChoice, setTerminalChoice] = useState(null);
   const [openingSession, setOpeningSession] = useState("");
   const [sessionOpenError, setSessionOpenError] = useState(null);
@@ -153,6 +155,9 @@ function App() {
     [projectDialog, setProjectDialog] = useState(null),
     [rename, setRename] = useState(null),
     [toast, setToast] = useState(""),
+    [toastAction, setToastAction] = useState(null),
+    [localTerminal, setLocalTerminal] = useState(null),
+    [, setLocalTerminalShown] = useState(0),
     [projectRefreshing, setProjectRefreshing] = useState(false),
     [fatal, setFatal] = useState(""),
     [connectionError, setConnectionError] = useState(""),
@@ -189,6 +194,7 @@ function App() {
     browserIds = useRef(new Set()),
     initialized = useRef(false),
     browserStreamReady = useRef(false),
+    browserStreamClosed = useRef(false),
     browserSnapshot = useRef({ tabs: [] }),
     refreshStatus = useRef(null),
     launchAcknowledged = useRef(false),
@@ -674,8 +680,20 @@ function App() {
   const newTerminalHere = (event) =>
     newTerminal(contentWorkspace, event?.currentTarget?.tagName === "BUTTON"
       ? event.currentTarget : terminalTrigger.current);
+  // In a terminal's heading the item opens that terminal; elsewhere a new
+  // terminal in the menu's project.
+  const localTerminalItem = (location) => {
+    const tab = home ? null : location === "heading" ? (terminal ? current : null) : location.startsWith("heading-") ? tabs.find(item => item.id === location.slice(8)) : null;
+    const target = tab?.kind === "terminal" ? { kind: "terminal", id: tab.id } : { kind: "project", path: terminalChoice.path, run: "shell" };
+    const item = localTerminal?.item(target);
+    return item?.visible ? { ...item, onSelect: () => {
+      setTerminalChoice(null);
+      void localTerminal.open(target, { confirm, notify: (text, action) => { setToastAction(action ? { ...action, text } : null); setToast(text); } });
+    } } : null;
+  };
   const terminalMenuAt = (location) => terminalChoice?.anchor?.dataset.terminalLocation === location && (
     <TerminalMenu choice={terminalChoice} busy={busy} codex={codexTerminalSupported(system)} codexLabel={codexMenuLabel(sessionCapabilities)}
+      local={localTerminalItem(location)}
       onClose={() => setTerminalChoice(null)}
       onSelect={(kind) => createTerminal(terminalChoice.path, kind).catch((e) => notify(e.message))} />
   );
@@ -867,6 +885,9 @@ function App() {
         if (!live) return;
         jobRunning = next.job.running;
         setStatus(previous => keepSame(previous, next));
+        // An event stream the browser closed for good (it answered with an
+        // error while its controller restarted) is opened again.
+        if (next.ready && browserStreamClosed.current) { browserStreamClosed.current = false; setBrowserStreamEpoch(epoch => epoch + 1); }
         setStartRequest(pending => pending?.id && pending.id === next.job.id ? null : pending);
         setConnectionError("");
         if (
@@ -880,7 +901,8 @@ function App() {
             const install = await api("/environment/guest-systems");
             if (live && install.activate) setGuestSystem(previous => ({ ...previous, activate:true }));
           }
-          if (next.job.error) notify(next.job.error);
+          // A clear reports its outcome in the browser data window that runs it.
+          if (next.job.error && next.job.kind !== "browser-clear") notify(next.job.error);
         }
         if (next.ready) {
           const supportsBrowser = guestCapability(next, "browser");
@@ -1035,7 +1057,10 @@ function App() {
       remote.current?.receiveCopy?.(JSON.parse(event.data));
     });
     stream.onopen = () => { browserStreamReady.current = true; };
-    stream.onerror = () => { browserStreamReady.current = false; };
+    stream.onerror = () => {
+      browserStreamReady.current = false;
+      if (stream.readyState === EventSource.CLOSED) browserStreamClosed.current = true;
+    };
     stream.onmessage = (event) => {
       const b = JSON.parse(event.data);
       setBrowserError("");
@@ -1081,7 +1106,7 @@ function App() {
       browserStreamReady.current = false;
       stream.close();
     };
-  }, [status?.ready, browserAvailable]);
+  }, [status?.ready, browserAvailable, browserStreamEpoch]);
   useEffect(() => {
     if (current && current.kind !== "terminal")
       lastBrowserTab.current = current.id;
@@ -1093,9 +1118,19 @@ function App() {
   }, [current?.url, current?.title, current?.incognito, active]);
   useEffect(() => {
     if (!toast) return;
-    const timer = setTimeout(() => setToast(""), 4500);
+    const timer = setTimeout(() => setToast(""), toastAction?.text === toast ? 12000 : 4500);
     return () => clearTimeout(timer);
-  }, [toast]);
+  }, [toast, toastAction]);
+  // "在本机终端中打开": the desktop app only, loaded apart from the first chunk.
+  useEffect(() => {
+    if (!getClientContext().desktop_gateway) return;
+    let live = true;
+    import("./local-terminal-open.mjs")
+      .then(module => module.localTerminalOpener(() => live && setLocalTerminalShown(n => n + 1)))
+      .then(opener => live && setLocalTerminal(opener))
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     if (!tailnetLogin) return;
     if (!status?.ready || managementPage || showHome || desktopOpen) {
@@ -1191,6 +1226,7 @@ function App() {
       if (k === "t" && !event.shiftKey) handle = newPage;
       if (k === "n" && event.shiftKey) handle = () => openBrowserPage(undefined, true);
       if (k === "d") handle = () => document.dispatchEvent(new Event("cage-add-favorite"));
+      if (event.shiftKey && (k === "backspace" || k === "delete") && browserAvailable && status?.ready && !busy && !terminal && !desktopOpen) handle = () => openBrowserData({ view: "clear", tab: liveBrowser });
       if (k === "enter" && event.shiftKey) handle = newTerminalHere;
       if (k === "l")
         handle = () => {
@@ -1534,6 +1570,7 @@ function App() {
     onRecover={() => recoverEditor(tab)} />;
   const dialogs = (
     <>
+      <BrowserDataHost tabs={browserTabs} onSettings={openBrowserSettings} onInternal={openInternalPage} onVault={() => openSettings("vault")} />
       {dialog && (
         <Modal
           title={dialog.title}
@@ -2181,6 +2218,7 @@ function App() {
           <EnvironmentRestartContext.Provider value={null}>
             <SafetyMessage message={toast} />
           </EnvironmentRestartContext.Provider>
+          {toastAction?.text === toast && <button className="toast-action" onClick={() => { void Promise.resolve(toastAction.run()).then(() => setToast("已复制命令"), () => setToast("无法写入剪贴板")); }}>{toastAction.label}</button>}
         </div>
       )}
       {dialogs}

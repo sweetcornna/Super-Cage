@@ -10,6 +10,12 @@ import (
 // `agent-vm version --min`.
 var Version string
 
+// Stamp names one build of the release programs: the Makefile and the
+// Windows build link the same random value into cage and cage-attach, so a
+// controller can tell the cage-attach built with it from a stale or foreign
+// one. Source builds have none.
+var Stamp string
+
 func init() {
 	if Version == "" {
 		Version = strings.TrimSpace(agentvm.CageVersion)

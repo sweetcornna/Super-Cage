@@ -1,15 +1,34 @@
-import React, { useEffect, useState } from 'react';
-import { Globe2, Info, LayoutPanelLeft, Puzzle, Search, ShieldCheck, ExternalLink } from 'lucide-react';
+import React, { Component, Suspense, lazy, useEffect, useState } from 'react';
+import { Globe2, Info, LayoutPanelLeft, Puzzle, Search, ShieldCheck } from 'lucide-react';
 import { api } from './api';
 import { InlineSelect } from './inline-select';
-import { BrowserCookies } from './browser-cookies';
+import { reportDiagnostic } from './diagnostics.mjs';
 import { BrowserExtensions } from './browser-extensions';
 import './browser-settings.css';
+
+// The privacy section loads with browser-data.jsx when it is first shown. A
+// chunk that fails to load or a render error stays inside the section: it is
+// reported, the earlier Chromium links show instead, and the next showing
+// loads it again.
+const loadPrivacy = () => lazy(() => import('./browser-data.jsx').then(module => ({ default: module.BrowserPrivacySection })));
+let Privacy = loadPrivacy();
+class PrivacyGuard extends Component {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  componentDidCatch(error) { reportDiagnostic('browser-data', error); Privacy = loadPrivacy(); }
+  render() { return this.state.failed ? this.props.fallback : this.props.children; }
+}
+function BrowserPrivacy(props) {
+  return <PrivacyGuard fallback={<div className="browser-settings-links">
+    <button onClick={() => props.onInternal('permissions')}>网站权限</button>
+    <button onClick={() => props.onInternal('clear')}>清除普通会话浏览数据</button>
+  </div>}><Suspense fallback={null}><Privacy {...props} /></Suspense></PrivacyGuard>;
+}
 
 const sections = [
   { id: 'general', title: '新标签页', icon: Globe2, search: '启动 新标签页 主页 默认 地址 网址' },
   { id: 'appearance', title: '外观', icon: LayoutPanelLeft, search: '外观 标签栏 布局 横排 竖排' },
-  { id: 'privacy', title: '隐私与网站数据', icon: ShieldCheck, search: '隐私 cookie 网站数据 权限 清除 浏览记录' },
+  { id: 'privacy', title: '隐私与网站数据', icon: ShieldCheck, search: '隐私 cookie 网站数据 权限 清除 浏览记录 历史 保持登录 自动清理 重置' },
   { id: 'extensions', title: '扩展', icon: Puzzle, search: '扩展 插件 管理 安装 导入 edge chrome' },
   { id: 'about', title: '关于浏览器', icon: Info, search: '关于 浏览器 chromium 版本' },
 ];
@@ -18,7 +37,6 @@ export function BrowserSettingsPage({ tab, tabs, currentHome, layout, onLayoutCh
   const [home, setHome] = useState(currentHome || 'https://www.bing.com/'), [savedHome, setSavedHome] = useState(currentHome || 'https://www.bing.com/');
   const [saving, setSaving] = useState(false), [error, setError] = useState(''), [saved, setSaved] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [cookieSession, setCookieSession] = useState('normal');
   const [info, setInfo] = useState(null);
   useEffect(() => { let live = true; api('/browser/info', {}).then(value => { if (live) setInfo(value); }).catch(() => { if (live) setInfo({ error: true }); }); return () => { live = false; }; }, []);
   useEffect(() => { const next = tab.url.split('#')[1]; if (sections.some(item => item.id === next)) { setSection(next); setQuery(''); } }, [tab.url]);
@@ -34,8 +52,6 @@ export function BrowserSettingsPage({ tab, tabs, currentHome, layout, onLayoutCh
     catch (error) { setError(error.message); }
     finally { setSaving(false); }
   };
-  const privateTab = tabs.find(item => item.incognito && !item.login);
-  const cookieTab = cookieSession === 'private' && privateTab ? privateTab : tab;
   const visible = query.trim() ? sections.filter(item => `${item.title} ${item.search}`.toLowerCase().includes(query.trim().toLowerCase())) : sections.filter(item => item.id === section);
   return <section className="browser-settings-page" aria-label="浏览器设置">
     <header className="browser-settings-top"><h1>设置</h1><label className="browser-settings-search"><Search size={16} /><input aria-label="搜索浏览器设置" placeholder="搜索设置" value={query} onChange={event => setQuery(event.target.value)} /></label></header>
@@ -56,9 +72,7 @@ export function BrowserSettingsPage({ tab, tabs, currentHome, layout, onLayoutCh
           </form></>}
           {item.id === 'appearance' && <><p>调整网页与文件编辑器的标签栏。</p><div className="browser-setting-row"><div><h3>标签栏布局</h3><p>立即生效，保存在本机。</p></div><InlineSelect aria-label="标签栏布局" value={layout} onValueChange={onLayoutChange}><option value="horizontal">横排（顶部）</option><option value="vertical">竖排（左侧）</option></InlineSelect></div><p>浏览器设置页跟随 Super Cage 当前的字体与配色。</p></>}
           {item.id === 'privacy' && <><p>管理网站保存在当前浏览会话中的数据和访问权限。</p>
-            <div className="browser-setting-row"><div><h3>Cookie 与登录状态</h3><p>普通会话与无痕会话分别管理。</p></div><InlineSelect aria-label="Cookie 浏览会话" value={cookieSession} onValueChange={setCookieSession}><option value="normal">普通会话</option><option value="private" disabled={!privateTab}>无痕会话</option></InlineSelect></div>
-            <BrowserCookies key={cookieTab.id} tab={cookieTab} onClose={() => changeSection('general')} />
-            <div className="browser-settings-links"><button onClick={() => onInternal('permissions')}><ExternalLink size={15} />网站权限</button><button onClick={() => onInternal('clear')}><ExternalLink size={15} />清除普通会话浏览数据</button></div>
+            <Suspense fallback={null}><BrowserPrivacy tab={tab} tabs={tabs} onInternal={onInternal} onOpenPage={onOpenPage} onClose={() => changeSection('general')} /></Suspense>
           </>}
           {item.id === 'extensions' && <><p>添加与管理 Super Cage 浏览器使用的扩展。</p><BrowserExtensions onInternal={onInternal} onOpenPage={onOpenPage} onConfirm={onConfirm} /></>}
           {item.id === 'about' && <><p>Super Cage 浏览器由环境内的 Chromium 承载。网页、扩展和网站数据随当前 Super Cage 环境保存。</p><div className="browser-setting-row"><div><h3>浏览器引擎</h3><p>{info?.product || (info?.error ? '版本信息暂时不可用' : '正在读取版本…')}</p></div></div><p>下载文件通过 Super Cage 保存到下载暂存目录，可从下载面板另存为。</p></>}

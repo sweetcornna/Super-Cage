@@ -368,6 +368,19 @@ func (s *Server) scienceAncestor() string {
 	return "http://localhost:" + strconv.Itoa(record.Port)
 }
 
+// scienceControlFile is control.json with the Claude Science front's fields,
+// set only while a front runs; read by the native shell and the desktop
+// entry, never served to a page. The record's own fields are
+// controlclient's, shared with cage-attach, which ignores these.
+type scienceControlFile struct {
+	controlFile
+	SciencePort     int              `json:"science_port,omitempty"`
+	ScienceIdentity *scienceIdentity `json:"science_identity,omitempty"`
+	// ScienceEnd lets the native shell end the front's session
+	// (POST /_cage/end, round-2 N1).
+	ScienceEnd string `json:"science_end,omitempty"`
+}
+
 // publishScienceControl records the front port, its end secret (and the
 // identity the shell applies) in this workload's control.json, which only the
 // native shell and the desktop entry read. Port 0 removes them.
@@ -385,7 +398,7 @@ func (s *Server) publishScienceControl(port int, end string, identity *scienceId
 		if err != nil {
 			return err
 		}
-		var record controlFile
+		var record scienceControlFile
 		if err = json.Unmarshal(data, &record); err != nil {
 			return err
 		}
@@ -423,7 +436,7 @@ func (s *Server) localScienceFronts() []int {
 		if err != nil || len(data) > 64<<10 {
 			continue
 		}
-		var record controlFile
+		var record scienceControlFile
 		if json.Unmarshal(data, &record) == nil && record.SciencePort >= 1024 && record.SciencePort <= 65535 {
 			ports = append(ports, record.SciencePort)
 		}

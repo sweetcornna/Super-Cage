@@ -305,7 +305,7 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 	}
 	front := workload.scienceFrontRunning()
 	data, _ := os.ReadFile(filepath.Join(workload.profile, "control.json"))
-	var record controlFile
+	var record scienceControlFile
 	if json.Unmarshal(data, &record) != nil || record.SciencePort != front.port || record.Port != 17777 || record.Token != workload.token {
 		t.Fatalf("control file: %s", data)
 	}
@@ -544,7 +544,7 @@ func TestScienceTicketRoute(t *testing.T) {
 	}
 	// The shell's copy of the identity is in the control file, not the page.
 	data, _ := os.ReadFile(filepath.Join(s.profile, "control.json"))
-	var record controlFile
+	var record scienceControlFile
 	if json.Unmarshal(data, &record) != nil || record.ScienceIdentity == nil || record.ScienceIdentity.Timezone != "Asia/Tokyo" || record.ScienceIdentity.AcceptLanguage != "ja-JP" {
 		t.Fatalf("control file: %s", data)
 	}
@@ -788,13 +788,13 @@ func TestSciencePublishKeepsTheWorkloadRecord(t *testing.T) {
 	if front == nil {
 		t.Fatal("no front")
 	}
-	read := func() controlFile {
+	read := func() scienceControlFile {
 		t.Helper()
 		data, err := os.ReadFile(filepath.Join(s.profile, "control.json"))
 		if err != nil {
 			t.Fatal(err)
 		}
-		var record controlFile
+		var record scienceControlFile
 		if err := json.Unmarshal(data, &record); err != nil {
 			t.Fatal(err)
 		}

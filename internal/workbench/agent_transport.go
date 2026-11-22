@@ -13,50 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
 // AgentTarget separates the desktop's client configuration from its selected
 // workload. A selected workload always requires an explicit generation.
-type AgentTarget struct {
-	Scope      string `json:"scope"`
-	Connection string `json:"connection_id,omitempty"`
-}
+type AgentTarget = controlclient.AgentTarget
 
 func agentConnectTarget(ctx context.Context, configPath string, target AgentTarget) (*controllerClient, error) {
-	if target.Scope == "" || target.Scope == "local" {
-		return agentConnect(ctx, configPath)
-	}
-	if target.Scope != "desktop" && target.Scope != "selected" && target.Scope != "client" {
-		return nil, &AgentError{Code: "invalid_input", Message: "scope must be local, desktop, selected or client.", NextAction: "capabilities"}
-	}
-	if target.Scope == "selected" && target.Connection == "" {
-		return nil, &AgentError{Code: "invalid_input", Message: "selected scope requires --connection from client.context.", NextAction: "client.context"}
-	}
-	path := desktopConfigPath(configPath)
-	if target.Scope == "client" {
-		path = configPath
-	}
-	c, err := connectProvenController(filepath.Dir(path))
-	if controllerIdentityError(err) {
-		return nil, &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
-	}
+	c, err := controlclient.AgentConnectTarget(ctx, configPath, target, agentSameBuild, connectProvenControllerConn)
 	if err != nil {
-		return nil, &AgentError{Code: "service_unavailable", Message: "Open the Super Cage desktop before managing client configuration.", NextAction: "open_desktop"}
+		return nil, err
 	}
-	want, err := currentController()
-	if err != nil || !want.matches(c.launch.Controller) || (target.Scope != "client" && !c.launch.DesktopGateway) || (target.Scope == "client" && !c.launch.ClientOnly) || filepath.Clean(c.launch.ConfigPath) != filepath.Clean(path) {
-		c.close()
-		return nil, &AgentError{Code: "controller_mismatch", Message: "The desktop controller does not match this CLI and configuration.", NextAction: "open_desktop"}
-	}
-	u, _ := url.Parse(c.launch.URL)
-	code, err := c.callContext(ctx, "POST", "/api/session", map[string]string{"token": u.Fragment}, nil)
-	if err != nil || code != 200 {
-		c.close()
-		return nil, agentHTTPError(401)
-	}
-	c.client.Jar.SetCookies(u, []*http.Cookie{{Name: cookieName + "_" + u.Port() + "-desktop", Value: trustedViewProof(c.record.Token), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode}})
-	return c, nil
+	return c.(*controllerClient), nil
 }
 
 type AgentResponse struct {

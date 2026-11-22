@@ -1171,10 +1171,12 @@ func (s *Server) runSafetyCheck() (returned error) {
 
 // Monitoring renews a short host-owned lease without replaying the disruptive
 // failure drill. Lost supervision eventually closes existing guest connections.
+// Jobs that leave the network path alone (installs, a browser data clear,
+// which talks only to the browser controller) let the lease renew meanwhile.
 func (s *Server) networkMonitorBlockedLocked() bool {
 	job := s.jobs.snapshot()
 	return s.closing || s.networkPaused || (job.Running && job.Kind != "environment-tools" && job.Kind != "claude-desktop-install" &&
-		job.Kind != "claude-science-install" && job.Kind != "claude-science-update")
+		job.Kind != "claude-science-install" && job.Kind != "claude-science-update" && job.Kind != "browser-clear")
 }
 
 func (s *Server) monitorSafety() {

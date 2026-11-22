@@ -222,6 +222,9 @@ func (s *Server) attach() error {
 	s.mu.Unlock()
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
+	// A browser controller that restarted since (a crash, or a reset the host
+	// stopped following) starts with its window shown: tell it again.
+	s.browserViews.reset()
 	s.browserViews.background(s.changeBrowserVisibility)
 	return nil
 }
@@ -707,6 +710,9 @@ func (s *Server) stopEnvironment() (returned error) {
 	}
 	if s.macosGuest != nil {
 		return s.stopMacOSGuest()
+	}
+	if explicitStop {
+		s.browserDataAutoClean("stop")
 	}
 	s.setMessage("正在停止 Super Cage 环境…")
 	if (explicitStop || s.jobs.snapshot().Kind == "storage") && cage.InstanceJobID(filepath.Join(s.profile, "state"), "base-building") != "" {

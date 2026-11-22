@@ -64,6 +64,7 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 swiftc -O -target "$(uname -m)-apple-macosx14.0" -parse-as-library -framework Cocoa -framework WebKit -framework Security -framework LocalAuthentication desktop/Cage.swift desktop/MacKeyboard.swift desktop/NativeInput.swift desktop/Updates.swift desktop/AccountDevice.swift desktop/MacGuestLogin.swift -o "$bundle/Contents/MacOS/Cage"
 swiftc -O -target "$(uname -m)-apple-macosx14.0" -parse-as-library -framework Cocoa -framework Security desktop/Updates.swift desktop/UpdateInstaller.swift -o "$bundle/Contents/Resources/CageUpdateInstaller"
 cp _output/bin/cage "$bundle/Contents/Resources/cage"
+cp _output/bin/cage-attach "$bundle/Contents/Resources/cage-attach"
 "$bundle/Contents/Resources/cage" verify-macos-guest
 if [[ "$(uname -m)" == x86_64 ]]; then
   bash scripts/build-intel-macos-runtime.sh "$bundle/Contents/Resources/intel-macos"
@@ -80,7 +81,7 @@ if [[ "$(uname -m)" == arm64 || "$(uname -m)" == x86_64 ]]; then
 fi
 node scripts/bundle-cloud-kit.mjs "$bundle/Contents/Resources"
 cp _output/proxy-core/mihomo "$bundle/Contents/Resources/mihomo"
-for executable in "$bundle/Contents/MacOS/Cage" "$bundle/Contents/Resources/CageUpdateInstaller" "$bundle/Contents/Resources/cage" "$bundle/Contents/Resources/mihomo"; do
+for executable in "$bundle/Contents/MacOS/Cage" "$bundle/Contents/Resources/CageUpdateInstaller" "$bundle/Contents/Resources/cage" "$bundle/Contents/Resources/cage-attach" "$bundle/Contents/Resources/mihomo"; do
   minimum="$(otool -l "$executable" | awk '$1 == "minos" {print $2}')"
   if [[ -z "$minimum" ]] || ! awk -v version="$minimum" 'BEGIN {split(version,v,"."); exit !(v[1] < 14 || (v[1] == 14 && v[2] == 0 && v[3]+0 == 0))}'; then
     printf 'Unsupported deployment target %s in %s (expected macOS 14.0 or earlier).\n' "$minimum" "$executable" >&2
@@ -122,6 +123,7 @@ if [[ -n "${CAGE_PROVISIONING_PROFILE:-}" ]]; then
   account_signing+=(--entitlements "$build_stage/account.entitlements")
 fi
 "${sign[@]}" "$bundle/Contents/Resources/mihomo"
+"${sign[@]}" "$bundle/Contents/Resources/cage-attach"
 "${sign[@]}" "$bundle/Contents/Resources/CageUpdateInstaller"
 "${account_signing[@]}" "$bundle/Contents/MacOS/Cage"
 "${account_signing[@]}" "$bundle"

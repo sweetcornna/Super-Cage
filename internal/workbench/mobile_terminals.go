@@ -35,7 +35,8 @@ func mobileTerminalSummary(t *terminalSession, item map[string]any) map[string]a
 	if code := t.exitStatus(); closed && code >= 0 {
 		exit = code
 	}
-	return map[string]any{"id": item["id"], "title": item["title"], "kind": kind, "closed": closed, "workspace": item["workspace"], "exit_code": exit}
+	// viewer: the phone may send a viewer identity with its input and resize.
+	return map[string]any{"id": item["id"], "title": item["title"], "kind": kind, "closed": closed, "workspace": item["workspace"], "exit_code": exit, "viewer": terminalViewerProtocol}
 }
 
 // mobileTerminalKinds are the terminal kinds this guest can start.
@@ -132,11 +133,15 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	// A phone reading the output shows the terminal: it stays a viewer for
+	// the size owner rules.
+	peer := session.phonePeer()
 	hold := time.NewTimer(mobileTerminalHold)
 	defer hold.Stop()
 	for {
 		out := session.outputAfter(after, mobileTerminalChunk)
 		if len(out.Data) > 0 || out.Reset || out.Closed {
+			session.showQueries(peer, out.Data)
 			jsonReply(w, map[string]any{"data": out.Data, "next": out.Next, "reset": out.Reset, "closed": out.Closed, "exit_code": out.ExitCode})
 			return
 		}
@@ -153,9 +158,10 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Data string `json:"data"`
+		Data   string `json:"data"`
+		Viewer string `json:"viewer"`
 	}
-	if !readJSON(w, r, &input, 72<<10) {
+	if !readJSON(w, r, &input, 72<<10) || !mobileViewerValid(w, input.Viewer) {
 		return
 	}
 	if input.Data == "" || len(input.Data) > mobileTerminalInput || !utf8.ValidString(input.Data) {
@@ -166,12 +172,20 @@ func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	// The account decides whether the phone may type; reading the input and
+	// queueing it happen after, so a program that stopped reading cannot
+	// hold the account for everyone.
+	peer := session.phonePeer(input.Viewer)
 	s.account.mu.Lock()
-	err := errMobileLocked
-	if s.mobileAuthorized(r.Context()) {
-		err = session.enqueueInput(r.Context(), input.Data)
-	}
+	authorized := s.mobileAuthorized(r.Context())
 	s.account.mu.Unlock()
+	err := errMobileLocked
+	if authorized {
+		var data string
+		if data, err = session.peerInput(peer, input.Data); err == nil {
+			err = session.enqueueInput(r.Context(), data)
+		}
+	}
 	switch {
 	case err == nil:
 		w.WriteHeader(http.StatusNoContent)
@@ -186,10 +200,11 @@ func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) mobileTerminalResize(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Cols uint16 `json:"cols"`
-		Rows uint16 `json:"rows"`
+		Cols   uint16 `json:"cols"`
+		Rows   uint16 `json:"rows"`
+		Viewer string `json:"viewer"`
 	}
-	if !readJSON(w, r, &input, 1<<10) {
+	if !readJSON(w, r, &input, 1<<10) || !mobileViewerValid(w, input.Viewer) {
 		return
 	}
 	if !validTerminalSize(input.Cols, input.Rows) {
@@ -200,10 +215,11 @@ func (s *Server) mobileTerminalResize(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	peer := session.phonePeer(input.Viewer)
 	session.mu.Lock()
 	closed := session.closed
 	session.mu.Unlock()
-	if closed || session.file.Resize(input.Cols, input.Rows) != nil {
+	if closed || session.peerResize(peer, input.Cols, input.Rows) != nil {
 		http.Error(w, "终端已结束", http.StatusConflict)
 		return
 	}
@@ -233,4 +249,15 @@ func (s *Server) mobileCloseTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// mobileViewerValid checks the optional viewer identity of a phone's input
+// or resize. A server from before the viewer rules refuses the field, so the
+// phone sends it only when the terminal summary has viewer.
+func mobileViewerValid(w http.ResponseWriter, viewer string) bool {
+	if viewer != "" && !terminalViewerPattern.MatchString(viewer) {
+		http.Error(w, "终端查看者标识无效", http.StatusBadRequest)
+		return false
+	}
+	return true
 }

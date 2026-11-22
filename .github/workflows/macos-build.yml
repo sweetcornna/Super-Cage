@@ -123,7 +123,7 @@ jobs:
           trap 'rm -rf "$check"' EXIT
           tar -xzf "$archive" -C "$check"
           codesign --verify --deep --strict "$check/Super Cage.app"
-          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/mihomo Contents/Resources/CageUpdateInstaller; do
+          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/cage-attach Contents/Resources/mihomo Contents/Resources/CageUpdateInstaller; do
             test -x "$check/Super Cage.app/$executable"
           done
           (cd _output/ci-macos-test && shasum -a 256 "${archive##*/}" > SHA256SUMS)
