@@ -75,6 +75,7 @@ const entryUsageCommands = `用法：
   cage entry revoke <设备> [环境]   撤销一台设备，立即断开它的连接
   cage entry rename <设备> <名称> [环境]
   cage entry include [环境]         确认后在 ~/.ssh/config 顶部加入一行 Include
+  cage entry herdr [环境]           显示把这个环境加到 Herdr 的命令（不替你运行）
   cage entry proxy <环境>           ssh 的 ProxyCommand，不用手动运行
   cage ssh <环境> [ssh 参数…]       不改 ~/.ssh/config 也能连接
 环境：default（默认环境）或本机虚拟机的标识。
@@ -112,7 +113,7 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 		}
 	}
 	environment := defaultLocalVMID
-	positional := map[string]int{"on": 0, "off": 0, "status": 0, "devices": 0, "include": 0, "revoke": 1, "rename": 2}
+	positional := map[string]int{"on": 0, "off": 0, "status": 0, "devices": 0, "include": 0, "herdr": 0, "revoke": 1, "rename": 2}
 	need, known := positional[args[0]]
 	if !known {
 		fmt.Fprint(stderr, entryUsage())
@@ -136,7 +137,7 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 		err = entryCall(ctx, configPath, "POST", "/api/entry/on", map[string]any{}, &view)
 	case "off":
 		err = entryCall(ctx, configPath, "POST", "/api/entry/off", map[string]any{}, &view)
-	case "status", "devices":
+	case "status", "devices", "herdr":
 		err = entryCall(ctx, configPath, "GET", "/api/entry", nil, &view)
 	case "revoke":
 		err = entryCall(ctx, configPath, "POST", "/api/entry/devices/"+url.PathEscape(rest[0])+"/revoke", map[string]any{}, &view)
@@ -148,6 +149,9 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 	if err != nil {
 		fmt.Fprintln(stderr, "Super Cage："+entryClientError(err))
 		return 1
+	}
+	if args[0] == "herdr" {
+		return entryPrintHerdr(stdout, stderr, view, environment, jsonOutput)
 	}
 	if jsonOutput {
 		encoder := json.NewEncoder(stdout)
@@ -183,6 +187,9 @@ func entryPrintStatus(out io.Writer, view entryStatusView) {
 	line := entryStateLines[view.State]
 	if view.State == "in_use" {
 		line = fmt.Sprintf("已开启 · %d 个连接（终端 %d，命令 %d，文件 %d）", view.Connections.Total, view.Connections.Shell, view.Connections.Exec, view.Connections.SFTP)
+		if view.Connections.Herdr > 0 {
+			line = strings.TrimSuffix(line, "）") + fmt.Sprintf("，Herdr %d）", view.Connections.Herdr)
+		}
 	}
 	fmt.Fprintf(out, "本机终端（%s）：%s\n", view.Name, line)
 	if view.Revoked {
@@ -193,6 +200,38 @@ func entryPrintStatus(out io.Writer, view entryStatusView) {
 		fmt.Fprintf(out, "  不改 ~/.ssh/config：%s\n", view.Commands.CageSSH)
 	}
 }
+
+// entryPrintHerdr prints the one line that adds this environment to Herdr on
+// this computer. Super Cage never runs the owner's hc: the owner does.
+func entryPrintHerdr(out, errOut io.Writer, view entryStatusView, environment string, jsonOutput bool) int {
+	if view.Herdr == nil {
+		fmt.Fprintln(errOut, "Super Cage：本机终端未开启。先运行 cage entry on "+environment)
+		return 1
+	}
+	if jsonOutput {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(view.Herdr)
+		return 0
+	}
+	switch view.Herdr.State {
+	case "connected":
+		fmt.Fprintln(out, "Herdr 已连接这个环境。")
+	case "ready":
+		fmt.Fprintln(out, "Herdr 已添加这个环境。在另一台电脑或重新添加时运行：")
+	default:
+		fmt.Fprintln(out, "在这台电脑的终端里运行：")
+	}
+	if view.Herdr.State != "connected" {
+		fmt.Fprintf(out, "\n  %s\n\n", view.Herdr.Command)
+	}
+	fmt.Fprintln(out, entryHerdrNote)
+	return 0
+}
+
+// entryHerdrNote says what Herdr puts in the environment and what the link
+// lets through; the page shows the same words.
+const entryHerdrNote = "Herdr 会在环境里装好它的 herdr-core，没有连接也没有运行中的终端 10 分钟后自动停止。环境不能经 Herdr 向这台电脑输入文字、读取屏幕或发通知；终端画面经过和本机终端一样的过滤。"
 
 func entryPrintDevices(out io.Writer, view entryStatusView) {
 	if len(view.Devices) == 0 {

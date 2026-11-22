@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,9 @@ func TestEntryCLI(t *testing.T) {
 	if out, _, code := run("status"); code != 0 || out != "本机终端（默认环境）：未开启\n" {
 		t.Fatalf("status: %d %q", code, out)
 	}
+	if _, stderr, code := run("herdr"); code != 1 || !strings.Contains(stderr, "cage entry on default") {
+		t.Fatalf("herdr while off: %d %q", code, stderr)
+	}
 	if _, stderr, code := run("off"); code != 1 || stderr != "Super Cage："+errEntryOff.Message+"\n" {
 		t.Fatalf("off while off: %d %q", code, stderr)
 	}
@@ -43,6 +47,24 @@ func TestEntryCLI(t *testing.T) {
 		t.Fatal("cage entry on without a terminal wrote ~/.ssh/config")
 	}
 	f.loadDevice()
+	// cage entry herdr prints the command and never runs an hc.
+	bin := t.TempDir()
+	ran := filepath.Join(bin, "ran")
+	if err := os.WriteFile(filepath.Join(bin, "hc"), []byte("#!/bin/sh\n: >"+ran+"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, _, code = run("herdr")
+	if code != 0 || !strings.Contains(out, "在这台电脑的终端里运行：\n\n  hc machine add ") || !strings.HasSuffix(out, entryHerdrNote+"\n") {
+		t.Fatalf("herdr: %d %q", code, out)
+	}
+	var herdr entryHerdrView
+	if out, _, code := run("herdr", "--json"); code != 0 || json.Unmarshal([]byte(out), &herdr) != nil || herdr.State != "not_set_up" || !strings.HasPrefix(herdr.Command, "hc machine add ") {
+		t.Fatalf("herdr --json: %d %q", code, out)
+	}
+	if _, err := os.Stat(ran); err == nil {
+		t.Fatal("cage entry herdr ran hc")
+	}
 	out, _, code = run("status", "--json")
 	var view entryStatusView
 	if code != 0 || json.Unmarshal([]byte(out), &view) != nil || !view.Enabled || view.HostAlias != "cage-default" || view.Commands == nil {
