@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 var errTerminalInputFull = errors.New("terminal input queue is full")
@@ -59,6 +60,8 @@ type terminalSession struct {
 	originPID                      string
 	kept                           bool
 	sshViewers                     int
+	// lastInput is when input was last admitted, from any viewer.
+	lastInput time.Time
 }
 
 func (t *terminalSession) ownsConversation() bool {
@@ -188,6 +191,7 @@ func (t *terminalSession) admitInputLocked(input string) error {
 	}
 	t.input = append(t.input, input)
 	t.inputBytes += cost
+	t.lastInput = time.Now()
 	select {
 	case t.inputReady <- struct{}{}:
 	default:

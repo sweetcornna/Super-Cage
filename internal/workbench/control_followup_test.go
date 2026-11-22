@@ -39,7 +39,8 @@ func TestAgentStartServiceRefusesOlderController(t *testing.T) {
 	if !errors.As(startErr, &agentErr) || agentErr.Code != "controller_mismatch" || !strings.Contains(agentErr.Message, "需要更新") {
 		t.Fatalf("AgentStartService: %#v", startErr)
 	}
-	if !errors.Is(entryErr, errControllerOutdated) {
+	// A server has no window to open: its own sentence.
+	if !errors.Is(entryErr, errServerControllerOutdated) || strings.Contains(entryErr.Error(), "打开 Super Cage") || !strings.Contains(entryErr.Error(), "服务器") {
 		t.Fatalf("ServerEntry: %v", entryErr)
 	}
 }

@@ -32,11 +32,14 @@ func errEntryKeptFull() error {
 	return fmt.Errorf("最多保留 %d 个本机终端：先在 Super Cage 的本机终端设置里结束不用的", entryKeptLimit)
 }
 
-// entryKeptCheck is the idle check's timer and what it saw last time.
+// entryKeptCheck is the idle check's timer and what it saw last time, and
+// the last lock's decision about the terminals it cut.
 type entryKeptCheck struct {
-	mu    sync.Mutex
-	timer *time.Timer
-	idle  map[string]time.Time // kept terminals seen idle, since when
+	mu        sync.Mutex
+	timer     *time.Timer
+	idle      map[string]time.Time // kept terminals seen idle, since when
+	lockEpoch context.Context      // the unlock that the last lock ended
+	lockKeep  map[string]bool      // the terminals that lock keeps
 }
 
 // keep marks an ssh terminal kept, within entryKeptLimit.
@@ -93,6 +96,79 @@ func (s *Server) entryKeep(session *terminalSession) error {
 	}
 	s.entry.kept.mu.Unlock()
 	return nil
+}
+
+// entryKeepOnLock keeps a terminal that the lock ending epoch cut, when
+// that lock's decision keeps it. The decision is made once per lock, over
+// every ssh terminal it cuts, so which ones stay does not depend on the
+// order their connections notice the lock: within entryKeptLimit, the ones
+// with the most recent input, the newest first among equals.
+func (s *Server) entryKeepOnLock(epoch context.Context, session *terminalSession) bool {
+	session.mu.Lock()
+	kept := session.kept
+	session.mu.Unlock()
+	if kept {
+		return true
+	}
+	s.entry.kept.mu.Lock()
+	if s.entry.kept.lockEpoch != epoch {
+		s.entry.kept.lockEpoch, s.entry.kept.lockKeep = epoch, s.entryLockDecision()
+	}
+	keep := s.entry.kept.lockKeep[session.id]
+	s.entry.kept.mu.Unlock()
+	return keep && s.entryKeep(session) == nil
+}
+
+// entryLockDecision picks the cut ssh terminals a lock keeps: every one an
+// ssh client shows, not kept yet and still running, ranked by entryKeepRank,
+// as many as entryKeptLimit leaves room for.
+func (s *Server) entryLockDecision() map[string]bool {
+	s.terminals.mu.Lock()
+	room := entryKeptLimit - len(s.terminals.kept)
+	var cut []*terminalSession
+	for id, session := range s.terminals.sessions {
+		if !s.terminals.kept[id] {
+			cut = append(cut, session)
+		}
+	}
+	s.terminals.mu.Unlock()
+	cut = slices.DeleteFunc(cut, func(session *terminalSession) bool {
+		session.mu.Lock()
+		defer session.mu.Unlock()
+		return session.origin != "ssh" || session.sshViewers == 0 || session.closed || session.ended
+	})
+	keep := map[string]bool{}
+	for _, session := range entryKeepRank(cut)[:max(0, min(room, len(cut)))] {
+		keep[session.id] = true
+	}
+	return keep
+}
+
+// entryKeepRank orders terminals by their last input, most recent first,
+// and the newest first among equals.
+func entryKeepRank(sessions []*terminalSession) []*terminalSession {
+	type ranked struct {
+		session  *terminalSession
+		input    time.Time
+		sequence int
+	}
+	order := make([]ranked, 0, len(sessions))
+	for _, session := range sessions {
+		session.mu.Lock()
+		order = append(order, ranked{session, session.lastInput, session.sequence})
+		session.mu.Unlock()
+	}
+	slices.SortFunc(order, func(a, b ranked) int {
+		if c := b.input.Compare(a.input); c != 0 {
+			return c
+		}
+		return b.sequence - a.sequence
+	})
+	out := make([]*terminalSession, len(order))
+	for i, item := range order {
+		out[i] = item.session
+	}
+	return out
 }
 
 // entryUnkept stops the idle check once nothing is kept.

@@ -1094,8 +1094,8 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	close(outputDone)
 	locked := !ended && conn.epoch.Err() != nil
 	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
-	// already: then it ends, and says so.
-	full := locked && s.entryKeep(session) != nil
+	// already: then it ends, and says so (entryKeepOnLock decides which).
+	full := locked && !s.entryKeepOnLock(conn.epoch, session)
 	session.mu.Lock()
 	kept := session.kept
 	session.mu.Unlock()

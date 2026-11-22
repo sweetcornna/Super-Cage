@@ -428,7 +428,8 @@ func TestEntryKeptTerminalsHaveTheirOwnCapAndExpire(t *testing.T) {
 }
 
 // A lock keeps the terminals it cuts within entryKeptLimit; the others end
-// and say why.
+// and say why. Which ones stay does not depend on the order the connections
+// notice the lock: the most recent input wins, then the newest terminal.
 func TestEntryLockBeyondTheKeptCapEndsTheTerminal(t *testing.T) {
 	previous := entryKeptLimit
 	entryKeptLimit = 1
@@ -449,13 +450,24 @@ func TestEntryLockBeyondTheKeptCapEndsTheTerminal(t *testing.T) {
 		t.Fatal(err)
 	}
 	var shells []*entryShell
+	var ids []string
+	seen := map[string]bool{}
 	for i := range 2 {
 		shell := entryOpenShell(t, client, 100, 30, "")
 		marker := fmt.Sprintf("L%d=", i)
 		shell.send("printf '" + marker + "%s\\n' ready\n")
 		shell.expect(marker)
+		for _, summary := range entrySSHTerminals(f.s) {
+			if id := summary["id"].(string); !seen[id] {
+				seen[id] = true
+				ids = append(ids, id)
+			}
+		}
 		shells = append(shells, shell)
 	}
+	// The older terminal has the most recent input, so it stays.
+	shells[0].send("printf 'AGAIN=%s\\n' yes\n")
+	shells[0].expect("AGAIN=")
 	ended := make(chan struct{})
 	go func() { _ = client.Wait(); close(ended) }()
 	f.s.account.lock()
@@ -465,18 +477,37 @@ func TestEntryLockBeyondTheKeptCapEndsTheTerminal(t *testing.T) {
 		t.Fatal("the lock did not cut the connection")
 	}
 	entryAwait(t, 5*time.Second, "one terminal left", func() bool { return len(entrySSHTerminals(f.s)) == 1 })
-	if f.s.terminals.keptCount() != 1 {
-		t.Fatalf("kept %d", f.s.terminals.keptCount())
+	if kept := f.s.terminals.keptSessions(); len(kept) != 1 || kept[0].id != ids[0] {
+		t.Fatalf("kept %d terminals, not the one with the latest input", len(kept))
 	}
-	notices := 0
-	for _, shell := range shells {
-		if text := shell.text(); strings.Contains(text, "最多保留 1 个本机终端") && strings.Contains(text, "这个终端随连接结束") {
-			notices++
-		} else if !strings.Contains(text, entryLockedNotice) {
-			t.Errorf("neither notice: %q", text[max(0, len(text)-300):])
-		}
+	if text := shells[0].text(); !strings.Contains(text, entryLockedNotice) {
+		t.Errorf("the kept terminal: %q", text[max(0, len(text)-300):])
 	}
-	if notices != 1 {
-		t.Fatalf("%d terminals said they ended", notices)
+	if text := shells[1].text(); !strings.Contains(text, "最多保留 1 个本机终端") || !strings.Contains(text, "这个终端随连接结束") {
+		t.Errorf("the ended terminal: %q", text[max(0, len(text)-300):])
+	}
+}
+
+// The order a lock keeps terminals in: most recent input first, then the
+// newest.
+func TestEntryKeepRankPrefersRecentInputThenNewest(t *testing.T) {
+	at := time.Now()
+	session := func(id string, sequence int, input time.Time) *terminalSession {
+		s := newTerminalSession(nil)
+		s.id, s.sequence, s.lastInput = id, sequence, input
+		return s
+	}
+	ranked := entryKeepRank([]*terminalSession{
+		session("a", 1, at),
+		session("b", 2, at.Add(time.Second)),
+		session("c", 3, at.Add(time.Second)),
+		session("d", 4, time.Time{}),
+	})
+	var order []string
+	for _, s := range ranked {
+		order = append(order, s.id)
+	}
+	if strings.Join(order, "") != "cbad" {
+		t.Fatalf("order %v", order)
 	}
 }

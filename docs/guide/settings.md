@@ -3,7 +3,7 @@ title: 设置参考
 description: 按设置菜单找到每项功能，了解保存、重启、账号归属和当前客户端设置的区别。
 group: 设置与维护
 order: 9
-keywords: 设置 账户 保险箱 记住登录 Touch ID 主题 外观 字体 无障碍 流畅画质 时区 语言
+keywords: 设置 账户 保险箱 记住登录 Touch ID 主题 外观 字体 无障碍 流畅画质 时区 语言 本机终端 ssh
 ---
 ## 打开设置与保存
 
@@ -110,3 +110,7 @@ Super Cage 账户用于解锁当前环境。在云端工作台修改的是服务
 自动时区和语言使用代理出口定位，手动选择不会被主机位置代替。应用后可能重启环境，详见[时区与出口规则](network.md#时区语言与出口规则)。联网检查的“系统时区与语言”项在 Linux 客机上除核对变量与配置文件外，还分别核对进程和系统时区文件的实际 UTC 偏移；`/etc/localtime` 为链接时，同时核对其目标。文件缺失、无法读取或结果不一致时，外网保持关闭，检查详情说明原因及读到的差异。
 
 “远程连接”中的手机配对针对本机 Super Cage。先切回本机，再生成配对码或移除配对手机。SSH 主机在工作台侧栏管理；手机中继和云端运行环境是不同的服务，分别见[手机连接](mobile.md)与[云端部署](cloud.md)。
+
+### 本机终端与 ssh 配置
+
+“本机终端”开启后，可以在自己的终端里用 `ssh <主机名>` 或 `cage ssh <环境>` 连接这个环境。Super Cage 让 `~/.ssh/config` 引入的配置只用 OpenSSH 7.6 起都认识的选项，KnownHostsCommand、SessionType、StdinNull、ForkAfterAuthentication 和 ObscureKeystrokeTiming 这五项较新的设定只由 `cage ssh` 通过它自己的配置文件加上，所以电脑上较旧的 ssh 不会因为它连不上任何主机。直接用 `ssh <主机名>` 时，你在 `Host *` 里给这五项设的值也会用在这个环境上；`cage ssh` 不读你的 `~/.ssh/config`，不受影响。

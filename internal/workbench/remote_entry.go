@@ -82,12 +82,20 @@ func (s *Server) remoteManifest(w http.ResponseWriter, r *http.Request) {
 			"browser": true, "desktop": true, "audio": true}})
 }
 
+// errServerControllerOutdated is errControllerOutdated on a server, where
+// nobody opens a window: the server's service is updated and restarted as
+// the cloud guide's maintenance says.
+var errServerControllerOutdated = errors.New("服务器上的 Super Cage 服务需要更新：在服务器维护时先保存任务、停止相关环境与服务，更新并重启服务器上的 Super Cage 后再连接。")
+
 // ServerEntry is used only over an authenticated SSH command channel. It
 // attaches to the existing server without triggering desktop build takeover.
 // The returned ticket must travel on that private pipe, never a shared log.
 func ServerEntry(configPath string) (RemoteEntry, error) {
 	var result RemoteEntry
 	c, err := connectProvenController(filepath.Dir(configPath))
+	if errors.Is(err, errControllerOutdated) {
+		return result, errServerControllerOutdated
+	}
 	if controllerIdentityError(err) {
 		return result, err
 	}
