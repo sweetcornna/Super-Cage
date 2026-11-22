@@ -129,6 +129,21 @@ assertions = 0;
             Check(ScienceFrame.End(scienceRoot, other) == null, "an end for a foreign origin: " + other);
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
 
+        // The journal of framed origins: nothing at all without one (the window's
+        // start reads one path), recorded once, forgotten once cleared.
+        var journalData = Path.Combine(scienceRoot, "webview2-journal");
+        Check(ScienceFrame.Journal(journalData).Count == 0 && !Directory.Exists(journalData), "a missing journal read or created something");
+        Check(ScienceFrame.Forget(journalData, [origin]) && !Directory.Exists(journalData), "forgetting without a journal wrote something");
+        Check(ScienceFrame.Record(journalData, origin, "http://localhost") && ScienceFrame.Record(journalData, origin, "http://localhost") &&
+            ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(origin, "http://localhost")]), "journal after recording one origin twice");
+        var second = origin.Replace("0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210");
+        Check(ScienceFrame.Record(journalData, second, "http://localhost") && ScienceFrame.Forget(journalData, [origin]) &&
+            ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(second, "http://localhost")]), "journal after forgetting one of two");
+        Check(ScienceFrame.Forget(journalData, [second]) && !File.Exists(ScienceFrame.JournalPath(journalData)), "an empty journal stays on disk");
+        File.WriteAllText(ScienceFrame.JournalPath(journalData), "{\"framed\":[{\"origin\":\"http://localhost:1\",\"site\":\"x\"},{\"origin\":\"" + origin + "\",\"site\":\"http://localhost\"}]}");
+        Check(ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(origin, "http://localhost")]), "a journal entry that is no session origin was kept");
+        File.Delete(ScienceFrame.JournalPath(journalData));
+
         // The calls and the policy are the ones the Go tests prove in headless Chromium.
         Check(golden["contract"]!.GetValue<int>() == ScienceFrame.Contract, "bridge contract differs");
         Check(golden["settle_ms"]!.GetValue<int>() == ScienceFrame.SettleMilliseconds, "settle time differs");

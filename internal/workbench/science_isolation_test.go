@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -449,14 +451,32 @@ func TestScienceBrowserSessionStorageIsCleared(t *testing.T) {
 	shell.load(t, harness.origin+"/")
 	entry := env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
 	origin := strings.TrimSuffix(entry, "/_cage/enter")
+	shell.journal = filepath.Join(t.TempDir(), "cage-science-framed.json")
 	shell.open(t, entry)
+	if framed := readScienceJournal(shell.journal); len(framed) != 1 || framed[0].Origin != origin {
+		t.Fatalf("journal before the frame %v", framed)
+	}
 	waitFor(t, 30*time.Second, "the page's storage", func() bool { return len(scienceDocReports(env.daemon)) > 0 })
 	shell.close(t)
 	waitFor(t, 10*time.Second, "auto-attach to end", func() bool { return !shell.pageAttached() })
 	waitFor(t, 10*time.Second, "the origin cleared", func() bool { return shell.cleared.Load() > 0 })
-	// A document of the same origin under the same window (the same storage
-	// partition) finds nothing: the front no longer knows the label and
-	// answers 403, which still gives a document at that origin.
+	if _, err := os.Stat(shell.journal); !os.IsNotExist(err) {
+		t.Fatalf("a cleared origin stayed in the journal: %v", err)
+	}
+	value := scienceStorageLeft(t, browser, shell, origin)
+	t.Logf("after the frame went: %v", value)
+	if value != scienceStorageEmpty {
+		t.Fatalf("the session's origin kept %v", value)
+	}
+}
+
+const scienceStorageEmpty = `{"local":null,"databases":[],"caches":[]}`
+
+// scienceStorageLeft is what a document of a session origin under the same
+// window (the same storage partition) finds: the front no longer knows the
+// label and answers 403, which still gives a document at that origin.
+func scienceStorageLeft(t *testing.T, browser *testBrowser, shell *scienceShell, origin string) any {
+	t.Helper()
 	shell.eval(t, `(() => { const f = document.createElement("iframe"); f.id = "probe"; f.src = `+strconv.Quote(origin+"/_cage/gone")+`; document.getElementById("pane").append(f); return true })()`)
 	var probe string
 	waitFor(t, 10*time.Second, "the probe frame", func() bool {
@@ -492,8 +512,5 @@ func TestScienceBrowserSessionStorageIsCleared(t *testing.T) {
 	waitFor(t, 10*time.Second, "the probe's answer", func() bool {
 		return browser.call(probe, "Runtime.evaluate", map[string]any{"expression": expression, "returnByValue": true, "awaitPromise": true}, &value) == nil && value.Result.Value != nil
 	})
-	t.Logf("after the frame went: %v", value.Result.Value)
-	if value.Result.Value != `{"local":null,"databases":[],"caches":[]}` {
-		t.Fatalf("the session's origin kept %v", value.Result.Value)
-	}
+	return value.Result.Value
 }

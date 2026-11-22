@@ -30,6 +30,7 @@ internal sealed class ScienceFrameHost
     };
 
     private readonly CoreWebView2 core;
+    private readonly string data;
     private readonly Action<string> failed;
     private readonly Action<string> navigate;
     private readonly ScienceFrame.Policy policy = new();
@@ -44,11 +45,13 @@ internal sealed class ScienceFrameHost
     private readonly HashSet<string> dead = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> expected = new(StringComparer.Ordinal);
 
-    // failed tells the pane its frame ended; navigate re-issues a navigation
-    // this host held.
-    public ScienceFrameHost(CoreWebView2 core, Action<string> failed, Action<string> navigate)
+    // data is the WebView's user data folder (the journal of framed
+    // origins); failed tells the pane its frame ended; navigate re-issues a
+    // navigation this host held.
+    public ScienceFrameHost(CoreWebView2 core, string data, Action<string> failed, Action<string> navigate)
     {
         this.core = core;
+        this.data = data;
         this.failed = failed;
         this.navigate = navigate;
         // Frames navigate to the attached session's origin only (and to
@@ -84,9 +87,14 @@ internal sealed class ScienceFrameHost
     public async Task Attach(string url)
     {
         var next = ScienceFrame.Identity(Backend.Root, url) ?? throw new InvalidDataException("找不到这个本机渲染页面对应的环境，请回到 Claude Science 重新打开。");
+        var label = ScienceFrame.LabelOrigin(url)!;
+        // Before the frame can store anything: a start after a kill or a
+        // crash clears what it stored (N6).
+        if (!Uri.TryCreate(core.Source, UriKind.Absolute, out var source) || !ScienceFrame.Record(data, label, source.Scheme + "://" + source.Host))
+            throw new InvalidDataException("窗口没能记录本机渲染页面的存储位置，本机渲染未打开。");
         var actions = policy.Arm(next);
         if (actions.Any(action => action.End)) throw new InvalidDataException("窗口正在跳转，本机渲染未打开。");
-        origin = ScienceFrame.LabelOrigin(url)!;
+        origin = label;
         framed.Add(origin);
         var page = actions.Where(action => action.Session.Length == 0 && action.Call != null).ToList();
         try
@@ -280,19 +288,39 @@ internal sealed class ScienceFrameHost
     }
 
     // ClearFramed empties the storage of session origins whose targets are
-    // gone (framed before the page detach).
+    // gone (framed before the page detach) and forgets them in the journal.
     private async Task ClearFramed(List<string> origins)
     {
-        if (!Uri.TryCreate(core.Source, UriKind.Absolute, out var page)) return;
-        var site = page.Scheme + "://" + page.Host;
+        var journal = ScienceFrame.Journal(data).ToDictionary(item => item.Origin, item => item.Site, StringComparer.Ordinal);
+        var site = Uri.TryCreate(core.Source, UriKind.Absolute, out var page) ? page.Scheme + "://" + page.Host : "";
+        var cleared = new List<string>();
         foreach (var framedOrigin in origins)
+            if (await Clear(core, framedOrigin, journal.GetValueOrDefault(framedOrigin, site))) cleared.Add(framedOrigin);
+        ScienceFrame.Forget(data, cleared);
+    }
+
+    private static async Task<bool> Clear(CoreWebView2 core, string framedOrigin, string site)
+    {
+        if (site.Length == 0) return false;
+        foreach (var call in ScienceFrame.ClearOrigin(framedOrigin, site))
         {
-            foreach (var call in ScienceFrame.ClearOrigin(framedOrigin, site))
-            {
-                try { await Send("", call); }
-                catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { }
-            }
+            try { await core.CallDevToolsProtocolMethodAsync(call.Method, call.Params.ToJsonString()); }
+            catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { return false; }
         }
+        return true;
+    }
+
+    // Sweep runs at every start of the WebView, with or without the
+    // switches: the origins a killed or crashed window framed and never
+    // cleared are cleared now. Without a journal it is one existence check.
+    public static async Task Sweep(CoreWebView2 core, string data)
+    {
+        var framed = ScienceFrame.Journal(data);
+        if (framed.Count == 0) return;
+        var cleared = new List<string>();
+        foreach (var item in framed)
+            if (await Clear(core, item.Origin, item.Site)) cleared.Add(item.Origin);
+        ScienceFrame.Forget(data, cleared);
     }
 
     private async Task Send(string session, ScienceFrame.Call call)

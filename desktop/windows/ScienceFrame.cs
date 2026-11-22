@@ -199,6 +199,66 @@ internal static partial class ScienceFrame
         Make("Storage.clearDataForOrigin", new JsonObject { ["origin"] = origin, ["storageTypes"] = "all" }),
     ];
 
+    // The journal of framed session origins (round-2 N6): the window writes
+    // a session origin (with its own site, the storage partition) before it
+    // attaches for it and forgets it once its storage is cleared. A window
+    // that is killed or whose browser crashes never clears it, so the next
+    // start does (ScienceFrameHost.Sweep), with or without the switches.
+    // Without a journal that start reads nothing else.
+    public sealed record Framed(string Origin, string Site);
+
+    public static string JournalPath(string userDataFolder) => Path.Combine(userDataFolder, "cage-science-framed.json");
+
+    public static List<Framed> Journal(string userDataFolder)
+    {
+        var path = JournalPath(userDataFolder);
+        if (!File.Exists(path)) return [];
+        var framed = new List<Framed>();
+        if (ReadObject(path)?["framed"] is not JsonArray items) return framed;
+        foreach (var item in items.OfType<JsonObject>())
+        {
+            var origin = Text(item, "origin");
+            if (LabelOrigin(origin + "/_cage/enter") == origin) framed.Add(new Framed(origin, Text(item, "site")));
+        }
+        return framed;
+    }
+
+    public static bool Record(string userDataFolder, string origin, string site)
+    {
+        var framed = Journal(userDataFolder);
+        if (framed.Any(item => item.Origin == origin)) return true;
+        framed.Add(new Framed(origin, site));
+        return WriteJournal(userDataFolder, framed);
+    }
+
+    public static bool Forget(string userDataFolder, IEnumerable<string> origins)
+    {
+        var gone = origins.ToHashSet(StringComparer.Ordinal);
+        var framed = Journal(userDataFolder);
+        if (!framed.Any(item => gone.Contains(item.Origin)) && (framed.Count != 0 || !File.Exists(JournalPath(userDataFolder)))) return true;
+        return WriteJournal(userDataFolder, framed.Where(item => !gone.Contains(item.Origin)).ToList());
+    }
+
+    private static bool WriteJournal(string userDataFolder, List<Framed> framed)
+    {
+        var path = JournalPath(userDataFolder);
+        try
+        {
+            if (framed.Count == 0)
+            {
+                File.Delete(path);
+                return true;
+            }
+            Directory.CreateDirectory(userDataFolder);
+            var items = new JsonArray(framed.Select(item => (JsonNode)new JsonObject { ["origin"] = item.Origin, ["site"] = item.Site }).ToArray());
+            var temporary = path + ".cage-" + Guid.NewGuid().ToString("N");
+            File.WriteAllText(temporary, new JsonObject { ["framed"] = items }.ToJsonString());
+            File.Move(temporary, path, true);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+    }
+
     // The locale override is per renderer process: a second target in the
     // same process reports the one already set.
     public static bool Benign(string message) => message.Contains("Another locale override is already in effect", StringComparison.Ordinal);

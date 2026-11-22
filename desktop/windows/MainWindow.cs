@@ -223,7 +223,10 @@ internal sealed class MainWindow : Form
                 science?.EndForExit();
                 webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。");
             };
-            science = arguments == null ? null : new ScienceFrameHost(core, reason =>
+            // What a killed or crashed window's Claude Science frame stored
+            // (N6); without a journal, one existence check.
+            await ScienceFrameHost.Sweep(core, Path.Combine(Backend.Root, "webview2"));
+            science = arguments == null ? null : new ScienceFrameHost(core, Path.Combine(Backend.Root, "webview2"), reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
                 uri => { if (!web.IsDisposed && web.CoreWebView2 == core) core.Navigate(uri); });
             core.NavigationCompleted += (_, e) => {

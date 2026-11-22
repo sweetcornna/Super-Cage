@@ -393,6 +393,10 @@ type scienceShell struct {
 	// front ends the window asked for and what they answered.
 	noEnd, noCrash bool
 	endResults     []string
+	// journal is where the window records each session origin before it
+	// attaches (ScienceFrame.Record), so a start after a kill or a crash
+	// clears what that frame stored ("": none).
+	journal string
 }
 
 // scienceClearOriginCalls is what the window sends for each session origin
@@ -577,6 +581,7 @@ func (s *scienceShell) run(actions []scienceAction, ending string) {
 		}
 		s.cleared.Add(1)
 	}
+	s.forget(origins)
 	if proceed {
 		s.mu.Lock()
 		target := s.target
@@ -732,6 +737,7 @@ func (s *scienceShell) open(t *testing.T, url string) {
 	s.origins[scienceSessionOrigin(url)] = true
 	s.current = scienceSessionOrigin(url)
 	s.mu.Unlock()
+	s.record(t, scienceSessionOrigin(url))
 	s.arm()
 	s.eval(t, scienceAddFrame(url))
 }
@@ -811,6 +817,89 @@ func (s *scienceShell) navigateTop(t *testing.T, url string) {
 	})
 	s.run(actions, ending)
 	waitFor(t, scienceNavigateWait+time.Second, "the held navigation to go", func() bool { return s.navigated.Load() > before })
+}
+
+// scienceJournalEntry is one framed session origin and the window's site
+// (ScienceFrame.Record writes the same file).
+type scienceJournalEntry struct {
+	Origin string `json:"origin"`
+	Site   string `json:"site"`
+}
+
+func readScienceJournal(path string) []scienceJournalEntry {
+	var journal struct {
+		Framed []scienceJournalEntry `json:"framed"`
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || json.Unmarshal(data, &journal) != nil {
+		return nil
+	}
+	return journal.Framed
+}
+
+func writeScienceJournal(path string, entries []scienceJournalEntry) error {
+	if len(entries) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	data, _ := json.Marshal(map[string]any{"framed": entries})
+	temporary := path + ".tmp"
+	if err := os.WriteFile(temporary, data, 0o600); err != nil {
+		return err
+	}
+	return os.Rename(temporary, path)
+}
+
+// record is the window writing a session origin to its journal before it
+// attaches for it.
+func (s *scienceShell) record(t *testing.T, origin string) {
+	t.Helper()
+	if s.journal == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := readScienceJournal(s.journal)
+	if !slices.ContainsFunc(entries, func(entry scienceJournalEntry) bool { return entry.Origin == origin }) {
+		entries = append(entries, scienceJournalEntry{Origin: origin, Site: s.site})
+	}
+	if err := writeScienceJournal(s.journal, entries); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// forget drops cleared origins from the journal.
+func (s *scienceShell) forget(origins map[string]bool) {
+	if s.journal == "" || len(origins) == 0 {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := slices.DeleteFunc(readScienceJournal(s.journal), func(entry scienceJournalEntry) bool { return origins[entry.Origin] })
+	_ = writeScienceJournal(s.journal, entries)
+}
+
+// sweep is the window's start: it clears the storage of every origin in
+// its journal (frames a killed or crashed window never cleared), then
+// forgets them. Without a journal it reads nothing else.
+func (s *scienceShell) sweep(t *testing.T) {
+	t.Helper()
+	if s.journal == "" {
+		return
+	}
+	entries := readScienceJournal(s.journal)
+	cleared := map[string]bool{}
+	for _, entry := range entries {
+		for _, call := range scienceClearOriginCalls(entry.Origin, entry.Site) {
+			if err := s.browser.call(s.page, call.Method, call.Params, nil); err != nil {
+				t.Logf("%s %s: %v", call.Method, entry.Origin, err)
+			}
+		}
+		cleared[entry.Origin] = true
+	}
+	s.forget(cleared)
 }
 
 // ended counts the frames the shell told the pane to end.
