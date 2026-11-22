@@ -7,7 +7,8 @@ import (
 )
 
 // The program exists to stay small: one stray import of any of these
-// brings back the memory of the whole cage into every attached window.
+// brings back the memory of the whole cage into every attached window and
+// every ssh connection's proxy.
 var forbidden = []string{
 	"github.com/sylvinus/agent-vm/internal/workbench",
 	"github.com/sylvinus/agent-vm/internal/cage",
@@ -15,6 +16,8 @@ var forbidden = []string{
 	"crypto/tls",
 	"github.com/gorilla/websocket",
 	"runtime/cgo",
+	"crypto/x509",
+	"golang.org/x/crypto/ssh",
 }
 
 func TestImportGraphStaysSlim(t *testing.T) {
@@ -32,7 +35,7 @@ func TestImportGraphStaysSlim(t *testing.T) {
 		for _, dep := range strings.Fields(string(out)) {
 			deps[dep] = true
 		}
-		if !deps["github.com/sylvinus/agent-vm/internal/attach"] {
+		if !deps["github.com/sylvinus/agent-vm/internal/attach"] || !deps["github.com/sylvinus/agent-vm/internal/entryproxy"] {
 			t.Fatalf("%s: the dependency list does not look like cage-attach's:\n%s", goos, out)
 		}
 		for _, name := range forbidden {

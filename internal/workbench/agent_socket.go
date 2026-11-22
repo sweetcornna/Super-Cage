@@ -22,7 +22,9 @@ func agentDialSocket(ctx context.Context, c *controllerClient, target AgentTarge
 		return nil, err
 	}
 	req, _ := http.NewRequest("GET", c.origin, nil)
-	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{agentConnection(target)}}
+	// agentRequestHeader marks the agent transport, which the SSH entry's
+	// routes refuse.
+	headers := http.Header{"Origin": []string{c.origin}, connectionHeader: []string{agentConnection(target)}, agentRequestHeader: []string{"1"}}
 	for _, cookie := range c.client.Jar.Cookies(req.URL) {
 		headers.Add("Cookie", cookie.String())
 	}

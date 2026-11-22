@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
@@ -26,6 +27,12 @@ type controllerPortRecord struct {
 // blocks for Hyper-V, WSL or container networking, which may cover every
 // preferred port. The system then assigns a free port. It is remembered, so
 // later starts keep that origin while it stays available.
+//
+// Residual (A3 of the review of controller-dial-hardening, documented, not
+// fixed): another local user who holds a preferred port, or its [::1]
+// twin, still moves the controller to another port (a new origin, so the
+// old one's browser storage is not seen), and one who holds every port a
+// start tries keeps it from starting.
 func listenController(profile string) (net.Listener, int, error) {
 	for port := controllerFirstPort; port < controllerFirstPort+controllerPortCount; port++ {
 		listener, err := listenLoopback(port)
@@ -113,9 +120,26 @@ func newLoopbackPair(v4, v6 net.Listener) *loopbackPair {
 	return p
 }
 
+// forward passes l's connections to Accept. An error of the IPv4 listener
+// is passed on, as net/http expects of its listener. One of the IPv6 twin
+// is not: net/http would stop serving IPv4 too, or retry at once. The twin
+// backs off instead, as net/http does after a temporary error, up to a
+// second, until it accepts again or the pair closes (A4 of the review of
+// controller-dial-hardening).
 func (p *loopbackPair) forward(l net.Listener) {
+	var delay time.Duration
 	for {
 		conn, err := l.Accept()
+		if err != nil && l == p.v6 && !errors.Is(err, net.ErrClosed) {
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			select {
+			case <-time.After(delay):
+				continue
+			case <-p.closed:
+				return
+			}
+		}
+		delay = 0
 		select {
 		case p.accepted <- acceptedConn{conn, err}:
 		case <-p.closed:

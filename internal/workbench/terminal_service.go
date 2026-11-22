@@ -46,6 +46,9 @@ type terminalManager struct {
 	sequence int
 	closed   bool
 	workers  sync.WaitGroup
+	// kept are the ssh terminals kept past their connection (entryKeep),
+	// which have their own cap instead of the shared limit.
+	kept map[string]bool
 }
 
 func (m *terminalManager) startSession(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func()) (*terminalSession, error) {
@@ -122,7 +125,7 @@ func (m *terminalManager) admissionErrorLocked() error {
 	if m.closed {
 		return errTerminalsClosed
 	}
-	if len(m.sessions) >= 12 {
+	if len(m.sessions)-len(m.kept) >= 12 {
 		return errTerminalLimit
 	}
 	return nil
@@ -278,6 +281,7 @@ func (m *terminalManager) remove(id string) {
 		session.close()
 		m.mu.Lock()
 		delete(m.sessions, id)
+		delete(m.kept, id)
 		m.mu.Unlock()
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 var errTerminalInputFull = errors.New("terminal input queue is full")
@@ -53,6 +54,17 @@ type terminalSession struct {
 	sizing                terminalSizing // viewers and the size owner; guarded by mu
 	sizeMu                sync.Mutex     // serialises deciding and applying a size
 	resizer               terminalResizer
+	// origin is "ssh" for a terminal the local SSH entry opened, with the
+	// device's name and id; kept is the owner's "保留", which keeps it past
+	// the connection (a lock sets it too). sshViewers counts the ssh
+	// clients showing it. originPID names the guest file with the shell's
+	// process id of an interactive ssh terminal (entryKeptBusy).
+	origin, originDevice, originID string
+	originPID                      string
+	kept                           bool
+	sshViewers                     int
+	// lastInput is when input was last admitted, from any viewer.
+	lastInput time.Time
 }
 
 func (t *terminalSession) ownsConversation() bool {
@@ -106,6 +118,9 @@ func (t *terminalSession) summary() map[string]any {
 	// Claude startup veil and account header.
 	if t.kind == "codex" && t.sharedID != "" {
 		summary["cli_session_provider"] = codexProvider
+	}
+	if t.origin != "" {
+		summary["origin"] = map[string]any{"kind": t.origin, "device": t.originDevice, "kept": t.kept}
 	}
 	return summary
 }
@@ -185,6 +200,7 @@ func (t *terminalSession) admitInputLocked(input string) error {
 	}
 	t.input = append(t.input, input)
 	t.inputBytes += cost
+	t.lastInput = time.Now()
 	select {
 	case t.inputReady <- struct{}{}:
 	default:
