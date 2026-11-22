@@ -948,7 +948,8 @@ func (l *deviceLink) report() {
 func deviceSelfName() string {
 	name, _ := os.Hostname()
 	name = strings.TrimSuffix(strings.TrimSpace(name), ".local")
-	if name == "" || len(name) > 160 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+	// What the other computer's prompt shows and its list keeps.
+	if !remotelink.ValidPairName(name) {
 		name = "Super Cage"
 	}
 	return name

@@ -92,9 +92,42 @@ func devicePlatform(platform string) bool {
 	return false
 }
 
-// deviceName is a model or machine name a device may report about itself.
+// deviceName is a model or machine name a device may report about itself:
+// at most 160 bytes of the characters the approval prompt shows
+// (remotelink.ValidPairName): printable only, so no control, format
+// (bidirectional overrides, isolates, zero-width) or line-separator ones.
 func deviceName(name string) bool {
+	return name != "" && len(name) <= 160 && utf8.ValidString(name) && !strings.ContainsFunc(name, notGraphic)
+}
+
+func notGraphic(r rune) bool { return !unicode.IsGraphic(r) }
+
+// olderDeviceName is the rule of earlier builds of this list: no control
+// characters only.
+func olderDeviceName(name string) bool {
 	return name != "" && len(name) <= 160 && utf8.ValidString(name) && !strings.ContainsFunc(name, unicode.IsControl)
+}
+
+// sanitizeName keeps a record an earlier build wrote readable when its name
+// has characters deviceName refuses: they are left out, and a name of
+// nothing else becomes a plain one. A name no build wrote is left as it is,
+// so the list is refused as any edited file.
+func (d *deviceRecord) sanitizeName() {
+	if d.Platform == "" || deviceName(d.Name) || !olderDeviceName(d.Name) {
+		return
+	}
+	d.Name = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if notGraphic(r) {
+			return -1
+		}
+		return r
+	}, d.Name))
+	if d.Name == "" {
+		d.Name = "手机"
+		if deviceKind(d.Platform) == "computer" {
+			d.Name = deviceDefaultName
+		}
+	}
 }
 
 // shortCodeRequestListable reports whether a device that proved the short
@@ -187,7 +220,13 @@ func readDevicesFile(path string) (*devicesFile, error) {
 		return nil, err
 	}
 	var f devicesFile
-	if json.Unmarshal(b, &f) != nil || f.Version != devicesVersion || f.Devices == nil || checkDevices(f.Devices) != nil {
+	if json.Unmarshal(b, &f) != nil || f.Version != devicesVersion || f.Devices == nil {
+		return nil, errDevicesUnreadable
+	}
+	for i := range f.Devices {
+		f.Devices[i].sanitizeName()
+	}
+	if checkDevices(f.Devices) != nil {
 		return nil, errDevicesUnreadable
 	}
 	return &f, nil

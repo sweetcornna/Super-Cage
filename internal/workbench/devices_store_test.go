@@ -163,7 +163,7 @@ func TestDevicesMalformedListIsRefusedAndKept(t *testing.T) {
 		"bad relay":        encode(func(d *deviceRecord) { d.Relay = "http://relay.example" }),
 		"unknown platform": encode(func(d *deviceRecord) { d.Platform = "plan9" }),
 		"kind mismatch":    encode(func(d *deviceRecord) { d.Kind = "phone" }),
-		"control in name":  encode(func(d *deviceRecord) { d.Name = "a\nb" }),
+		"control in name":  encode(func(d *deviceRecord) { d.Name = "a\nb" }), // no build wrote it: refused, not sanitised
 		"name unreported":  encode(func(d *deviceRecord) { d.Platform, d.Kind = "", "phone" }),
 		"no added_at":      encode(func(d *deviceRecord) { d.AddedAt = time.Time{} }),
 	}
