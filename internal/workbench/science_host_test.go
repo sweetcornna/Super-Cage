@@ -29,11 +29,22 @@ func withScienceHostOS(t *testing.T, goos string) {
 	t.Cleanup(func() { scienceHostOS = old })
 }
 
+// withScienceHostVerified sets the build-time gate (scienceHostVerified) as
+// -ldflags -X would.
+func withScienceHostVerified(t *testing.T, platforms string) {
+	t.Helper()
+	old := scienceHostVerified
+	scienceHostVerified = platforms
+	t.Cleanup(func() { scienceHostVerified = old })
+}
+
 // scienceWorkload is a Windows workload with a published control file, as
-// serve() leaves it.
+// serve() leaves it, in a build that lifts the gate for Windows (as the
+// real-window build does; TestScienceHostRenderGate covers it closed).
 func scienceWorkload(t *testing.T) *Server {
 	t.Helper()
 	withScienceHostOS(t, "windows")
+	withScienceHostVerified(t, "windows")
 	withScienceHostArch(t, "amd64")
 	s := testServer(t)
 	if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: 17777, Token: s.token, PID: os.Getpid()}); err != nil {
@@ -192,6 +203,137 @@ func TestScienceHostRenderOffChangesNothing(t *testing.T) {
 	}
 }
 
+func TestScienceHostGateClosedInThisTree(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin", "linux", ""} {
+		if scienceHostRenderVerified(goos) {
+			t.Fatalf("%q verified in this tree", goos)
+		}
+	}
+	withScienceHostVerified(t, "linux, windows")
+	if !scienceHostRenderVerified("windows") || !scienceHostRenderVerified("linux") || scienceHostRenderVerified("darwin") || scienceHostRenderVerified("") {
+		t.Fatal("ldflags list not read")
+	}
+}
+
+// With the gate closed the server never offers the switch, whatever frame
+// contract the window answers; a stored "on" is turned off and the log says
+// so.
+// Lifted, the same stored "on" starts the front.
+func TestScienceHostRenderGate(t *testing.T) {
+	workload := scienceWorkload(t)
+	withScienceHostVerified(t, "")
+	var logged []string
+	saved := scienceLog
+	scienceLog = func(level, source, message string) { logged = append(logged, level+" "+source+" "+message) }
+	t.Cleanup(func() { scienceLog = saved })
+	read := func() scienceHostRenderState {
+		t.Helper()
+		w := (requestShape{method: "GET", path: "/api/claude-science/host-render", trusted: true, headers: windowFetch}).send(workload)
+		var state scienceHostRenderState
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &state) != nil {
+			t.Fatalf("read: %d %s", w.Code, w.Body)
+		}
+		return state
+	}
+	post := func(body string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("POST", workload.origin+"/api/claude-science/host-render", strings.NewReader(body))
+		r.Header.Set("Origin", workload.origin)
+		r.Header.Set("Content-Type", "application/json")
+		for name, value := range windowFetch {
+			r.Header.Set(name, value)
+		}
+		r.AddCookie(&http.Cookie{Name: workload.cookieName(), Value: workload.session})
+		r.AddCookie(&http.Cookie{Name: workload.cookieName() + "-desktop", Value: trustedViewProof(workload.token)})
+		w := httptest.NewRecorder()
+		workload.handler().ServeHTTP(w, r)
+		return w
+	}
+	stored := func() string {
+		data, _ := os.ReadFile(filepath.Join(workload.profile, "workbench.json"))
+		return string(data)
+	}
+	if state := read(); state.Available || state.UnavailableCode != "unverified" || state.UnavailableReason != scienceReasonUnverified || state.Enabled {
+		t.Fatalf("closed gate offered the switch: %+v", state)
+	}
+	for _, contract := range []int{scienceBridgeContract, scienceBridgeContract + 1} {
+		if w := post(fmt.Sprintf(`{"enabled":true,"contract":%d}`, contract)); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), scienceReasonUnverified) {
+			t.Fatalf("turned on with contract %d: %d %s", contract, w.Code, w.Body)
+		}
+	}
+	if strings.Contains(stored(), "science_host_render") || workload.scienceFrontRunning() != nil {
+		t.Fatal("a refused switch was stored or started the front")
+	}
+	// A stored "on" from a build that offered it.
+	workload.mu.Lock()
+	workload.preferences.ScienceHostRender = true
+	err := writePrivate(filepath.Join(workload.profile, "workbench.json"), workload.preferences)
+	workload.mu.Unlock()
+	if err != nil || !strings.Contains(stored(), "science_host_render") {
+		t.Fatalf("stored on: %v %s", err, stored())
+	}
+	workload.syncScienceFront()
+	workload.syncScienceFront()
+	if workload.scienceFrontRunning() != nil {
+		t.Fatal("front started with the gate closed")
+	}
+	if data, _ := os.ReadFile(filepath.Join(workload.profile, "control.json")); strings.Contains(string(data), "science") {
+		t.Fatalf("control file names the front: %s", data)
+	}
+	if state := read(); state.Enabled || state.Running || state.Available {
+		t.Fatalf("stored on not treated as off: %+v", state)
+	}
+	// Turned off where it is stored, so a later build that offers it does
+	// not start on by surprise; said once.
+	workload.mu.Lock()
+	still := workload.preferences.ScienceHostRender
+	workload.mu.Unlock()
+	if still || strings.Contains(stored(), "science_host_render") {
+		t.Fatalf("stored on not cleared: %s", stored())
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "turned off") || !strings.HasPrefix(logged[0], "warn claude-science ") {
+		t.Fatalf("log: %q", logged)
+	}
+	// Turning it off is still accepted (and forgets the stored "on").
+	if w := post(`{"enabled":false}`); w.Code != http.StatusOK || strings.Contains(stored(), "science_host_render") {
+		t.Fatalf("off: %d %s", w.Code, stored())
+	}
+	// Lifted: offered, and a stored "on" starts the front.
+	withScienceHostVerified(t, "windows")
+	if state := read(); !state.Available || state.Enabled {
+		t.Fatalf("lifted gate: %+v", state)
+	}
+	if w := post(fmt.Sprintf(`{"enabled":true,"contract":%d}`, scienceBridgeContract)); w.Code != http.StatusOK || workload.scienceFrontRunning() == nil {
+		t.Fatalf("on with the gate lifted: %d %s", w.Code, w.Body)
+	}
+	if state := read(); !state.Available || !state.Enabled || !state.Running {
+		t.Fatalf("lifted gate, on: %+v", state)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("log after lifting: %q", logged)
+	}
+}
+
+// A release build's entry document frames and connects nowhere new, even
+// with a science_port in a local control file (hand-edited, or left by a
+// workload of a build that offered host rendering).
+func TestScienceEntryDocumentClosedGate(t *testing.T) {
+	workload := scienceWorkload(t)
+	entry := scienceEntry(t, workload)
+	if err := workload.publishScienceControl(47999, "SECRET", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := frameSources(t, entry); got != scienceFrameSource(47999) {
+		t.Fatalf("lifted gate: entry frame-src %q", got)
+	}
+	withScienceHostVerified(t, "")
+	if got := frameSources(t, entry); got != "'none'" {
+		t.Fatalf("closed gate: entry frame-src %q", got)
+	}
+	if got := documentDirective(t, entry, "connect-src"); strings.Contains(got, scienceProxyCheckOrigin) || strings.Contains(got, scienceProxyLoopbackOrigin) {
+		t.Fatalf("closed gate: entry connect-src %q", got)
+	}
+}
+
 func TestScienceHostRenderAvailability(t *testing.T) {
 	trusted := requestShape{method: "GET", path: "/api/claude-science", trusted: true}
 	cases := []struct {
@@ -326,7 +468,7 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 		t.Fatalf("entry frame-src %q", got)
 	}
 	// and run the window's proxy proof (F5).
-	if got := documentDirective(t, entry, "connect-src"); got != "'self' ws://localhost:17778 "+scienceProxyCheckOrigin {
+	if got := documentDirective(t, entry, "connect-src"); got != "'self' ws://localhost:17778 "+scienceProxyCheckOrigin+" "+scienceProxyLoopbackOrigin {
 		t.Fatalf("entry connect-src %q", got)
 	}
 	if got := frameSources(t, workload); got != "'none'" {

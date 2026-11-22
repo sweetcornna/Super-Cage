@@ -342,8 +342,15 @@ func newTestScienceFrontAt(t *testing.T, port int) *testScienceFront {
 	})
 	go env.front.serve()
 	t.Cleanup(env.front.close)
+	// The window finds a front's end secret by port, as the shell reads
+	// control.json.
+	scienceTestFronts.Store(port, env.front)
+	t.Cleanup(func() { scienceTestFronts.CompareAndDelete(port, env.front) })
 	return env
 }
+
+// scienceTestFronts are the running test fronts by port.
+var scienceTestFronts sync.Map
 
 // base is the origin of the last entry's label.
 func (env *testScienceFront) base() string { return env.front.labelOrigin(env.label) }

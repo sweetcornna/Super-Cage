@@ -1,6 +1,7 @@
 {
   "backstop": [
     "--proxy-server=http://127.0.0.1:9",
+    "--proxy-bypass-list=\u003c-loopback\u003e;localhost;127.0.0.1;[::1];*.localhost",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--disable-shared-workers",
     "--no-pings"
@@ -21,7 +22,7 @@
       }
     }
   ],
-  "contract": 2,
+  "contract": 3,
   "control": {
     "port": 17777,
     "token": "",
@@ -59,8 +60,17 @@
         "mobile": false,
         "bitness": "64"
       }
-    }
+    },
+    "science_end": "SECRET"
   },
+  "crash_wait_ms": 1500,
+  "end": {
+    "ended_header": "X-Cage-Ended",
+    "label_header": "X-Cage-End-Label",
+    "path": "/_cage/end",
+    "secret_header": "X-Cage-End"
+  },
+  "end_wait_ms": 2500,
   "frame": [
     {
       "method": "Emulation.setTimezoneOverride",
@@ -148,6 +158,7 @@
     }
   },
   "proxy_check": {
+    "loopback_url": "http://127.0.0.3:8099/NONCE",
     "options": {
       "disableCache": true,
       "includeCredentials": false
@@ -426,7 +437,7 @@
       ]
     },
     {
-      "name": "auto-attach ends only after every guest target is gone",
+      "name": "the frame goes in order (end the front, crash, remove); auto-attach ends after every guest target",
       "steps": [
         {
           "do": "arm",
@@ -462,7 +473,11 @@
         },
         {
           "do": "detach",
-          "expect": []
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
         },
         {
           "do": "detached",
@@ -503,7 +518,11 @@
         },
         {
           "do": "detach",
-          "expect": []
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
         },
         {
           "do": "attached",
@@ -537,6 +556,8 @@
         {
           "do": "detach",
           "expect": [
+            "endfront",
+            "remove",
             "page Target.setAutoAttach"
           ]
         },
@@ -562,7 +583,11 @@
         },
         {
           "do": "detach",
-          "expect": []
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
         },
         {
           "do": "attached",
@@ -627,6 +652,8 @@
         {
           "do": "navigate",
           "expect": [
+            "endfront",
+            "F crash",
             "remove"
           ]
         },
@@ -675,6 +702,8 @@
         {
           "do": "navigate",
           "expect": [
+            "endfront",
+            "remove",
             "page Target.setAutoAttach",
             "proceed"
           ]
@@ -707,6 +736,8 @@
         {
           "do": "navigate",
           "expect": [
+            "endfront",
+            "F crash",
             "remove"
           ]
         },
@@ -725,6 +756,671 @@
           "session": "F",
           "expect": [
             "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a nested worker's session ends with its parent's",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W",
+          "type": "worker",
+          "expect": [
+            "W Emulation.setUserAgentOverride",
+            "W Runtime.evaluate",
+            "W Target.setAutoAttach",
+            "W Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "W",
+          "session": "V",
+          "type": "worker",
+          "expect": [
+            "V Emulation.setUserAgentOverride",
+            "V Runtime.evaluate",
+            "V Target.setAutoAttach",
+            "V Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a paused target under a paused frame goes with it",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "G",
+          "type": "iframe",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "G",
+          "session": "H",
+          "type": "worker",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "G",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a frame Target.getTargets no longer lists is gone with everything under it",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W",
+          "type": "worker",
+          "expect": [
+            "W Emulation.setUserAgentOverride",
+            "W Runtime.evaluate",
+            "W Target.setAutoAttach",
+            "W Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "listed",
+          "targets": [
+            "TF",
+            "TW"
+          ],
+          "known": [
+            "F"
+          ],
+          "expect": []
+        },
+        {
+          "do": "listed",
+          "targets": [
+            "TW"
+          ],
+          "known": [
+            "F"
+          ],
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a frame that attaches while the targets are listed stays",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "G",
+          "type": "iframe",
+          "expect": []
+        },
+        {
+          "do": "listed",
+          "known": [
+            "F"
+          ],
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "G",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a call that fails while the frame goes ends nothing",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W",
+          "type": "worker",
+          "expect": [
+            "W Emulation.setUserAgentOverride",
+            "W Runtime.evaluate",
+            "W Target.setAutoAttach",
+            "W Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "failed",
+          "session": "W",
+          "expect": []
+        },
+        {
+          "do": "settle",
+          "session": "W",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a second detach or a navigation while the frame goes repeats nothing",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": []
+        },
+        {
+          "do": "navigate",
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach",
+            "proceed"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "more live workers under the frame than the cap end it, and later targets stay paused",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 2,
+            "attaches": 100,
+            "window_ms": 10000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "W1",
+          "session": "W2",
+          "type": "worker",
+          "expect": [
+            "W2 Emulation.setUserAgentOverride",
+            "W2 Runtime.evaluate",
+            "W2 Target.setAutoAttach",
+            "W2 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W3",
+          "type": "worker",
+          "expect": [
+            "end workers"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W1",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W4",
+          "type": "worker",
+          "expect": []
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "more attaches under the frame within the window than the cap end it",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 10,
+            "attaches": 3,
+            "window_ms": 1000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W1",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W2",
+          "type": "worker",
+          "at": 400,
+          "expect": [
+            "W2 Emulation.setUserAgentOverride",
+            "W2 Runtime.evaluate",
+            "W2 Target.setAutoAttach",
+            "W2 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W2",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W3",
+          "type": "worker",
+          "at": 800,
+          "expect": [
+            "W3 Emulation.setUserAgentOverride",
+            "W3 Runtime.evaluate",
+            "W3 Target.setAutoAttach",
+            "W3 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W3",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W4",
+          "type": "worker",
+          "at": 1200,
+          "expect": [
+            "W4 Emulation.setUserAgentOverride",
+            "W4 Runtime.evaluate",
+            "W4 Target.setAutoAttach",
+            "W4 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W4",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W5",
+          "type": "worker",
+          "at": 1300,
+          "expect": [
+            "end workers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a new session counts its workers afresh",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 1,
+            "attaches": 100,
+            "window_ms": 10000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W2",
+          "type": "worker",
+          "expect": [
+            "end workers"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "G",
+          "type": "iframe",
+          "expect": [
+            "G Emulation.setTimezoneOverride",
+            "G Emulation.setLocaleOverride",
+            "G Emulation.setUserAgentOverride",
+            "G Page.enable",
+            "G Page.setInterceptFileChooserDialog",
+            "G Target.setAutoAttach",
+            "G Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "G",
+          "session": "W3",
+          "type": "worker",
+          "expect": [
+            "W3 Emulation.setUserAgentOverride",
+            "W3 Runtime.evaluate",
+            "W3 Target.setAutoAttach",
+            "W3 Runtime.runIfWaitingForDebugger"
           ]
         }
       ]
@@ -773,5 +1469,10 @@
       "method": "Runtime.runIfWaitingForDebugger",
       "params": {}
     }
-  ]
+  ],
+  "worker_cap": {
+    "live": 64,
+    "attaches": 200,
+    "window_ms": 10000
+  }
 }

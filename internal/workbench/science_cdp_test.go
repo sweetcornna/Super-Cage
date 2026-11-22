@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -168,11 +169,17 @@ func launchTestBrowser(t *testing.T, env []string, args ...string) *testBrowser 
 // first (the WebView2 user data folder has the same file).
 func launchTestBrowserWithPreferences(t *testing.T, preferences map[string]any, env []string, args ...string) *testBrowser {
 	t.Helper()
+	return launchTestBrowserIn(t, t.TempDir(), preferences, env, args...)
+}
+
+// launchTestBrowserIn runs the browser on a given profile (a second launch
+// on the same profile finds what the first left).
+func launchTestBrowserIn(t *testing.T, profile string, preferences map[string]any, env []string, args ...string) *testBrowser {
+	t.Helper()
 	path := os.Getenv("CAGE_TEST_BROWSER_PATH")
 	if path == "" {
 		t.Skip("CAGE_TEST_BROWSER_PATH is not set")
 	}
-	profile := t.TempDir()
 	if preferences != nil {
 		data, _ := json.Marshal(preferences)
 		if err := os.MkdirAll(profile+"/Default", 0o700); err != nil {
@@ -191,7 +198,9 @@ func launchTestBrowserWithPreferences(t *testing.T, preferences map[string]any, 
 		"--log-net-log=" + netLog, "--net-log-capture-mode=Default",
 	}
 	cmd := exec.Command(path, append(append(base, args...), "about:blank")...)
-	cmd.Env = append(os.Environ(), env...)
+	// The teardown tests crash renderers on purpose: their minidumps go to
+	// the profile, not to the machine's own Chrome crash database.
+	cmd.Env = append(append(os.Environ(), "BREAKPAD_DUMP_LOCATION="+filepath.Join(profile, "Crashpad")), env...)
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +236,19 @@ func launchTestBrowserWithPreferences(t *testing.T, preferences map[string]any, 
 	browser.cdpClient = &cdpClient{conn: conn, pending: map[int]cdpPending{}}
 	go browser.read()
 	return browser
+}
+
+// kill ends the browser the way a crash or a killed window would: nothing
+// it does on a normal exit happens.
+func (b *testBrowser) kill() {
+	if b.cmd.ProcessState != nil {
+		return
+	}
+	_ = b.cmd.Process.Kill()
+	_ = b.cmd.Wait()
+	if b.cdpClient != nil {
+		_ = b.conn.Close()
+	}
 }
 
 // stop closes the browser (so the net log is finished) and reaps it.

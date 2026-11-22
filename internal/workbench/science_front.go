@@ -362,6 +362,16 @@ func (f *scienceFront) close() {
 // reason, when set, is shown to the pane as why the frame was closed.
 func (f *scienceFront) reset(reason string) {
 	f.mu.Lock()
+	upstream := f.resetLocked(reason)
+	f.mu.Unlock()
+	if upstream != nil {
+		upstream.close()
+	}
+}
+
+// resetLocked is reset with f.mu held; the caller closes the upstream it
+// returns once f.mu is released.
+func (f *scienceFront) resetLocked(reason string) *scienceUpstream {
 	upstream := f.upstream
 	f.upstream, f.session, f.current, f.audit, f.jar = nil, "", scienceTicket{}, nil, scienceJar{}
 	clear(f.issued)
@@ -372,10 +382,7 @@ func (f *scienceFront) reset(reason string) {
 		now := f.now()
 		f.state.Refused, f.state.RefusedAt = reason, &now
 	}
-	f.mu.Unlock()
-	if upstream != nil {
-		upstream.close()
-	}
+	return upstream
 }
 
 // endGenerationLocked ends the requests and sockets of the current
@@ -398,8 +405,44 @@ const scienceEndWait = 2 * time.Second
 func (f *scienceFront) endSession(reason string, limit time.Duration) bool {
 	f.mu.Lock()
 	flight := f.flight
+	upstream := f.resetLocked(reason)
 	f.mu.Unlock()
-	f.reset(reason)
+	if upstream != nil {
+		upstream.close()
+	}
+	return awaitScienceFlight(flight, limit)
+}
+
+// endLabel is the shell's end for the frame of one label: the session's or
+// a checking label's ends the session as endSession does; an issued label
+// that never entered only loses its entry; any other label (a frame the
+// pane already replaced) changes nothing, so a late teardown never ends the
+// session that followed it. It reports whether the label was known and
+// whether the wait finished.
+func (f *scienceFront) endLabel(label string, limit time.Duration) (known, complete bool) {
+	f.mu.Lock()
+	_, checking := f.checking[label]
+	_, issued := f.issued[label]
+	session := label != "" && f.session != "" && webfront.Equal(label, f.session)
+	if label == "" || !session && !checking {
+		if issued {
+			delete(f.issued, label)
+		}
+		f.mu.Unlock()
+		return issued, true
+	}
+	flight := f.flight
+	upstream := f.resetLocked("")
+	f.mu.Unlock()
+	if upstream != nil {
+		upstream.close()
+	}
+	return true, awaitScienceFlight(flight, limit)
+}
+
+// awaitScienceFlight waits (up to limit) for an ended generation's requests
+// and sockets to return.
+func awaitScienceFlight(flight *sync.WaitGroup, limit time.Duration) bool {
 	finished := make(chan struct{})
 	go func() {
 		flight.Wait()
@@ -415,30 +458,47 @@ func (f *scienceFront) endSession(reason string, limit time.Duration) bool {
 	}
 }
 
+// The shell's end (serveEnd): its path, the headers it sends (the secret,
+// the label of the frame it tears down) and the one it gets back (complete,
+// timeout or stale). testdata/science-cdp.json pins them for ScienceFrame.cs.
+const (
+	scienceEndPath         = "/_cage/end"
+	scienceEndSecretHeader = "X-Cage-End"
+	scienceEndLabelHeader  = "X-Cage-End-Label"
+	scienceEndedHeader     = "X-Cage-Ended"
+)
+
 // scienceEnded tells the caller of an end whether the wait finished.
 func scienceEnded(w http.ResponseWriter, complete bool) {
 	if complete {
-		w.Header().Set("X-Cage-Ended", "complete")
+		w.Header().Set(scienceEndedHeader, "complete")
 	} else {
-		w.Header().Set("X-Cage-Ended", "timeout")
+		w.Header().Set(scienceEndedHeader, "timeout")
 	}
 }
 
 // serveEnd lets the native shell end the session before it tears a frame
 // down, even with the pane gone or hung (round-2 N1): a POST to a loopback
 // host of this port from a non-browser caller (no Origin, no fetch
-// metadata) with X-Cage-End: control.json's science_end. A page cannot send
-// that header without a preflight, which the front never answers.
+// metadata) with X-Cage-End: control.json's science_end and
+// X-Cage-End-Label: the label of the frame it tears down (endLabel). A page
+// cannot send those headers without a preflight, which the front never
+// answers. X-Cage-Ended says complete, timeout or stale (not this front's
+// frame any more: nothing changed).
 func (f *scienceFront) serveEnd(w http.ResponseWriter, r *http.Request) {
 	port := strconv.Itoa(f.port)
 	local := r.Host == "127.0.0.1:"+port || r.Host == "[::1]:"+port || r.Host == "localhost:"+port
-	secret := r.Header.Get("X-Cage-End")
+	secret := r.Header.Get(scienceEndSecretHeader)
 	if r.Method != http.MethodPost || !local || r.Header.Get("Origin") != "" || r.Header.Get("Sec-Fetch-Site") != "" ||
 		len(secret) != len(f.endSecret) || subtle.ConstantTimeCompare([]byte(secret), []byte(f.endSecret)) != 1 {
 		sciencePlain(w, http.StatusForbidden, "refused")
 		return
 	}
-	scienceEnded(w, f.endSession("", scienceEndWait))
+	if known, complete := f.endLabel(r.Header.Get(scienceEndLabelHeader), scienceEndWait); !known {
+		w.Header().Set(scienceEndedHeader, "stale")
+	} else {
+		scienceEnded(w, complete)
+	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -530,7 +590,7 @@ func (f *scienceFront) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	header.Set("Cache-Control", "no-store")
 	// The exact Host names a label this front issued: DNS rebinding cannot
 	// produce it (no DNS name resolves to *.localhost but itself).
-	if r.URL.Path == "/_cage/end" {
+	if r.URL.Path == scienceEndPath {
 		f.serveEnd(w, r)
 		return
 	}

@@ -297,8 +297,14 @@ func (b *testBrowser) emulateFramePolicy(t *testing.T, session, workbench, front
 // while host rendering is on (ScienceFrame.cs), with the dead port replaced
 // by the canary proxy.
 func scienceBackstopArgs(proxyPort int) []string {
-	return []string{fmt.Sprintf("--proxy-server=http://127.0.0.1:%d", proxyPort), "--webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-shared-workers", "--no-pings"}
+	return []string{fmt.Sprintf("--proxy-server=http://127.0.0.1:%d", proxyPort), "--proxy-bypass-list=" + scienceProxyBypass,
+		"--webrtc-ip-handling-policy=disable_non_proxied_udp", "--disable-shared-workers", "--no-pings"}
 }
+
+// scienceProxyBypass is the shell's bypass list: the implicit loopback rules
+// off, then only the workbench and the fronts' names and the loopback
+// addresses they use (round-2 N3: 127.0.0.3 goes to the proxy).
+const scienceProxyBypass = "<-loopback>;localhost;127.0.0.1;[::1];*.localhost"
 
 // pageRequests drops the browser's own background requests (Google time,
 // accounts and the like) from the proxy's record: the backstop stops those
@@ -594,7 +600,7 @@ func scienceTestCheckSources(frameSources string) string {
 	if frameSources == "'none'" {
 		return ""
 	}
-	return " " + scienceProxyCheckOrigin
+	return " " + scienceProxyCheckOrigin + " " + scienceProxyLoopbackOrigin
 }
 
 // F5: the window's proxy proof holds under the shell's switch only. The
@@ -611,6 +617,9 @@ func TestScienceBrowserProxyCheck(t *testing.T) {
 		{"the shell's switch", scienceBackstopArgs(9), "verified"},
 		{"no switch", nil, "failed"},
 		{"a proxy that answers", scienceBackstopArgs(canary), "failed"},
+		// Round-2 N3: any proxy that is down fails .invalid the same way;
+		// only the shell's bypass list sends 127.0.0.3 to the proxy too.
+		{"a dead proxy that is not the shell's", []string{"--proxy-server=http://127.0.0.1:1"}, "failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			browser := launchTestBrowser(t, scienceHostEnv, tc.args...)

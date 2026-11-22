@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- Checks the WebView2 behaviour Claude Science host rendering relies on
+       against the installed runtime (docs: desktop/windows.webview2-checks/README.md).
+       Not shipped: it runs in the interactive session of a test machine. -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Cage.WebView2Checks</AssemblyName>
+    <RootNamespace>Cage.Windows</RootNamespace>
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
+    <Compile Include="../windows/ScienceFrame.cs" Link="ScienceFrame.cs" />
+    <Compile Include="../windows/ScienceFrameHost.cs" Link="ScienceFrameHost.cs" />
+    <Compile Include="../windows/CrashReports.cs" Link="CrashReports.cs" />
+  </ItemGroup>
+  <Target Name="RemoveUnusedWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup><Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" /></ItemGroup>
+  </Target>
+</Project>
