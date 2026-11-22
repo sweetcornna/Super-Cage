@@ -127,7 +127,7 @@ func TestEntryLockKeepsTheTerminalAndOffersToRejoin(t *testing.T) {
 	}
 	f.s.account.setKey(make([]byte, 32))
 	again := entryOpenShell(t, f.client(), 100, 30, "")
-	again.expect("输入编号重新接入")
+	again.prompt("输入编号重新接入")
 	again.send("1\r")
 	again.send("printf 'M=%s\\n' \"$MARK\"\n")
 	if got := again.expect("M="); got != "kept42" {
