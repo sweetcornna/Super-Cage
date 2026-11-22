@@ -199,6 +199,9 @@ func jobName(kind string) string {
 	if name := names[kind]; name != "" {
 		return name
 	}
+	if action, id, ok := agentJobKind(kind); ok {
+		return agentJobName(action, id)
+	}
 	return "本次操作"
 }
 
@@ -229,6 +232,25 @@ func (m *jobManager) cancelRunning() string {
 		return m.active.id
 	}
 	return ""
+}
+
+// cancelJob cancels the running job id when match accepts its kind. found
+// is false when no job of that id is known; canceled is true when it was
+// running and matched, or had already ended.
+func (m *jobManager) cancelJob(id string, match func(kind string) bool) (found, canceled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id == "" || m.state.ID != id {
+		return false, false
+	}
+	if !m.state.Running {
+		return true, true
+	}
+	if !match(m.state.Kind) || m.cancel == nil {
+		return true, false
+	}
+	m.cancel()
+	return true, true
 }
 
 // close seals admission before waiting, so no worker can be added concurrently

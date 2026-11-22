@@ -13,6 +13,12 @@ script := cage.AgentInstallScript(input) // prelude + input + installer
 // internal/workbench/agents.go runs it with withToolsNetworkMonitor and the maintenance channel
 ```
 
+The routes (`GET /api/agents`, `POST /api/agents/{id}/install|update|remove`, `POST /api/agents/cancel`), the job
+(kind `agent-<action>:<id>`, window only, single slot, lease renewal), its progress and failure lines and the
+status codes are documented at the top of `internal/workbench/agents.go`. The job's channel is the shared
+maintenance list plus, for that job only, `agents.ExtraInstallHosts(entry)` (CONNECT 443; empty for every entry
+today).
+
 - `entry` comes from `agents.Lookup`; `ScriptInput` re-validates it against every catalog rule and refuses
   an entry that comes with the environment, an unknown action or architecture, a non-terminal client, and for
   install/update a withdrawn entry, a missing `tar.gz` artifact for the architecture, or a **hidden** entry

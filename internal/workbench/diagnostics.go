@@ -59,6 +59,20 @@ func (s *Server) diagnosticEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	jsonReply(w, map[string]bool{"ok": true})
 }
+
+// diagnosticGuestJournal is all a diagnostic bundle reads from a Linux guest:
+// the last lines of Cage's own journal namespace. No home directory, so no
+// agent client's data folder (logins, history), is ever read (design 6, S13).
+const diagnosticGuestJournal = `sudo python3 - <<'CAGE_DIAGNOSTIC_JOURNAL'
+import subprocess, sys
+result = subprocess.run(['journalctl','--namespace=cage','--no-pager','-o','short-iso','-n','150','--since','14 days ago'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
+data = result.stdout
+if len(data) > 49152:
+    data = data[-49152:]
+    data = data.partition(b'\n')[2]
+sys.stdout.buffer.write(data)
+CAGE_DIAGNOSTIC_JOURNAL`
+
 func (s *Server) diagnosticExport(w http.ResponseWriter, r *http.Request) {
 	if !s.diagnosticMu.TryLock() {
 		http.Error(w, "正在导出另一份诊断包，请稍候", 409)
@@ -76,15 +90,7 @@ func (s *Server) diagnosticExport(w http.ResponseWriter, r *http.Request) {
 		if s.macosGuest != nil || s.windowsGuest != nil {
 			guest, err = s.nativeGuestDiagnostics(ctx)
 		} else {
-			guest, err = s.guest(ctx, `sudo python3 - <<'CAGE_DIAGNOSTIC_JOURNAL'
-import subprocess, sys
-result = subprocess.run(['journalctl','--namespace=cage','--no-pager','-o','short-iso','-n','150','--since','14 days ago'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
-data = result.stdout
-if len(data) > 49152:
-    data = data[-49152:]
-    data = data.partition(b'\n')[2]
-sys.stdout.buffer.write(data)
-CAGE_DIAGNOSTIC_JOURNAL`)
+			guest, err = s.guest(ctx, diagnosticGuestJournal)
 		}
 		if err != nil {
 			guest = nil

@@ -71,6 +71,19 @@ type allowance struct {
 	dataDirs    []string
 }
 
+// ExtraInstallHosts returns e's reviewed download hosts outside today's
+// channel: the hosts the workbench lets that entry's jobs, and only those
+// jobs, reach (CONNECT 443).
+func ExtraInstallHosts(e Entry) []string {
+	var hosts []string
+	for _, h := range e.Hosts.Install {
+		if !maintenanceHosts[h] && slices.Contains(extraInstallHosts[e.ID], h) {
+			hosts = append(hosts, h)
+		}
+	}
+	return hosts
+}
+
 // allowedPackages are the Debian packages an entry may ask the job to install.
 var allowedPackages = map[string]bool{"bubblewrap": true}
 

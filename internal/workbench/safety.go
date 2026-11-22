@@ -1176,7 +1176,7 @@ func (s *Server) runSafetyCheck() (returned error) {
 func (s *Server) networkMonitorBlockedLocked() bool {
 	job := s.jobs.snapshot()
 	return s.closing || s.networkPaused || (job.Running && job.Kind != "environment-tools" && job.Kind != "claude-desktop-install" &&
-		job.Kind != "claude-science-install" && job.Kind != "claude-science-update" && job.Kind != "browser-clear")
+		job.Kind != "claude-science-install" && job.Kind != "claude-science-update" && job.Kind != "browser-clear" && !agentJobRenewsLease(job.Kind))
 }
 
 func (s *Server) monitorSafety() {
