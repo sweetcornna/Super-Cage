@@ -28,35 +28,22 @@ try {
     .getByRole("button", { name: "添加项目", exact: true })
     .click();
   await page.getByRole("button", { name: "添加本机项目…", exact: true }).click();
-  await page.waitForFunction(
-    (path) => document.getElementById("project-path")?.value === path,
-    state.chosenFolder,
-  );
-  assert.equal(
-    await page.getByLabel("新项目文件夹", { exact: true }).inputValue(),
-    state.chosenFolder,
-  );
+  // The chosen folder arrives in the project dialog as its default folder.
+  const createDialog = page.getByRole("dialog", { name: "创建项目", exact: true });
+  const folders = createDialog.getByRole("list", { name: "已绑定文件夹" });
+  await folders.getByText(state.chosenFolder, { exact: true }).waitFor();
+  assert.equal(await folders.getByRole("listitem").count(), 1);
   state.failJob = true;
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "打开项目", exact: true })
-    .click();
+  await createDialog.getByRole("button", { name: "创建项目", exact: true }).click();
 
-  await page
-    .getByRole("dialog")
+  await createDialog
     .getByRole("alert")
     .filter({ hasText: "项目文件夹连接失败" })
     .waitFor();
-  assert.equal(
-    await page.getByLabel("新项目文件夹", { exact: true }).inputValue(),
-    state.chosenFolder,
-  );
+  await folders.getByText(state.chosenFolder, { exact: true }).waitFor();
   assert.ok(state.settings.workspace.endsWith(".claude-cage-workspace"));
   state.failJob = false;
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "打开项目", exact: true })
-    .click();
+  await createDialog.getByRole("button", { name: "创建项目", exact: true }).click();
 
   await page.getByRole("dialog").waitFor({ state: "hidden" });
   assert.equal(state.settings.workspace, state.chosenFolder);
@@ -207,7 +194,7 @@ try {
   await settings();
   await page.getByRole("heading", { name: "通用", exact: true }).waitFor();
   await shot("settings");
-  await page.getByRole("radio", { name: /^原生 Linux/ }).check();
+  await page.getByRole("radio", { name: /^客机原生快捷键/ }).check();
   await page
     .getByRole("button", { name: "返回工作台", exact: true })
     .first()
@@ -219,14 +206,14 @@ try {
     .getByRole("button", { name: "取消", exact: true })
     .click();
   assert.equal(
-    await page.getByRole("radio", { name: /^原生 Linux/ }).isChecked(),
+    await page.getByRole("radio", { name: /^客机原生快捷键/ }).isChecked(),
     true,
   );
   state.failSave = true;
   await page.getByRole("button", { name: "保存设置", exact: true }).click();
   await page.getByRole("alert").filter({ hasText: "保存失败" }).waitFor();
   assert.equal(
-    await page.getByRole("radio", { name: /^原生 Linux/ }).isChecked(),
+    await page.getByRole("radio", { name: /^客机原生快捷键/ }).isChecked(),
     true,
   );
   state.failSave = false;
@@ -238,7 +225,7 @@ try {
   assert.equal(state.terminalConnections, connections);
   await settings();
   assert.equal(
-    await page.getByRole("radio", { name: /^原生 Linux/ }).isChecked(),
+    await page.getByRole("radio", { name: /^客机原生快捷键/ }).isChecked(),
     true,
   );
   await page.getByRole("button", { name: "时区与语言", exact: true }).click();
@@ -267,18 +254,17 @@ try {
   await shot("settings-region-minimum");
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "放弃修改", exact: true }).click();
+  // The folder picker answers with another-project this time.
+  const firstProject = state.chosenFolder;
+  state.chosenFolder = "/Users/shihao/Projects/another-project";
   await page
     .getByRole("button", { name: "添加项目", exact: true })
     .click();
   await page.getByRole("button", { name: "添加本机项目…", exact: true }).click();
-  await page
-    .getByLabel("新项目文件夹", { exact: true })
-    .fill("/Users/shihao/Projects/another-project");
-  await page
-    .getByRole("dialog")
-    .getByRole("button", { name: "打开项目", exact: true })
-    .click();
+  await folders.getByText(state.chosenFolder, { exact: true }).waitFor();
+  await createDialog.getByRole("button", { name: "创建项目", exact: true }).click();
   await page.getByRole("dialog").waitFor({ state: "hidden" });
+  state.chosenFolder = firstProject;
   assert.equal(
     state.settings.workspace,
     "/Users/shihao/Projects/another-project",

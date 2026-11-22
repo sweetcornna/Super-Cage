@@ -25,6 +25,8 @@ const open = async title => {
   const trigger = actions(title).getByRole("button", { name: "归档", exact: true });
   await trigger.click();
   await dialog.waitFor();
+  // The dialog rises 6px while it fades in; measure it where it settles.
+  await dialog.evaluate(node => Promise.all(node.getAnimations().map(animation => animation.finished)));
   return trigger;
 };
 try {
@@ -44,6 +46,8 @@ try {
   state.terminals = [{ id: "archive-live", kind: "claude", workspace,
     title: sessions[0].title, cli_session_id: sessions[0].id }];
   await page.getByRole("tab", { name: sessions[0].title, exact: true }).waitFor();
+  // The sidebar previews five rows per project; the last history row is behind 展开显示.
+  await page.getByRole("button", { name: "展开显示", exact: true }).click();
   await page.getByRole("button", { name: sessions.at(-1).title, exact: true }).waitFor();
   await mkdir(output, { recursive: true });
   // A user can click the visible action text as well as its icon. Locator
@@ -62,7 +66,7 @@ try {
     const anchor = await trigger.boundingBox();
     const box = await dialog.boundingBox();
     assert.ok(Math.abs(box.y - anchor.y - anchor.height - 6) < 1, "confirmation is not below archive trigger");
-    assert.ok(box.width <= 305 && box.x >= 8 && box.x + box.width <= width - 8, "confirmation overflows window");
+    assert.ok(box.width <= 340 && box.x >= 8 && box.x + box.width <= width - 8, "confirmation overflows window");
     assert.ok(Math.abs(box.x + box.width / 2 - anchor.x) < 100, "confirmation is too far from trigger");
     await page.screenshot({ path: `${output}/${engine}-${width}.png` });
     await dialog.getByRole("button", { name: "取消", exact: true }).click();
