@@ -342,24 +342,37 @@ internal sealed class ScienceFrameHost
         _ = Apply(policy.DetachedTarget(session), "");
     }
 
-    // ProxyCheck loads ScienceFrame.ProxyCheckURL under the window's main
-    // frame (the workbench document allows it in connect-src while a front
-    // runs): "verified" only when the switch's proxy refused the connection.
+    // ProxyCheck loads ScienceFrame.ProxyCheckURL, then ProxyLoopbackURL,
+    // under the window's main frame (the workbench document allows both in
+    // connect-src while a front runs): "verified" only when the switch's
+    // proxy refused both. Each load gets ProxyCheckMilliseconds (a direct
+    // connection to 127.0.0.3 can hang where nothing refuses it).
     private async Task<string> ProxyCheck()
     {
         try
         {
             using var tree = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Page.getFrameTree", "{}"));
             var frame = tree.RootElement.GetProperty("frameTree").GetProperty("frame").GetProperty("id").GetString();
-            var parameters = new JsonObject {
-                ["frameId"] = frame,
-                ["url"] = ScienceFrame.ProxyCheckURL(Guid.NewGuid().ToString("N")),
-                ["options"] = ScienceFrame.ProxyCheckOptions(),
-            };
-            using var reply = JsonDocument.Parse(await core.CallDevToolsProtocolMethodAsync("Network.loadNetworkResource", parameters.ToJsonString()));
-            var resource = reply.RootElement.GetProperty("resource");
-            var name = resource.TryGetProperty("netErrorName", out var error) ? error.GetString() ?? "" : "";
-            return ScienceFrame.ProxyVerdict(resource.GetProperty("success").GetBoolean(), name);
+            var nonce = Guid.NewGuid().ToString("N");
+            foreach (var url in new[] { ScienceFrame.ProxyCheckURL(nonce), ScienceFrame.ProxyLoopbackURL(nonce) })
+            {
+                var parameters = new JsonObject {
+                    ["frameId"] = frame,
+                    ["url"] = url,
+                    ["options"] = ScienceFrame.ProxyCheckOptions(),
+                };
+                var load = core.CallDevToolsProtocolMethodAsync("Network.loadNetworkResource", parameters.ToJsonString());
+                if (await Task.WhenAny(load, Task.Delay(ScienceFrame.ProxyCheckMilliseconds)) != load)
+                {
+                    _ = load.ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+                    return "failed";
+                }
+                using var reply = JsonDocument.Parse(await load);
+                var resource = reply.RootElement.GetProperty("resource");
+                var name = resource.TryGetProperty("netErrorName", out var error) ? error.GetString() ?? "" : "";
+                if (ScienceFrame.ProxyVerdict(resource.GetProperty("success").GetBoolean(), name) != "verified") return "failed";
+            }
+            return "verified";
         }
         catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or COMException or ArgumentException)
         {

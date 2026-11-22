@@ -1,6 +1,7 @@
 {
   "backstop": [
     "--proxy-server=http://127.0.0.1:9",
+    "--proxy-bypass-list=\u003c-loopback\u003e;localhost;127.0.0.1;[::1];*.localhost",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--disable-shared-workers",
     "--no-pings"
@@ -150,6 +151,7 @@
     }
   },
   "proxy_check": {
+    "loopback_url": "http://127.0.0.3:8099/NONCE",
     "options": {
       "disableCache": true,
       "includeCredentials": false

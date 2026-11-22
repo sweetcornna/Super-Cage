@@ -144,6 +144,7 @@ assertions = 0;
         Check(ScienceFrame.Benign("Another locale override is already in effect") && !ScienceFrame.Benign("Target closed"), "benign locale error");
         var proxy = golden["proxy_check"]!.AsObject();
         Check(ScienceFrame.ProxyCheckURL("NONCE") == proxy["url"]!.GetValue<string>(), "proxy check address differs");
+        Check(ScienceFrame.ProxyLoopbackURL("NONCE") == proxy["loopback_url"]!.GetValue<string>(), "proxy check loopback address differs");
         Check(Same(ScienceFrame.ProxyCheckOptions(), proxy["options"]), "proxy check options differ");
         Check(ScienceFrame.ProxyVerified == proxy["verified"]!.GetValue<string>(), "proxy check error differs");
         Check(ScienceFrame.ProxyVerdict(false, ScienceFrame.ProxyVerified) == "verified" && ScienceFrame.ProxyVerdict(false, "net::ERR_NAME_NOT_RESOLVED") == "failed" &&

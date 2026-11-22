@@ -447,14 +447,20 @@ func (s *Server) scienceDocumentSources(r *http.Request) (frames, connect string
 	for _, port := range ports {
 		sources = append(sources, scienceFrameSource(port))
 	}
-	return strings.Join(sources, " "), " " + scienceProxyCheckOrigin
+	return strings.Join(sources, " "), " " + scienceProxyCheckOrigin + " " + scienceProxyLoopbackOrigin
 }
 
-// scienceProxyCheckOrigin is the address the window's proxy proof loads
-// (ScienceFrame.ProxyCheckURL): .invalid never resolves. The workbench
-// document may connect to it only while a front runs, since the check is
-// held to the document's connect-src.
-const scienceProxyCheckOrigin = "http://cage-proxy-check.invalid"
+// scienceProxyCheckOrigin and scienceProxyLoopbackOrigin are the addresses
+// the window's proxy proof loads (ScienceFrame.ProxyCheckURL and
+// ProxyLoopbackURL): .invalid never resolves, and 127.0.0.3 is a loopback
+// address only the shell's bypass list (<-loopback>) sends to the proxy;
+// under any other proxy it goes direct (round-2 N3). The workbench document
+// may connect to them only while a front runs, since the check is held to
+// the document's connect-src.
+const (
+	scienceProxyCheckOrigin    = "http://cage-proxy-check.invalid"
+	scienceProxyLoopbackOrigin = "http://127.0.0.3:8099"
+)
 
 // scienceBridgeContract is the scienceFrame bridge version this server's
 // pane needs (claude-science-state.mjs hostRenderContract; the window's
@@ -593,7 +599,11 @@ func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// F5: the shell proved, in this WebView, that a request to an address
-	// nobody can serve ends at the switched proxy (ScienceFrame.ProxyCheck).
+	// nobody can serve ends at the switched proxy, and that a loopback
+	// address outside the bypass list does too (round-2 N3,
+	// ScienceFrame.ProxyCheck). The verdict is the window's own word,
+	// carried by the pane: it keeps a window without the switches (or with
+	// someone else's proxy) from framing, not a page that lies about it.
 	if input.Proxy != "verified" {
 		http.Error(w, scienceReasonProxyUnproven, http.StatusConflict)
 		return

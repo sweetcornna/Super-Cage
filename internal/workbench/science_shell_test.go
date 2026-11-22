@@ -278,6 +278,16 @@ func scienceProxyCheckURL(nonce string) string {
 	return scienceProxyCheckOrigin + "/" + nonce
 }
 
+// scienceProxyLoopbackURL is the proof's second address (round-2 N3): any
+// proxy that is down fails the first the same way, but only under the
+// shell's bypass list does a loopback address other than the listed ones go
+// to the proxy; under another proxy, or none, it goes direct and is refused.
+// Both must end with net::ERR_PROXY_CONNECTION_FAILED. The pane reports the
+// verdict to the server: the proof is the window's own word.
+func scienceProxyLoopbackURL(nonce string) string {
+	return scienceProxyLoopbackOrigin + "/" + nonce
+}
+
 const scienceProxyVerified = "net::ERR_PROXY_CONNECTION_FAILED"
 
 func scienceProxyVerdict(success bool, netErrorName string) string {
@@ -287,7 +297,8 @@ func scienceProxyVerdict(success bool, netErrorName string) string {
 	return "failed"
 }
 
-// proxyCheck is the window's check (ScienceFrameHost.ProxyCheck).
+// proxyCheck is the window's check (ScienceFrameHost.ProxyCheck): both
+// addresses, each with the verdict of one load.
 func (s *scienceShell) proxyCheck(t *testing.T) (string, string) {
 	t.Helper()
 	var tree struct {
@@ -300,22 +311,34 @@ func (s *scienceShell) proxyCheck(t *testing.T) (string, string) {
 	if err := s.browser.call(s.page, "Page.getFrameTree", map[string]any{}, &tree); err != nil {
 		t.Fatal(err)
 	}
-	var reply struct {
-		Resource struct {
-			Success        bool   `json:"success"`
-			NetErrorName   string `json:"netErrorName"`
-			HTTPStatusCode int    `json:"httpStatusCode"`
-		} `json:"resource"`
+	verdict, details := "verified", []string{}
+	nonce := fmt.Sprintf("%x", time.Now().UnixNano())
+	for _, url := range []string{scienceProxyCheckURL(nonce), scienceProxyLoopbackURL(nonce)} {
+		var reply struct {
+			Resource struct {
+				Success        bool   `json:"success"`
+				NetErrorName   string `json:"netErrorName"`
+				HTTPStatusCode int    `json:"httpStatusCode"`
+			} `json:"resource"`
+		}
+		err := s.browser.call(s.page, "Network.loadNetworkResource", map[string]any{
+			"frameId": tree.FrameTree.Frame.ID,
+			"url":     url,
+			"options": map[string]any{"disableCache": true, "includeCredentials": false},
+		}, &reply)
+		if err != nil {
+			verdict = "failed"
+			details = append(details, err.Error())
+			continue
+		}
+		details = append(details, fmt.Sprintf("success=%v error=%q status=%d", reply.Resource.Success, reply.Resource.NetErrorName, reply.Resource.HTTPStatusCode))
+		if scienceProxyVerdict(reply.Resource.Success, reply.Resource.NetErrorName) != "verified" {
+			// The first address decides already: the second is not loaded.
+			verdict = "failed"
+			break
+		}
 	}
-	err := s.browser.call(s.page, "Network.loadNetworkResource", map[string]any{
-		"frameId": tree.FrameTree.Frame.ID,
-		"url":     scienceProxyCheckURL(fmt.Sprintf("%x", time.Now().UnixNano())),
-		"options": map[string]any{"disableCache": true, "includeCredentials": false},
-	}, &reply)
-	if err != nil {
-		return "failed", err.Error()
-	}
-	return scienceProxyVerdict(reply.Resource.Success, reply.Resource.NetErrorName), fmt.Sprintf("success=%v error=%q status=%d", reply.Resource.Success, reply.Resource.NetErrorName, reply.Resource.HTTPStatusCode)
+	return verdict, strings.Join(details, "; ")
 }
 
 // scienceNavigateWait is how long a held navigation waits for the frame's

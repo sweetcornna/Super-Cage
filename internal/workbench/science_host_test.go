@@ -326,7 +326,7 @@ func TestScienceHostRenderOnChangesOnlyTheEntryDocument(t *testing.T) {
 		t.Fatalf("entry frame-src %q", got)
 	}
 	// and run the window's proxy proof (F5).
-	if got := documentDirective(t, entry, "connect-src"); got != "'self' ws://localhost:17778 "+scienceProxyCheckOrigin {
+	if got := documentDirective(t, entry, "connect-src"); got != "'self' ws://localhost:17778 "+scienceProxyCheckOrigin+" "+scienceProxyLoopbackOrigin {
 		t.Fatalf("entry connect-src %q", got)
 	}
 	if got := frameSources(t, workload); got != "'none'" {

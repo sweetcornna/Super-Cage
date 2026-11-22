@@ -23,7 +23,10 @@ internal static partial class ScienceFrame
     // still bypasses it, so the workbench and the front load), no non-proxied
     // WebRTC, no shared workers (CDP cannot pause them before they run), no
     // hyperlink-auditing pings.
-    public const string BackstopArguments = "--proxy-server=http://127.0.0.1:9 --webrtc-ip-handling-policy=disable_non_proxied_udp --disable-shared-workers --no-pings";
+    // The bypass list turns the implicit loopback rules off and bypasses
+    // only the names and addresses the workbench and the fronts use, so a
+    // loopback address outside it reaches the proxy (round-2 N3).
+    public const string BackstopArguments = "--proxy-server=http://127.0.0.1:9 --proxy-bypass-list=<-loopback>;localhost;127.0.0.1;[::1];*.localhost --webrtc-ip-handling-policy=disable_non_proxied_udp --disable-shared-workers --no-pings";
 
     // How long a target whose call failed may take to detach before the frame
     // ends, and how long a held top-level navigation waits for the frame's
@@ -200,11 +203,17 @@ internal static partial class ScienceFrame
     // same process reports the one already set.
     public static bool Benign(string message) => message.Contains("Another locale override is already in effect", StringComparison.Ordinal);
 
-    // The proxy proof prepare runs (F5): an address that cannot exist, loaded
+    // The proxy proof prepare runs (F5): an address that cannot exist, then a
+    // loopback address outside the bypass list (round-2 N3), each loaded
     // under the window's own document without cookies. Only the switch's
-    // proxy (127.0.0.1:9, where nothing listens) ends it with this error.
+    // proxy (127.0.0.1:9, where nothing listens) with the switch's bypass
+    // list ends both with this error: any proxy that is down fails the first
+    // the same way, but under another proxy (or none) the second goes direct.
+    // The pane carries the verdict to the server: it is the window's word.
     public const string ProxyVerified = "net::ERR_PROXY_CONNECTION_FAILED";
+    public const int ProxyCheckMilliseconds = 3000;
     public static string ProxyCheckURL(string nonce) => "http://cage-proxy-check.invalid/" + nonce;
+    public static string ProxyLoopbackURL(string nonce) => "http://127.0.0.3:8099/" + nonce;
     public static JsonObject ProxyCheckOptions() => new() { ["disableCache"] = true, ["includeCredentials"] = false };
     public static string ProxyVerdict(bool success, string netErrorName) => !success && netErrorName == ProxyVerified ? "verified" : "failed";
 

@@ -36,9 +36,10 @@ func TestScienceCDPGolden(t *testing.T) {
 		// The proxy proof prepare runs (F5) and the preferences the shell
 		// writes before the WebView starts with the switches.
 		"proxy_check": map[string]any{
-			"url":      scienceProxyCheckURL("NONCE"),
-			"options":  map[string]any{"disableCache": true, "includeCredentials": false},
-			"verified": scienceProxyVerified,
+			"url":          scienceProxyCheckURL("NONCE"),
+			"loopback_url": scienceProxyLoopbackURL("NONCE"),
+			"options":      map[string]any{"disableCache": true, "includeCredentials": false},
+			"verified":     scienceProxyVerified,
 		},
 		"preferences": sciencePreferences(),
 		// After auto-attach ends, per session origin the window framed.
