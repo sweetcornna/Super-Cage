@@ -61,7 +61,7 @@ export function createDevicesHost(options = {}) {
     devices: options.devices ?? [], computers: options.computers ?? [], limit: options.limit ?? 5, short: options.short ?? true,
     keepAwake: options.keepAwake ?? { active: true }, joinAvailable: options.joinAvailable ?? true,
     invite: null, mints: 0, joinMode: options.joinMode ?? "approval", joinState: null,
-    log: [], inviteWaiters: [], joinWaiters: [], failNext: {}, now: () => Date.now(),
+    log: [], inviteWaiters: [], joinWaiters: [], failNext: {}, answers: [], approved: "", now: () => Date.now(),
   };
   host.count = (pattern) => host.log.filter((entry) => pattern.test(entry)).length;
   // The test says what the other device did.
@@ -70,6 +70,14 @@ export function createDevicesHost(options = {}) {
     if (host.invite) host.invite = { ...host.invite, state, ...extra, delivered: host.inviteWaiters.length > 0 };
     wake(host.inviteWaiters, { state, ...extra });
   };
+  // The other computer confirmed the number too: only now the host saves the device.
+  host.finishJoin = () => {
+    const device = { id: "d" + (host.devices.length + 4), kind: "computer", platform: "darwin", name: host.approved || "MacBook Air", added_at: new Date().toISOString(), last_seen: new Date().toISOString(), connected: true };
+    host.devices.push(device);
+    host.say("joined", { device: { id: device.id, name: device.name } });
+  };
+  // The joining dialog's held read is waiting (so the next change reaches it at once).
+  host.joinHeld = async () => { for (let i = 0; i < 200 && host.joinWaiters.length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 25)); };
   host.joinSay = (state, extra = {}) => { host.joinState = { state, ...extra }; wake(host.joinWaiters, host.joinState); };
   // The list as it is now, answered again until thawed: a page whose list is out of date.
   host.freeze = () => { host.frozen = { devices: structuredClone(host.devices), limit: host.limit, keep_awake: host.keepAwake, invite: null }; };
@@ -118,7 +126,9 @@ export async function devicesRoutes(page, host) {
     }
     if (path === "/devices/invite" && method === "GET") {
       if (!host.invite) return host.reply(route, 200, { state: "none" });
-      if (host.invite.state !== "waiting" && !host.invite.delivered) { host.invite.delivered = true; return host.reply(route, 200, { state: host.invite.state, request: host.invite.request, device: host.invite.device }); }
+      // wait=0: the state as it is, at once (the dialog's first read).
+      if (!Number(new URL(request.url()).searchParams.get("wait"))) { host.invite.delivered = true; return host.reply(route, 200, { state: host.invite.state, request: host.invite.request, device: host.invite.device, error: host.invite.error }); }
+      if (host.invite.state !== "waiting" && !host.invite.delivered) { host.invite.delivered = true; return host.reply(route, 200, { state: host.invite.state, request: host.invite.request, device: host.invite.device, error: host.invite.error }); }
       const answer = await held(host.inviteWaiters);
       return host.reply(route, 200, answer);
     }
@@ -127,10 +137,10 @@ export async function devicesRoutes(page, host) {
       wake(host.inviteWaiters, { state: "none" });
       return host.reply(route, 200, { state: "none" });
     }
+    // 允许: the host now waits for the joiner's own confirmation ("confirming"); nothing is saved until host.finishJoin().
     if (path === "/devices/invite/approve" && method === "POST") {
-      const device = { id: "d" + (host.devices.length + 4), kind: "computer", platform: "darwin", name: host.invite?.request?.name || "MacBook Air", added_at: new Date().toISOString(), last_seen: new Date().toISOString(), connected: true };
-      host.devices.push(device);
-      host.say("joined", { device: { id: device.id, name: device.name } });
+      host.approved = host.invite?.request?.name || "MacBook Air";
+      host.say("confirming");
       return host.reply(route, 204, "");
     }
     if (path === "/devices/invite/reject" && method === "POST") {
@@ -171,7 +181,10 @@ export async function devicesRoutes(page, host) {
       return host.reply(route, 200, { id: computer.id, name: computer.name });
     }
     if (path === "/client/devices/join" && method === "GET") {
-      const answer = await held(host.joinWaiters);
+      // As the gateway: a decided join (or none) answers at once; one that waits for a person (finding, approval, confirm) is held until it changes.
+      const current = host.joinState;
+      const immediate = !Number(new URL(request.url()).searchParams.get("wait"));
+      const answer = !current ? { state: "none" } : !immediate && ["finding", "approval", "confirm"].includes(current.state) ? await held(host.joinWaiters) : current;
       if (answer.state === "joined") {
         answer.id ??= "h3";
         answer.name ??= host.joinBody?.name || "另一台电脑";
@@ -185,15 +198,19 @@ export async function devicesRoutes(page, host) {
       wake(host.joinWaiters, { state: "none" });
       return host.reply(route, 204, "");
     }
-    // 确认 (assumed route, see interface-assumptions.md): only now is the computer saved.
-    const confirm = path.match(/^\/client\/devices\/([^/]+)\/confirm$/);
-    if (confirm && method === "POST") {
-      host.confirmBody = body;
-      const id = decodeURIComponent(confirm[1]);
-      if (host.joinState?.state !== "confirm" || host.joinState.id !== id || body?.check !== host.joinState.check) return host.reply(route, 409, "没有等待确认的加入");
+    // 一致 / 不一致 once the other computer allowed (origin/devices-code interface.md): the reply is the join's next state.
+    // A number other than the one shown is refused and the question stays open.
+    if ((path === "/client/devices/join/confirm" || path === "/client/devices/join/reject") && method === "POST") {
+      host.answers.push({ path, body });
+      if (host.joinState?.state !== "confirm") return host.reply(route, 409, "没有等待确认的加入");
+      if (path.endsWith("/reject")) {
+        host.joinSay("failed", { error: "两台电脑的核对数字不一致，没有加入，也没有保存任何内容。" });
+        return host.reply(route, 200, host.joinState);
+      }
+      if (body?.check !== host.joinState.check) return host.reply(route, 409, "核对数字不一致：只有两台电脑显示相同的数字时才能确认");
       const name = host.joinBody?.name || "另一台电脑";
-      host.computers.push({ id, name, platform: "", relay: "", added_at: new Date().toISOString(), last_open: null, state: "closed" });
-      host.joinState = { state: "joined", id, name };
+      host.computers.push({ id: "h3", name, platform: "", relay: "", added_at: new Date().toISOString(), last_open: null, state: "closed" });
+      host.joinSay("joined", { id: "h3", name });
       return host.reply(route, 200, host.joinState);
     }
     const open = path.match(/^\/client\/devices\/([^/]+)\/(open|close)$/);

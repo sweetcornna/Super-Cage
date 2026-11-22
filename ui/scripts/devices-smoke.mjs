@@ -42,6 +42,14 @@ async function desktopRun({ theme, viewport, only }) {
     await page.waitForTimeout(quietMs);
     assert.deepEqual(host.log.slice(before), [], label + ": nothing may ask the host while it sits");
   };
+  // At the number the join waits for a person: nothing may ask but the one held read that waits for a change.
+  const heldOnly = async (label) => {
+    await page.waitForTimeout(300);
+    const before = host.log.length;
+    await page.waitForTimeout(quietMs);
+    const asked = host.log.slice(before);
+    assert.ok(asked.length <= 1 && asked.every((entry) => entry === "GET /client/devices/join"), label + ": at most the one held read, asked " + JSON.stringify(asked));
+  };
   const fits = async (title) => {
     const box = await dialog(title).boundingBox();
     assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.width <= viewport.width && box.y + box.height <= viewport.height, title + " fits the window: " + JSON.stringify(box));
@@ -200,13 +208,45 @@ async function desktopRun({ theme, viewport, only }) {
     host.say("request", { request: { name: "MacBook Air", platform: "darwin", check: "5521" } });
     await add.getByText("核对数字 5521，与那台电脑上显示的一致再允许。", { exact: true }).waitFor();
     await add.getByRole("button", { name: "允许", exact: true }).click();
-    await add.getByText("已添加 MacBook Air", { exact: true }).waitFor();
+    // 允许 is not the end: the other computer confirms the number on its side, and nothing is saved before that.
+    const waitingFor = add.getByRole("group", { name: "等待对方确认", exact: true });
+    await waitingFor.waitFor();
+    assert.equal((await waitingFor.innerText()).replace(/\s+/g, " ").trim(), "已允许，等待对方确认 核对数字 5521，对方在它的屏幕上确认一致后才会添加；关闭这个窗口会取消。");
     assert.equal(host.count(/^POST \/devices\/invite\/approve$/), 1);
+    assert.equal(await add.getByText("已添加", { exact: false }).count(), 0, "not added before the other computer confirms");
+    assert.equal(host.devices.some((device) => device.name === "MacBook Air"), false);
+    assert.equal(await add.getByRole("button", { name: "取消", exact: true }).count(), 1);
+    await shot("add-confirming");
+    await fits("添加设备");
+    host.finishJoin();
+    await add.getByText("已添加 MacBook Air", { exact: true }).waitFor();
     await shot("add-joined");
     await add.getByRole("button", { name: "完成", exact: true }).click();
     await add.waitFor({ state: "detached" });
     await page.getByText("4 台设备 · 2 台在线", { exact: true }).waitFor();
     assert.equal(host.count(/^DELETE \/devices\/invite$/) >= 0, true);
+
+    // The other computer does not confirm (不一致, no answer, or it closed its dialog): the host says so, nothing is added.
+    await page.getByRole("button", { name: "添加设备", exact: true }).click();
+    await add.locator(".devices-digits").waitFor();
+    host.say("request", { request: { name: "MacBook Air", platform: "darwin", check: "6407" } });
+    await add.getByRole("button", { name: "允许", exact: true }).click();
+    await waitingFor.waitFor();
+    const devicesBefore = host.devices.length;
+    host.say("failed", { error: "对方没有确认核对数字，没有添加。" });
+    await add.getByText("对方没有确认核对数字，没有添加。", { exact: true }).waitFor();
+    assert.equal(host.devices.length, devicesBefore, "nothing added");
+    await shot("add-not-confirmed");
+    await add.getByRole("button", { name: "重新生成", exact: true }).click();
+    await add.locator(".devices-digits").waitFor();
+    // Closing the dialog while the other computer is asked ends it.
+    const cancels = host.count(/^DELETE \/devices\/invite$/);
+    host.say("request", { request: { name: "MacBook Air", platform: "darwin", check: "6408" } });
+    await add.getByRole("button", { name: "允许", exact: true }).click();
+    await waitingFor.waitFor();
+    await add.getByRole("button", { name: "取消", exact: true }).click();
+    await add.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/devices\/invite$/), cancels + 1, "取消 ends the invite");
 
     // A code that runs out, and one that fails.
     await page.getByRole("button", { name: "添加设备", exact: true }).click();
@@ -291,25 +331,36 @@ async function desktopRun({ theme, viewport, only }) {
     // The other computer allows: this one shows the number again and saves nothing until 确认.
     const agree = join.getByRole("group", { name: "核对数字", exact: true });
     const agreeText = async () => (await agree.innerText()).replace(/\s+/g, " ").trim();
-    host.joinSay("confirm", { check: "3817", id: "h3" });
+    host.joinSay("confirm", { check: "3817" });
     await agree.waitFor();
     assert.equal(await agreeText(), "那台电脑已允许加入 核对数字 3817，与那台电脑上显示的数字一致再确认。");
     assert.equal(await join.getByText("已加入", { exact: false }).count(), 0, "not joined before 确认");
     assert.equal(host.computers.some((item) => item.id === "h3"), false, "nothing is saved before 确认");
     assert.equal(await join.getByRole("button", { name: "确认", exact: true }).isDisabled(), false);
+    assert.equal(await join.getByRole("button", { name: "不一致", exact: true }).isDisabled(), false);
     await shot("join-confirm");
     await fits("加入其他电脑");
-    await quiet("the number waits for 确认");
-    assert.equal(host.count(/^POST \/client\/devices\/h3\/confirm$/), 0);
+    // Nothing ticks while a person decides: at most the one held read that waits for a change.
+    await heldOnly("the number waits for 确认");
+    assert.equal(host.answers.length, 0);
     await join.getByRole("button", { name: "确认", exact: true }).click();
     await join.getByText("已加入「家里的 Mac mini」", { exact: true }).waitFor();
-    assert.deepEqual(host.confirmBody, { check: "3817" }, "the number shown goes back with 确认");
+    assert.deepEqual(host.answers, [{ path: "/client/devices/join/confirm", body: { check: "3817" } }], "the number shown goes back with 确认");
     assert.equal(host.computers.some((item) => item.id === "h3"), true, "确认 saves the computer");
     await shot("join-joined");
     await join.getByRole("button", { name: "完成", exact: true }).click();
     await join.waitFor({ state: "detached" });
     await page.locator(".devices-row", { hasText: "家里的 Mac mini" }).first().waitFor();
     await page.getByText("电脑 · 还没有打开过", { exact: true }).first().waitFor();
+
+    const computersAfterJoin = host.computers.length;
+    const reopen = () => page.getByRole("button", { name: "加入其他电脑", exact: true }).click();
+    const ask = async (digits) => {
+      await field.fill(digits);
+      await join.getByRole("button", { name: "加入", exact: true }).click();
+      await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
+      await host.joinHeld();
+    };
 
     // Why a join fails.
     for (const [mode, text] of [
@@ -336,37 +387,57 @@ async function desktopRun({ theme, viewport, only }) {
     await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
     host.joinSay("denied");
     await join.getByText("那台电脑没有允许加入。", { exact: true }).waitFor();
-    // Allowed, but this computer does not agree: 取消 saves nothing and ends the join.
-    await field.fill("33334444");
-    await join.getByRole("button", { name: "加入", exact: true }).click();
-    await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
-    host.joinSay("confirm", { check: "5206", id: "h4" });
+    // Allowed, but the numbers differ: 不一致 saves nothing, on either side.
+    await ask("33334444");
+    host.joinSay("confirm", { check: "5206" });
     await agree.waitFor();
     assert.equal(await agreeText(), "那台电脑已允许加入 核对数字 5206，与那台电脑上显示的数字一致再确认。");
-    await join.getByRole("button", { name: "取消", exact: true }).click();
-    await join.waitFor({ state: "detached" });
-    assert.equal(host.count(/^DELETE \/client\/devices\/join$/), 1, "取消 ends the join");
-    assert.equal(host.count(/^POST \/client\/devices\/h4\/confirm$/), 0);
-    assert.equal(host.computers.some((item) => item.id === "h4"), false);
-    // 取消 while the other computer has not answered yet ends it too.
-    await page.getByRole("button", { name: "加入其他电脑", exact: true }).click();
+    await join.getByRole("button", { name: "不一致", exact: true }).click();
+    await join.getByText("两台电脑的核对数字不一致，没有加入，也没有保存任何内容。", { exact: true }).waitFor();
+    assert.deepEqual(host.answers.at(-1), { path: "/client/devices/join/reject", body: {} });
+    assert.equal(host.computers.length, computersAfterJoin, "nothing saved");
+    // Closing the dialog ends the join, while the other computer has not answered yet and while the number waits.
     await field.fill("33334445");
     await join.getByRole("button", { name: "加入", exact: true }).click();
     await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
-    await join.getByRole("button", { name: "取消", exact: true }).click();
+    await page.keyboard.press("Escape");
+    await join.waitFor({ state: "detached" });
+    assert.equal(host.count(/^DELETE \/client\/devices\/join$/), 1, "closing ends the join");
+    await reopen();
+    await ask("33334446");
+    host.joinSay("confirm", { check: "7714" });
+    await agree.waitFor();
+    await join.getByRole("button", { name: "关闭面板", exact: true }).click();
     await join.waitFor({ state: "detached" });
     assert.equal(host.count(/^DELETE \/client\/devices\/join$/), 2);
-    // 确认 that finds nothing waiting (the other computer gave up meanwhile) starts over, saving nothing.
-    await page.getByRole("button", { name: "加入其他电脑", exact: true }).click();
-    await field.fill("33334446");
-    await join.getByRole("button", { name: "加入", exact: true }).click();
-    await join.getByText("在那台电脑上点“允许”。核对数字 3817", { exact: true }).waitFor();
-    host.joinSay("confirm", { check: "7714", id: "h5" });
+    assert.equal(host.count(/\/join\/(confirm|reject)$/), 2, "nothing was answered by closing: only the 不一致 above and the 确认 before");
+    assert.equal(host.computers.length, computersAfterJoin, "nothing saved");
+    // The other computer closes its dialog while the number waits: said at once, the question goes away.
+    await reopen();
+    await ask("33334447");
+    host.joinSay("confirm", { check: "7715" });
     await agree.waitFor();
-    host.failNext["POST /client/devices/h5/confirm"] = { status: 409, body: "没有等待确认的加入" };
+    host.joinSay("failed", { error: "对方电脑已取消，没有加入，也没有保存任何内容。" });
+    await join.getByText("对方电脑已取消，没有加入，也没有保存任何内容。", { exact: true }).waitFor();
+    await agree.waitFor({ state: "detached" });
+    // A number the gateway does not show is refused and the question stays: the sentence is shown, 不一致 still ends it.
+    await ask("33334448");
+    host.joinSay("confirm", { check: "7716" });
+    await agree.waitFor();
+    host.joinState = { state: "confirm", check: "0000" };
+    await join.getByRole("button", { name: "确认", exact: true }).click();
+    await join.getByText("核对数字不一致：只有两台电脑显示相同的数字时才能确认", { exact: true }).waitFor();
+    assert.equal(await agreeText(), "那台电脑已允许加入 核对数字 7716，与那台电脑上显示的数字一致再确认。 核对数字不一致：只有两台电脑显示相同的数字时才能确认");
+    await join.getByRole("button", { name: "不一致", exact: true }).click();
+    await join.getByText("两台电脑的核对数字不一致，没有加入，也没有保存任何内容。", { exact: true }).waitFor();
+    // An answer that finds nothing waiting any more (the time ran out meanwhile) starts over, saving nothing.
+    await ask("33334449");
+    host.joinSay("confirm", { check: "7717" });
+    await agree.waitFor();
+    host.failNext["POST /client/devices/join/confirm"] = { status: 409, body: "没有等待确认的加入" };
     await join.getByRole("button", { name: "确认", exact: true }).click();
     await join.getByText("这次加入已失效，请在那台电脑上重新生成配对码。", { exact: true }).waitFor();
-    assert.equal(host.computers.some((item) => item.id === "h5"), false);
+    assert.equal(host.computers.length, computersAfterJoin, "nothing saved");
     // A long code joins at once, with nothing to approve.
     host.joinMode = "ok";
     await field.fill(LONG);

@@ -115,10 +115,13 @@ export const customRelayLine = (relay) => relay ? "这台电脑使用自建中�
 // ── the add dialog (this computer shows a code) ──────────────────────────
 
 export const FAILED_TEXT = "配对失败：配对码不对或连接被篡改。请重新生成。";
+// The host says why when it knows ("对方没有确认核对数字，没有添加。"): its Chinese sentence is shown, anything else reads as FAILED_TEXT.
+export const failedSentence = (error) => { const text = String(error || "").trim(); return /[\u4e00-\u9fff]/.test(text) ? text : FAILED_TEXT; };
 
 export const initialInvite = { phase: "minting" };
 
-// phases: minting → code → request → joined, or failed | expired | rejected | limit | error at any step.
+// phases: minting → code → request → confirming → joined, or failed | expired | rejected | limit | error at any step.
+// confirming: 允许 has gone out and the other computer has not confirmed the number on its side yet; nothing is saved.
 // Events: minted(reply, refreshed) · poll(result) · tick(now) · deciding · rejected · error(error) · restart.
 export function inviteReducer(state, event) {
   switch (event.type) {
@@ -129,15 +132,18 @@ export function inviteReducer(state, event) {
       return { phase: "code", image: reply.image || "", manual: reply.manual || "", short: /^\d{8}$/.test(String(reply.short || "")) ? String(reply.short) : "", expires: Number.isFinite(expires) ? expires : 0, mintedAt: event.now ?? Date.now(), refreshed: Boolean(event.refreshed) };
     }
     case "poll": {
-      if (!["code", "request"].includes(state.phase)) return state;
+      if (!["code", "request", "confirming"].includes(state.phase)) return state;
       const result = event.result || {};
+      if (result.state === "confirming") return state.phase === "confirming" ? state : { ...state, phase: "confirming", deciding: false };
       if (result.state === "request" && result.request) {
+        // A late read cannot take the number back after 允许.
+        if (state.phase === "confirming") return state;
         // The same request again (a held read that timed out) keeps the buttons as they are.
         if (state.phase === "request" && state.request?.check === result.request.check) return state;
         return { ...state, phase: "request", request: { name: String(result.request.name || "").trim(), platform: result.request.platform || "", check: String(result.request.check || "") }, deciding: false };
       }
       if (result.state === "joined") return { phase: "joined", device: { id: result.device?.id || "", name: String(result.device?.name || "").trim() } };
-      if (result.state === "failed") return { phase: "failed" };
+      if (result.state === "failed") return { phase: "failed", message: failedSentence(result.error) };
       // "none": the host has no code any more (it was cancelled or replaced from another window).
       if (result.state === "expired" || result.state === "none") return { phase: "expired" };
       return state;
@@ -159,6 +165,10 @@ export function inviteReducer(state, event) {
 export const requestTitle = (request) => (request?.name || "一台设备") + (platformName(request?.platform) ? "（" + platformName(request.platform) + "）" : "") + "想加入这台电脑";
 export const requestHintParts = (check) => ["核对数字 ", String(check), "，与那台电脑上显示的一致再允许。"];
 export const requestHint = (check) => requestHintParts(check).join("");
+// After 允许: the other computer confirms the same number on its side before anything is saved.
+export const CONFIRMING_TITLE = "已允许，等待对方确认";
+export const confirmingHintParts = (check) => ["核对数字 ", String(check), "，对方在它的屏幕上确认一致后才会添加；关闭这个窗口会取消。"];
+export const confirmingHint = (check) => confirmingHintParts(check).join("");
 
 // ── the join dialog (this computer enters a code) ────────────────────────
 
@@ -192,11 +202,13 @@ export const approvalText = (check) => "在那台电脑上点“允许”。核�
 export const confirmTitle = "那台电脑已允许加入";
 export const confirmHintParts = (check) => ["核对数字 ", String(check), "，与那台电脑上显示的数字一致再确认。"];
 export const confirmHint = (check) => confirmHintParts(check).join("");
-// 确认 that finds nothing waiting any more (the other computer gave up, the time ran out, a lock): the join starts over.
+// 确认 / 不一致 that finds nothing waiting any more (the other computer gave up, the time ran out, a lock): the join starts over.
 export const CONFIRM_LOST_TEXT = "这次加入已失效，请在那台电脑上重新生成配对码。";
+// The gateway no longer has a join while this dialog still waits for one (a lock cancels it).
+export const CANCELLED_TEXT = "加入已取消，请重新输入配对码。";
 export const joinedText = (name) => "已加入「" + (String(name || "").trim() || "那台电脑") + "」";
 
-// phases: input → searching → approval → confirm → saving → joined, or input again with an error.
+// phases: input → searching → approval → confirm → saving (the answer is on its way) → joined, or input again with an error.
 export const initialJoin = { phase: "input", error: "" };
 export function joinReducer(state, event) {
   switch (event.type) {
@@ -205,17 +217,26 @@ export function joinReducer(state, event) {
     case "reply": {
       const reply = event.reply || {};
       // The other computer has allowed: the number is shown again, and the computer is saved only when 确认 is pressed.
-      if (reply.state === "confirm") return (state.phase === "saving" || state.phase === "confirm") && state.check === String(reply.check || "") && state.id === String(reply.id || "") ? state : { phase: "confirm", check: String(reply.check || ""), id: String(reply.id || "") };
+      if (reply.state === "confirm") return (state.phase === "saving" || state.phase === "confirm") && state.check === String(reply.check || "") ? state : { phase: "confirm", check: String(reply.check || "") };
       if (reply.state === "approval") {
         if (state.phase === "confirm" || state.phase === "saving") return state;
         return state.phase === "approval" && state.check === String(reply.check || "") ? state : { phase: "approval", check: String(reply.check || "") };
       }
       if (reply.state === "joined" || reply.id) return { phase: "joined", computer: { id: reply.id || "", name: String(reply.name || "").trim() } };
       if (reply.state === "failed" || reply.state === "denied" || reply.state === "expired") return { phase: "input", error: joinFailure({ state: reply.state, message: reply.error }) };
+      if (reply.state === "none" && ["approval", "confirm", "saving"].includes(state.phase)) return { phase: "input", error: CANCELLED_TEXT };
       return state;
     }
-    case "confirming": return state.phase === "confirm" ? { ...state, phase: "saving" } : state;
-    case "error": return { phase: "input", error: event.confirming && [404, 409, 410].includes(event.error?.status) ? CONFIRM_LOST_TEXT : joinFailure(event.error) };
+    case "answering": return state.phase === "confirm" ? { phase: "saving", check: state.check } : state;
+    case "error": {
+      if (event.answering) {
+        const message = String(event.error?.message || "");
+        // The number sent was not the one the gateway shows: the question stays open, as it does there.
+        if (event.error?.status === 409 && /不一致/.test(message) && state.check) return { phase: "confirm", check: state.check, error: message };
+        if ([404, 409, 410].includes(event.error?.status)) return { phase: "input", error: CONFIRM_LOST_TEXT };
+      }
+      return { phase: "input", error: joinFailure(event.error) };
+    }
     default: return state;
   }
 }
@@ -230,14 +251,19 @@ const abortableSleep = (ms, signal) => new Promise((resolve) => {
 // Reads until the signal ends or onResult returns true. A read is held by the host (wait seconds) and answers
 // when something changes, so nothing ticks here: a read that came back sooner than MIN_SPACING_MS (a host that
 // does not hold, a change) is followed by the rest of that second, a failed one by the session-poll backoff,
-// and onError may end the loop (it returns true to stop).
-export async function holdReads({ read, onResult, onError, signal, wait = HELD_SECONDS, now = Date.now, sleep = abortableSleep }) {
+// and onError may end the loop (it returns true to stop). firstWait: the first read of a loop may ask for the state as it is
+// (0 seconds: answered at once, and the held read follows without waiting out the second), so a change that came before
+// the loop started is not waited for; the host holds only while nothing has changed since the read began.
+export async function holdReads({ read, onResult, onError, signal, wait = HELD_SECONDS, firstWait = wait, now = Date.now, sleep = abortableSleep }) {
   let failures = 0;
+  let first = true;
   while (!signal.aborted) {
     const started = now();
+    const asking = first ? firstWait : wait;
+    first = false;
     let result;
     try {
-      result = await read(wait, signal);
+      result = await read(asking, signal);
       failures = 0;
     } catch (error) {
       if (signal.aborted) return;
@@ -247,7 +273,7 @@ export async function holdReads({ read, onResult, onError, signal, wait = HELD_S
     }
     if (signal.aborted || onResult(result)) return;
     const spent = now() - started;
-    if (spent < MIN_SPACING_MS) await sleep(MIN_SPACING_MS - spent, signal);
+    if (asking > 0 && spent < MIN_SPACING_MS) await sleep(MIN_SPACING_MS - spent, signal);
   }
 }
 

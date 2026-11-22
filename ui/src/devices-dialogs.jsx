@@ -4,7 +4,7 @@ import { api, writeClipboard } from "./api";
 import { Modal } from "./modal";
 import { requestDeadline, requestDeadlineMs } from "./session-poll.mjs";
 import {
-  FAILED_TEXT, approvalText, confirmHintParts, confirmTitle, countdownText, customRelayLine, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinReducer,
+  CONFIRMING_TITLE, FAILED_TEXT, approvalText, confirmHintParts, confirmTitle, confirmingHintParts, countdownText, customRelayLine, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinReducer,
   joinedText, limitText, NAME_LIMIT, readCodeInput, readJoinName, requestHintParts, requestTitle,
 } from "./devices-state.mjs";
 import { openComputer } from "./devices-open.mjs";
@@ -44,17 +44,18 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
     return () => {
       minting.current++;
       // The code dies with the dialog (also when the settings page is left meanwhile).
-      if (phase.current === "code" || phase.current === "request") api("/devices/invite", undefined, "DELETE", {}, { empty: true }).catch(() => {});
+      if (phase.current === "code" || phase.current === "request" || phase.current === "confirming") api("/devices/invite", undefined, "DELETE", {}, { empty: true }).catch(() => {});
     };
   }, []);
 
   // One loop per code, through the approval, until the host decides.
-  const code = view.phase === "code" || view.phase === "request" ? view.manual : "";
+  const code = view.phase === "code" || view.phase === "request" || view.phase === "confirming" ? view.manual : "";
   useEffect(() => {
     if (!code) return undefined;
     const controller = new AbortController();
     void holdReads({
       signal: controller.signal,
+      firstWait: 0,
       read: heldRead("/devices/invite"),
       onResult: (result) => { dispatch({ type: "poll", result }); return decisions.has(result?.state); },
       onError: (error, failures) => {
@@ -143,6 +144,15 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
         </button>
       </>
     );
+  } else if (view.phase === "confirming") {
+    // 允许 has gone out; the other computer confirms the same number before anything is saved.
+    body = (
+      <div className="devices-request" role="group" aria-label="等待对方确认">
+        <h3>{CONFIRMING_TITLE}</h3>
+        <p>{confirmingHintParts(request?.check)[0]}<strong className="devices-check">{request?.check}</strong>{confirmingHintParts(request?.check)[2]}</p>
+      </div>
+    );
+    footer = <button type="button" onClick={onClose}>取消</button>;
   } else if (view.phase === "joined") {
     body = <p className="devices-outcome" role="status"><Check size={18} aria-hidden="true" />已添加 {view.device.name || "新设备"}</p>;
     footer = <button type="button" className="primary" onClick={onClose}>完成</button>;
@@ -150,7 +160,7 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
     body = <p className="devices-outcome" role="alert">配对码已过期</p>;
     footer = <>{close}{again}</>;
   } else if (view.phase === "failed") {
-    body = <p className="devices-outcome" role="alert">{FAILED_TEXT}</p>;
+    body = <p className="devices-outcome" role="alert">{view.message || FAILED_TEXT}</p>;
     footer = <>{close}{again}</>;
   } else if (view.phase === "rejected") {
     body = <p className="devices-outcome" role="status">已拒绝{request?.name ? " " + request.name : ""}，这个配对码已失效。</p>;
@@ -194,15 +204,17 @@ export function JoinDialog({ onClose, onJoined }) {
     try { dispatch({ type: "reply", reply: await api("/client/devices/join", name ? { code: parsed.code, name } : { code: parsed.code }) }); }
     catch (error) { dispatch({ type: "error", error }); }
   }
-  // The other computer's approval: one held read until it answers.
-  const waiting = view.phase === "approval";
+  // The other computer's approval, and then its wait for our answer: one held read until the join is decided (it also tells
+  // at once when the other computer closes its dialog meanwhile).
+  const waiting = view.phase === "approval" || view.phase === "confirm" || view.phase === "saving";
   useEffect(() => {
     if (!waiting) return undefined;
     const controller = new AbortController();
     void holdReads({
       signal: controller.signal,
+      firstWait: 0,
       read: heldRead("/client/devices/join"),
-      onResult: (reply) => { dispatch({ type: "reply", reply }); return reply?.state !== "approval"; },
+      onResult: (reply) => { dispatch({ type: "reply", reply }); return !["finding", "approval", "confirm"].includes(reply?.state); },
       onError: (error, failures) => {
         if (lastRead(error.status) || failures >= 6) { dispatch({ type: "error", error }); return true; }
         return false;
@@ -212,16 +224,13 @@ export function JoinDialog({ onClose, onJoined }) {
   }, [waiting]);
   useEffect(() => { if (view.phase === "joined") onJoined?.(); }, [view.phase]);
 
-  // 确认: the number matches, the computer is saved. The reply may be the saved computer or nothing at all.
-  async function confirm() {
+  // 确认 (the number matches: it goes back as shown) or 不一致. The reply is the join's next state; the held read says the same.
+  async function answer(same) {
     if (view.phase !== "confirm") return;
-    dispatch({ type: "confirming" });
-    try {
-      const reply = await api("/client/devices/" + encodeURIComponent(view.id) + "/confirm", { check: view.check }, "POST", {}, { empty: true });
-      dispatch({ type: "reply", reply: { state: "joined", id: view.id, name: label.trim(), ...(reply && typeof reply === "object" ? reply : {}) } });
-    } catch (error) { dispatch({ type: "error", error, confirming: true }); }
+    dispatch({ type: "answering" });
+    try { dispatch({ type: "reply", reply: await api("/client/devices/join/" + (same ? "confirm" : "reject"), same ? { check: view.check } : {}) }); }
+    catch (error) { dispatch({ type: "error", error, answering: true }); }
   }
-
   async function open() {
     setOpening(true);
     setOpenError("");
@@ -256,12 +265,13 @@ export function JoinDialog({ onClose, onJoined }) {
       <div className="devices-request" role="group" aria-label="核对数字">
         <h3>{confirmTitle}</h3>
         <p>{confirmHintParts(view.check)[0]}<strong className="devices-check">{view.check}</strong>{confirmHintParts(view.check)[2]}</p>
+        {view.error && <p className="devices-error" role="alert">{view.error}</p>}
       </div>
     );
     footer = (
       <>
-        <button type="button" disabled={view.phase === "saving"} onClick={onClose}>取消</button>
-        <button type="button" className="primary" disabled={view.phase === "saving"} onClick={confirm}>
+        <button type="button" disabled={view.phase === "saving"} onClick={() => answer(false)}>不一致</button>
+        <button type="button" className="primary" disabled={view.phase === "saving"} onClick={() => answer(true)}>
           {view.phase === "saving" && <LoaderCircle size={15} className="spin" aria-hidden="true" />}确认
         </button>
       </>

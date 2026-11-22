@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CONFIRM_LOST_TEXT, DEVICE_KEY, DEVICE_NAME_KEY, FAILED_TEXT, approvalText, atLimit, computerMeta, confirmHint, confirmTitle, countdownText, customRelayLine, deviceIdOf, deviceMeta, deviceName,
-  forgetConfirmation, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinFailure, joinReducer, joinedText, kindLine, limitOf, limitText,
+  CANCELLED_TEXT, CONFIRMING_TITLE, CONFIRM_LOST_TEXT, DEVICE_KEY, DEVICE_NAME_KEY, FAILED_TEXT, approvalText, atLimit, computerMeta, confirmHint, confirmTitle, confirmingHint, countdownText, customRelayLine, deviceIdOf, deviceMeta, deviceName,
+  failedSentence, forgetConfirmation, groupDigits, holdReads, initialInvite, initialJoin, inviteReducer, joinFailure, joinReducer, joinedText, kindLine, limitOf, limitText,
   platformName, readCodeInput, readJoinName, rememberDevice, removeConfirmation, requestHint, requestTitle, summaryText, timeText, validTime,
 } from "./devices-state.mjs";
 
@@ -140,7 +140,7 @@ test("a code that is not used expires, fails or is refused", () => {
   assert.equal(inviteReducer(code, { type: "tick", now: now + 4999 }), code);
   assert.deepEqual(inviteReducer(code, { type: "tick", now: now + 5000 }), { phase: "expired" });
   assert.deepEqual(inviteReducer(code, { type: "poll", result: { state: "expired" } }), { phase: "expired" });
-  assert.deepEqual(inviteReducer(code, { type: "poll", result: { state: "failed" } }), { phase: "failed" });
+  assert.deepEqual(inviteReducer(code, { type: "poll", result: { state: "failed" } }), { phase: "failed", message: FAILED_TEXT });
   assert.equal(FAILED_TEXT, "配对失败：配对码不对或连接被篡改。请重新生成。");
   const request = inviteReducer(code, { type: "poll", result: { state: "request", request: { name: "x", platform: "windows", check: "1234" } } });
   assert.equal(inviteReducer(request, { type: "rejected" }).phase, "rejected");
@@ -175,24 +175,102 @@ test("the joining dialog asks, waits for the other computer, and says why it fai
 test("the joining side confirms the number too: the computer is saved only after 确认", () => {
   const waiting = joinReducer(joinReducer(initialJoin, { type: "submit" }), { type: "reply", reply: { state: "approval", check: "3817" } });
   // the other computer allows: the number is shown again, nothing is joined
-  const asked = joinReducer(waiting, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } });
-  assert.deepEqual(asked, { phase: "confirm", check: "3817", id: "h3" });
-  assert.equal(joinReducer(asked, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } }), asked);
+  const asked = joinReducer(waiting, { type: "reply", reply: { state: "confirm", check: "3817" } });
+  assert.deepEqual(asked, { phase: "confirm", check: "3817" });
+  assert.equal(joinReducer(asked, { type: "reply", reply: { state: "confirm", check: "3817" } }), asked);
   assert.equal(confirmTitle, "那台电脑已允许加入");
   assert.equal(confirmHint("3817"), "核对数字 3817，与那台电脑上显示的数字一致再确认。");
   // a late "approval" read does not take the number away again, and typing changes nothing
   assert.equal(joinReducer(asked, { type: "reply", reply: { state: "approval", check: "3817" } }), asked);
   assert.equal(joinReducer(asked, { type: "edit" }), asked);
-  // 确认 goes out; the reply (or the id the confirm carried) is the saved computer
-  const saving = joinReducer(asked, { type: "confirming" });
-  assert.deepEqual(saving, { phase: "saving", check: "3817", id: "h3" });
-  assert.equal(joinReducer(saving, { type: "reply", reply: { state: "confirm", check: "3817", id: "h3" } }), saving, "a late read does not undo 确认");
-  assert.deepEqual(joinReducer(saving, { type: "reply", reply: { state: "joined", id: "h3", name: "家里的 Mac mini" } }), { phase: "joined", computer: { id: "h3", name: "家里的 Mac mini" } });
-  assert.equal(joinReducer(waiting, { type: "confirming" }), waiting, "nothing to confirm before the other computer allows");
-  // a 确认 that finds nothing waiting starts over with a sentence of its own; any other failure reads as before
-  for (const status of [404, 409, 410]) assert.deepEqual(joinReducer(saving, { type: "error", error: Object.assign(new Error("x"), { status }), confirming: true }), { phase: "input", error: CONFIRM_LOST_TEXT });
-  assert.equal(joinReducer(saving, { type: "error", error: Object.assign(new Error("Super Cage 已锁定，请先解锁。"), { status: 423 }), confirming: true }).error, "Super Cage 已锁定，请先解锁。");
+  // the answer goes out (确认 or 不一致); a late read does not undo it, the next state of the join decides
+  const answering = joinReducer(asked, { type: "answering" });
+  assert.deepEqual(answering, { phase: "saving", check: "3817" });
+  assert.equal(joinReducer(answering, { type: "reply", reply: { state: "confirm", check: "3817" } }), answering);
+  assert.deepEqual(joinReducer(answering, { type: "reply", reply: { state: "joined", id: "h3", name: "家里的 Mac mini" } }), { phase: "joined", computer: { id: "h3", name: "家里的 Mac mini" } });
+  assert.equal(joinReducer(waiting, { type: "answering" }), waiting, "nothing to answer before the other computer allows");
+  // 不一致: the gateway's next state is the failure, said as it words it
+  assert.deepEqual(joinReducer(answering, { type: "reply", reply: { state: "failed", error: "两台电脑的核对数字不一致，没有加入，也没有保存任何内容。" } }), { phase: "input", error: "两台电脑的核对数字不一致，没有加入，也没有保存任何内容。" });
+  // the other computer closed its dialog while the question waited
+  assert.equal(joinReducer(asked, { type: "reply", reply: { state: "failed", error: "对方电脑已取消，没有加入，也没有保存任何内容。" } }).error, "对方电脑已取消，没有加入，也没有保存任何内容。");
+  // the gateway has no join any more (a lock cancelled it) while the dialog waits
+  for (const state of [waiting, asked, answering]) assert.deepEqual(joinReducer(state, { type: "reply", reply: { state: "none" } }), { phase: "input", error: CANCELLED_TEXT });
+  assert.equal(joinReducer(initialJoin, { type: "reply", reply: { state: "none" } }), initialJoin);
+  // an answer that finds nothing waiting starts over with a sentence of its own; a different number keeps the question open
+  for (const status of [404, 409, 410]) assert.deepEqual(joinReducer(answering, { type: "error", error: Object.assign(new Error("没有等待确认的加入"), { status }), answering: true }), { phase: "input", error: CONFIRM_LOST_TEXT });
+  assert.deepEqual(joinReducer(answering, { type: "error", error: Object.assign(new Error("核对数字不一致：只有两台电脑显示相同的数字时才能确认"), { status: 409 }), answering: true }), { phase: "confirm", check: "3817", error: "核对数字不一致：只有两台电脑显示相同的数字时才能确认" });
+  assert.equal(joinReducer(answering, { type: "error", error: Object.assign(new Error("Super Cage 已锁定，请先解锁。"), { status: 423 }), answering: true }).error, "Super Cage 已锁定，请先解锁。");
   assert.equal(joinReducer(waiting, { type: "error", error: Object.assign(new Error("x"), { status: 409 }) }).error, "配对码已被使用，请在那台电脑上重新生成。");
+});
+
+test("the host waits for the other computer's confirmation after 允许, and says why when it does not come", () => {
+  const code = inviteReducer(inviteReducer(initialInvite, { type: "minted", reply: { image: "data:image/png;base64,AA", manual: "CAGE-X", short: "48219037", expires: new Date(now + 120000).toISOString() }, now }), { type: "poll", result: { state: "waiting" } });
+  assert.equal(code.phase, "code");
+  const request = inviteReducer(code, { type: "poll", result: { state: "request", request: { name: "MacBook Air", platform: "darwin", check: "3817" } } });
+  assert.equal(request.phase, "request");
+  const confirming = inviteReducer(request, { type: "poll", result: { state: "confirming" } });
+  assert.equal(confirming.phase, "confirming");
+  assert.equal(confirming.request.check, "3817", "the number stays on show");
+  assert.equal(confirming.manual, "CAGE-X", "the loop that reads it continues");
+  assert.equal(inviteReducer(confirming, { type: "poll", result: { state: "confirming" } }), confirming);
+  assert.equal(inviteReducer(confirming, { type: "poll", result: { state: "request", request: { name: "MacBook Air", platform: "darwin", check: "3817" } } }), confirming, "a late read does not take 允许 back");
+  assert.equal(confirmingHint("3817"), "核对数字 3817，对方在它的屏幕上确认一致后才会添加；关闭这个窗口会取消。");
+  assert.equal(CONFIRMING_TITLE, "已允许，等待对方确认");
+  // the countdown no longer matters once a person is asked
+  assert.equal(inviteReducer(confirming, { type: "tick", now: now + 10 * 60000 }), confirming);
+  assert.deepEqual(inviteReducer(confirming, { type: "poll", result: { state: "joined", device: { id: "d4", name: "MacBook Air" } } }), { phase: "joined", device: { id: "d4", name: "MacBook Air" } });
+  // 不一致, no answer in time or a closed dialog on the other side: the host's sentence is shown; nothing else is made up
+  assert.deepEqual(inviteReducer(confirming, { type: "poll", result: { state: "failed", error: "对方没有确认核对数字，没有添加。" } }), { phase: "failed", message: "对方没有确认核对数字，没有添加。" });
+  assert.deepEqual(inviteReducer(code, { type: "poll", result: { state: "failed" } }), { phase: "failed", message: FAILED_TEXT });
+  assert.equal(failedSentence("handshake failed"), FAILED_TEXT);
+  assert.equal(failedSentence(undefined), FAILED_TEXT);
+  assert.equal(inviteReducer(confirming, { type: "poll", result: { state: "expired" } }).phase, "expired");
+});
+
+// The JSON the real routes answer (origin/devices-code, scratchpad/devices/code/interface.md), read as the page reads it.
+test("the state module reads the shapes the host and the gateway answer", () => {
+  const replies = {
+    host: [
+      { state: "waiting" },
+      { state: "request", request: { name: "MacBook Air", platform: "darwin", check: "3817" } },
+      { state: "confirming" },
+      { state: "joined", device: { id: "d4", name: "MacBook Air" } },
+      { state: "rejected" },
+      { state: "expired" },
+      { state: "failed", error: "对方没有确认核对数字，没有添加。" },
+      { state: "failed" },
+    ],
+    join: [
+      { state: "none" },
+      { state: "finding" },
+      { state: "approval", check: "3817" },
+      { state: "confirm", check: "3817" },
+      { state: "joined", id: "h3", name: "家里的 Mac mini" },
+      { state: "failed", error: "没有及时确认核对数字，没有加入。" },
+    ],
+  };
+  // the host's dialog follows a whole invitation without a state it cannot read
+  let invite = inviteReducer(initialInvite, { type: "minted", reply: { image: "", manual: "CAGE-X", short: "48219037", expires: new Date(now + 120000).toISOString() }, now });
+  const seen = [];
+  for (const name of ["waiting", "request", "confirming", "joined"]) {
+    invite = inviteReducer(invite, { type: "poll", result: replies.host.find((reply) => reply.state === name) });
+    seen.push(invite.phase);
+  }
+  assert.deepEqual(seen, ["code", "request", "confirming", "joined"]);
+  for (const reply of replies.host.filter((one) => ["rejected", "expired", "failed"].includes(one.state))) {
+    const ended = inviteReducer(inviteReducer(initialInvite, { type: "minted", reply: { manual: "CAGE-X", expires: new Date(now + 1000).toISOString() }, now }), { type: "poll", result: reply });
+    assert.ok(["code", "failed", "expired"].includes(ended.phase), JSON.stringify(reply));
+  }
+  // the joining dialog's phases follow the gateway's views, and the held read goes on exactly while the join is undecided
+  const undecided = (reply) => ["finding", "approval", "confirm"].includes(reply.state);
+  let join = joinReducer(initialJoin, { type: "submit" });
+  const phases = [];
+  for (const reply of replies.join) {
+    join = joinReducer(join, { type: "reply", reply });
+    phases.push(join.phase + (undecided(reply) ? "…" : ""));
+  }
+  assert.deepEqual(phases, ["searching", "searching…", "approval…", "confirm…", "joined", "input"]);
+  assert.equal(join.error, "没有及时确认核对数字，没有加入。");
 });
 
 test("a refused join says what to do next", () => {
@@ -248,6 +326,20 @@ test("a read that came back at once is followed by the rest of the second", asyn
   });
   assert.deepEqual(seen, ["waiting", "waiting", "joined"]);
   assert.deepEqual(c.sleeps, [1000, 1000]);
+});
+
+test("the first read can ask for the state as it is, and the held read follows without waiting out the second", async () => {
+  const c = clock();
+  const asked = [];
+  const results = [{ state: "approval" }, { state: "confirm" }, { state: "joined" }];
+  await holdReads({
+    firstWait: 0,
+    read: async (wait) => { asked.push(wait); return results.shift(); },
+    onResult: (result) => result.state === "joined",
+    signal: new AbortController().signal, now: c.now, sleep: c.sleep,
+  });
+  assert.deepEqual(asked, [0, 25, 25]);
+  assert.deepEqual(c.sleeps, [1000], "no pause after the first read (a change that came right after it is not missed); the second came back at once and is followed by the rest of its second");
 });
 
 test("a held read that waited its time starts the next at once", async () => {
