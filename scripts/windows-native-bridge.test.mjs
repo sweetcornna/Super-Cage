@@ -5,8 +5,11 @@ import { randomUUID } from 'node:crypto';
 import vm from 'node:vm';
 
 const source = await readFile(new URL('../desktop/windows/MainWindow.cs', import.meta.url), 'utf8');
-const script = source.match(/private const string BridgeScript = """\s*([\s\S]*?)\s*""";/)?.[1];
+// The literal is a constant, or a static field whose one placeholder (the
+// Claude Science frame contract, a number) is filled in at start.
+const script = source.match(/private (?:const|static readonly) string BridgeScript = """\s*([\s\S]*?)\s*"""(?:;|\.Replace\("SCIENCE_FRAME_CONTRACT")/)?.[1]?.replaceAll('SCIENCE_FRAME_CONTRACT', '1');
 assert.ok(script);
+assert.ok(!/[A-Z]{3,}_[A-Z_]{3,}/.test(script.replace(/'[^']*'|"[^"]*"/g, '')), 'a placeholder of the bridge script is left unfilled');
 
 function bridge() {
   let reply, sent;
