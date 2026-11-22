@@ -25,6 +25,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 	"github.com/sylvinus/agent-vm/internal/localterm"
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
@@ -310,7 +311,7 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 		entryRefuse(w, errEntryOff)
 		return
 	}
-	header := http.Header{"Cage-Entry-Host-Key": {strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))}}
+	header := http.Header{entryproxy.HostKeyHeader: {strings.TrimSpace(string(ssh.MarshalAuthorizedKey(signer.PublicKey())))}}
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == s.origin }, ReadBufferSize: 16 << 10, WriteBufferSize: 16 << 10}
 	ws, err := upgrader.Upgrade(w, r, header)
 	if err != nil {

@@ -23,7 +23,9 @@ import (
 	"al.essio.dev/pkg/shellescape"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
@@ -42,10 +44,10 @@ import (
 
 const (
 	entryStateVersion = 1
-	entryDeviceKey    = "device_ed25519"
-	entryDeviceRecord = "device.json"
+	entryDeviceKey    = entryproxy.DeviceKey
+	entryDeviceRecord = entryproxy.DeviceRecord
 	entryHostKey      = "host_ed25519"
-	entryClientDir    = "super-cage"
+	entryClientDir    = entryproxy.ClientDir
 	entryRevokedFile  = "revoked.json"
 )
 
@@ -74,26 +76,10 @@ func defaultEntryPaths(profile, executable string) (entryPaths, error) {
 	if err != nil || home == "" {
 		return entryPaths{}, errors.New("无法确定用户目录")
 	}
-	var device string
-	switch runtime.GOOS {
-	case "darwin":
-		config, err := os.UserConfigDir()
-		if err != nil {
-			return entryPaths{}, err
-		}
-		device = filepath.Join(config, "Super Cage", "entry")
-	case "windows":
-		local := os.Getenv("LOCALAPPDATA")
-		if local == "" {
-			return entryPaths{}, errors.New("无法确定 LOCALAPPDATA")
-		}
-		device = filepath.Join(local, "Super Cage", "entry")
-	default:
-		data := os.Getenv("XDG_DATA_HOME")
-		if data == "" || !filepath.IsAbs(data) {
-			data = filepath.Join(home, ".local", "share")
-		}
-		device = filepath.Join(data, "super-cage", "entry")
+	// The proxy finds the device key in the same place (entryproxy).
+	device, err := entryproxy.DeviceDir()
+	if err != nil {
+		return entryPaths{}, err
 	}
 	system := "/etc/ssh/ssh_config"
 	if runtime.GOOS == "windows" {
@@ -112,11 +98,16 @@ func defaultEntryPaths(profile, executable string) (entryPaths, error) {
 	}, nil
 }
 
-// entryProxyCommand is the ProxyCommand of a Host block. ssh takes the rest
-// of the line as it is, expands its % tokens and hands it to the user's
-// shell (on Windows it starts the command line directly), so the executable
-// is quoted for that and its % doubled.
+// entryProxyCommand is the ProxyCommand of a Host block: the slim
+// cage-attach beside cage when there is one, which keeps each ssh
+// connection's resident proxy small, else cage. ssh takes the rest of the
+// line as it is, expands its % tokens and hands it to the user's shell (on
+// Windows it starts the command line directly), so the executable is quoted
+// for that and its % doubled.
 func entryProxyCommand(executable, environment string) string {
+	if slim := attach.Beside(executable); slim != "" {
+		executable = slim
+	}
 	quoted := shellescape.Quote(executable)
 	if runtime.GOOS == "windows" {
 		quoted = "\"" + executable + "\""
@@ -156,15 +147,9 @@ func entryEnvironmentName(profile string) string {
 }
 
 // entryProfileConfig resolves an environment id to its configuration path,
-// from the default profile's configuration path.
+// from the default profile's configuration path, as the proxy does.
 func entryProfileConfig(defaultConfig, environment string) (string, error) {
-	if environment == defaultLocalVMID {
-		return defaultConfig, nil
-	}
-	if !validLocalVMID(environment) {
-		return "", errors.New("环境标识无效")
-	}
-	return filepath.Join(filepath.Dir(defaultConfig), cage.LocalVMDir, environment, "config.json"), nil
+	return entryproxy.ProfileConfig(defaultConfig, environment)
 }
 
 // entryDevice is one computer enrolled for this environment's entry.

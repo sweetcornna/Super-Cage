@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
 // ipv6LoopbackUsable reports whether this system can bind [::1] at all.
@@ -233,7 +235,7 @@ func TestControllerClientsSendNothingToIPv6Squatter(t *testing.T) {
 				_ = AgentSocket(ctx, s.configPath, AgentTarget{}, "/api/terminals/none/stream", io.NopCloser(strings.NewReader("")), io.Discard)
 				// The local SSH entry's proxy (cage entry proxy): refused,
 				// the entry is off, but over the proven connection.
-				if ws, _, err := entryDial(ctx, s.configPath, "none"); err == nil {
+				if ws, _, err := entryproxy.Dial(ctx, s.configPath, "none", agentSameBuild); err == nil {
 					ws.Close()
 				}
 			}

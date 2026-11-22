@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
 // The entry's tests run every piece for real except the guest: Cage's own
@@ -364,18 +365,20 @@ func (f *entryFixture) call(method, path string, input, output any) error {
 	return entryCall(context.Background(), f.s.configPath, method, path, input, output)
 }
 
-// dial opens the entry the way cage entry proxy does and starts an SSH
-// client on it with key.
+// dial opens the entry with cage entry proxy's own code (entryproxy.Dial
+// and Relay) and starts an SSH client on it with key.
 func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
-	ws, hostKey, err := entryDial(context.Background(), f.s.configPath, f.computer.ID)
+	ws, line, err := entryproxy.Dial(context.Background(), f.s.configPath, f.computer.ID, agentSameBuild)
 	if err != nil {
 		return nil, err
 	}
-	if hostKey == nil || !entryKeysEqual(hostKey, f.hostKey) {
+	hostKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(line))
+	if err != nil || !entryKeysEqual(hostKey, f.hostKey) {
 		ws.Close()
-		return nil, fmt.Errorf("host key header %v", hostKey)
+		return nil, fmt.Errorf("host key header %q", line)
 	}
-	conn := newEntryWSConn(ws)
+	conn, relayed := net.Pipe()
+	go entryproxy.Relay(context.Background(), ws, relayed, relayed)
 	config := &ssh.ClientConfig{User: "whoever", Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}, HostKeyCallback: ssh.FixedHostKey(f.hostKey), Timeout: 10 * time.Second}
 	client, channels, requests, err := ssh.NewClientConn(conn, "cage-test", config)
 	if err != nil {
@@ -383,6 +386,11 @@ func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
 		return nil, err
 	}
 	return ssh.NewClient(client, channels, requests), nil
+}
+
+// proxyPaths are the fixture's paths as the proxy reads them.
+func (f *entryFixture) proxyPaths() entryproxy.Paths {
+	return entryproxy.Paths{SSHDir: f.paths.SSHDir, DeviceDir: f.paths.DeviceDir}
 }
 
 func (f *entryFixture) client() *ssh.Client {
@@ -440,16 +448,18 @@ func (f *entryFixture) systemSSH(ctx context.Context, config string, args ...str
 }
 
 // TestEntryProxyHelper is the ProxyCommand of the generated configuration in
-// these tests: the test binary runs entryProxy, the code cage entry proxy
-// runs, with the test's configuration path and entry paths.
+// these tests: the test binary runs entryproxy.Run, the code cage entry
+// proxy and cage-attach entry proxy run, with the test's configuration path
+// and entry paths.
 func TestEntryProxyHelper(t *testing.T) {
 	if os.Getenv("CAGE_ENTRY_TEST_HELPER") == "" {
 		t.Skip("helper process only")
 	}
 	var dirs map[string]string
 	_ = json.Unmarshal([]byte(os.Getenv("CAGE_ENTRY_TEST_PATHS")), &dirs)
-	paths := entryPaths{SSHDir: dirs["ssh"], DeviceDir: dirs["device"], ComputerDir: dirs["computer"]}
-	os.Exit(entryProxy(context.Background(), os.Getenv("CAGE_ENTRY_TEST_CONFIG"), os.Getenv("CAGE_ENTRY_TEST_ENV"), paths, os.Stdin, os.Stdout, os.Stderr))
+	paths := entryproxy.Paths{SSHDir: dirs["ssh"], DeviceDir: dirs["device"]}
+	cfg := entryproxy.Config{ConfigPath: os.Getenv("CAGE_ENTRY_TEST_CONFIG"), Environment: os.Getenv("CAGE_ENTRY_TEST_ENV"), Paths: paths, Check: agentSameBuild}
+	os.Exit(entryproxy.Run(context.Background(), cfg, os.Stdin, os.Stdout, os.Stderr))
 }
 
 // entryAwait waits for cond, or fails after the budget.

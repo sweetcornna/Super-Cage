@@ -64,24 +64,47 @@ type Conn struct {
 // Dial opens a workload WebSocket on the authenticated controller
 // connection, exactly as the UI does, without exporting its cookies.
 func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, path string) (*Conn, error) {
+	conn, _, err := c.DialHandshake(ctx, target, path)
+	return conn, err
+}
+
+// handshakeBodyLimit bounds the body of a refused handshake that
+// DialHandshake reads.
+const handshakeBodyLimit = 4 << 10
+
+// Handshake is the controller's answer to a WebSocket handshake: its status,
+// its single-valued headers by lower-case name and, when it refused the
+// stream, at most 4 KiB of the body that says why. Status is 0 when no
+// answer was read.
+type Handshake struct {
+	Status int
+	Header map[string]string
+	Body   []byte
+}
+
+// DialHandshake is Dial for callers that read the answer itself: the SSH
+// entry's proxy takes the host key from a header and its refusal from the
+// body. A refusal returns the same error as Dial.
+func (c *Client) DialHandshake(ctx context.Context, target controlclient.AgentTarget, path string) (*Conn, Handshake, error) {
+	var answer Handshake
 	if err := controlclient.CheckSocket(target, path); err != nil {
-		return nil, err
+		return nil, answer, err
 	}
 	if !validPath(path) {
-		return nil, &controlclient.AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
+		return nil, answer, &controlclient.AgentError{Code: "invalid_input", Message: "Use a relative /api/ WebSocket path", NextAction: "routes"}
 	}
 	var request bytes.Buffer
 	// The generation is the target's, as the UI sends it.
 	if err := c.writeHead(&request, "GET", path, controlclient.Connection(target)); err != nil {
-		return nil, &controlclient.AgentError{Code: "invalid_input", Message: "Use a connection generation without control characters", NextAction: "client.context"}
+		return nil, answer, &controlclient.AgentError{Code: "invalid_input", Message: "Use a connection generation without control characters", NextAction: "client.context"}
 	}
 	failed := &controlclient.AgentError{Code: "connection_failed", Message: "WebSocket connection failed", NextAction: "status"}
 	conn, err := c.dial(ctx, handshakeTimeout)
 	if identity := controlclient.IdentityAgentError(err); identity != nil {
-		return nil, identity
+		return nil, answer, identity
 	}
 	if err != nil {
-		return nil, failed
+		return nil, answer, failed
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Unix(1, 0)) })
 	var nonce [16]byte
@@ -93,24 +116,31 @@ func (c *Client) Dial(ctx context.Context, target controlclient.AgentTarget, pat
 	if _, err = conn.Write(request.Bytes()); err == nil {
 		reply, err = readReply(r)
 	}
+	if err == nil {
+		answer.Status, answer.Header = reply.status, reply.header
+		if reply.status != 101 && (reply.chunked || reply.contentLength >= 0) {
+			// Bounded by the dial's deadline, which still holds.
+			answer.Body, _ = readBody(r, reply, handshakeBodyLimit)
+		}
+	}
 	if !stop() || err != nil {
 		conn.Close()
-		return nil, failed
+		return nil, answer, failed
 	}
 	if reply.status != 101 {
 		conn.Close()
-		return nil, controlclient.HTTPError(reply.status)
+		return nil, answer, controlclient.HTTPError(reply.status)
 	}
 	digest := sha1.Sum([]byte(key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
 	if !strings.EqualFold(reply.header["upgrade"], "websocket") || !hasToken(reply.header["connection"], "upgrade") ||
 		reply.header["sec-websocket-accept"] != base64.StdEncoding.EncodeToString(digest[:]) ||
 		reply.header["sec-websocket-extensions"] != "" || reply.header["sec-websocket-protocol"] != "" {
 		conn.Close()
-		return nil, failed
+		return nil, answer, failed
 	}
 	_ = conn.SetDeadline(time.Time{})
 	// Frames that arrived with the handshake are already in r.
-	return &Conn{conn: conn, r: r}, nil
+	return &Conn{conn: conn, r: r}, answer, nil
 }
 
 func hasToken(value, token string) bool {

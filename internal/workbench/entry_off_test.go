@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
 type entryRouteRecorder struct{ patterns []string }
@@ -84,7 +86,7 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 				t.Fatalf("%s while off: %v", pattern, err)
 			}
 		case "GET /api/entry/ssh":
-			if _, _, err := entryDial(context.Background(), f.s.configPath, device); !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code || refusal.Status != http.StatusConflict {
+			if _, _, err := entryproxy.Dial(context.Background(), f.s.configPath, device, agentSameBuild); !errors.As(err, &refusal) || refusal.Code != errEntryOff.Code || refusal.Status != http.StatusConflict {
 				t.Fatalf("dial while off: %v", err)
 			}
 		case "POST /api/terminals/{id}/keep":
@@ -106,7 +108,7 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 		}
 	}
 	var stderr bytes.Buffer
-	if code := entryProxy(context.Background(), f.s.configPath, defaultLocalVMID, f.paths, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != entryProxyFailure || !strings.HasPrefix(stderr.String(), "Super Cage：") {
+	if code := entryproxy.Run(context.Background(), entryproxy.Config{ConfigPath: f.s.configPath, Environment: defaultLocalVMID, Paths: f.proxyPaths(), Check: agentSameBuild}, strings.NewReader(""), &bytes.Buffer{}, &stderr); code != entryProxyFailure || !strings.HasPrefix(stderr.String(), "Super Cage：") {
 		t.Fatalf("proxy while off: %d %q", code, stderr.String())
 	}
 	if _, err := entrySSHCommand(f.paths, defaultLocalVMID, nil); err == nil {

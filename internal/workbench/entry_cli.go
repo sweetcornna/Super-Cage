@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
 // entryCall makes one request to the environment's controller with the
@@ -44,12 +46,12 @@ func entryCall(ctx context.Context, configPath, method, path string, input, outp
 	c.client.Timeout = time.Minute
 	response, err := c.client.Do(request)
 	if err != nil {
-		return &entryRefusal{0, "connection", "与 Super Cage 的连接中断：请查看状态后再重试"}
+		return &entryRefusal{Code: "connection", Message: "与 Super Cage 的连接中断：请查看状态后再重试"}
 	}
 	defer response.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 	if response.StatusCode != http.StatusOK {
-		refusal := entryHTTPRefusal(response.StatusCode, data)
+		refusal := entryproxy.HTTPRefusal(response.StatusCode, data)
 		if refusal.Code == "failed" && len(data) > 0 && len(data) < 512 {
 			refusal.Message = strings.TrimSpace(string(data))
 		}
@@ -95,11 +97,10 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 		return 2
 	}
 	if args[0] == "proxy" {
-		if len(args) != 2 {
-			fmt.Fprintln(stderr, "Super Cage：用法 cage entry proxy <环境>")
-			return entryProxyFailure
-		}
-		return EntryProxy(ctx, defaultConfig, args[1], stdin, stdout, stderr)
+		// cmd/cage hands this to the cage-attach beside it when there is
+		// one; here the controller must be this very build, as for cage
+		// agent.
+		return entryproxy.Main(ctx, args, defaultConfig, agentSameBuild, stdin, stdout, stderr)
 	}
 	jsonOutput := false
 	var rest []string
