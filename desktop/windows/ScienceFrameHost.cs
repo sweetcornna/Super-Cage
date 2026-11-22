@@ -57,7 +57,9 @@ internal sealed class ScienceFrameHost
         this.navigate = navigate;
         // Frames navigate to the attached session's origin only (and to
         // about:blank or srcdoc documents, which stay in it); the workbench
-        // itself has no frames (frame-src 'none' without a front).
+        // itself has no frames (frame-src 'none' without a front). WebView2
+        // 157 still sends a cancelled navigation's request; only its document
+        // never commits (desktop/windows.webview2-checks, frame-navigation).
         core.FrameNavigationStarting += (_, e) => {
             if (e.Uri is "about:blank" or "about:srcdoc") return;
             if (origin.Length == 0 || !Uri.TryCreate(e.Uri, UriKind.Absolute, out var url) ||
@@ -127,6 +129,8 @@ internal sealed class ScienceFrameHost
     // (N7): a reload as a reload; anything else as a navigation to its
     // address, so a back or forward one becomes a new history entry and a
     // form's POST body would be lost (the workbench submits no forms).
+    // Cancelling keeps the old document (and the frame) alive; WebView2 157
+    // still sends the cancelled request, so the address is requested twice.
     public bool Hold(string uri, bool reload)
     {
         var ending = origin;

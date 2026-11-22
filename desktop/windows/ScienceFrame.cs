@@ -263,7 +263,13 @@ internal static partial class ScienceFrame
     }
 
     // The locale override is per renderer process: a second target in the
-    // same process reports the one already set.
+    // same process reports the one already set. Chromium says so in the
+    // error's text, but WebView2 157 reports every protocol error as
+    // E_INVALIDARG ("Value does not fall within the expected range."), so
+    // in the window this never matches and such a second frame ends the
+    // frame (fail closed). Two frames of one session origin are the only
+    // ones that share a process (each label is its own site,
+    // desktop/windows.webview2-checks), and the pane never shows two.
     public static bool Benign(string message) => message.Contains("Another locale override is already in effect", StringComparison.Ordinal);
 
     // The proxy proof prepare runs (F5): an address that cannot exist, then a
