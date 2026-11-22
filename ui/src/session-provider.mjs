@@ -170,8 +170,31 @@ export function archiveCopy(session, { closing = false } = {}) {
   return { title: closing ? "关闭并归档这段会话？" : "归档这段会话？", body: body + kept, confirm: closing ? "关闭并归档" : "归档会话" };
 }
 
+// A Codex launch the guest refused ends its terminal with this status
+// (codex_sessions.py LAUNCH_REFUSED); the terminal list reports it as exit_code.
+export const CODEX_LAUNCH_REFUSED = 75;
+export const codexLaunchRefused = (tab) => isCodexTab(tab) && tab.closed === true && tab.exit_code === CODEX_LAUNCH_REFUSED;
+
+// The last line a terminal drew, from its buffer (xterm's buffer.active): the
+// refusal's reason is the last thing the launch printed before it ended.
+export function terminalLastLine(buffer) {
+  for (let index = (buffer?.length ?? 0) - 1; index >= 0; index--) {
+    const text = buffer.getLine(index)?.translateToString(true).trim();
+    if (text) return text;
+  }
+  return "";
+}
+
+// The one line a pane shows over a session that has ended: a refused Codex
+// launch says it did not open, and why; any other end is an ordinary close.
+export function endedNote(tab, reason = "") {
+  if (!codexLaunchRefused(tab)) return "终端会话已结束。可点击项目右侧的终端图标新建终端。";
+  return "未能打开：" + (reason || "电脑拒绝了这次 Codex 启动，原因见终端中的提示");
+}
+
 // The state word in the header of a Codex session's pane.
-export function codexStateWord(session, { closed = false } = {}) {
+export function codexStateWord(session, { closed = false, refused = false } = {}) {
+  if (refused) return "未能打开";
   if (closed) return "已结束";
   const owner = sessionOwner(session);
   if (owner === "phone") return session?.active ? "手机正在运行" : "手机上打开";

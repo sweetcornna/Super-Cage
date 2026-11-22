@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { sessionKey } from "./session-order.mjs";
 import { canContinueInTerminal, canStopFromPane, codexCapabilities, codexMenuLabel, codexSessionAccountLabel, codexSessionAction,
-  isCodexSession, isCodexTab, mixedSessionRows, archiveCopy, codexStateWord, sessionViewPath, ownerState, providerChip, providerLabel, purgeCopy, selectionProvider, sessionListPath, sessionOwner,
+  codexLaunchRefused, endedNote, terminalLastLine, isCodexSession, isCodexTab, mixedSessionRows, archiveCopy, codexStateWord, sessionViewPath, ownerState, providerChip, providerLabel, purgeCopy, selectionProvider, sessionListPath, sessionOwner,
   shouldGateStartup, showSessionAccount } from "./session-provider.mjs";
 
 const codex = (id, owner = "", extra = {}) => ({ id, provider: "codex", owner, title: id, ...extra });
@@ -115,6 +115,24 @@ test("archive copy names what stops", () => {
   assert.match(archiveCopy(codex("a", "external")).body, /不会停止其他进程/);
   assert.equal(archiveCopy(codex("a", "")).body, "历史将保留，可从设置中的已归档会话恢复。");
   assert.match(archiveCopy(codex("a", "surprise")).body, /不会停止其他进程/, "unknown owners read as external");
+});
+
+test("a refused Codex launch is not an ordinary close", () => {
+  const ended = (fields) => ({ cli_session_provider: "codex", closed: true, exit_code: 75, ...fields });
+  assert.equal(codexLaunchRefused(ended()), true);
+  assert.equal(codexLaunchRefused(ended({ exit_code: 0 })), false, "Codex quit on its own");
+  assert.equal(codexLaunchRefused(ended({ exit_code: undefined })), false, "an older server sends no status");
+  assert.equal(codexLaunchRefused(ended({ closed: false })), false, "only an ended terminal");
+  assert.equal(codexLaunchRefused(ended({ cli_session_provider: "" })), false, "a Claude or plain terminal ending with 75 is its own business");
+  assert.equal(endedNote(ended(), "会话账号已变化，请重新读取会话列表"), "未能打开：会话账号已变化，请重新读取会话列表");
+  assert.match(endedNote(ended()), /^未能打开：电脑拒绝了这次 Codex 启动/);
+  assert.equal(endedNote(ended({ exit_code: 0 })), "终端会话已结束。可点击项目右侧的终端图标新建终端。");
+  assert.equal(codexStateWord(codex("a", "desktop"), { closed: true, refused: true }), "未能打开");
+  const lines = ["", "$ codex", "会话账号已变化，请重新读取会话列表", "  ", ""];
+  const buffer = { length: lines.length, getLine: (index) => ({ translateToString: () => lines[index] }) };
+  assert.equal(terminalLastLine(buffer), "会话账号已变化，请重新读取会话列表", "the last line with text");
+  assert.equal(terminalLastLine({ length: 0, getLine: () => undefined }), "");
+  assert.equal(terminalLastLine(undefined), "");
 });
 
 test("state words", () => {
