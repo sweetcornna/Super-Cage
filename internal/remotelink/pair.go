@@ -669,6 +669,7 @@ type JoinerPairing struct {
 	key     []byte
 	binding pairBinding
 	record  []byte
+	left    chan struct{}
 }
 
 // JoinHost checks the host's proof of the code, then proves the code itself
@@ -743,8 +744,22 @@ func (j *JoinerPairing) Await(ctx context.Context) ([]byte, error) {
 	if err != nil {
 		return nil, pairStepError(ctx, err)
 	}
-	return j.result(m)
+	record, err := j.result(m)
+	if err == nil {
+		// The host sends nothing more: a message or a closed session means
+		// it went away while this side's person compares the number.
+		j.left = make(chan struct{})
+		go func() {
+			_, _ = readPairMessage(j.conn)
+			close(j.left)
+		}()
+	}
+	return record, err
 }
+
+// Left is closed when the host ends the session after its approval, before
+// this side confirmed or refused. It is nil until Await returned a record.
+func (j *JoinerPairing) Left() <-chan struct{} { return j.left }
 
 func (j *JoinerPairing) result(m pairMessage) ([]byte, error) {
 	if refused := m.refusal(); refused != nil {

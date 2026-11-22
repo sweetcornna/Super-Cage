@@ -64,6 +64,7 @@ var (
 	ErrDeviceJoinerLeft      = errors.New("对方已取消加入")
 	ErrDeviceCodeExpired     = errors.New("配对码已过期，请重新生成")
 	ErrDeviceNotConfirmed    = errors.New("加入的设备没有确认核对数字，没有添加")
+	ErrDeviceHostLeft        = errors.New("对方电脑已取消，没有加入，也没有保存任何内容")
 	errDeviceCodeFormat      = errors.New("请输入 8 位数字配对码")
 )
 
@@ -406,9 +407,22 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 		return none, errors.New("电脑未完成配对，请重新获取配对码")
 	}
 	asked, stopAsking := context.WithTimeout(ctx, DeviceApprovalTimeout)
+	go func() {
+		select {
+		case <-pending.Left():
+			stopAsking()
+		case <-asked.Done():
+		}
+	}()
 	same := confirm(asked, pending.Check)
 	expired := asked.Err() != nil
 	stopAsking()
+	select {
+	case <-pending.Left():
+		// The host closed its dialog or locked: nothing to confirm to.
+		return none, ErrDeviceHostLeft
+	default:
+	}
 	reply, done := context.WithTimeout(ctx, 10*time.Second)
 	defer done()
 	if !same || expired {

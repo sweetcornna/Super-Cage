@@ -50,8 +50,9 @@ const (
 	deviceLinkRest         = 5 * time.Minute
 	deviceLockRecheck      = 2 * time.Second
 	deviceDefaultName      = "另一台电脑"
-	// deviceJoinLimit bounds a short-code join: the code's life plus the
-	// other computer's approval (design §4.2).
+	// deviceJoinLimit bounds a short-code join from the moment the code is
+	// typed: finding the room, the other computer's approval (at most 75 s)
+	// and this window's confirmation (60 s), design §4.2.
 	deviceJoinLimit = 3 * time.Minute
 )
 

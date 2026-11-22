@@ -77,8 +77,10 @@ type deviceInvite struct {
 }
 
 // deviceInviteLife bounds an invite: the code's two minutes (applied by
-// mobilelink.AcceptDevice) plus the wait for 允许 and the answer.
-const deviceInviteLife = 4 * time.Minute
+// mobilelink.AcceptDevice), the 60 s wait for 允许 and the joiner's own
+// confirmation (at most 75 s more), so a joiner that arrives late still has
+// its whole minute to confirm.
+const deviceInviteLife = 5 * time.Minute
 
 // guestProfile is the device's private guest browser profile: stable across
 // its reconnects, unrelated to its id, and never a name the guest could match.

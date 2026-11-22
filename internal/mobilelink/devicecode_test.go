@@ -841,6 +841,33 @@ func TestDeviceCodeJoinerConfirms(t *testing.T) {
 			}
 		})
 	}
+	// The host's person closes the dialog (or the host locks) after 允许:
+	// the joiner's question ends at once and a late click saves nothing.
+	t.Run("host leaves", func(t *testing.T) {
+		DeviceApprovalTimeout = 10 * time.Second
+		defer func() { DeviceApprovalTimeout = 300 * time.Millisecond }()
+		f := newDeviceFixture(t, 0)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		hostCtx, leave := context.WithCancel(ctx)
+		defer leave()
+		inv, done := f.serve(hostCtx, func(context.Context, DeviceRequest) bool { return true })
+		start := time.Now()
+		record, err := f.redeemWith(ctx, inv.Code, nil, func(asked context.Context, _ string) bool {
+			leave()
+			<-asked.Done()
+			return true
+		})
+		if !errors.Is(err, ErrDeviceHostLeft) || record != (PairedHost{}) || time.Since(start) > 5*time.Second {
+			t.Fatalf("joiner: %+v %v after %v", record, err, time.Since(start))
+		}
+		if err := receive(t, done); !errors.Is(err, context.Canceled) {
+			t.Fatalf("host: %v", err)
+		}
+		if _, saved := f.counts(); saved != 0 {
+			t.Fatal("host saved a joiner after leaving")
+		}
+	})
 }
 
 func TestParseDeviceCode(t *testing.T) {
