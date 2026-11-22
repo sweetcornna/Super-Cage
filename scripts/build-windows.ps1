@@ -11,6 +11,7 @@ param(
     [string]$DependencyCache
 )
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
+if ($Release -and $ScienceHostVerified) { throw 'A release never carries the lifted Claude Science host-rendering gate: -ScienceHostVerified is for the real-window run only, until a reviewed commit lifts the gate in the sources.' }
 $repository = Split-Path $PSScriptRoot -Parent
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repository '_output/windows-amd64/app' }
 if (-not $DependencyCache) { $DependencyCache = Join-Path $repository '_output/windows-deps' }

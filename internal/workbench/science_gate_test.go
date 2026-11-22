@@ -31,6 +31,18 @@ func TestScienceHostGatesMoveTogether(t *testing.T) {
 	if !regexp.MustCompile(`(?m)^\s*\[switch\]\$ScienceHostVerified,\s*$`).MatchString(script) {
 		t.Fatal("build-windows.ps1 has no [switch]$ScienceHostVerified parameter")
 	}
+	// A release never carries the lifted gate (a reviewed commit lifts it
+	// in the sources).
+	if !regexp.MustCompile(`(?m)^if \(\$Release -and \$ScienceHostVerified\) \{ throw '[^']+' \}$`).MatchString(script) {
+		t.Fatal("build-windows.ps1 does not refuse -Release with -ScienceHostVerified")
+	}
+	// Every build of the window passes the property explicitly (true or
+	// false), so an environment variable cannot lift the window alone.
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "Cage.Windows.csproj") && !strings.Contains(line, "'publish'") {
+			t.Fatalf("build-windows.ps1 builds the window other than through the one publish: %s", line)
+		}
+	}
 	// It alone decides both: the server's ldflag and the window's property.
 	const lift = "-X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows"
 	for _, want := range []string{
