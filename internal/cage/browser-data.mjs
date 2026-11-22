@@ -34,6 +34,8 @@ const storageDirectories = ["IndexedDB", "Local Storage", "Session Storage", "Se
 const categories = ["history", "site", "cache", "downloads"];
 const pageSize = 50;
 const memoLifetime = 20_000;
+// Usage is asked origin by origin over CDP: one site list asks for at most this many.
+const usageLimit = 500;
 
 // Cookie keys match browser-cookies.mjs, so a key names the same cookie in
 // both tools.
@@ -175,9 +177,11 @@ export class BrowserData {
 
   // Every origin this session is known to have touched: open tabs, cookie
   // hosts, recent history and, in the regular profile, every origin that
-  // holds storage there (browser-data-storage.mjs). storageError says the
-  // profile could not be read, so origins may be missing.
-  async origins(scope) {
+  // holds storage there (browser-data-storage.mjs; stored names those).
+  // storageError says the profile could not be read, so origins may be
+  // missing. With accept (a clear's kept domains), only storage origins it
+  // takes are read, and more than the read's limit is an error.
+  async origins(scope, accept) {
     const origins = new Map();
     const add = (origin, last = 0, visits = 0) => {
       if (!origin) return;
@@ -190,15 +194,16 @@ export class BrowserData {
     // A cookie names a host, not a scheme or a port: both schemes are probed.
     for (const host of new Set(cookies.map(cookieHost))) { add("https://" + host); add("http://" + host); }
     let historyComplete = true, storageError = null;
+    const stored = new Set();
     if (!scope.private) {
       const history = await this.extension("history-origins");
       historyComplete = history.complete;
       for (const [origin, entry] of Object.entries(history.origins)) add(origin, entry.last, entry.visits);
       try {
-        for (const origin of await storageOrigins(join(this.profile, "Default"))) add(origin);
+        for (const origin of await storageOrigins(join(this.profile, "Default"), accept ? { accept, strict: true } : {})) { add(origin); stored.add(origin); }
       } catch (error) { storageError = error; }
     }
-    return { origins, cookies, historyComplete, storageError };
+    return { origins, cookies, historyComplete, storageError, stored };
   }
 
   async usage(scope, origins) {
@@ -211,9 +216,11 @@ export class BrowserData {
     if (this.memo?.session === session && this.now() - this.memo.at < memoLifetime) return this.memo;
     const scope = await this.scope(session);
     if (!scope) return { session, sites: [], at: this.now() };
-    const { origins, cookies, historyComplete } = await this.origins(scope);
-    const list = [...origins.keys()];
-    const bytes = await this.usage(scope, list);
+    const { origins, cookies, historyComplete, stored } = await this.origins(scope);
+    // Origins holding storage first: one build asks for at most usageLimit
+    // usages; the rest (tabs, cookies and history without storage) count 0.
+    const list = [...origins.keys()].sort((a, b) => stored.has(b) - stored.has(a));
+    const bytes = [...await this.usage(scope, list.slice(0, usageLimit)), ...new Array(Math.max(0, list.length - usageLimit)).fill(0)];
     const sites = new Map();
     const entry = site => {
       if (!sites.has(site)) sites.set(site, { site, cookies: 0, cookieBytes: 0, bytes: 0, last: 0, origins: [], stored: 0 });
@@ -369,7 +376,8 @@ export class BrowserData {
       const before = await this.disk(measured);
       let kept = [], keptHere = [], skippedOrigins = 0, keptDownloads = 0;
       if (wanted.includes("site") || wanted.includes("cache")) {
-        const { origins, storageError } = keepEnabled ? await this.origins(scope) : { origins: new Map() };
+        const underKept = origin => keep.some(domain => within(originHost(origin), domain));
+        const { origins, storageError } = keepEnabled ? await this.origins(scope, underKept) : { origins: new Map() };
         // Without the profile's own list a kept domain's subdomains could lose
         // their sign-in: nothing is deleted (the HTTP cache holds no sign-in).
         if (storageError && wanted.includes("site") && keep.length)

@@ -71,3 +71,10 @@ test("finding 12: deleting a long entry by id removes the whole address", async 
   assert.deepEqual(await p.call({ op: "history-delete-entries", entries: [{ id: "1", time: 50 }, { id: "2", time: 50 }] }), { ok: true, removed: 1 });
   assert.equal(p.remaining().length, 0);
 });
+
+test("review round 2, N7: an exclusion list that lost every origin removes nothing", async () => {
+  const p = page();
+  const result = await p.call({ op: "remove", since: 0, excludeOrigins: ["https://www.192.168.1.10", "https://foo.123"], types: { cookies: true } });
+  assert.deepEqual(result, { ok: true, skipped: 2 });
+  assert.equal(p.calls.length, 0);
+});

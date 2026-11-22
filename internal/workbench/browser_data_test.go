@@ -41,6 +41,9 @@ func browserDataServer(t *testing.T, answer func(path string, body map[string]an
 		calls = append(calls, browserDataGuestCall{r.URL.Path, body})
 		mu.Unlock()
 		status, text := answer(r.URL.Path, body)
+		if status == 0 {
+			return nil, errors.New("connection reset by peer")
+		}
 		return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(text)), Header: make(http.Header)}, nil
 	}))
 	return s, func() []browserDataGuestCall {
@@ -613,6 +616,12 @@ func TestBrowserKeptDomainRefusesNumericHostsAndPublicSuffixes(t *testing.T) {
 			t.Errorf("%q accepted", input)
 		}
 	}
+	// Review round 2, N8: no IPv6 form can be kept (the guest cannot use one).
+	for _, input := range []string{"[::ffff:1.2.3.4]", "[::1]", "[2001:db8::1]:8443", "http://[2001:db8::1]:8080/", "https://[::ffff:102:304]/"} {
+		if _, err := browserKeptDomain(input); err == nil || err.Error() != "请输入网站域名，例如 github.com" {
+			t.Errorf("%q: %v", input, err)
+		}
+	}
 	for _, input := range []string{"co.uk", "github.io", "com.cn", "vercel.app", "*.co.jp"} {
 		if _, err := browserKeptDomain(input); err == nil || !strings.Contains(err.Error(), "公共后缀") {
 			t.Errorf("%q: %v", input, err)
@@ -671,9 +680,22 @@ func TestBrowserClearIsAHostJob(t *testing.T) {
 	if job := s.jobs.snapshot(); !job.Running || job.Kind != "browser-clear" {
 		t.Fatalf("a clear must be a host job: %+v", job)
 	}
-	second := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","range":"hour","types":["history"]}`, true)
+	second := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"clear","types":["site"],"range":"all","remember":true}`, true)
 	if second.Code != 200 || !strings.Contains(second.Body.String(), jobID) {
-		t.Fatalf("a second window joins the running clear: %d %s", second.Code, second.Body.String())
+		t.Fatalf("a second window asking for the same clear joins it: %d %s", second.Code, second.Body.String())
+	}
+	// Review round 2, N2: a different clear is refused, not folded into this one.
+	for _, body := range []string{`{"mode":"clear","range":"hour","types":["history"]}`, `{"mode":"clear","range":"all","types":["site"],"protect":"none"}`, `{"mode":"clear-sites","sites":["example.com"]}`} {
+		if w := request(s, "POST", "/api/browser/data", s.origin, body, true); w.Code != http.StatusConflict || strings.TrimSpace(w.Body.String()) != "另一项清除正在进行，完成后再试" {
+			t.Fatalf("%s during another clear: %d %s", body, w.Code, w.Body.String())
+		}
+	}
+	// Review round 2, N5: the network lease keeps being renewed while a clear runs.
+	s.mu.Lock()
+	blocked := s.networkMonitorBlockedLocked()
+	s.mu.Unlock()
+	if blocked {
+		t.Fatal("the network monitor is paused by a browser clear")
 	}
 	poll := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"job","id":"`+jobID+`"}`, true)
 	if poll.Code != 200 || !strings.Contains(poll.Body.String(), `"running"`) {
@@ -766,6 +788,82 @@ func TestBrowserClearReportsWhatTheHostSaw(t *testing.T) {
 	defer mu.Unlock()
 	if !slices.ContainsFunc(messages, func(message string) bool { return strings.Contains(message, "联网授权已到期") }) {
 		t.Fatalf("the lapsed lease was not said: %q", messages)
+	}
+}
+
+// Review round 2, N6: the reply to a reset request is lost. The host treats
+// the browser as possibly resetting (not ready), follows the controller and
+// reads the outcome by id; a request that never took effect is cancelled by
+// its id and said so.
+func TestBrowserResetFollowsALostReply(t *testing.T) {
+	restartLimit, unanswered := browserRestartLimit, browserResetUnanswered
+	defer func() { browserRestartLimit, browserResetUnanswered = restartLimit, unanswered }()
+	browserRestartLimit, browserResetUnanswered = 3*time.Second, time.Second
+	for _, c := range []struct {
+		name  string
+		taken bool
+	}{{"taken", true}, {"never arrived", false}} {
+		t.Run(c.name, func(t *testing.T) {
+			var mu sync.Mutex
+			var resetID, canceled string
+			var health int
+			var readyDuring []bool
+			var server *Server
+			s, _ := browserDataServer(t, func(path string, body map[string]any) (int, string) {
+				mu.Lock()
+				defer mu.Unlock()
+				switch {
+				case path == "/tabs":
+					return 200, `{"tabs":[]}`
+				case path == "/health":
+					health++
+					server.mu.Lock()
+					readyDuring = append(readyDuring, server.ready)
+					server.mu.Unlock()
+					if c.taken && health <= 2 {
+						return 502, `{"error":"down"}`
+					}
+					return 200, `{"ok":true}`
+				case body["mode"] == "reset":
+					resetID, _ = body["id"].(string)
+					return 0, ""
+				case body["mode"] == "reset-status":
+					if c.taken && body["id"] == resetID {
+						return 200, `{"state":"done"}`
+					}
+					return 200, `{"state":"unknown"}`
+				case body["mode"] == "reset-cancel":
+					canceled, _ = body["id"].(string)
+					return 200, `{"ok":true}`
+				}
+				return 200, `{"ok":true}`
+			})
+			server = s
+			if w := request(s, "POST", "/api/browser/data", s.origin, `{"mode":"reset"}`, true); w.Code != 200 {
+				t.Fatalf("reset: %d %s", w.Code, w.Body.String())
+			}
+			job := awaitJobIdle(t, &s.jobs)
+			mu.Lock()
+			defer mu.Unlock()
+			if resetID == "" {
+				t.Fatal("no reset request reached the controller")
+			}
+			if !slices.Contains(readyDuring, false) {
+				t.Fatalf("the host did not treat the browser as possibly resetting: %v", readyDuring)
+			}
+			s.mu.Lock()
+			ready := s.ready
+			s.mu.Unlock()
+			if !ready {
+				t.Fatal("not reconnected after the reset")
+			}
+			if c.taken && job.Error != "" {
+				t.Fatalf("a reset that took place: %+v", job)
+			}
+			if !c.taken && (!strings.Contains(job.Error, "没有收到重置请求") || canceled != resetID) {
+				t.Fatalf("a reset that never arrived: %+v, cancelled %q of %q", job, canceled, resetID)
+			}
+		})
 	}
 }
 
