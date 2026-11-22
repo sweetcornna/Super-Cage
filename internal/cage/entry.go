@@ -18,6 +18,16 @@ import (
 //go:embed entry-run.sh
 var entryRun string
 
+//go:embed entry-herdr-profile.sh
+var entryHerdrProfile string
+
+// EntryHerdrProfilePath is the login profile part that points hc in Cage
+// terminals at the Herdr core the entry runs (HC_SOCKET).
+const EntryHerdrProfilePath = "/etc/profile.d/cage-herdr.sh"
+
+// EntryHerdrProfile is the file installed at EntryHerdrProfilePath.
+func EntryHerdrProfile() string { return entryHerdrProfile }
+
 // EntryRunPath is where the entry's channel script lives in a Linux guest.
 const EntryRunPath = "/usr/local/lib/cage-entry/run"
 
@@ -28,19 +38,22 @@ func EntryRunScript() string { return entryRun }
 // left alone.
 func EntryRunDigest() string { return fmt.Sprintf("%x", sha256.Sum256([]byte(entryRun))) }
 
-// EntryInstallScript installs the channel script at path when the copy there
-// differs. It runs as the guest user through the controller's control hop and
-// uses sudo like the component start script, so the script ends up owned by
-// root. It prints nothing on success.
-func EntryInstallScript(path string) string {
+// EntryInstallScript installs the channel script at path, and the Herdr
+// profile part at profile, each only when the copy there differs. It runs as
+// the guest user through the controller's control hop and uses sudo like
+// the component start script, so the files end up owned by root. It prints
+// nothing on success.
+func EntryInstallScript(path, profile string) string {
+	return "set -eu\ntmp=\ntrap 'rm -f \"$tmp\"' EXIT\n" + entryInstallFile(path, "0755", entryRun, "CAGE_ENTRY_RUN") + entryInstallFile(profile, "0644", entryHerdrProfile, "CAGE_ENTRY_PROFILE")
+}
+
+func entryInstallFile(path, mode, content, marker string) string {
 	directory := path[:strings.LastIndex(path, "/")]
-	return "set -eu\n" +
-		"want=" + EntryRunDigest() + "\n" +
-		"have=$(sha256sum " + path + " 2>/dev/null | cut -d' ' -f1 || true)\n" +
-		"if [ \"$have\" = \"$want\" ]; then exit 0; fi\n" +
+	return "if [ \"$(sha256sum " + path + " 2>/dev/null | cut -d' ' -f1 || true)\" != " + fmt.Sprintf("%x", sha256.Sum256([]byte(content))) + " ]; then\n" +
 		"tmp=$(mktemp)\n" +
-		"trap 'rm -f \"$tmp\"' EXIT\n" +
-		"cat >\"$tmp\" <<'CAGE_ENTRY_RUN'\n" + entryRun + "CAGE_ENTRY_RUN\n" +
+		"cat >\"$tmp\" <<'" + marker + "'\n" + content + marker + "\n" +
 		"sudo install -d -o root -g root -m 0755 " + directory + "\n" +
-		"sudo install -o root -g root -m 0755 \"$tmp\" " + path + "\n"
+		"sudo install -o root -g root -m " + mode + " \"$tmp\" " + path + "\n" +
+		"rm -f \"$tmp\"\n" +
+		"fi\n"
 }

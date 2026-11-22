@@ -39,8 +39,8 @@ type entryConn struct {
 	// flush holds a cut back until terminal sessions wrote their reset.
 	flush entryFlush
 	// What the connection runs now, for the status line.
-	shells, execs, sftps atomic.Int32
-	channels             atomic.Int32
+	shells, execs, sftps, herdrs atomic.Int32
+	channels                     atomic.Int32
 	// refused counts each request or channel type the endpoint refused, so
 	// tests can tell "the client never asked" from "asked and refused".
 	refusedMu sync.Mutex
@@ -163,6 +163,8 @@ type entryConnections struct {
 	Shell int `json:"shell"`
 	Exec  int `json:"exec"`
 	SFTP  int `json:"sftp"`
+	// Herdr counts Herdr machine links.
+	Herdr int `json:"herdr"`
 }
 
 func (r *entryRegistry) counts() entryConnections {
@@ -177,6 +179,7 @@ func (r *entryRegistry) counts() entryConnections {
 		out.Shell += int(c.shells.Load())
 		out.Exec += int(c.execs.Load())
 		out.SFTP += int(c.sftps.Load())
+		out.Herdr += int(c.herdrs.Load())
 	}
 	return out
 }

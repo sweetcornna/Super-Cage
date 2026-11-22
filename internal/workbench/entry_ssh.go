@@ -41,7 +41,9 @@ import (
 //                            output through cage attach's escape filter;
 //       exec, shell        -> the guest's run script over Cage's own hop;
 //       subsystem sftp     -> the guest's sftp-server over the same hop;
-//       Herdr's connect line -> refused until step 3 brings its filter.
+//       Herdr's connect line -> the environment's Herdr core, through the
+//                            Herdr filter (entry_herdr.go); Herdr's TUI
+//                            bridge is refused.
 //   - no handler for any forwarding, agent, X11, tunnel or client
 //     environment: those channels are rejected, those requests answered no.
 
@@ -60,7 +62,6 @@ const (
 	// terminal's creation or a monitor round to release the operation lock.
 	entryOperationWait     = 10 * time.Second
 	entryServerVersion     = "SSH-2.0-SuperCage"
-	entryHerdrRefusal      = "Super Cage：本机终端还不能接入 Herdr，需要更新 Super Cage 到支持 Herdr 的版本。"
 	entryLockedNotice      = "Super Cage 已锁定：这个终端仍在运行。在应用中解锁后，用 ssh -t 重新接入，或在 Super Cage 里打开它。"
 	entryTerminalLimitText = "已有 12 个终端：先关闭一个"
 )
@@ -79,6 +80,8 @@ type entryService struct {
 	install func(context.Context) error
 	// kept is the idle check of kept ssh terminals.
 	kept entryKeptCheck
+	// herdr holds the delay after Herdr lines the environment ended at once.
+	herdr entryHerdrState
 }
 
 // entryFocusOn turns on focus reports in the ssh client's terminal, as cage
@@ -164,7 +167,7 @@ func (s *Server) entryStartWrapper() <-chan struct{} {
 	install := s.entry.install
 	if install == nil {
 		install = func(ctx context.Context) error {
-			_, err := s.guestControl(ctx, cage.EntryInstallScript(cage.EntryRunPath), "entry")
+			_, err := s.guestControl(ctx, cage.EntryInstallScript(cage.EntryRunPath, cage.EntryHerdrProfilePath), "entry")
 			return err
 		}
 	}
@@ -459,20 +462,20 @@ type entryWindowChange struct {
 	Cols, Rows, Width, Height uint32
 }
 
-// entryHerdrConnect recognises Herdr's connect line (herdr-core
-// machines.rs:242-266, "exec \"$p\" connect" after locating herdr-core) and
-// drifted variants of it: any command that names herdr-core, or hc as a
-// word, together with the word connect. Until step 3 brings the Herdr filter
-// these are refused, so a newer Herdr whose line changed still cannot open
-// an unfiltered link. Probes and installs (uname -sm, herdr-core --version,
-// herdr-core server restart) do not say connect and stay ordinary commands.
+// entryHerdrLine recognises what looks like Herdr's connect line (herdr-core
+// machines.rs:242-266, "exec \"$p\" connect" after locating herdr-core): any
+// command that names herdr-core, or hc as a word, together with the word
+// connect. Only the exact line becomes a Herdr link (entryHerdrClassify);
+// the rest are refused, so a newer Herdr whose line changed cannot open an
+// unfiltered link. Probes (uname -sm, herdr-core --version) do not say
+// connect and stay ordinary commands.
 var (
-	entryHerdrName    = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])hc([^A-Za-z0-9_-]|$)`)
-	entryHerdrConnect = regexp.MustCompile(`(^|[^A-Za-z0-9_-])connect([^A-Za-z0-9_-]|$)`)
+	entryHerdrName        = regexp.MustCompile(`(^|[^A-Za-z0-9_.-])hc([^A-Za-z0-9_-]|$)`)
+	entryHerdrConnectWord = regexp.MustCompile(`(^|[^A-Za-z0-9_-])connect([^A-Za-z0-9_-]|$)`)
 )
 
 func entryHerdrLine(command string) bool {
-	return (strings.Contains(command, "herdr-core") || entryHerdrName.MatchString(command)) && entryHerdrConnect.MatchString(command)
+	return (strings.Contains(command, "herdr-core") || entryHerdrName.MatchString(command)) && entryHerdrConnectWord.MatchString(command)
 }
 
 // entryOutput is one ssh window's side of the escape filter, written the way
@@ -677,14 +680,32 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 				conn.refuse("subsystem-pty")
 				_ = request.Reply(false, nil)
 				continue
-			case request.Type == "exec" && entryHerdrLine(command):
+			}
+			herdr, session := entryHerdrNone, ""
+			if request.Type == "exec" {
+				herdr, session = entryHerdrClassify(command)
+			}
+			refusal := ""
+			switch {
+			case herdr == entryHerdrTUI:
+				refusal = entryHerdrTUIRefusal
+			case herdr == entryHerdrDrift, herdr == entryHerdrConnect && pty != nil:
+				// Herdr never asks for a terminal on its link.
+				refusal = entryHerdrDriftRefusal
+			}
+			if refusal != "" {
 				conn.refuse("herdr")
 				_ = request.Reply(true, nil)
 				start(func() {
-					_, _ = io.WriteString(channel.Stderr(), entryHerdrRefusal+"\n")
+					_, _ = io.WriteString(channel.Stderr(), refusal+"\n")
 					entryExitStatus(channel, 1)
 					_ = channel.Close()
 				})
+				continue
+			}
+			if herdr == entryHerdrConnect {
+				_ = request.Reply(true, nil)
+				start(func() { s.entryHerdrLink(ctx, conn, channel, session) })
 				continue
 			}
 			_ = request.Reply(true, nil)
@@ -705,8 +726,13 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 				continue
 			}
 			mode := "exec"
-			if request.Type == "shell" {
+			switch {
+			case request.Type == "shell":
 				mode = "shell"
+			case herdr == entryHerdrInstall:
+				// Herdr's install restarts its core: with Herdr's
+				// environment, so it is the core the link reaches.
+				mode = "herdr-exec"
 			}
 			hopCtx, stopHop := context.WithCancel(ctx)
 			hangup = stopHop
@@ -751,16 +777,19 @@ func (s *Server) entryRunHop(ctx context.Context, conn *entryConn, channel ssh.C
 		_, _ = io.WriteString(channel.Stderr(), "Super Cage："+err.Error()+"\n")
 		return
 	}
-	run := "exec " + shellescape.Quote(s.entryRunPath()) + " " + mode
-	if mode == "exec" {
-		run += " " + shellescape.Quote(command)
+	if mode == "herdr-exec" {
+		// The install restarted the core: it stops again when idle.
+		defer s.entryHerdrIdle(entryHerdrInstallSession(command))
 	}
 	// Like guestControl: sshd hands the line to the guest user's login
 	// shell, which exec replaces at once with a bash that reads no profile
 	// or rc file, and that bash with the run script: nothing the guest
 	// wrote in those files runs before it, and no shell stays between the
 	// guest's sshd and the command.
-	script := "exec /bin/bash --noprofile --norc -c " + shellescape.Quote(run)
+	script := s.entryRunScript(mode)
+	if mode == "exec" || mode == "herdr-exec" {
+		script = s.entryRunScript(mode, command)
+	}
 	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", script)
 	cmd.WaitDelay = entryHopWaitDelay
 	stdin, err := cmd.StdinPipe()

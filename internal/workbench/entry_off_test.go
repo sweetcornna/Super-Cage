@@ -56,7 +56,7 @@ func TestEntryOffByDefaultWritesAndRunsNothing(t *testing.T) {
 	if err := f.call("GET", "/api/entry", nil, &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Enabled || view.State != "off" || len(view.Devices) != 0 || view.HostAlias != "" || view.Include != nil || view.Herdr {
+	if view.Enabled || view.State != "off" || len(view.Devices) != 0 || view.HostAlias != "" || view.Include != nil || view.Herdr != nil {
 		t.Fatalf("status while off: %+v", view)
 	}
 	// The Include preview reads ~/.ssh/config for the dialog that turns

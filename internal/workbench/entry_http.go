@@ -96,9 +96,9 @@ type entryStatusView struct {
 	Computer    string            `json:"computer,omitempty"`
 	Revoked     bool              `json:"revoked"`
 	Devices     []entryDeviceView `json:"devices"`
-	// Herdr is offered only once its filter exists (step 3).
-	Herdr bool   `json:"herdr"`
-	Error string `json:"error,omitempty"`
+	// Herdr is the Herdr row while the entry is on.
+	Herdr *entryHerdrView `json:"herdr,omitempty"`
+	Error string          `json:"error,omitempty"`
 	// Unreached names the environments a revocation could not reach.
 	Unreached []string `json:"unreached,omitempty"`
 	// Kept are the kept ssh terminals of this environment, at most
@@ -176,6 +176,13 @@ func (s *Server) entryView() entryStatusView {
 		// desktop saves, so the copied command would not follow them.
 		if view.Environment == defaultLocalVMID {
 			view.Commands.Attach = cage + " attach"
+		}
+		view.Herdr = &entryHerdrView{State: "not_set_up", Lines: view.Connections.Herdr, Command: entryHerdrCommand(view.HostAlias, include.Present, paths.clientFile())}
+		switch {
+		case view.Connections.Herdr > 0:
+			view.Herdr.State = "connected"
+		case st.HerdrSeen != nil:
+			view.Herdr.State = "ready"
 		}
 	}
 	return view

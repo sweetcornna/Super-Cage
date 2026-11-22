@@ -166,6 +166,9 @@ type entryState struct {
 	Version int           `json:"version"`
 	Enabled bool          `json:"enabled"`
 	Devices []entryDevice `json:"devices"`
+	// HerdrSeen is when a Herdr core of this computer last finished its
+	// hello through the entry: this environment is a machine in Herdr.
+	HerdrSeen *time.Time `json:"herdr_seen,omitempty"`
 }
 
 func (st *entryState) device(id string) *entryDevice {

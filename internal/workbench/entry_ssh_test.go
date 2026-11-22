@@ -370,37 +370,61 @@ func TestEntryRefusesForwardingAgentX11TunnelAndEnvironment(t *testing.T) {
 	}
 }
 
-// --- design 5.4: Herdr's line is refused until its filter exists ---
+// --- design 5.4: Herdr's lines ---
 
-func TestEntryRefusesHerdrConnectLine(t *testing.T) {
+func TestEntryHerdrLinesReachTheirOwnModes(t *testing.T) {
 	f := newEntryFixture(t, true)
 	f.on()
 	client := f.client()
+	// Herdr's exact connect line runs the environment's core through the run
+	// script, never the client's line; with no core installed Herdr's own
+	// words and status come back, so hc machine add offers its install.
+	for _, c := range []struct{ line, session string }{
+		{fmt.Sprintf(entryHerdrConnectLine, ""), "default"},
+		{fmt.Sprintf(entryHerdrConnectLine, "HC_SESSION=work "), "work"},
+	} {
+		_, stderr, status := entryRun(t, client, c.line, nil, nil)
+		if status != 127 || stderr != "herdr-core is not installed here\n" {
+			t.Fatalf("%q: status %d stderr %q", c.line, status, stderr)
+		}
+		ran := false
+		for _, command := range f.guest.commands() {
+			ran = ran || strings.HasSuffix(command, "/guest/run herdr "+c.session+"'")
+			if strings.Contains(command, "connect") {
+				t.Fatalf("the client's line reached the guest: %q", command)
+			}
+		}
+		if !ran {
+			t.Fatalf("no herdr %s in %q", c.session, f.guest.commands())
+		}
+	}
 	refused := []string{
-		`sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x "$p" ] || { echo "herdr-core is not installed here" >&2; exit 127; }; exec "$p" connect'`,
-		`sh -c 'p=$(command -v herdr-core) || p=$HOME/.local/bin/herdr-core; [ -x "$p" ] || { echo "herdr-core is not installed here" >&2; exit 127; }; HC_SESSION=work exec "$p" connect'`,
 		`exec "$HOME/.local/bin/herdr-core" connect --session work`,
 		`hc connect`,
+		fmt.Sprintf(entryHerdrConnectLine, "HC_SESSION=Work "),
+		fmt.Sprintf(entryHerdrConnectLine, "") + " ",
 		`cmd /d /c "if exist .\AppData\Local\Programs\herdr-core\herdr-core.exe (.\AppData\Local\Programs\herdr-core\herdr-core.exe connect) else (echo herdr-core is not installed here 1>&2 & exit /b 127)"`,
+		"printf '\\n%s\\n' 'herdr-remote-output-ready:1'\nexec \"$HOME/.local/bin/herdr\" --session agents remote-client-bridge --idle-timeout-v1",
 	}
+	before := len(f.guest.commands())
 	for _, line := range refused {
 		_, stderr, status := entryRun(t, client, line, nil, nil)
 		if status != 1 || !strings.Contains(stderr, "Herdr") {
 			t.Fatalf("%q: status %d stderr %q", line, status, stderr)
 		}
 	}
-	for _, line := range f.guest.commands() {
-		if strings.Contains(line, "connect") {
-			t.Fatalf("a Herdr line reached the guest: %q", line)
-		}
+	if after := f.guest.commands(); len(after) != before {
+		t.Fatalf("a refused Herdr line reached the guest: %q", after[before:])
 	}
-	for _, line := range []string{"uname -sm", "herdr-core --version || true", `sh -c 'd=$HOME/.local/bin; echo "$d/herdr-core server restart"'`, "echo reconnect"} {
-		if entryHerdrLine(line) {
-			t.Fatalf("%q was taken for Herdr's line", line)
-		}
+	for _, line := range []string{"uname -sm", "herdr-core --version || true", "echo reconnect"} {
 		if _, stderr, status := entryRun(t, client, line, nil, nil); status != 0 {
 			t.Fatalf("%q: status %d %q", line, status, stderr)
 		}
+	}
+	// Herdr's install restarts the core: it runs with Herdr's environment.
+	out, stderr, status := entryRun(t, client, `sh -c 'true || herdr-core server restart; printf %s "$XDG_RUNTIME_DIR"'`, nil, nil)
+	if status != 0 || !strings.HasSuffix(out, "/.cache/cage-herdr/run") {
+		t.Fatalf("install: %q %q %d", out, stderr, status)
 	}
 }
 

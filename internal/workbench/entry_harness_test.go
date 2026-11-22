@@ -313,6 +313,11 @@ func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 		t.Fatal(err)
 	}
 	s.entry.install = func(context.Context) error { f.installs.Add(1); return nil }
+	// A line's end arms Herdr's idle check in the guest stand-in: a
+	// moment here, not ten minutes of a waiting process.
+	idleAfter := entryHerdrIdleAfter
+	entryHerdrIdleAfter = time.Second
+	t.Cleanup(func() { entryHerdrIdleAfter = idleAfter })
 	workspace := s.environmentDir()
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)
