@@ -3,7 +3,10 @@ package workbench
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,9 +18,33 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
+
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 )
+
+// writeMacOSTestKey stands in for Lima's provisioned key: without a file
+// there guestos refuses to make the macOS guest's ssh arguments, since ssh
+// would then offer the default keys of the real home.
+func writeMacOSTestKey(t *testing.T, profile string) {
+	t.Helper()
+	_, key, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(key, "macos-guest-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(profile, "state", "lima", "_config")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user"), pem.EncodeToMemory(block), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
 
 func TestMacOSConnectionIgnoresSSHConfigOverrides(t *testing.T) {
 	s := testServer(t)
@@ -29,6 +56,7 @@ func TestMacOSConnectionIgnoresSSHConfigOverrides(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(s.instanceDir(), "ssh.config"), []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
+	writeMacOSTestKey(t, s.profile)
 	cmd := s.sshCommand(context.Background(), "-tt", s.sshTarget(), "--", "uname -s")
 	for _, value := range []string{os.DevNull, "54432", "devuser", "Hostname=127.0.0.1", "HostKeyAlias=cage-macos", "StrictHostKeyChecking=yes", "ForwardAgent=no", "ClearAllForwardings=yes", "cage-macos"} {
 		if !slices.Contains(cmd.Args, value) {
@@ -252,6 +280,7 @@ func TestMacOSSetupAdministratorIdentity(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(s.instanceDir(), "ssh.config"), []byte("User "+user+"\nPort 12345\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
+			writeMacOSTestKey(t, s.profile)
 			cmd := s.macOSSetupAdminCommand(t.Context())
 			if cmd.Err != nil {
 				t.Fatal(cmd.Err)
