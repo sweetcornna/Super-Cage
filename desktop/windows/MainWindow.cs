@@ -385,10 +385,13 @@ internal sealed class MainWindow : Form
                 {
                     smokeRestart = System.Diagnostics.Stopwatch.StartNew();
                     smokeScience["restart"] = "requested";
-                    // Neither the script nor the bridge's reply is awaited:
-                    // both race the end of this WebView. The smoke completes
-                    // when the reloaded one is ready.
-                    _ = web.CoreWebView2.ExecuteScriptAsync("void window.webkit.messageHandlers.cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
+                    // Neither the script nor the bridge's replies are
+                    // awaited: they race the end of this WebView. The smoke
+                    // completes when the reloaded one is ready. refreshSession
+                    // (a backend round trip) is still pending when the
+                    // restart replaces the WebView, as any request of the
+                    // page can be.
+                    _ = web.CoreWebView2.ExecuteScriptAsync("const cage = window.webkit.messageHandlers.cage; void cage.postMessage({action:'refreshSession'}).catch(() => {}); void cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
                         .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
                     return;
                 }
