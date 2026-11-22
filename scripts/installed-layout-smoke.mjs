@@ -203,14 +203,15 @@ function assertLocalConnected(context, where) {
 // about-settings and app-updates (about, updates), devices-page and
 // devices-dialogs (设备, 加入其他电脑), other-clients-* (agents), local-terminal-*
 // and local-entry (terminal app, SSH entry), settings, remote-hosts (the
-// picker), project-dialog and browser-extensions (the client's own stores).
+// picker), project-dialog, browser-extensions and virtual-machines (the
+// client's own stores).
 // Only reads: nothing here changes a setting, mints a code or opens a window.
 const windowReads = [
   // Answered by the desktop gateway itself; the UI names no connection for them.
   "/client/context", "/client/about", "/client/local-status", "/client/hosts",
   "/client/devices", "/client/devices/join?wait=0",
   "/client/local-terminal", "/client/local-terminal/app",
-  "/client/browser-extensions", "/client/project-shares",
+  "/client/browser-extensions", "/client/project-shares", "/client/virtual-machines",
   // Handed on to the local controller, which the UI names in X-Cage-Connection.
   "/status", "/account", "/settings", "/devices", "/devices/invite?wait=0", "/mobile-pair",
   "/agents", "/app-update", "/app-update/interruptions", "/entry", "/entry/include",
@@ -222,6 +223,10 @@ const windowReads = [
 // as absent in this process kind. A route that is missing by design goes into
 // this map: route -> the reason.
 const windowAbsent = new Map();
+// Where a call names its connection itself although its path is the gateway's
+// (virtual-machines.jsx sends X-Cage-Connection by hand; project-shares gets it
+// from connectionHeaders).
+const windowNamesConnection = new Set(["/client/virtual-machines"]);
 // The window holds a session cookie from its launch ticket and nothing more:
 // the trusted-view cookie lives only in the cookie jars of the Go launchers.
 // ask(path, headers) sends one GET /api + path with that and returns its status.
@@ -230,22 +235,27 @@ async function assertWindowRoutesAnswered(ask) {
   assertLocalConnected(context, "the window's context");
   const rows = [];
   for (const route of windowReads) {
-    const answer = await ask(route, connectionHeaders(route, context));
+    const headers = { ...connectionHeaders(route, context), ...(windowNamesConnection.has(route) ? { "X-Cage-Connection": context.connection_id } : {}) };
+    const at = Date.now();
+    const answer = await ask(route, headers);
     rows.push({ route, status: answer.status, text: answer.text });
-    console.log("    GET /api" + route.padEnd(32) + " " + answer.status);
+    console.log("    GET /api" + route.padEnd(32) + " " + answer.status + "  " + (Date.now() - at) + " ms");
   }
+  // The reverse, asked and printed before any assertion: what the agent
+  // transport sends stays refused on a route that the window may use.
+  const agent = await ask("/client/devices", { "X-Cage-Agent": "1" });
+  console.log("    GET /api" + "/client/devices".padEnd(32) + " " + agent.status + "  with X-Cage-Agent: 1");
   // 401 and 403 refuse the window; 404 is a route that is not there. 409, 423
-  // and 503 are fine: no VM runs, the account of a fresh profile is not set up.
+  // and 503 are fine: no VM runs, and a fresh profile's account is locked. The
+  // controller answers that 423 before a route's own gate, so for the routes
+  // handed on to it the step shows that the session and the connection header
+  // are accepted, and not what a handler behind the account gate would say.
   const refused = rows.filter((r) => r.status === 401 || r.status === 403);
   const missing = rows.filter((r) => r.status === 404 && !windowAbsent.has(r.route));
   const describe = (r) => "GET /api" + r.route + " -> " + r.status + " " + r.text.slice(0, 120).replace(/\s+/g, " ");
   assert.deepEqual(refused.map(describe), [], "the window's own requests are refused");
   assert.deepEqual(missing.map(describe), [], "the window's own requests find no route");
-  // The reverse, once: what the agent transport sends stays refused on a route
-  // that the window may use.
-  const agent = await ask("/client/devices", { "X-Cage-Agent": "1" });
-  assert.equal(agent.status, 403, "GET /api/client/devices with X-Cage-Agent: " + agent.status + " " + agent.text.slice(0, 120));
-  console.log("    GET /api" + "/client/devices with X-Cage-Agent: 1".padEnd(32) + " " + agent.status);
+  assert.equal(agent.status, 403, "GET /api/client/devices with X-Cage-Agent: 1 is answered " + agent.status + " " + agent.text.slice(0, 120));
 }
 
 // What Cage.swift does for the window: cage desktop --json with the window's pid.
