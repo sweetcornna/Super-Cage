@@ -301,14 +301,14 @@
 }
 
 /* Quiet actions at the end of the row. */
-.claude-profile-actions { grid-column: 4; display: flex; align-items: center; justify-content: flex-end; gap: 2px; min-width: 0; }
+.claude-profile-actions { grid-column: 4; display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
 .claude-profile-actions .claude-participation {
   position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   margin: 0 8px 0 0;
-  min-height: 28px;
+  min-height: var(--h-compact);
   color: var(--muted);
   font-size: var(--fs-caption);
   white-space: nowrap;
@@ -317,8 +317,8 @@
 .claude-participation input { position: absolute; inset: 0; margin: 0; opacity: 0; width: 100%; height: 100%; cursor: inherit; }
 .claude-switch-track {
   flex: none;
-  width: 30px;
-  height: 18px;
+  width: 28px;
+  height: 16px;
   padding: 2px;
   border-radius: var(--r-pill);
   background: var(--line-strong);
@@ -327,8 +327,8 @@
 .claude-switch-track::before {
   content: "";
   display: block;
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   border-radius: 50%;
   background: var(--surface);
   box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 16%, transparent);
@@ -350,10 +350,16 @@
   font-weight: 500;
   white-space: nowrap;
 }
-.claude-profile-actions .quiet-button svg { color: var(--muted); }
+/* Every glyph in the row's actions has one size, one stroke and one colour, so the terminal, the
+   refresh and the chevron weigh the same; the switch is the only filled shape. */
+.claude-profile-actions .quiet-button svg { width: 16px; height: 16px; stroke-width: 1.75; color: var(--muted); }
+.claude-profile-actions .quiet-button:hover:enabled svg { color: var(--ink); }
 .claude-profile-actions .quiet-button:hover:enabled,
 .claude-profile-actions .text-button:hover:enabled { background: var(--soft); color: var(--ink); text-decoration: none; }
 .claude-profile-actions .claude-icon-action { width: var(--h-compact); padding: 0; justify-content: center; }
+/* 撤销添加 is the quietest action in the row: muted like the glyphs, ink on hover. */
+.claude-profile-actions .text-button { color: var(--muted); font-weight: 400; }
+.claude-profile-actions .text-button:hover:enabled { color: var(--ink); }
 .claude-profile-actions .claude-remove-action:hover:enabled svg { color: var(--error); }
 .claude-profile-toggle svg { transition: transform var(--dur-fast) var(--ease-out); }
 .claude-profile-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }

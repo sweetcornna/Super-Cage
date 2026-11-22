@@ -1423,7 +1423,7 @@ function App() {
   const displayTabs = orderedTabs(tabs, metadata).map((tab) =>
     tab.claude_account_id || tab.terminalKind === "claude-login" ? { ...tab,
       claudeLabel: terminalAccountName(tab), claudeAccountNumber: claudeNumbers.get(tab.claude_account_id) }
-      : codexTerminalLabel(tab, codexProfiles.accounts) ? { ...tab, claudeLabel: "Codex · " + codexTerminalLabel(tab, codexProfiles.accounts) } : tab);
+      : codexTerminalLabel(tab, codexProfiles.accounts) ? { ...tab, claudeLabel: "Codex · " + codexTerminalLabel(tab, codexProfiles.accounts), accountChip: codexTerminalLabel(tab, codexProfiles.accounts) } : tab);
   const browserTabs = displayTabs.filter((tab) => tab.kind !== "terminal");
   const switchTabs =
     terminal && !showHome

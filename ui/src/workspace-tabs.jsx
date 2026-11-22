@@ -334,6 +334,12 @@ export function WorkspaceTabs({
           const openError = tab.historySession && sessionOpenError?.id === tab.cli_session_id ? sessionOpenError.message : "";
           const ownerChip = !horizontal && !vertical && ownerChips[tab.sessionOwner];
           const errorID = `session-open-error-${tab.cli_session_id}`;
+          // The row's chip: the account (the provider is in the mark, so the label
+          // is the account alone), or where an ssh terminal came from.
+          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.accountChip ?? tab.claudeLabel }
+            : tab.origin?.kind === "ssh" ? { text: `来自 ${tab.origin.device}${tab.origin.kept ? " · 已保留" : ""}`,
+              title: tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束" } : null;
+          const chipElement = chip && <small className="claude-tab-profile" title={chip.title}>{chip.text}</small>;
           return (
             <React.Fragment key={tab.id}>
             <div
@@ -417,11 +423,11 @@ export function WorkspaceTabs({
                 <TabIcon kind={tab.kind} favicon={tab.favicon} size={15}
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
                   provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
-                <span>{title}</span>
-                {/* A phone or external row names its owner instead; the account is in the label and tooltip. */}
-                {tab.claudeLabel && !ownerChip && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
-                {tab.origin?.kind === "ssh" && !tab.claudeLabel && !ownerChip &&
-                  <small className="claude-tab-profile" title={tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束"}>来自 {tab.origin.device}{tab.origin.kept ? " · 已保留" : ""}</small>}
+                {/* A phone or external row names its owner instead; the account is in the label and tooltip.
+                    In the sidebar the title and the chip share one line: a chip that does not fit whole is not shown (cli-sessions.css). */}
+                {chip && !horizontal && !vertical
+                  ? <i className="session-text"><span>{title}</span>{chipElement}</i>
+                  : <><span>{title}</span>{chipElement}</>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
                 {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
                 {!horizontal && !vertical && (opening
