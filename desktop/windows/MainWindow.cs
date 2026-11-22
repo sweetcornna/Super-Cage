@@ -23,6 +23,9 @@ internal sealed class MainWindow : Form
     // (SmokeReady, CompleteSmoke).
     private readonly Dictionary<string, object?> smokeScience = new();
     private System.Diagnostics.Stopwatch? smokeRestart;
+    // Smoke only: what the window showed (Error) after the smoke asked for
+    // the restart; a restart that works shows nothing.
+    private readonly List<string> smokeShown = [];
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, (string[] Paths, DateTime Expires)> fileSelections = new();
     // Claude Science host rendering: the switches this WebView was created
@@ -164,6 +167,7 @@ internal sealed class MainWindow : Form
     private void Error(string text)
     {
         _ = Backend.Report(text);
+        if (smokeRestart != null) smokeShown.Add(text);
         message.Text = text; status.Show(); status.BringToFront(); retry.Show(); web.Hide();
     }
 
@@ -298,6 +302,11 @@ internal sealed class MainWindow : Form
         string? prepareStatus = null;
         string? prepareMessage = null;
         if (failure != null) errors.Add(failure);
+        if (smokeShown.Count != 0)
+        {
+            smokeScience["shown"] = smokeShown;
+            errors.Add("重新载入窗口时显示了错误：" + smokeShown[0]);
+        }
         try
         {
             if (!nativeBridgeReady && web.CoreWebView2 != null)
@@ -387,11 +396,11 @@ internal sealed class MainWindow : Form
                     smokeScience["restart"] = "requested";
                     // Neither the script nor the bridge's replies are
                     // awaited: they race the end of this WebView. The smoke
-                    // completes when the reloaded one is ready. refreshSession
-                    // (a backend round trip) is still pending when the
-                    // restart replaces the WebView, as any request of the
-                    // page can be.
-                    _ = web.CoreWebView2.ExecuteScriptAsync("const cage = window.webkit.messageHandlers.cage; void cage.postMessage({action:'refreshSession'}).catch(() => {}); void cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
+                    // completes when the reloaded one is ready. A reconnect
+                    // (Bootstrap) and refreshSession, both backend round
+                    // trips, are still in flight when the restart replaces
+                    // the WebView, as any request of the page can be.
+                    _ = web.CoreWebView2.ExecuteScriptAsync("const cage = window.webkit.messageHandlers.cage; void cage.postMessage({action:'reconnect'}).catch(() => {}); void cage.postMessage({action:'refreshSession'}).catch(() => {}); void cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
                         .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
                     return;
                 }
@@ -736,6 +745,14 @@ internal sealed class MainWindow : Form
         (async () => {
           const report = {contract: window.cageNativeScienceFrame ?? null, moveBefore: 'moveBefore' in Element.prototype,
             frames: document.querySelectorAll('iframe').length};
+          // The window's 本机终端 settings read, as the page makes it at
+          // start (ui/src/local-terminal-open.mjs): status and names only.
+          try {
+            const response = await fetch('/api/client/local-terminal');
+            const value = response.ok ? await response.json() : {};
+            report.localTerminal = {status: response.status, keys: Object.keys(value).sort(),
+              settings: Object.keys(value.settings || {}).sort(), supported: value.supported ?? null};
+          } catch (error) { report.localTerminal = {error: String(error && error.message).slice(0, 300)}; }
           if (!ASK) return report;
         """ + SmokeScienceRequests + """
           const bridge = window.webkit.messageHandlers.cage;
