@@ -348,10 +348,11 @@ type entryHerdrView struct {
 
 // entryHerdrCommand is the one step that adds this environment to Herdr on
 // this computer: hc machine add with the Host the entry wrote, or, without
-// the Include in ~/.ssh/config, with Herdr's --via and Super Cage's file.
-func entryHerdrCommand(alias string, included bool, clientFile string) string {
+// the Include in ~/.ssh/config, with Herdr's --via and the file cage ssh
+// gives ssh (cageSSHFile).
+func entryHerdrCommand(alias string, included bool, configFile string) string {
 	if included {
 		return "hc machine add " + alias
 	}
-	return "hc machine add --via " + shellescape.Quote("ssh -F "+shellescape.Quote(clientFile)+" -T "+alias) + " --name " + alias
+	return "hc machine add --via " + shellescape.Quote("ssh -F "+shellescape.Quote(configFile)+" -T "+alias) + " --name " + alias
 }

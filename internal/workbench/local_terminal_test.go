@@ -34,6 +34,106 @@ func (r *recordingLaunches) Run(_ context.Context, step localterm.Step) error {
 	return nil
 }
 
+// No test finds the owner's hc: a test that wants one says where it is.
+func init() { localTerminalFindHC = func(string) string { return "" } }
+
+// Herdr opens only a new shell in a project, only once this computer's Herdr
+// added the environment, and only through the owner's hc (recorded here).
+func TestLocalTerminalHerdrOpensAShellThere(t *testing.T) {
+	every, perMinute := localTerminalOpenEvery, localTerminalOpenPerMinute
+	localTerminalOpenEvery, localTerminalOpenPerMinute = 0, 1000
+	t.Cleanup(func() { localTerminalOpenEvery, localTerminalOpenPerMinute = every, perMinute })
+	desktop, _, _ := desktopBeforeWorkload(t)
+	launches := &recordingLaunches{}
+	localTerminalRunner = launches
+	home := t.TempDir()
+	localTerminalHome = func() (string, error) { return home, nil }
+	localTerminalDetect = func() []localterm.Installed {
+		return []localterm.Installed{{App: *localterm.Lookup("kitty"), Path: "/Applications/kitty.app"}, {App: *localterm.Lookup("herdr"), Path: "/Applications/Herdr.app"}}
+	}
+	hc := filepath.Join(home, "not-run", "hc")
+	localTerminalFindHC = func(string) string { return hc }
+	t.Cleanup(func() {
+		localTerminalRunner, localTerminalDetect, localTerminalHome = localterm.ExecRunner{}, localterm.Detect, os.UserHomeDir
+		localTerminalFindHC = func(string) string { return "" }
+		localTerminalHerdrTarget = (*Server).localTerminalHerdrEntry
+	})
+	generation := desktop.remote.desktop.generation
+	listed := func(connection string) bool {
+		t.Helper()
+		w := clientCall(desktop, "GET", "/api/client/local-terminal/apps", "", connection)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		return strings.Contains(w.Body.String(), "\"id\":\"herdr\"")
+	}
+	// The environment's own entry is off here: Herdr is not offered.
+	if listed(generation) {
+		t.Fatal("Herdr offered for an environment it never added")
+	}
+	added := true
+	localTerminalHerdrTarget = func(_ *Server, _ context.Context, connection string) (localTerminalHerdrState, error) {
+		if connection != generation {
+			t.Errorf("asked about %q", connection)
+		}
+		return localTerminalHerdrState{Machine: "cage-default", Command: "hc machine add cage-default", Added: added}, nil
+	}
+	if !listed(generation) || listed("") || listed("an-earlier-connection") {
+		t.Fatal("Herdr's place in the list")
+	}
+	if w := clientCall(desktop, "GET", "/api/client/local-terminal/apps", "", generation); !strings.Contains(w.Body.String(), "\"hosts\":false,\"machine\":true") {
+		t.Fatal(w.Body.String())
+	}
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"herdr\",\"image_upload\":true,\"clipboard_write\":true}", ""); w.Code != 400 {
+		t.Fatal("chosen without an environment", w.Code)
+	}
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"herdr\",\"image_upload\":true,\"clipboard_write\":true}", generation); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	open := func(body string) *httptest.ResponseRecorder {
+		return clientCall(desktop, "POST", "/api/client/local-terminal/open", body, generation)
+	}
+	for _, body := range []string{"{\"terminal_id\":\"0123456789abcdef\"}", "{\"session_id\":\"s1\"}", "{\"project\":\"/work/app\",\"kind\":\"claude\"}"} {
+		if w := open(body); w.Code != 409 || !strings.Contains(w.Body.String(), "只能在项目上新建普通终端") {
+			t.Fatal(body, w.Code, w.Body.String())
+		}
+	}
+	if w := open("{\"project\":\"relative\"}"); w.Code != 400 {
+		t.Fatal(w.Code)
+	}
+	if len(launches.steps) != 0 {
+		t.Fatal("a refused open ran", launches.steps)
+	}
+	if w := open("{\"project\":\"/work/my app\",\"kind\":\"shell\"}"); w.Code != 200 || !strings.Contains(w.Body.String(), "\"app\":\"Herdr\"") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := strings.Join(launches.steps[0], "|"); got != hc+"|run|--bg|--on|cage-default|--cwd|/work/my app|--|bash|-l" {
+		t.Fatal(got)
+	}
+	// hc fails (the machine was removed from Herdr): the window offers the
+	// command that adds it.
+	launches.fail = true
+	if w := open("{\"project\":\"/work/app\"}"); w.Code != 412 || !strings.Contains(w.Body.String(), "Herdr 没能打开：refused") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	launches.fail = false
+	added = false
+	if w := open("{\"project\":\"/work/app\"}"); w.Code != 412 || !strings.Contains(w.Body.String(), localTerminalHerdrSetUp) || listed(generation) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	added = true
+	localTerminalFindHC = func(string) string { return "" }
+	if w := open("{\"project\":\"/work/app\"}"); w.Code != 409 || !strings.Contains(w.Body.String(), "找不到 Herdr 的 hc") || listed(generation) {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if len(launches.steps) != 2 {
+		t.Fatal(launches.steps)
+	}
+	if got := localTerminalHerdrError(errors.New("{\"error\":{\"kind\":\"not_found\",\"message\":\"no machine cage-default\"}}")); got != "no machine cage-default" {
+		t.Fatal(got)
+	}
+}
+
 func TestLocalTerminalSettingsStayOnThisComputer(t *testing.T) {
 	desktop, _, full := desktopBeforeWorkload(t)
 	if w := clientCall(desktop, "GET", "/api/client/local-terminal", "", ""); w.Code != 200 || !strings.Contains(w.Body.String(), "\"image_upload\":true") || !strings.Contains(w.Body.String(), "\"clipboard_write\":true") || !strings.Contains(w.Body.String(), "\"app\":\"\"") {

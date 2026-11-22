@@ -43,6 +43,14 @@ var localTerminalDetect = localterm.Detect
 // configurations; tests replace it.
 var localTerminalHome = os.UserHomeDir
 
+// localTerminalFindHC finds the owner's hc for Herdr; tests replace it, so
+// that no test ever finds or runs a real one.
+var localTerminalFindHC = localterm.FindHC
+
+// localTerminalHerdrTarget reads the shown environment's local entry; tests
+// replace it.
+var localTerminalHerdrTarget = (*Server).localTerminalHerdrEntry
+
 // localTerminalOpenEvery and localTerminalOpenPerMinute bound the launches
 // of one desktop: each can open a window or raise macOS's Automation prompt.
 var localTerminalOpenEvery, localTerminalOpenPerMinute = time.Second, 10
@@ -160,8 +168,14 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 			return
 		}
 		if app := localterm.Lookup(settings.App); app != nil && !app.Hosts {
-			requestError(w, errors.New(app.Note))
-			return
+			if !app.Machine {
+				requestError(w, errors.New(app.Note))
+				return
+			}
+			if _, _, why := s.localTerminalHerdr(r.Context(), requestConnection(r)); why != "" {
+				requestError(w, errors.New(why))
+				return
+			}
 		}
 		if err := writePrivate(filepath.Join(s.localTerminalDir(), localterm.SettingsFile), settings); err != nil {
 			requestError(w, err)
@@ -175,6 +189,13 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 		}
 		apps := []localTerminalApp{}
 		for _, app := range localterm.Apps() {
+			// Herdr is listed only where it can open a terminal now: this
+			// computer's Herdr added the environment shown.
+			if app.Machine {
+				if _, _, why := s.localTerminalHerdr(r.Context(), requestConnection(r)); why != "" {
+					continue
+				}
+			}
 			apps = append(apps, localTerminalApp{App: app, Installed: installed[app.ID]})
 		}
 		jsonReply(w, map[string]any{"apps": apps})
@@ -265,45 +286,52 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "还没有选择本机终端应用：在设置的“本机终端应用”里选择一个", http.StatusConflict)
 		return
 	}
-	var found *localterm.Installed
-	for _, candidate := range localTerminalDetect() {
-		if candidate.ID == app.ID {
-			found = &candidate
-			break
+	var plan localterm.Plan
+	if app.Machine {
+		var ok bool
+		if plan, ok = s.localTerminalHerdrPlan(w, r, connection, input); !ok {
+			return
 		}
-	}
-	if found == nil {
-		http.Error(w, app.Name+" 没有安装在这台电脑上", http.StatusConflict)
-		return
-	}
-	args, err := localTerminalArgs(s.localTerminalConfig(), connection, input)
-	if err != nil {
-		requestError(w, err)
-		return
-	}
-	command, err := s.localTerminalCommand()
-	if err != nil {
-		requestError(w, err)
-		return
-	}
-	home, err := localTerminalHome()
-	if err != nil {
-		requestError(w, err)
-		return
-	}
-	// Every window has its own files, even for one terminal opened twice.
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	name := hex.EncodeToString(b[:])
-	if input.TerminalID != "" {
-		name = strings.ToLower(input.TerminalID) + "-" + name[:8]
-	}
-	scratch := filepath.Join(dir, "local-terminal")
-	localterm.PruneScratch(scratch, home, 10*time.Minute)
-	plan, err := localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(command, args...), Name: name, Scratch: scratch, Home: home})
-	if err != nil {
-		requestError(w, err)
-		return
+	} else {
+		var found *localterm.Installed
+		for _, candidate := range localTerminalDetect() {
+			if candidate.ID == app.ID {
+				found = &candidate
+				break
+			}
+		}
+		if found == nil {
+			http.Error(w, app.Name+" 没有安装在这台电脑上", http.StatusConflict)
+			return
+		}
+		args, err := localTerminalArgs(s.localTerminalConfig(), connection, input)
+		if err != nil {
+			requestError(w, err)
+			return
+		}
+		command, err := s.localTerminalCommand()
+		if err != nil {
+			requestError(w, err)
+			return
+		}
+		home, err := localTerminalHome()
+		if err != nil {
+			requestError(w, err)
+			return
+		}
+		// Every window has its own files, even for one terminal opened twice.
+		var b [8]byte
+		_, _ = rand.Read(b[:])
+		name := hex.EncodeToString(b[:])
+		if input.TerminalID != "" {
+			name = strings.ToLower(input.TerminalID) + "-" + name[:8]
+		}
+		scratch := filepath.Join(dir, "local-terminal")
+		localterm.PruneScratch(scratch, home, 10*time.Minute)
+		if plan, err = localterm.PlanLaunch(localterm.PlanInput{App: *found, Command: append(command, args...), Name: name, Scratch: scratch, Home: home}); err != nil {
+			requestError(w, err)
+			return
+		}
 	}
 	// One open at a time: one may wait while macOS asks the owner to allow
 	// controlling the application, and after "Allow" every waiting open
@@ -323,10 +351,136 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 150*time.Second)
 	defer cancel()
 	if err := localterm.Launch(ctx, plan, localTerminalRunner); err != nil {
+		if app.Machine {
+			// Most often the machine is gone from Herdr: the window offers
+			// the command that adds it again.
+			http.Error(w, "Herdr 没能打开："+localTerminalHerdrError(err), http.StatusPreconditionFailed)
+			return
+		}
 		http.Error(w, "无法在 "+app.Name+" 中打开："+err.Error(), http.StatusBadGateway)
 		return
 	}
 	jsonReply(w, map[string]any{"app": app.Name, "automation": app.Automation})
+}
+
+// localTerminalHerdrState is what the shown environment's local entry says
+// about Herdr: the machine name it has there, the command that adds it, and
+// whether this computer's Herdr added it.
+type localTerminalHerdrState struct {
+	Machine string
+	Command string
+	Added   bool
+}
+
+// localTerminalHerdrEntry asks the environment the desktop shows for its
+// local entry, as the settings page does.
+func (s *Server) localTerminalHerdrEntry(ctx context.Context, connection string) (localTerminalHerdrState, error) {
+	session, _, err := s.remote.desktop.acquire(connection)
+	if err != nil {
+		return localTerminalHerdrState{}, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, session.Origin+"/api/entry", nil)
+	if err != nil {
+		return localTerminalHerdrState{}, err
+	}
+	req.Header.Set("Origin", session.Origin)
+	response, err := session.Client.Do(req)
+	if err != nil {
+		return localTerminalHerdrState{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return localTerminalHerdrState{}, errors.New(response.Status)
+	}
+	var view struct {
+		Enabled   bool   `json:"enabled"`
+		HostAlias string `json:"host_alias"`
+		Herdr     *struct {
+			State   string `json:"state"`
+			Command string `json:"command"`
+		} `json:"herdr"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&view); err != nil {
+		return localTerminalHerdrState{}, err
+	}
+	state := localTerminalHerdrState{Machine: view.HostAlias}
+	if view.Enabled && view.Herdr != nil {
+		state.Command = view.Herdr.Command
+		state.Added = view.Herdr.State == "ready" || view.Herdr.State == "connected"
+	}
+	return state, nil
+}
+
+const localTerminalHerdrSetUp = "先把这个环境加到 Herdr"
+
+// localTerminalHerdr says whether Herdr can open a terminal of the shown
+// environment now, and with which hc; why is the reason it cannot.
+func (s *Server) localTerminalHerdr(ctx context.Context, connection string) (state localTerminalHerdrState, hc, why string) {
+	detected := false
+	for _, app := range localTerminalDetect() {
+		detected = detected || app.Machine
+	}
+	if !detected {
+		return state, "", "Herdr 没有安装在这台电脑上"
+	}
+	home, err := localTerminalHome()
+	if err != nil {
+		return state, "", err.Error()
+	}
+	if hc = localTerminalFindHC(home); hc == "" {
+		return state, "", "这台电脑上找不到 Herdr 的 hc 命令"
+	}
+	if current := s.remote.context(); current.Mode == "none" || connection == "" || connection != current.ConnectionID {
+		return state, "", "连接已经切换，请重新打开当前工作台"
+	}
+	state, err = localTerminalHerdrTarget(s, ctx, connection)
+	if err != nil || !state.Added {
+		return state, "", localTerminalHerdrSetUp
+	}
+	return state, hc, ""
+}
+
+// localTerminalHerdrPlan is "在本机终端中打开" with Herdr chosen: a new shell
+// in a project only, on the machine this computer's Herdr added.
+func (s *Server) localTerminalHerdrPlan(w http.ResponseWriter, r *http.Request, connection string, input localTerminalOpen) (localterm.Plan, bool) {
+	if input.Project == "" || input.TerminalID != "" || input.SessionID != "" || input.Kind != "" && input.Kind != "shell" {
+		http.Error(w, "Herdr 只能在项目上新建普通终端", http.StatusConflict)
+		return localterm.Plan{}, false
+	}
+	if !strings.HasPrefix(input.Project, "/") || termfilter.Controls(input.Project) {
+		requestError(w, errors.New("项目路径无效"))
+		return localterm.Plan{}, false
+	}
+	state, hc, why := s.localTerminalHerdr(r.Context(), connection)
+	if why == localTerminalHerdrSetUp {
+		http.Error(w, why, http.StatusPreconditionFailed)
+		return localterm.Plan{}, false
+	}
+	if why != "" {
+		http.Error(w, why, http.StatusConflict)
+		return localterm.Plan{}, false
+	}
+	plan, err := localterm.PlanHerdr(hc, state.Machine, input.Project)
+	if err != nil {
+		requestError(w, err)
+		return localterm.Plan{}, false
+	}
+	return plan, true
+}
+
+// localTerminalHerdrError is hc's own message from its JSON error line.
+func localTerminalHerdrError(err error) string {
+	var reply struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(err.Error()), &reply) == nil && reply.Error.Message != "" {
+		return strings.ToValidUTF8(reply.Error.Message, "")
+	}
+	return err.Error()
 }
 
 // pruneLocalTerminal removes what launches of an earlier run left behind:

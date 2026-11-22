@@ -177,7 +177,7 @@ func (s *Server) entryView() entryStatusView {
 		if view.Environment == defaultLocalVMID {
 			view.Commands.Attach = cage + " attach"
 		}
-		view.Herdr = &entryHerdrView{State: "not_set_up", Lines: view.Connections.Herdr, Command: entryHerdrCommand(view.HostAlias, include.Present, paths.clientFile())}
+		view.Herdr = &entryHerdrView{State: "not_set_up", Lines: view.Connections.Herdr, Command: entryHerdrCommand(view.HostAlias, include.Present, paths.cageSSHFile())}
 		switch {
 		case view.Connections.Herdr > 0:
 			view.Herdr.State = "connected"

@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -96,6 +97,21 @@ func TestEntryHerdrRealCores(t *testing.T) {
 		t.Fatalf("the owner's terminal shows %q", screen)
 	}
 
+	// What "在本机终端中打开" with Herdr chosen runs: a shell there, in the
+	// background, that Herdr's window can then show.
+	start := time.Now()
+	out, code = h.hc(false, "run", "--bg", "--on", "cage-default", "--name", "opened", "--cwd", h.guestHome, "--", "bash", "-l")
+	results["hc_run_bg_ms"] = ms(time.Since(start))
+	if code != 0 {
+		t.Fatalf("run --bg --on: %d %s", code, out)
+	}
+	if listed, _ := h.hc(false, "get", "--json", "cage-default/opened"); !strings.Contains(listed, "\"opened\"") || !strings.Contains(listed, h.guestHome) {
+		t.Fatalf("the opened shell: %s", listed)
+	} else {
+		t.Logf("opened there: %s", listed)
+	}
+	h.hc(true, "kill", "opened")
+
 	// The environment knows the owner's core only as Super Cage.
 	host, _ := os.Hostname()
 	host = strings.ToLower(strings.TrimSuffix(host, ".local"))
@@ -159,7 +175,7 @@ func TestEntryHerdrRealCores(t *testing.T) {
 		out, _ := h.hc(true, "server", "status", "--json")
 		return strings.Contains(out, "\"live\":0")
 	})
-	start := time.Now()
+	start = time.Now()
 	if err := f.call("POST", "/api/entry/off", map[string]any{}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -434,17 +450,34 @@ func (h *entryHerdrCores) summaries() []string {
 	return found
 }
 
-// stop ends both cores the way Herdr does and then anything of this test's
-// that still runs, by PID.
+// stop ends both cores the way Herdr does. Only the processes the cores
+// named (core and holders) are killed if they outlive that; anything else of
+// this test's still running fails the test.
 func (h *entryHerdrCores) stop() {
+	var named []int
 	for _, guest := range []bool{false, true} {
 		dir := filepath.Join(h.short, "o")
 		if guest {
 			dir = filepath.Join(h.short, "g")
 		}
-		if sockets, _ := filepath.Glob(filepath.Join(dir, "herdr-core", "*.sock")); len(sockets) > 0 {
-			h.hc(guest, "server", "stop")
+		if sockets, _ := filepath.Glob(filepath.Join(dir, "herdr-core", "*.sock")); len(sockets) == 0 {
+			continue
 		}
+		if out, code := h.hc(guest, "server", "status", "--json"); code == 0 {
+			var status struct {
+				PID     int `json:"pid"`
+				Holders []struct {
+					PID int `json:"pid"`
+				} `json:"holders"`
+			}
+			if json.Unmarshal([]byte(out), &status) == nil && status.PID > 0 {
+				named = append(named, status.PID)
+				for _, holder := range status.Holders {
+					named = append(named, holder.PID)
+				}
+			}
+		}
+		h.hc(guest, "server", "stop")
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	for len(h.processes()) > 0 && time.Now().Before(deadline) {
@@ -452,7 +485,9 @@ func (h *entryHerdrCores) stop() {
 	}
 	for _, p := range h.processes() {
 		h.t.Errorf("still running after the cores stopped: %d %s", p.pid, p.args)
-		_ = syscall.Kill(p.pid, syscall.SIGKILL)
+		if slices.Contains(named, p.pid) {
+			_ = syscall.Kill(p.pid, syscall.SIGKILL)
+		}
 	}
 	_ = os.RemoveAll(h.short)
 }

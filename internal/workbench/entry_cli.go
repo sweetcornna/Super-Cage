@@ -231,7 +231,7 @@ func entryPrintHerdr(out, errOut io.Writer, view entryStatusView, environment st
 
 // entryHerdrNote says what Herdr puts in the environment and what the link
 // lets through; the page shows the same words.
-const entryHerdrNote = "Herdr 会在环境里装好它的 herdr-core，没有连接也没有运行中的终端 10 分钟后自动停止。环境不能经 Herdr 向这台电脑输入文字、读取屏幕或发通知；终端画面经过和本机终端一样的过滤。"
+const entryHerdrNote = "Herdr 会在环境里装上它的 herdr-core，没有连接、也没有终端在运行时，10 分钟后自动停止。环境不能经 Herdr 向这台电脑的终端输入文字或读取它们；终端画面经过和 ssh 终端一样的过滤。"
 
 func entryPrintDevices(out io.Writer, view entryStatusView) {
 	if len(view.Devices) == 0 {

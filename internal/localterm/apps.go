@@ -23,9 +23,13 @@ type App struct {
 	// control the application, and the owner should be told first.
 	Automation bool `json:"automation"`
 	// Hosts: the application can show "cage attach" in this build. Herdr
-	// cannot (it needs the SSH entry of a later step).
-	Hosts bool   `json:"hosts"`
-	Note  string `json:"note,omitempty"`
+	// cannot: it shows its own terminals.
+	Hosts bool `json:"hosts"`
+	// Machine: the application opens a new terminal of the environment as
+	// a machine of its own (Herdr, through the local SSH entry), only in a
+	// project and only once the environment was added there (herdr.go).
+	Machine bool   `json:"machine,omitempty"`
+	Note    string `json:"note,omitempty"`
 }
 
 // macApps is the table of design section 5.8, macOS.
@@ -44,8 +48,8 @@ var macApps = []App{
 		Evidence: "kitty setup.py CFBundleIdentifier=f'net.kovidgoyal.{appname}', kitty/constants.py appname = 'kitty'; Homebrew cask kitty (Contents/MacOS/kitty); --single-instance in kitty/simple_cli_definitions.py"},
 	{ID: "alacritty", Name: "Alacritty", BundleIDs: []string{"org.alacritty"}, Hosts: true,
 		Evidence: "alacritty extra/osx/Alacritty.app/Contents/Info.plist CFBundleIdentifier; Homebrew cask alacritty"},
-	{ID: "herdr", Name: "Herdr", BundleIDs: []string{"dev.herdr.app"}, Hosts: false,
-		Note:     "Herdr 通过本机终端的 SSH 入口连接，稍后的版本提供",
+	{ID: "herdr", Name: "Herdr", BundleIDs: []string{"dev.herdr.app"}, Hosts: false, Machine: true,
+		Note:     "在项目上新建终端时用 Herdr 打开；已有的终端仍在 Super Cage 中打开",
 		Evidence: "herdr-app scripts/package CFBundleIdentifier; detected on this Mac at /Applications/Herdr.app (E11)"},
 }
 

@@ -114,9 +114,50 @@ func TestPlansPerApplication(t *testing.T) {
 	if err != nil || plan.Steps[0].Argv[1] != "warppreview://launch/super-cage-0123456789abcdef.yaml" {
 		t.Fatal(plan.Steps, err)
 	}
-	// Herdr is detected but cannot host cage attach yet.
+	// Herdr never hosts cage attach: it opens its own terminals (PlanHerdr).
 	if _, err := PlanLaunch(PlanInput{App: installed(t, "herdr"), Command: attachCommand, Name: "x", Scratch: "/tmp", Home: "/Users/x"}); err == nil {
 		t.Fatal("herdr planned")
+	}
+}
+
+func TestPlanHerdr(t *testing.T) {
+	plan, err := PlanHerdr("/Users/x/.local/bin/hc", "cage-default", "/home/u/work app")
+	if err != nil || len(plan.Files) != 0 || len(plan.Steps) != 1 || plan.Steps[0].Detach || plan.Steps[0].Prompt {
+		t.Fatal(plan, err)
+	}
+	if got := strings.Join(plan.Steps[0].Argv, "|"); got != "/Users/x/.local/bin/hc|run|--bg|--on|cage-default|--cwd|/home/u/work app|--|bash|-l" {
+		t.Fatal(got)
+	}
+	for _, bad := range [][3]string{{"hc", "cage-default", "/p"}, {"/hc", "-x", "/p"}, {"/hc", "cage default", "/p"}, {"/hc", "cage-default", "p"}, {"/hc", "cage-default", "/p\x1b]52"}} {
+		if _, err := PlanHerdr(bad[0], bad[1], bad[2]); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}
+
+// FindHC looks only where Herdr's installers put hc; the test never looks
+// at this computer's own paths.
+func TestFindHC(t *testing.T) {
+	home := "/Users/owner"
+	if paths := HCPaths(home); len(paths) != 4 || paths[0] != "/Users/owner/.local/bin/hc" || paths[1] != "/opt/homebrew/bin/hc" {
+		t.Fatal(paths)
+	}
+	if FindHC("relative") != "" {
+		t.Fatal("a relative home")
+	}
+	dir := t.TempDir()
+	plain, runs := filepath.Join(dir, "plain"), filepath.Join(dir, "runs")
+	if err := os.WriteFile(plain, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runs, nil, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := firstExecutable([]string{filepath.Join(dir, "missing"), plain, dir, runs}); got != runs {
+		t.Fatal(got)
+	}
+	if got := firstExecutable([]string{plain}); got != "" {
+		t.Fatal(got)
 	}
 }
 
