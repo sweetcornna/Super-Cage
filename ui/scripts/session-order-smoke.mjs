@@ -47,6 +47,8 @@ try {
       : {sessions}});
   });
   await phone.goto((process.env.CAGE_UI_URL || "http://127.0.0.1:5217")+"/mobile.html");
+  // The phone opens on its home screen: the sidebar is behind the menu button.
+  await phone.getByRole("button",{name:"展开侧栏",exact:true}).click();
   const drawer = phone.getByRole("dialog",{name:"工作区侧栏"});
   await drawer.getByRole("img",{name:"会话正在运行"}).waitFor();
   assert.equal(await drawer.locator(".session-select").first().getAttribute("aria-label"),sessions[1].title);
