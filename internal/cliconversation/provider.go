@@ -240,6 +240,15 @@ func readResult(reader io.Reader, sessionID string, onText func(string), approva
 			continue
 		}
 		if e.ParentToolUseID != nil {
+			// A subagent's own messages: only its tool calls are counted, on
+			// the call that started it.
+			if e.Type == "assistant" && onTools != nil && !finished && strings.EqualFold(e.SessionID, sessionID) {
+				var changed bool
+				tools, changed = updateChild(tools, *e.ParentToolUseID, line)
+				if changed {
+					onTools(slices.Clone(tools))
+				}
+			}
 			continue
 		}
 		if e.Type == "system" && e.Subtype == "cage_identity_changed" {

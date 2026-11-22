@@ -95,6 +95,9 @@ type terminalConversation struct {
 	Active              bool         `json:"active"`
 	ConnectionNotice    string       `json:"connection_notice"`
 	HistoryTruncated    bool         `json:"history_truncated"`
+	// Tasks comes with a view, RunningTasks with a discovered session.
+	Tasks        *mobileTasks `json:"tasks"`
+	RunningTasks int          `json:"running_tasks"`
 	// WatchKey comes only from the resident helper: view-wait answers when
 	// what this view was read from changes.
 	WatchKey string `json:"watch_key"`
@@ -289,6 +292,7 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		}
 		record.Workspace = workspace
 		record.Active = item.Active
+		record.RunningTasks = item.RunningTasks
 		record.Title, record.GuestConfig, record.Connection = item.Title, item.Config, item.Connection
 		s.cliDiscovery.named(record.ID, item.Title)
 		record.GuestWorkspace = item.Workspace
@@ -399,6 +403,7 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	record.Resume = record.Resume || current.HasHistory
 	record.TerminalRunning = current.Running
 	record.Active = current.Active
+	record.Tasks = current.Tasks
 	record.AccountFailure = current.AccountFailure
 	if current.NativeHistory {
 		record.ResumeTranscript = ""

@@ -43,6 +43,9 @@ type mobileSummary struct {
 	Deleting      bool      `json:"deleting,omitempty"`
 	Revision      uint64    `json:"revision"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// RunningTasks counts the subagents and background tasks of a terminal
+	// conversation whose CLI is live (from discovery); absent when none run.
+	RunningTasks int `json:"running_tasks,omitempty"`
 	// Owner is who writes a Codex session's thread now: "" (nobody), "desktop"
 	// (a terminal of this server), "phone" (a phone turn) or "external" (any
 	// other process). Codex sessions only.
@@ -91,6 +94,16 @@ type mobileSession struct {
 	AcknowledgedRequestID string       `json:"acknowledged_request_id,omitempty"`
 	TerminalAvailable     bool         `json:"terminal_available,omitempty"`
 	DesktopTerminalID     string       `json:"desktop_terminal_id,omitempty"`
+	// Tasks holds what still runs in a terminal conversation, also when the
+	// turn that started it is no longer in Turns; absent when nothing runs.
+	Tasks *mobileTasks `json:"tasks,omitempty"`
+}
+
+// mobileTasks is the channel helper's running summary: Count in total and the
+// newest at most 16 with their latest call.
+type mobileTasks struct {
+	Count   int                            `json:"count"`
+	Running []cliconversation.ToolActivity `json:"running"`
 }
 type mobileRecord struct {
 	mobileSession
@@ -312,6 +325,7 @@ func (m *mobileCLIStore) record(profile, id string) (*mobileRecord, error) {
 		turn := &record.Turns[n-1]
 		if turn.Status == "running" || turn.Status == "stopping" {
 			turn.Status, turn.Error = "interrupted", "主机服务重新启动。请检查本轮结果后再发送消息。"
+			turn.Tools = cliconversation.CloseTasks(turn.Tools)
 			record.changed()
 			if err := writePrivate(path, &record); err != nil {
 				return nil, err
@@ -350,6 +364,9 @@ func (m *mobileCLIStore) summaries(profile string, granted map[string]bool, arch
 		}
 		summary.Running = m.running[id] || m.codexLive[id]
 		summary.ClaudeDesktop = summary.Running && m.desktop[id]
+		if !summary.Running {
+			summary.RunningTasks = 0 // nothing outlives its CLI process
+		}
 		if granted[summary.Workspace] && !summary.Deleted && summary.Archived == archived {
 			if summary.CustomTitle != "" {
 				summary.Title = summary.CustomTitle
