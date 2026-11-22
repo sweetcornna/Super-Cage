@@ -88,6 +88,7 @@ func (f *entryFixture) bareConfig(extra string) string {
 func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 	f := newEntryFixture(t, true)
 	f.on()
+	calls := len(testSSHCalls())
 	config := f.paths.clientFile()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
@@ -102,7 +103,9 @@ func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 	if err := os.WriteFile(local, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	scp := exec.CommandContext(ctx, "/usr/bin/scp", "-F", config, "-q", local, "cage-default:payload-copy.bin")
+	// scp and sftp run /usr/bin/ssh unless -S names another: the tests'
+	// scp and sftp give the shim (ssh_shim_test.go).
+	scp := exec.CommandContext(ctx, testSSHTool("scp"), "-F", config, "-q", local, "cage-default:payload-copy.bin")
 	scp.Env, scp.Dir = f.sshEnv(), f.dir
 	if out, stderr, code := entryCombined(scp); code != 0 {
 		t.Fatalf("scp up: %q %q %d", out, stderr, code)
@@ -111,7 +114,7 @@ func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 		t.Fatalf("scp up delivered %d bytes, %v", len(copied), err)
 	}
 	back := filepath.Join(f.dir, "client", "back.bin")
-	scp = exec.CommandContext(ctx, "/usr/bin/scp", "-F", config, "-q", "cage-default:payload-copy.bin", back)
+	scp = exec.CommandContext(ctx, testSSHTool("scp"), "-F", config, "-q", "cage-default:payload-copy.bin", back)
 	scp.Env, scp.Dir = f.sshEnv(), f.dir
 	if out, stderr, code := entryCombined(scp); code != 0 {
 		t.Fatalf("scp down: %q %q %d", out, stderr, code)
@@ -121,7 +124,7 @@ func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 	}
 	batch := filepath.Join(f.dir, "batch")
 	_ = os.WriteFile(batch, []byte("pwd\nput "+local+" sftp-copy.bin\nls -l sftp-copy.bin\n"), 0o600)
-	sftp := exec.CommandContext(ctx, "/usr/bin/sftp", "-F", config, "-b", batch, "cage-default")
+	sftp := exec.CommandContext(ctx, testSSHTool("sftp"), "-F", config, "-b", batch, "cage-default")
 	sftp.Env, sftp.Dir = f.sshEnv(), f.dir
 	out, stderr, code = entryCombined(sftp)
 	if code != 0 || !strings.Contains(out, home) || !strings.Contains(out, "sftp-copy.bin") {
@@ -156,6 +159,14 @@ func TestEntrySystemSSHCommandsScpSftpRsync(t *testing.T) {
 	}
 	if !strings.Contains(output.String(), "P=xterm-256color|Asia/Tokyo") {
 		t.Fatalf("ssh -tt output %q", output.String())
+	}
+	// Each of them ran the shim, never the system ssh straight.
+	// (scp speaks SFTP: it and sftp ask for the sftp subsystem.)
+	for _, want := range []string{"cage-default echo hello", "cage-default sftp", "rsync --server", "-tt cage-default"} {
+		testSSHCalledSince(t, calls, want)
+	}
+	if n := strings.Count(strings.Join(testSSHCalls()[calls:], "\n"), "-s -- cage-default sftp"); n < 3 {
+		t.Fatalf("scp, scp and sftp ran the shim %d times", n)
 	}
 }
 

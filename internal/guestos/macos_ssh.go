@@ -3,6 +3,7 @@ package guestos
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -42,12 +43,21 @@ func macOSSSHBaseArgs(profile, user string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// ssh drops an -i whose file is not there and then offers the default
+	// keys of the home in the user database (~/.ssh/id_*), IdentitiesOnly or
+	// not: ssh -G lists them. So the provisioned key must be a file first.
+	key := filepath.Join(profile, "state", "lima", "_config", "user")
+	if info, err := os.Lstat(key); errors.Is(err, fs.ErrNotExist) {
+		return nil, errors.New("macOS 客机 SSH 密钥尚未就绪")
+	} else if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("macOS 客机 SSH 密钥无效")
+	}
 	known := filepath.Join(profile, "macos-known-hosts")
 	// ssh -o parses each option as a config line; quote paths with spaces.
 	// Lima's ssh.config is not used: the port is reread each call because it
 	// changes between boots.
 	return []string{"-q", "-e", "none", "-F", os.DevNull, "-p", strconv.Itoa(port),
-		"-l", user, "-i", filepath.Join(profile, "state", "lima", "_config", "user"),
+		"-l", user, "-i", key,
 		"-o", "Hostname=127.0.0.1", "-o", "HostKeyAlias=cage-macos",
 		"-o", "StrictHostKeyChecking=yes", "-o", "HostKeyAlgorithms=ssh-ed25519",
 		"-o", "UserKnownHostsFile=" + strconv.Quote(known), "-o", "GlobalKnownHostsFile=" + os.DevNull,

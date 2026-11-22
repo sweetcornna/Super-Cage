@@ -395,6 +395,7 @@ func writeScreenSharingSSHConfig(t *testing.T, s *Server, port int) {
 	if err := os.WriteFile(filepath.Join(dir, "ssh.config"), []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
+	writeMacOSTestKey(t, s.profile)
 }
 
 // Run the real OpenSSH client against an isolated server. Accept only the

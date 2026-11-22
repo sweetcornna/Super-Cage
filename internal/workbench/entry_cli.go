@@ -133,6 +133,9 @@ func EntryMain(args []string, defaultConfig string, stdin *os.File, stdout, stde
 	var view entryStatusView
 	switch args[0] {
 	case "on":
+		if code := entryConfirmOn(ctx, configPath, stdin, stderr); code != 0 {
+			return code
+		}
 		err = entryCall(ctx, configPath, "POST", "/api/entry/on", map[string]any{}, &view)
 	case "off":
 		err = entryCall(ctx, configPath, "POST", "/api/entry/off", map[string]any{}, &view)
@@ -213,6 +216,41 @@ func entryPrintDevices(out io.Writer, view entryStatusView) {
 		}
 		fmt.Fprintf(out, "%s  %s  %s  %s%s\n", device.ID[:8], device.Name, device.Fingerprint, used, state)
 	}
+}
+
+// entryOnRefusal is what cage entry on says when no person can answer it.
+const entryOnRefusal = "开启本机终端要你本人确认：请在你自己的终端里运行 cage entry on，或在 Super Cage 窗口里开启。"
+
+// entryConfirmOn asks the person at this terminal before cage entry on turns
+// the entry on (owner decision 2026-11-22): stdin and stderr must be a
+// terminal, and the question and its answer go through the controlling
+// terminal, not through stdin, so a program that pipes or scripts cage entry
+// cannot answer it. No option skips it; the window turns the entry on as
+// before. It returns 0 to go on, else the exit status.
+func entryConfirmOn(ctx context.Context, configPath string, stdin *os.File, stderr io.Writer) int {
+	errFile, _ := stderr.(*os.File)
+	if stdin == nil || errFile == nil || !term.IsTerminal(int(stdin.Fd())) || !term.IsTerminal(int(errFile.Fd())) {
+		fmt.Fprintln(stderr, "Super Cage："+entryOnRefusal)
+		return 1
+	}
+	var view entryStatusView
+	if err := entryCall(ctx, configPath, "GET", "/api/entry", nil, &view); err != nil {
+		fmt.Fprintln(stderr, "Super Cage："+entryClientError(err))
+		return 1
+	}
+	tty, err := entryOpenTTY()
+	if err != nil {
+		fmt.Fprintln(stderr, "Super Cage："+entryOnRefusal)
+		return 1
+	}
+	defer tty.Close()
+	fmt.Fprintf(tty, "在这台电脑上开启%s的本机终端？开启后，你在这台电脑上的 ssh、scp、sftp 和 rsync 可以连进这个环境。[y/N] ", view.Name)
+	answer, _ := bufio.NewReader(tty).ReadString('\n')
+	if answer = strings.ToLower(strings.TrimSpace(answer)); answer != "y" && answer != "yes" {
+		fmt.Fprintln(tty, "未开启。")
+		return 1
+	}
+	return 0
 }
 
 // entryIncludeCommand shows the exact line and asks before it is written.

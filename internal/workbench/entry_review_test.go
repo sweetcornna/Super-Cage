@@ -675,8 +675,8 @@ func sshBinaries() []string {
 
 func sshGWith(t *testing.T, binary, config, host string) (map[string]string, string, int) {
 	t.Helper()
-	cmd := exec.Command(binary, "-G", "-F", config, host)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + filepath.Dir(filepath.Dir(config))}
+	cmd := exec.Command(testSSHShim(binary), "-G", "-F", config, host)
+	cmd.Env = []string{testSSHPath("/usr/bin:/bin"), "HOME=" + filepath.Dir(filepath.Dir(config))}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()

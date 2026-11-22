@@ -96,9 +96,7 @@ type entryStatusView struct {
 	Computer    string            `json:"computer,omitempty"`
 	Revoked     bool              `json:"revoked"`
 	Devices     []entryDeviceView `json:"devices"`
-	// Herdr is offered only once its filter exists (step 3).
-	Herdr bool   `json:"herdr"`
-	Error string `json:"error,omitempty"`
+	Error       string            `json:"error,omitempty"`
 	// Unreached names the environments a revocation could not reach.
 	Unreached []string `json:"unreached,omitempty"`
 	// Kept are the kept ssh terminals of this environment, at most
@@ -293,6 +291,7 @@ func (s *Server) entryOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.entry.registry.cutAll(errEntryOff)
+	s.entryUnkeepAll()
 	s.entryCancelWrapper()
 	if err := entryRemoveClient(paths, entryEnvironmentID(s.profile)); err != nil {
 		requestError(w, errors.New("本机终端已关闭，但 ssh 配置没能全部移除："+err.Error()))

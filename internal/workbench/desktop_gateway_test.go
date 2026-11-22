@@ -293,3 +293,74 @@ func TestRemoteAutoReleasesOnlyOwnedLocalService(t *testing.T) {
 		})
 	}
 }
+
+// Quitting the app suspends the local view it shows, which is what ends the
+// entry's ssh connections (TestEntryQuitCutsLikeLock): the window's own
+// request before it quits goes on to the local controller, and closing the
+// gateway, when the app is gone, sends it too.
+func TestDesktopQuitSuspendsTheLocalView(t *testing.T) {
+	s, f := gatewayFixture(t)
+	d := s.remote.desktop
+	local := chooseLocal(t, d, d.context().ConnectionID)
+	r := httptest.NewRequest("POST", s.origin+"/api/account/suspend", strings.NewReader("{}"))
+	r.Header.Set("Origin", s.origin)
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set(connectionHeader, local)
+	r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
+	w := httptest.NewRecorder()
+	s.handler().ServeHTTP(w, r)
+	if w.Code != 200 || f.suspended.Load() != 1 {
+		t.Fatalf("the window's suspend before quitting: %d %s, %d suspensions", w.Code, w.Body.String(), f.suspended.Load())
+	}
+	s.remote.close()
+	if f.suspended.Load() != 2 {
+		t.Fatalf("closing the gateway suspended the local view %d times", f.suspended.Load()-1)
+	}
+}
+
+// A local view left for another local view keeps its controller unlocked
+// while the app runs, and with it that environment's ssh entry. Quitting the
+// app counts as lock for the entry, so closing the gateway suspends every
+// local view this run left behind that is still running, not only the one it
+// shows.
+func TestDesktopQuitSuspendsLocalViewsLeftBehind(t *testing.T) {
+	s := testServer(t)
+	first, second := newLocalVMFixture(t, "a"), newLocalVMFixture(t, "b")
+	s.remote = newDesktopGateway(s.profile, first)
+	d := s.remote.desktop
+	d.localFor = func(id string) (DesktopLocalController, error) {
+		if id == defaultLocalVMID {
+			return first, nil
+		}
+		return second, nil
+	}
+	t.Cleanup(s.remote.close)
+	shown := chooseLocal(t, d, d.context().ConnectionID)
+	c, err := d.prepare(switchRequest{ConnectionID: shown, Mode: "local", VMID: "0123456789abcdef"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidateState(t, d, "connected")
+	if err := d.commit(context.Background(), switchRequest{ConnectionID: shown, CandidateID: c.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if !first.unlocked.Load() || !second.unlocked.Load() {
+		t.Fatal("switching between local views locked one")
+	}
+	// Back to the first: the other is the one left behind now.
+	shown = d.context().ConnectionID
+	if c, err = d.prepare(switchRequest{ConnectionID: shown, Mode: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	candidateState(t, d, "connected")
+	if err := d.commit(context.Background(), switchRequest{ConnectionID: shown, CandidateID: c.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(d.left) != 1 || d.left["0123456789abcdef"] == nil || !first.unlocked.Load() || !second.unlocked.Load() {
+		t.Fatalf("after switching back: left %v", d.left)
+	}
+	s.remote.close()
+	if first.unlocked.Load() || second.unlocked.Load() {
+		t.Fatalf("quitting left a local view unlocked: default %v, other %v", first.unlocked.Load(), second.unlocked.Load())
+	}
+}

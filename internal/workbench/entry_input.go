@@ -81,7 +81,7 @@ func entryReadInputHeld(channel io.Reader, presence *entryPresence, guestFocus f
 				send(presence.release())
 				return
 			}
-			data = presence.note(read, guestFocus)
+			data = entryNote(presence, read, guestFocus)
 		case <-held:
 			// Input that came meanwhile goes first.
 			select {
@@ -90,7 +90,7 @@ func entryReadInputHeld(channel io.Reader, presence *entryPresence, guestFocus f
 					send(presence.release())
 					return
 				}
-				data = presence.note(read, guestFocus)
+				data = entryNote(presence, read, guestFocus)
 			default:
 				data = presence.release()
 			}
