@@ -130,7 +130,7 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       await page.getByRole("button", { name: "设置", exact: true }).click();
       const nav = page.getByRole("navigation", { name: "设置分组" });
-      await nav.getByRole("button", { name: "远程连接", exact: true }).click();
+      await nav.getByRole("button", { name: "设备", exact: true }).click();
       assert.deepEqual(chunks, [], "the page must load only when its section opens");
       assert.equal(entry.requests.length, 0);
       await nav.getByRole("button", { name: "本机终端", exact: true }).click();
@@ -187,7 +187,7 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await shot("on");
       // Populated: two connections, long names, a revoked device.
       populated(entry);
-      await nav.getByRole("button", { name: "远程连接", exact: true }).click();
+      await nav.getByRole("button", { name: "设备", exact: true }).click();
       await nav.getByRole("button", { name: "本机终端", exact: true }).click();
       await content.getByText("已开启 · 2 个连接").waitFor();
       await content.getByText("最近使用 3 分钟前").waitFor();
@@ -231,14 +231,14 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       // State lines.
       for (const [state, text] of [["paused", "网络已暂停 · ssh 已断开，恢复网络后可重新连接"], ["stopped", "环境已停止 · 启动环境后可连接"], ["starting", "环境正在启动 · 启动完成后可连接"]]) {
         entry.view.state = state;
-        await nav.getByRole("button", { name: "远程连接", exact: true }).click();
+        await nav.getByRole("button", { name: "设备", exact: true }).click();
         await nav.getByRole("button", { name: "本机终端", exact: true }).click();
         await content.getByText(text).waitFor();
       }
       await shot("paused-or-starting");
       // Off: confirm, then the empty state again.
       entry.view.state = "idle";
-      await nav.getByRole("button", { name: "远程连接", exact: true }).click();
+      await nav.getByRole("button", { name: "设备", exact: true }).click();
       await nav.getByRole("button", { name: "本机终端", exact: true }).click();
       await content.getByRole("button", { name: "关闭本机终端" }).click();
       const off = page.getByRole("dialog", { name: "关闭本机终端？" });
@@ -248,7 +248,7 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       // A controller without the entry, and a window on another computer.
       for (const [variant, text] of [["outdated", "需要更新 Super Cage：正在运行的版本还没有本机终端。"], ["remote", "本机终端只能在这台电脑上的 Super Cage 里管理。"]]) {
         entry.variant = variant;
-        await nav.getByRole("button", { name: "远程连接", exact: true }).click();
+        await nav.getByRole("button", { name: "设备", exact: true }).click();
         await nav.getByRole("button", { name: "本机终端", exact: true }).click();
         await content.getByRole("alert").filter({ hasText: text }).waitFor();
       }

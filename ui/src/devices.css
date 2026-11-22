@@ -1,0 +1,289 @@
+/* Settings → 设备 and its two dialogs. The page reuses the settings page's section title, help lines and the relay
+   block's classes; only what is new is styled here. Loaded with the page (lazily). */
+.devices-page .devices-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 8px;
+}
+.devices-page .devices-actions button {
+  min-height: var(--h-control);
+  padding: 0 16px;
+}
+.devices-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.devices-group {
+  margin: 32px 0 0;
+}
+.devices-group-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 8px;
+}
+.settings-page .settings-content .devices-group-head h4 {
+  margin: 0;
+  font-size: var(--s-lg, 1.15rem);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--strong);
+}
+.devices-meta {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.devices-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--line);
+}
+.devices-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 3.6rem;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+.devices-row-icon {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  color: var(--muted);
+}
+.devices-row-text {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+.devices-row-text strong {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.devices-row-meta {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.devices-row-error {
+  color: var(--error);
+  font-size: var(--fs-secondary);
+  line-height: 1.5;
+}
+/* The device is connected now: the green of the sidebar's 环境运行正常 dot (clay would read as a warning here), as quiet. */
+.devices-live {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+}
+.devices-row .quiet-button {
+  color: var(--muted);
+}
+.devices-row .quiet-button:hover:not(:disabled) {
+  color: var(--ink);
+}
+.devices-limit,
+.devices-note {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.devices-note[role="alert"] {
+  color: var(--error);
+}
+.settings-subpage .devices-page .devices-empty {
+  padding: 40px 24px 16px;
+  border-top: 1px solid var(--line);
+}
+.devices-page .devices-empty .drawing {
+  width: 132px;
+}
+.devices-page .devices-empty .drawing svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+/* The relay block sits under the lists as it did under the pairing card. */
+.devices-page .remote-relay-settings {
+  margin-top: 48px;
+}
+
+/* ── the two dialogs ───────────────────────────────────── */
+.devices-dialog {
+  min-height: 4.5rem;
+}
+.devices-dialog .devices-code {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px 32px;
+  align-items: start;
+}
+.devices-dialog .devices-code-text {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-width: 0;
+}
+.devices-dialog .devices-code-text > p,
+.devices-dialog .devices-steps {
+  margin: 0;
+}
+.devices-digits {
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: var(--fs-hero);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.devices-dialog .devices-code-text > .devices-countdown {
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.devices-steps {
+  display: grid;
+  gap: 10px;
+  padding: 0;
+  list-style: none;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+  line-height: 1.65;
+}
+.devices-steps strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+.devices-dialog .devices-code-text > .devices-relay,
+.devices-dialog .devices-code-text > .devices-privacy {
+  color: var(--muted);
+  font-size: var(--fs-caption);
+  line-height: 1.6;
+}
+.devices-qr {
+  display: block;
+  width: 320px;
+  height: 320px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  background: #fff;
+  image-rendering: pixelated;
+}
+.devices-request {
+  display: grid;
+  gap: 10px;
+  padding: 8px 0 4px;
+}
+.devices-request h3 {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+  font-weight: 500;
+  letter-spacing: var(--track-cjk);
+  line-height: var(--lh-title);
+}
+.modal-body .devices-request > p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.devices-check {
+  display: inline-block;
+  margin: 0 0.15em;
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: var(--fs-section);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1em;
+}
+.devices-outcome {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--fs-lead);
+  line-height: 1.6;
+}
+.devices-outcome svg {
+  flex: none;
+  color: var(--green);
+}
+.devices-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--fs-secondary);
+  line-height: 1.6;
+}
+.devices-waiting {
+  color: var(--ink);
+}
+.devices-footer-note {
+  margin-right: auto;
+}
+.modal-footer .devices-copy {
+  margin-right: auto;
+}
+.devices-join {
+  display: grid;
+  gap: 12px;
+}
+.devices-join .devices-code-input {
+  width: 100%;
+  min-height: 3.5rem;
+  padding: 0 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-serif);
+  font-size: var(--fs-hero);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.1em;
+  text-align: center;
+}
+.devices-join .devices-code-input::placeholder {
+  color: var(--faint);
+}
+/* A long code is text to paste, not digits to read. */
+.devices-join .devices-code-input.long {
+  font-family: var(--font-mono);
+  font-size: var(--fs-secondary);
+  letter-spacing: 0;
+  text-align: left;
+}
+.devices-join .field-help {
+  margin: 0;
+}
+@media (max-width: 860px) {
+  .devices-dialog .devices-code {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .devices-qr {
+    width: min(320px, 100%);
+    height: auto;
+    aspect-ratio: 1;
+  }
+}

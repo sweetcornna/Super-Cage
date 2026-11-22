@@ -21,7 +21,7 @@ import { SessionAccount } from "../session-account";
 import "./mobile.css";
 import "./super.css";
 import { IconHints } from "../icon-hints.jsx";
-import { edgeSwipe, openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
+import { deviceMode, edgeSwipe, openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
 import { afterOutcome, HOLD_SECONDS, initialPoll, MIN_SPACING_MS, pollQuery, requestDeadline, requestDeadlineMs } from "../session-poll.mjs";
 import { keepSame } from "../poll-state.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
@@ -37,7 +37,7 @@ const labels = {
 };
 const active = (status) => status === "running" || status === "stopping" || status === "queued";
 const nativePhone = navigator.userAgent.includes("CageMobile/1");
-const phoneWorkspace = nativePhone || location.pathname === "/";
+const phoneWorkspace = nativePhone || location.pathname === "/" || deviceMode;
 const dateFormat = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function displayTime(value) {
   if (!value) return "";
