@@ -16,8 +16,10 @@ import "./devices.css";
 // back; a code on show is followed by held reads, see devices-dialogs.jsx).
 export default function DevicesPage({ relay, savedRelay, busy: working, onRelayChange, onConfirm }) {
   const remote = isRemoteClient();
-  // A tenant workspace is a machine of a server, not a computer to join from.
-  const canJoin = !getClientContext().tenant_workspace;
+  // A tenant workspace is a machine of a server, not a computer to join from or to add a device to (a code is made
+  // only in this computer's own window, devices.go): what was paired stays listed and can be removed.
+  const portal = getClientContext().tenant_workspace === true;
+  const canJoin = !portal;
   const [state, setState] = useState(null);
   const [joined, setJoined] = useState(null);
   const [error, setError] = useState("");
@@ -122,9 +124,10 @@ export default function DevicesPage({ relay, savedRelay, busy: working, onRelayC
       {state?.problem && <p className="error-message" role="alert">{state.problem}</p>}
       {!state && !error && !remote && <p className="devices-status" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在读取设备…</p>}
       {remote && <p className="field-help">请先切换到这台电脑的本机环境，再添加或管理手机和其他电脑。</p>}
+      {portal && <p className="field-help">这是门户里的环境，不能在这里添加设备。手机请在 Super Cage 应用里用门户账号登录。</p>}
       {(state || joined) && (
         <div className="devices-actions">
-          {state && !empty && addButton}
+          {state && !empty && !portal && addButton}
           {joined && <button type="button" disabled={busy !== ""} onClick={() => setDialog("join")}>加入其他电脑</button>}
         </div>
       )}
@@ -135,7 +138,7 @@ export default function DevicesPage({ relay, savedRelay, busy: working, onRelayC
               <span className="drawing drawing-laptop" aria-hidden="true" dangerouslySetInnerHTML={{ __html: deviceArt.laptop }} />
               <h3>还没有设备</h3>
               <p>手机或另一台电脑配对后，可以在这里看到它，并随时移除。</p>
-              <div className="empty-action">{addButton}</div>
+              {!portal && <div className="empty-action">{addButton}</div>}
             </div>
           ) : (
             <>

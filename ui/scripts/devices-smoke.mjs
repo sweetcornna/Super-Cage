@@ -21,7 +21,7 @@ const LONG = "CAGE-7QK2-M9XT-4HNA-WB3E-0RCP-YL6D";
 async function desktopRun({ theme, viewport, only }) {
   const host = createDevicesHost({ devices: [], computers: [] });
   const fixture = await createWorkbench({
-    viewport, clientContext: context,
+    viewport, clientContext: only === "portal" ? { ...context, tenant_workspace: true } : context,
     beforeNavigate: async (page, state) => {
       await page.emulateMedia({ colorScheme: theme });
       if (only === "custom") state.settings.mobile_relay = "https://relay.example.com";
@@ -78,6 +78,32 @@ async function desktopRun({ theme, viewport, only }) {
       assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).isDisabled(), true);
       assert.deepEqual(errors, []);
       console.log("PASS: " + name + " custom relay: the line in the dialog, unsaved address holds 添加设备");
+      return;
+    }
+    if (only === "portal") {
+      // A portal (tenant) workspace: nothing to add and nothing to join from here; one sentence says so, once. The
+      // devices already paired stay listed and can be removed.
+      const sentence = "这是门户里的环境，不能在这里添加设备。手机请在 Super Cage 应用里用门户账号登录。";
+      await page.getByRole("button", { name: "设置", exact: true }).click();
+      await nav.getByRole("button", { name: "设备", exact: true }).click();
+      await page.getByRole("heading", { name: "还没有设备", exact: true }).waitFor();
+      assert.equal(await page.getByText(sentence, { exact: true }).count(), 1, "the sentence, once, in the empty view");
+      assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).count(), 0);
+      assert.equal(await page.getByRole("button", { name: "加入其他电脑", exact: true }).count(), 0);
+      await shot("portal-empty");
+      host.devices = sampleDevices();
+      await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+      await page.getByText("3 台设备 · 1 台在线", { exact: true }).waitFor();
+      assert.equal(await page.getByText(sentence, { exact: true }).count(), 1, "the sentence, once, with devices listed");
+      assert.equal(await page.getByRole("button", { name: "添加设备", exact: true }).count(), 0);
+      await shot("portal-list");
+      await page.getByRole("button", { name: "移除 Google Pixel 9 Pro", exact: true }).click();
+      await page.getByRole("dialog").last().getByRole("button", { name: "移除", exact: true }).click();
+      await page.getByText("2 台设备 · 1 台在线", { exact: true }).waitFor();
+      assert.equal(host.count(/^DELETE \/devices\/d2$/), 1);
+      assert.equal(host.count(/^(POST \/devices\/invite|GET \/client\/devices)/), 0, "no code asked for, no joined computers read");
+      assert.deepEqual(errors, []);
+      console.log("PASS: " + name + " portal workspace: no 添加设备, the sentence once, the list and 移除 stay");
       return;
     }
 
@@ -617,16 +643,19 @@ async function phoneRun({ theme, viewport }) {
   } finally { await browser.close(); }
 }
 
-// CAGE_DEVICES_ONLY=desktop|phone runs one half.
+// CAGE_DEVICES_ONLY=desktop|phone runs one half, portal only the portal workspace.
 const only = process.env.CAGE_DEVICES_ONLY || "";
+const portalRun = () => desktopRun({ theme: "light", viewport: { width: 1440, height: 900 }, only: "portal" });
 if (only === "one") await desktopRun({ theme: "light", viewport: { width: 1440, height: 900 } });
+else if (only === "portal") await portalRun();
 else if (only !== "phone") {
   for (const theme of ["light", "dark"]) {
     for (const viewport of [{ width: 1440, height: 900 }, { width: 1000, height: 700 }]) await desktopRun({ theme, viewport });
   }
   await desktopRun({ theme: "light", viewport: { width: 1000, height: 700 }, only: "custom" });
+  await portalRun();
 }
-if (only !== "desktop") {
+if (only !== "desktop" && only !== "portal") {
   for (const theme of ["light", "dark"]) await phoneRun({ theme, viewport: { width: 1440, height: 900 } });
   await phoneRun({ theme: "light", viewport: { width: 1000, height: 700 } });
 }
