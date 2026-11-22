@@ -677,8 +677,10 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		requestError(w, errors.New("无法生成二维码"))
 		return
 	}
+	// The code itself carries whole seconds; it expires at that second.
+	expires := time.Unix(code.Expires, 0)
 	p.mu.Lock()
-	invite.expires = room.ExpiresAt
+	invite.expires = expires
 	p.mu.Unlock()
 	complete = true
 	go func() {
@@ -714,7 +716,7 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.invite == invite && invite.state == "waiting" {
-			// The relay ends a waiting room at the same time the code expires.
+			// The relay ends a waiting room when the code expires, or just after.
 			if ctx.Err() != nil || !time.Now().Before(invite.expires) {
 				p.inviteStateLocked(invite, "expired", "")
 			} else {
@@ -727,7 +729,7 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	w.Header().Set("Cache-Control", "no-store")
-	jsonReply(w, map[string]any{"image": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), "expires": room.ExpiresAt, "manual": "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw))})
+	jsonReply(w, map[string]any{"image": "data:image/png;base64," + base64.StdEncoding.EncodeToString(png), "expires": expires, "manual": "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw))})
 }
 
 // inviteState is GET /api/devices/invite?wait=N: a held read that answers
