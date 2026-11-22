@@ -122,6 +122,10 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 		s.clientProjectShareRequest(w, r, path)
 		return
 	}
+	if path == "devices" || strings.HasPrefix(path, "devices/") {
+		s.clientDevicesRequest(w, r, path)
+		return
+	}
 	if path == "commit" || path == "disconnect" || path == "local" {
 		defer g.drainClosedClientShares()
 	}
@@ -258,6 +262,7 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 		s.clientRequest(w, r)
 		return true
 	}
+	s.noteDeviceLock(r)
 	switch r.URL.Path {
 	case "/api/session", "/api/launch", "/api/handoff":
 		return false

@@ -140,15 +140,35 @@ func OpenSaved(relayOrigin, lookupToken, trustedHostPin string, device DeviceSig
 	if err != nil {
 		return nil, err
 	}
+	return openSaved(relayOrigin, lookupToken, trustedHostPin, func() (*remotelink.Identity, error) { return identity, nil })
+}
+
+// OpenSavedKey is OpenSaved for a computer that holds its own device key
+// (crypto.Signer: Ed25519 or P-256) rather than a platform signer. Each dial,
+// recoveries included, issues a fresh certificate for the key: an identity's
+// certificate is valid for 24 hours and the host checks that, while the pin
+// (the key's SPKI digest) stays the same.
+func OpenSavedKey(relayOrigin, lookupToken, trustedHostPin string, key crypto.Signer) (*Client, error) {
+	if key == nil {
+		return nil, errors.New("missing device key")
+	}
+	return openSaved(relayOrigin, lookupToken, trustedHostPin, func() (*remotelink.Identity, error) { return remotelink.IdentityFromSigner(key) })
+}
+
+func openSaved(relayOrigin, lookupToken, trustedHostPin string, identity func() (*remotelink.Identity, error)) (*Client, error) {
 	lifetime, cancel := context.WithCancel(context.Background())
 	dial := func(parent context.Context) (*mobilelink.Client, error) {
 		ctx, stop := context.WithTimeout(parent, 25*time.Second)
 		defer stop()
+		id, err := identity()
+		if err != nil {
+			return nil, err
+		}
 		room, err := lookupSaved(ctx, relayOrigin, lookupToken)
 		if err != nil {
 			return nil, err
 		}
-		return mobilelink.ConnectClient(ctx, relayOrigin, room.ID, room.ClientToken, identity, trustedHostPin)
+		return mobilelink.ConnectClient(ctx, relayOrigin, room.ID, room.ClientToken, id, trustedHostPin)
 	}
 	link, err := dial(lifetime)
 	if err != nil {

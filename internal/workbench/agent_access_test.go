@@ -193,6 +193,7 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 		{"POST", "/api/input/files/desktop/open"}, {"POST", "/api/agent/native/x/complete"}, {"GET", "/api/agent/native?consumer=window"},
 		{"POST", "/api/terminals/t1/keep"}, {"GET", "/api/entry/ssh"}, {"POST", "/api/entry/include"}, {"POST", "/api/entry/devices/x/rename"}, {"POST", "/api/entry/off"},
 		{"GET", "/api/client/virtual-machines"},
+		{"POST", "/api/client/devices/join"}, {"POST", "/api/client/devices/0123456789abcdef0123456789abcdef/open"}, {"GET", "/api/client/devices"},
 		{"POST", "/api/agents/codex/install"}, {"POST", "/api/agents/codex/update"}, {"POST", "/api/agents/codex/remove"}, {"POST", "/api/agents/cancel"},
 	} {
 		refused(route[0], route[1], "native_transport_required")
