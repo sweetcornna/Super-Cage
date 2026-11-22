@@ -14,25 +14,41 @@ const fixture = await createWorkbench({ nativeRequest: async (body) => {
   if (body.operation === "install") update = { ...update, phase: "downloading", receivedBytes: 50, totalBytes: 100, message: "正在下载更新" };
   if (body.operation === "cancel") update = { ...update, phase: "available", message: "更新已暂停，可稍后继续" };
   return update;
+}, beforeNavigate: async (page) => {
+  // The workbench's side of the click: manual mode, and one running terminal
+  // command the upgrade would interrupt.
+  await page.route("**/api/app-update", (route) => route.fulfill({ json: { mode: "manual", silent_available: true, pending: null, waiting: null, last_attempt: null, chain: null } }));
+  await page.route("**/api/app-update/interruptions", (route) => route.fulfill({ json: {
+    blockers: [{ id: "terminal-command:7", kind: "terminal", label: "终端里还有命令在运行（make）", interruptible: true }],
+    must_wait: [], confirm: ["terminal-command:7"], reopen: [], environment_running: true,
+  } }));
 } });
 const { browser, page, state, errors } = fixture;
 const checks = [];
 try {
-  await page.getByRole("button", { name: "下载更新", exact: true }).waitFor();
-  const button = page.getByRole("button", { name: "下载更新", exact: true });
-  assert.match(await button.getAttribute("title"), /点击后将自动停止环境、安装并重启/);
+  const button = page.getByRole("button", { name: "升级到 0.2.0-alpha.2", exact: true });
+  await button.waitFor();
+  assert.match(await button.getAttribute("title"), /会被中断的任务.*停止环境、安装并重启.*不点击不会升级/);
   const bounds = await button.boundingBox();
   assert.ok(bounds.x < 248 && bounds.y > 700, "update action is not in the bottom-left sidebar");
   await page.screenshot({ path: join(output, "update-available.png") });
+  // The click lists what will be interrupted; nothing installs before 继续升级.
   await button.click();
-  assert.equal(calls.filter((call) => call.operation === "install").length, 1);
+  const confirmation = page.getByRole("dialog", { name: "升级到 0.2.0-alpha.2" });
+  await confirmation.getByText("终端里还有命令在运行（make）", { exact: true }).waitFor();
+  assert.equal(calls.filter((call) => call.operation === "install").length, 0, "the click installed before the confirmation");
+  await confirmation.getByRole("button", { name: "继续升级", exact: true }).click();
+  await confirmation.waitFor({ state: "hidden" });
+  const installs = calls.filter((call) => call.operation === "install");
+  assert.equal(installs.length, 1);
+  assert.deepEqual(installs[0].confirmed, ["terminal-command:7"], "the install carries exactly what was confirmed");
   await page.getByRole("progressbar", { name: "更新下载进度" }).waitFor();
   assert.equal(await page.getByRole("progressbar").getAttribute("aria-valuenow"), "50");
   assert.equal(await page.getByRole("dialog", { name: "Super Cage 更新" }).count(), 0);
   await page.evaluate(() => window.dispatchEvent(new CustomEvent("cage-app-update", { detail: { phase: "failed", latestVersion: "0.2.0-alpha.2", message: "更新源暂不可访问，仓库尚未公开", retryable: true } })));
-  await page.getByRole("button", { name: "重试更新", exact: true }).waitFor();
+  await page.getByRole("button", { name: "重试升级", exact: true }).waitFor();
   await page.getByRole("alert").filter({ hasText: "更新源暂不可访问，仓库尚未公开" }).waitFor();
-  checks.push("bottom-left update affordance", "single install request without a dialog", "inline ring progress", "private source failure visible");
+  checks.push("bottom-left update affordance", "confirmation lists the interruption, then a single install with the confirmed ids", "inline ring progress", "private source failure visible");
 
   const downloads = [{ id: "qa-download", name: "report.txt", state: "failed", error: "目标目录暂时无法写入", retryable: true }];
   let retries = 0, editorRestarts = 0, componentUpdates = 0;
