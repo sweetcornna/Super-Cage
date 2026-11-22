@@ -604,14 +604,16 @@ func entryReadOwner(paths entryPaths) entryOwnerConfig {
 
 // entryIncludePattern is the glob pattern ssh makes of an Include argument
 // (ssh_config(5), Include, TOKENS and ENVIRONMENT VARIABLES; OpenSSH 9.9
-// added the expansion, older releases take the argument as it is): ${VAR}
+// added the expansion, older releases take the argument as it is): ${HOME}
 // and the tokens that do not depend on the host being connected to, then
 // a relative path in ~/.ssh (/etc/ssh for the system file), then ~ and
 // ~/ as the user's home. ok is false for anything that cannot be expanded
-// with certainty: %C, %h, %j, %k, %n, %p and %r name the destination,
-// %L and %l the local host name, which can change with the network; an
-// undefined variable; another user's home; %i and %u on Windows; ~ in the
-// system file, which ssh refuses.
+// with certainty: any other variable (ssh reads it from the environment of
+// the shell it runs in, which a controller started from the Dock or at
+// login does not share); %C, %h, %j, %k, %n, %p and %r name the
+// destination, %L and %l the local host name, which can change with the
+// network; another user's home; %i and %u on Windows; ~ in the system
+// file, which ssh refuses.
 func entryIncludePattern(arg, home, base string, user bool) (string, bool) {
 	var b strings.Builder
 	for i := 0; i < len(arg); i++ {
@@ -622,7 +624,7 @@ func entryIncludePattern(arg, home, base string, user bool) (string, bool) {
 				return "", false
 			}
 			value, ok := os.LookupEnv(arg[i+2 : i+2+end])
-			if !ok {
+			if !ok || arg[i+2:i+2+end] != "HOME" {
 				return "", false
 			}
 			b.WriteString(value)

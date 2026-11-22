@@ -34,6 +34,9 @@ func TestEntryAliasFollowsIncludesLikeSSH(t *testing.T) {
 		name, include, file, want string
 	}{
 		{"home variable", "Include ${HOME}/inc/e.conf", "e.conf", "cage-lab1-defaul"},
+		// Any other variable may differ between the owner's shell and the
+		// controller's environment, even when the controller has it.
+		{"another variable", "Include ${CAGE_TEST_INC}/e.conf", "e.conf", "super-cage-lab1-default"},
 		{"user token", "Include HOMEDIR/inc/%u.conf", me.Username + ".conf", "cage-lab1-defaul"},
 		{"unknown variable", "Include ${CAGE_TEST_ELSEWHERE}/e.conf", "", "super-cage-lab1-default"},
 		{"host token", "Include ~/.ssh/hosts/%h.conf", "", "super-cage-lab1-default"},
@@ -45,6 +48,7 @@ func TestEntryAliasFollowsIncludesLikeSSH(t *testing.T) {
 			home := filepath.Dir(paths.SSHDir)
 			// ssh expands ${HOME} from its environment.
 			t.Setenv("HOME", home)
+			t.Setenv("CAGE_TEST_INC", filepath.Join(home, "inc"))
 			if err := os.MkdirAll(filepath.Join(home, "inc"), 0o700); err != nil {
 				t.Fatal(err)
 			}
@@ -67,7 +71,9 @@ func TestEntryAliasFollowsIncludesLikeSSH(t *testing.T) {
 			if alias != c.want {
 				t.Fatalf("alias %q, want %q", alias, c.want)
 			}
-			if c.file == "" {
+			if c.file == "" || strings.HasPrefix(c.want, "super-cage-") {
+				// Nothing to compare: ssh (here with an environment of its own)
+				// may not see the owner's file either.
 				return
 			}
 			// ssh agrees: with Super Cage's Include first, the owner's host
@@ -419,4 +425,58 @@ func TestEntryKeptTerminalsHaveTheirOwnCapAndExpire(t *testing.T) {
 	idleShell.session.Close()
 	entryAwait(t, 10*time.Second, "the idle kept terminal to end", func() bool { return f.s.terminals.get(idle) == nil })
 	entryAwait(t, 2*time.Second, "no timer once nothing is kept", func() bool { return !f.s.entryKeptTimerRunning() })
+}
+
+// A lock keeps the terminals it cuts within entryKeptLimit; the others end
+// and say why.
+func TestEntryLockBeyondTheKeptCapEndsTheTerminal(t *testing.T) {
+	previous := entryKeptLimit
+	entryKeptLimit = 1
+	t.Cleanup(func() { entryKeptLimit = previous })
+	f := newEntryFixture(t, true)
+	f.on()
+	t.Cleanup(func() {
+		for _, session := range f.s.terminals.keptSessions() {
+			f.s.terminals.remove(session.id)
+		}
+		f.s.entryUnkept()
+		for deadline := time.Now().Add(10 * time.Second); f.s.entryKeptTimerRunning() && time.Now().Before(deadline); {
+			time.Sleep(20 * time.Millisecond)
+		}
+	})
+	client, err := f.dial(f.device)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shells []*entryShell
+	for i := range 2 {
+		shell := entryOpenShell(t, client, 100, 30, "")
+		marker := fmt.Sprintf("L%d=", i)
+		shell.send("printf '" + marker + "%s\\n' ready\n")
+		shell.expect(marker)
+		shells = append(shells, shell)
+	}
+	ended := make(chan struct{})
+	go func() { _ = client.Wait(); close(ended) }()
+	f.s.account.lock()
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the lock did not cut the connection")
+	}
+	entryAwait(t, 5*time.Second, "one terminal left", func() bool { return len(entrySSHTerminals(f.s)) == 1 })
+	if f.s.terminals.keptCount() != 1 {
+		t.Fatalf("kept %d", f.s.terminals.keptCount())
+	}
+	notices := 0
+	for _, shell := range shells {
+		if text := shell.text(); strings.Contains(text, "最多保留 1 个本机终端") && strings.Contains(text, "这个终端随连接结束") {
+			notices++
+		} else if !strings.Contains(text, entryLockedNotice) {
+			t.Errorf("neither notice: %q", text[max(0, len(text)-300):])
+		}
+	}
+	if notices != 1 {
+		t.Fatalf("%d terminals said they ended", notices)
+	}
 }
