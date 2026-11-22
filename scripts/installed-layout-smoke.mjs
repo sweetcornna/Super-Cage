@@ -15,17 +15,26 @@
 //   3. cage desktop --json, what the window starts, then the page it loads, in
 //      headless Chrome with the native bridge mirrored: the page enters the
 //      local workbench by itself on a fresh launch;
-//   4. the picker's own choice of the local environment (candidate, commit).
+//   4. the window's own requests: the read routes that its settings and pages
+//      call (devices, other computers, about and updates, the SSH entry, the
+//      terminal app, the agents list ...), asked with exactly what the page
+//      holds (its session cookie from the launch ticket, and the headers the
+//      UI's api() helper adds), none refused with 401 or 403 and none missing
+//      (404); the agent transport's header on the same route is refused. Real
+//      Go tests hand-set the cookie of the launcher's own jar and the UI
+//      smokes fake the API, so a gate that demands what the webview never
+//      holds (the trusted-view cookie) refused the real window unnoticed;
+//   5. the picker's own choice of the local environment (candidate, commit).
 //      Its disconnect releases the idle controller the gateway started, so the
 //      choice again starts a second one. After each start the gateway has no
 //      defunct child: the starter of a controller ends with it, and the
 //      gateway lives on;
-//   5. the local controller's launch answer names the companion and its
+//   6. the local controller's launch answer names the companion and its
 //      status answer does not (the layout really is the installed one), and
 //      it is the instance the gateway reports;
-//   6. cage attach and cage entry status against the running controller, and
+//   7. cage attach and cage entry status against the running controller, and
 //      a cage-attach of another build stamp refused;
-//   7. every process stopped by the PID this run started, the ports free, the
+//   8. every process stopped by the PID this run started, the ports free, the
 //      temporary directories removed.
 //
 // The window's page stays on the desktop gateway's origin (the app only loads
@@ -54,6 +63,7 @@ import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { connectionHeaders } from "../ui/src/client-context.mjs";
 
 const run = promisify(execFile);
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -71,7 +81,7 @@ const procs = new Map(); // pid -> label: processes this run started
 const ports = new Set();
 let root = "", home = "", appDir = "", cageBin = "", attachBin = "", otherAttach = "", stamp = "";
 let env = {}, desktopEnv = {};
-let browser = null;
+let browser = null, windowPage = null;
 
 async function step(name, fn) {
   const at = Date.now();
@@ -185,6 +195,57 @@ function assertLocalConnected(context, where) {
   assert.equal(context.connection?.state, "connected", where + ": " + JSON.stringify(context.connection));
   assert.match(context.instance_id, /^[0-9a-f]{64}$/, where + ": instance");
   assert.equal(context.connection.manifest?.platform, process.platform, where + ": manifest platform");
+}
+
+// ---- the window's own requests -----------------------------------------------
+// The read routes that the window's settings and pages call, as the UI names
+// them (the path after /api), listed from the api() calls of ui/src:
+// about-settings and app-updates (about, updates), devices-page and
+// devices-dialogs (设备, 加入其他电脑), other-clients-* (agents), local-terminal-*
+// and local-entry (terminal app, SSH entry), settings, remote-hosts (the
+// picker), project-dialog and browser-extensions (the client's own stores).
+// Only reads: nothing here changes a setting, mints a code or opens a window.
+const windowReads = [
+  // Answered by the desktop gateway itself; the UI names no connection for them.
+  "/client/context", "/client/about", "/client/local-status", "/client/hosts",
+  "/client/devices", "/client/devices/join?wait=0",
+  "/client/local-terminal", "/client/local-terminal/app",
+  "/client/browser-extensions", "/client/project-shares",
+  // Handed on to the local controller, which the UI names in X-Cage-Connection.
+  "/status", "/account", "/settings", "/devices", "/devices/invite?wait=0", "/mobile-pair",
+  "/agents", "/app-update", "/app-update/interruptions", "/entry", "/entry/include",
+];
+// A 404 is a route that is not there, which the page shows as a broken screen.
+// The desktop gateway and the local controller carry every route above (the
+// SSH entry and devices routes answer 404 only in a gateway-only or client-only
+// process, the terminal app's only outside the desktop), so none is documented
+// as absent in this process kind. A route that is missing by design goes into
+// this map: route -> the reason.
+const windowAbsent = new Map();
+// The window holds a session cookie from its launch ticket and nothing more:
+// the trusted-view cookie lives only in the cookie jars of the Go launchers.
+// ask(path, headers) sends one GET /api + path with that and returns its status.
+async function assertWindowRoutesAnswered(ask) {
+  const context = JSON.parse((await ask("/client/context", {})).text);
+  assertLocalConnected(context, "the window's context");
+  const rows = [];
+  for (const route of windowReads) {
+    const answer = await ask(route, connectionHeaders(route, context));
+    rows.push({ route, status: answer.status, text: answer.text });
+    console.log("    GET /api" + route.padEnd(32) + " " + answer.status);
+  }
+  // 401 and 403 refuse the window; 404 is a route that is not there. 409, 423
+  // and 503 are fine: no VM runs, the account of a fresh profile is not set up.
+  const refused = rows.filter((r) => r.status === 401 || r.status === 403);
+  const missing = rows.filter((r) => r.status === 404 && !windowAbsent.has(r.route));
+  const describe = (r) => "GET /api" + r.route + " -> " + r.status + " " + r.text.slice(0, 120).replace(/\s+/g, " ");
+  assert.deepEqual(refused.map(describe), [], "the window's own requests are refused");
+  assert.deepEqual(missing.map(describe), [], "the window's own requests find no route");
+  // The reverse, once: what the agent transport sends stays refused on a route
+  // that the window may use.
+  const agent = await ask("/client/devices", { "X-Cage-Agent": "1" });
+  assert.equal(agent.status, 403, "GET /api/client/devices with X-Cage-Agent: " + agent.status + " " + agent.text.slice(0, 120));
+  console.log("    GET /api" + "/client/devices with X-Cage-Agent: 1".padEnd(32) + " " + agent.status);
 }
 
 // What Cage.swift does for the window: cage desktop --json with the window's pid.
@@ -404,8 +465,16 @@ try {
       for (const url of page.navigations) assert.ok(url.startsWith(origin + "/"), "the window left the gateway origin: " + url);
       assert.deepEqual(page.errors, [], "errors in the page:\n" + page.errors.join("\n"));
       assert.ok(nativeCalls.includes("workbenchReady"), "the page never told the window it was ready: " + nativeCalls);
+      windowPage = tab; // kept open for the next step; cleanup closes the browser on a failure
+    });
+    await step("the window's own requests are answered (from the page: its session cookie and the UI's headers)", async () => {
+      await assertWindowRoutesAnswered(async (route, headers) => windowPage.evaluate(async ({ route, headers }) => {
+        const response = await fetch("/api" + route, { credentials: "same-origin", headers });
+        return { status: response.status, text: await response.text() };
+      }, { route, headers }));
       await browser.close();
       browser = null;
+      windowPage = null;
     });
   }
 
@@ -416,6 +485,8 @@ try {
       assertLocalConnected(await chooseLocal(gw), "first choice");
       await noteControllers();
     });
+    // The page's requests, made with the page's credentials: the session cookie of a redeemed launch ticket.
+    await step("the window's own requests are answered (the gateway session's cookie and the UI's headers)", () => assertWindowRoutesAnswered((route, headers) => gw.get("/api" + route, headers)));
   }
   await step("the gateway has no defunct child while the local controller runs", () => assertNoDefunctChild(entry.controller.pid, "with the local controller running"));
 
