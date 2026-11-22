@@ -165,6 +165,8 @@ for (const theme of ["light", "dark"]) {
       await trigger.click();
       const menu = page.getByRole("menu", { name: "新建终端" });
       await menu.waitFor();
+      // The fixture is a Claude-only environment whose presence is known: no Codex row (choice C).
+      assert.deepEqual(await menu.getByRole("menuitem").allTextContents(), ["普通终端", "Claude 终端"], "the new-terminal menu of a Claude-only environment");
       await remember(page, theme, "new-menu", { menu: "#terminal-create-menu", sidebar: "aside.workspace-sidebar" });
       await menu.getByRole("menuitem", { name: "Claude 终端", exact: true }).click();
       await page.locator(".xterm-rows").filter({ hasText: "Linux terminal" }).first().waitFor();
@@ -213,11 +215,12 @@ const filtered = (phase, source) => {
 };
 const everything = (source) => multiset(Object.keys(source).flatMap((phase) => filtered(phase, source)));
 const wholeBase = everything(base.phases), wholeHere = everything(phases);
-// A polled request is one that comes three or more times over the whole path in
-// either run. A timer decides when it falls into a phase, so per phase it is compared
-// within two requests (a poll may land just before or after a phase's edge); over the
-// whole path it must exist on both sides.
-const polled = new Set([...wholeBase.keys(), ...wholeHere.keys()].filter((line) => Math.max(wholeBase.get(line) || 0, wholeHere.get(line) || 0) >= 3));
+// A polled request is one the baseline makes while the window idles: a timer made
+// it, so per phase it is compared within two requests (a poll may land just before or
+// after a phase's edge), and over the whole path it must exist on both sides. Decided
+// by the baseline alone, so a one-shot request that the branch makes twice as often
+// stays exact. Everything else is compared exactly.
+const polled = new Set(filtered("idle", base.phases));
 for (const phase of new Set([...Object.keys(base.phases), ...Object.keys(phases)])) {
   const left = multiset(filtered(phase, base.phases));
   const right = multiset(filtered(phase, phases));
