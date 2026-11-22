@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/sylvinus/agent-vm/internal/agents"
+	"github.com/sylvinus/agent-vm/internal/cage"
 )
 
 // Guarantee G (design 9.1): the catalog of other clients is not parsed on the
@@ -35,11 +37,14 @@ func TestClaudeOnlyPathNeverParsesTheCatalog(t *testing.T) {
 	}
 }
 
-// claudeOnlyPathProbe is what a Claude-only environment does without the guest:
-// the server exists, /status is read, and the attach read's presence part is
-// built and parsed as for an environment with no optional client. (Starting the
-// guest itself needs a VM; the importers of internal/agents are pinned by
-// TestOnlyTheOptionalClientRoutesImportTheCatalog.)
+// claudeOnlyPathProbe is what a Claude-only environment does on the host without
+// a guest: the server exists, /status is read, the required guest manifest is
+// derived, the attach read's presence part is built, and the answer of a Claude-only
+// guest goes through the code that consumes and records it (parseGuestConnection,
+// recordClientPresence), then through the loader the next start reads
+// (loadClientPresence). Booting the guest and reading it over ssh are NOT
+// exercised here; the only importers of internal/agents are pinned by
+// TestOnlyTheOptionalClientCodeImportsTheCatalog in that package.
 func claudeOnlyPathProbe(t *testing.T) {
 	if n := agents.Decodes(); n != 0 {
 		t.Fatalf("the catalog was parsed (%d) before the probe began: this process is not clean", n)
@@ -55,9 +60,23 @@ func claudeOnlyPathProbe(t *testing.T) {
 	if script := clientPresenceProbe(clientReceiptDir); !strings.Contains(script, clientPresenceMarker) {
 		t.Fatal("the presence probe lost its marker")
 	}
-	line, manifest, marked := splitClientPresence(clientPresenceMarker + " present= receipts=\n{}")
-	if presence, ok := parseClientPresence(line); !marked || !ok || !presence.Known || len(presence.Clients) != 0 || manifest != "{}" {
-		t.Fatalf("a Claude-only presence line was not read: %q %q %v %+v", line, manifest, marked, presence)
+	manifest, err := json.Marshal(cage.RequiredGuestManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := "{\"token\":\"guest-test\"}\npassword\n" + clientPresenceMarker + " present= receipts=\n" + string(manifest) + "\n"
+	credentials, current, presence, err := parseGuestConnection([]byte(read))
+	if err != nil || current == nil || credentials.Token != "guest-test" || !presence.Known || len(presence.Clients) != 0 {
+		t.Fatalf("the attach read of a Claude-only guest was not accepted: %v %+v", err, presence)
+	}
+	s.recordClientPresence(presence)
+	if stored := loadClientPresence(s.profile); !stored.Known || len(stored.Clients) != 0 {
+		t.Fatalf("the stored reading of a Claude-only guest was not read back: %+v", stored)
+	}
+	response := httptest.NewRecorder()
+	s.status(response, httptest.NewRequest("GET", "/api/status", nil))
+	if response.Code != 200 {
+		t.Fatalf("status %d after the presence was known: %s", response.Code, response.Body.String())
 	}
 	got := agents.Decodes()
 	t.Logf("catalog parses on the Claude path: %d", got)
