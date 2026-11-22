@@ -18,6 +18,55 @@ func writeMacOSSSHConfig(t *testing.T, profile string, port int) {
 	if err := os.WriteFile(filepath.Join(dir, "ssh.config"), []byte(cfg), 0600); err != nil {
 		t.Fatal(err)
 	}
+	writeMacOSSSHKey(t, profile)
+}
+
+// writeMacOSSSHKey stands in for Lima's provisioned key: without one the
+// arguments are refused (TestMacOSSSHArgsNeedTheProvisionedKey).
+func writeMacOSSSHKey(t *testing.T, profile string) {
+	t.Helper()
+	dir := filepath.Join(profile, "state", "lima", "_config")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "user"), []byte("test key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// ssh drops an -i whose file is missing and then offers ~/.ssh/id_* of the
+// home in the user database, even with IdentitiesOnly=yes. Without a regular
+// file at Lima's key path no ssh arguments are made.
+func TestMacOSSSHArgsNeedTheProvisionedKey(t *testing.T) {
+	profile := t.TempDir()
+	writeMacOSSSHConfig(t, profile, 55413)
+	key := filepath.Join(profile, "state", "lima", "_config", "user")
+	args, err := MacOSSSHArgs(profile, "blue")
+	if err != nil || !slices.Contains(args, key) || !slices.Contains(args, "IdentitiesOnly=yes") {
+		t.Fatalf("with the key: %q %v", args, err)
+	}
+	other := filepath.Join(profile, "other")
+	if err := os.WriteFile(other, []byte("test key\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for name, prepare := range map[string]func() error{
+		"missing":   func() error { return nil },
+		"directory": func() error { return os.Mkdir(key, 0700) },
+		"symlink":   func() error { return os.Symlink(other, key) },
+	} {
+		if err := os.RemoveAll(key); err != nil {
+			t.Fatal(err)
+		}
+		if err := prepare(); err != nil {
+			t.Fatal(name, err)
+		}
+		if args, err := MacOSSSHArgs(profile, "blue"); err == nil || args != nil {
+			t.Errorf("%s key: %q %v", name, args, err)
+		}
+		if args, err := MacOSScreenSharingSSHArgs(profile, "blue", 5901); err == nil || args != nil {
+			t.Errorf("%s key, screen sharing: %q %v", name, args, err)
+		}
+	}
 }
 
 func TestMacOSScreenSharingSSHArgs(t *testing.T) {

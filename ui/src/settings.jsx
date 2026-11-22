@@ -20,6 +20,7 @@ import {
   Archive,
   Info,
   SquareTerminal,
+  Blocks,
 } from "lucide-react";
 import { api } from "./api";
 import "./settings.css";
@@ -38,6 +39,7 @@ import { ScreenSharingChecks } from "./macos-screen-sharing";
 import { AccountSettings } from "./account";
 import { AboutSettings } from "./about-settings";
 import { EmptyState } from "./drawings";
+import { useOtherClientsRow } from "./other-clients-row";
 import "./settings-pages.css";
 // Loaded when its section opens (design 5.13: the UI costs nothing until then).
 // Detecting this computer's terminal applications runs only while this
@@ -45,6 +47,9 @@ import "./settings-pages.css";
 const LocalTerminalPage = lazy(() => import("./local-terminal-page.jsx"));
 // 设备 (phones and other computers) is loaded the same way: asking the host for the device list starts with it.
 const DevicesPage = lazy(() => import("./devices-page.jsx"));
+// 其他客户端: its code loads when the section opens; the row itself only exists
+// when something can be added (other-clients-row.js).
+const OtherClientsSection = lazy(() => import("./other-clients-section.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
@@ -56,6 +61,7 @@ const sections = [
   ["network", "网络与代理", Globe2],
   ["region", "时区与语言", Clock3],
   ["project", "环境与恢复", RotateCcw],
+  ["other-clients", "其他客户端", Blocks],
   ["about", "关于", Info],
 ];
 export function SettingsPanel({
@@ -79,7 +85,8 @@ export function SettingsPanel({
   const [localTerminalDirty, setLocalTerminalDirty] = useState(false);
   // 本机终端: choosing the application belongs to the desktop app, the ssh
   // entry to a window on the environment's own computer.
-  const shownSections = vmContext.desktop_gateway || localEntryAvailable ? sections : sections.filter(([id]) => id !== "local-terminal");
+  const showOtherClients = useOtherClientsRow();
+  const shownSections = sections.filter(([id]) => (id !== "local-terminal" || vmContext.desktop_gateway || localEntryAvailable) && (id !== "other-clients" || showOtherClients));
   const [draft, setDraft] = useState({ ...current }),
     [section, setSection] = useState(initialSection),
     [probe, setProbe] = useState(null),
@@ -270,6 +277,9 @@ export function SettingsPanel({
           {section === "about" && <AboutSettings />}
           {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
             <LocalTerminalPage opener={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />
+          </Suspense>}
+          {section === "other-clients" && showOtherClients && <Suspense fallback={<p className="field-help">正在加载…</p>}>
+            <OtherClientsSection status={status} />
           </Suspense>}
           {section === "archived-sessions" && <>
             <div className="section-title"><h3>已归档会话</h3><p>归档的会话不在侧栏显示，可以随时取消归档；永久删除后无法恢复。</p></div>

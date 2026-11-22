@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlwire"
 	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
@@ -151,6 +152,7 @@ ForceCommand %s
 	}
 	port := g.listener.Addr().(*net.TCPAddr).Port
 	known := filepath.Join(g.dir, "hop_known_hosts")
+	testSSHKnown(t, known)
 	if err := os.WriteFile(known, append([]byte(fmt.Sprintf("[127.0.0.1]:%d ", port)), ssh.MarshalAuthorizedKey(hostKey.PublicKey())...), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +306,11 @@ func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 		Cage: "/opt/super-cage/cage",
 	}
 	s.entry.paths = &f.paths
+	// The shim's known hosts include the entry's own (ssh_shim_test.go).
+	testSSHKnown(t, f.paths.knownHosts(entryEnvironmentID(s.profile)))
+	if entryEnvironmentID(s.profile) != defaultLocalVMID {
+		testSSHKnown(t, f.paths.knownHosts(defaultLocalVMID))
+	}
 	run := strings.Replace(cage.EntryRunScript(), "environment=/etc/claude-cage/environment", "environment="+filepath.Join(dir, "guest", "environment"), 1)
 	if err := os.MkdirAll(filepath.Join(dir, "guest"), 0o700); err != nil {
 		t.Fatal(err)
@@ -368,6 +375,12 @@ func (f *entryFixture) call(method, path string, input, output any) error {
 // dial opens the entry with cage entry proxy's own code (entryproxy.Dial
 // and Relay) and starts an SSH client on it with key.
 func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
+	return f.dialThrough(key, nil)
+}
+
+// dialThrough dials with the client's end of the relay passed through wrap,
+// which also gets the proxy's WebSocket.
+func (f *entryFixture) dialThrough(key ssh.Signer, wrap func(ws *controlwire.Conn, conn net.Conn) net.Conn) (*ssh.Client, error) {
 	ws, line, err := entryproxy.Dial(context.Background(), f.s.configPath, f.computer.ID, agentSameBuild)
 	if err != nil {
 		return nil, err
@@ -379,6 +392,9 @@ func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
 	}
 	conn, relayed := net.Pipe()
 	go entryproxy.Relay(context.Background(), ws, relayed, relayed)
+	if wrap != nil {
+		conn = wrap(ws, conn)
+	}
 	config := &ssh.ClientConfig{User: "whoever", Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}, HostKeyCallback: ssh.FixedHostKey(f.hostKey), Timeout: 10 * time.Second}
 	client, channels, requests, err := ssh.NewClientConn(conn, "cage-test", config)
 	if err != nil {
@@ -435,7 +451,9 @@ func entryRun(t *testing.T, client *ssh.Client, command string, stdin []byte, en
 // paths from it. HOME points into the test directory.
 func (f *entryFixture) sshEnv(extra ...string) []string {
 	paths, _ := json.Marshal(map[string]string{"ssh": f.paths.SSHDir, "device": f.paths.DeviceDir, "computer": f.paths.ComputerDir})
-	env := []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + filepath.Join(f.dir, "client"), "CAGE_ENTRY_TEST_HELPER=1", "CAGE_ENTRY_TEST_CONFIG=" + f.s.configPath, "CAGE_ENTRY_TEST_ENV=" + defaultLocalVMID, "CAGE_ENTRY_TEST_PATHS=" + string(paths)}
+	env := []string{testSSHPath("/usr/bin:/bin:/usr/sbin:/sbin"), "HOME=" + filepath.Join(f.dir, "client"), "CAGE_ENTRY_TEST_HELPER=1", "CAGE_ENTRY_TEST_CONFIG=" + f.s.configPath, "CAGE_ENTRY_TEST_ENV=" + defaultLocalVMID, "CAGE_ENTRY_TEST_PATHS=" + string(paths)}
+	// The ProxyCommand is this test binary: it uses this run's shim.
+	env = append(env, testSSHEnv()...)
 	return append(env, extra...)
 }
 
