@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -631,6 +632,7 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 		program.Add(1)
 		go func() {
 			defer program.Done()
+			defer entryGuard(channel, pty != nil)
 			run()
 		}()
 	}
@@ -1136,6 +1138,12 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	}
 	presence := &entryPresence{}
 	output := &entryOutput{filter: termfilter.New(termfilter.Options{ClipboardWrite: settings.ClipboardWrite, ClipboardNow: presence.here})}
+	// An internal error in either direction ends this session only (R3-2):
+	// its window gets the exit reset, the controller and the connection's
+	// other sessions go on.
+	run, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+	var failed atomic.Bool
 	// The peer exists before the subscription, so queries in live output
 	// are counted for this window from the first byte.
 	peer := session.openPeer(entryViewerID(), false)
@@ -1145,9 +1153,34 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	subscription := session.subscribe()
 	defer subscription.Close()
 	outputDone := make(chan struct{})
+	var outputOnce sync.Once
+	endOutput := func() { outputOnce.Do(func() { close(outputDone) }) }
+	defer func() {
+		if r := recover(); r != nil {
+			endOutput()
+			entryLogPanic("output", r)
+			cols, _ := view.size()
+			_, _ = channel.Write(entryPanicEnd(output, int(min(cols, 1<<16-1))))
+			entryExitStatus(channel, 255)
+			_ = channel.Close()
+			session.mu.Lock()
+			kept := session.kept
+			session.mu.Unlock()
+			if !kept {
+				s.terminals.remove(session.id)
+			}
+		}
+	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				entryLogPanic("input", r)
+				failed.Store(true)
+				stopRun()
+			}
+		}()
 		send := func(data []byte) bool {
-			if data = presence.note(data, output.filter.GuestFocus); len(data) == 0 {
+			if data = entryNote(presence, data, output.filter.GuestFocus); len(data) == 0 {
 				return true
 			}
 			input, err := session.peerInput(peer, string(data))
@@ -1174,10 +1207,10 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	// continue what the client's window shows.
 	session.showQueries(peer, subscription.History)
 	out := append([]byte(termfilter.TitlePush), entryFocusOn...)
-	out = output.frame(out, subscription.History, true, rejoin)
+	out = entryFrame(output, out, subscription.History, true, rejoin)
 	ended := false
 	_, err := channel.Write(out)
-	for err == nil && ctx.Err() == nil {
+	for err == nil && run.Err() == nil {
 		batch := subscription.next(terminalFrameLimit)
 		if len(batch.Data) > 0 {
 			if batch.Resync {
@@ -1185,7 +1218,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 				// viewer that resumes gets it.
 				session.showQueries(peer, batch.Data)
 			}
-			out = output.frame(out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
+			out = entryFrame(output, out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
 			_, err = channel.Write(out)
 			continue
 		}
@@ -1194,14 +1227,14 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			break
 		}
 		select {
-		case <-ctx.Done():
+		case <-run.Done():
 		case <-subscription.Wake():
 			continue
 		}
 		break
 	}
-	close(outputDone)
-	locked := !ended && conn.epoch.Err() != nil
+	endOutput()
+	locked := !ended && !failed.Load() && conn.epoch.Err() != nil
 	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
 	// already: then it ends, and says so (entryKeepOnLock decides which).
 	full := locked && !s.entryKeepOnLock(conn.epoch, session)
@@ -1214,6 +1247,8 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	tail := output.filter.End(nil, int(min(cols, 1<<16-1)))
 	switch cause := context.Cause(conn.ctx); {
 	case ended:
+	case failed.Load():
+		tail = append(tail, entryInternalError...)
 	case full:
 		tail = append(tail, "\r\nSuper Cage 已锁定："+errEntryKeptFull().Error()+"，这个终端随连接结束。\r\n"...)
 	case locked:
@@ -1235,6 +1270,55 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	if !kept {
 		s.terminals.remove(session.id)
 	}
+}
+
+// entryFrame and entryNote are an ssh terminal's output and input steps,
+// variables so that a test can make one fail (R3-2).
+var (
+	entryFrame = (*entryOutput).frame
+	entryNote  = (*entryPresence).note
+)
+
+// entryInternalError is the line after the exit reset when an internal
+// error ended the session.
+const entryInternalError = "\r\nSuper Cage：内部错误，这个连接的终端已结束。\r\n"
+
+// entryLogPanic records an internal error that ended one session, with
+// where it happened.
+func entryLogPanic(where string, r any) {
+	stack := debug.Stack()
+	if len(stack) > 4<<10 {
+		stack = stack[:4<<10]
+	}
+	diagnostics.Log("error", "entry", fmt.Sprintf("an ssh session's %s ended on an internal error: %v\n%s", where, r, stack))
+}
+
+// entryPanicEnd is the exit reset after an internal error: the window's
+// own filter's, or a fresh one's should that fail too.
+func entryPanicEnd(output *entryOutput, cols int) (tail []byte) {
+	defer func() {
+		if recover() != nil {
+			tail = termfilter.New(termfilter.Options{}).End(nil, cols)
+		}
+		tail = append(tail, entryInternalError...)
+	}()
+	return output.filter.End(nil, cols)
+}
+
+// entryGuard ends one session on an internal error outside its terminal's
+// own loop (a rejoin offer, a hop, a Herdr line), not the controller: it
+// logs, gives a terminal the exit reset and closes the channel.
+func entryGuard(channel ssh.Channel, terminal bool) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	entryLogPanic("session", r)
+	if terminal {
+		_, _ = channel.Write(append(termfilter.New(termfilter.Options{}).End(nil, 0), entryInternalError...))
+	}
+	entryExitStatus(channel, 255)
+	_ = channel.Close()
 }
 
 // entryWSConn carries one byte stream in binary WebSocket messages.
