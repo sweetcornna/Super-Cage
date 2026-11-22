@@ -332,7 +332,7 @@ func (s *Server) mobileSessions(w http.ResponseWriter, r *http.Request) {
 	// The desktop lists Codex sessions only when it asks with
 	// ?providers=claude,codex: an older desktop UI would open them as Claude
 	// Code terminals. The phone lists both, as it always has.
-	list, ok := sessionListFilter(strings.HasPrefix(r.URL.Path, "/api/mobile/"), query["providers"])
+	list, ok := s.sessionListKinds(strings.HasPrefix(r.URL.Path, "/api/mobile/"), query["providers"])
 	if !ok {
 		http.Error(w, "会话类型无效", 400)
 		return
@@ -470,6 +470,19 @@ type sessionCapabilities struct {
 
 // sessionListKinds is what a list request asks for.
 type sessionListKinds struct{ phone, claude, codex bool }
+
+// sessionListKinds is sessionListFilter with the phone's Codex rows following
+// presence, as its Codex kind does: unknown and present list both, absent
+// lists Claude only. The desktop names its providers itself.
+func (s *Server) sessionListKinds(phone bool, values []string) (sessionListKinds, bool) {
+	kinds, ok := sessionListFilter(phone, values)
+	if ok && phone {
+		s.mu.Lock()
+		kinds.codex = s.codexOfferedLocked()
+		s.mu.Unlock()
+	}
+	return kinds, ok
+}
 
 func sessionListFilter(phone bool, values []string) (sessionListKinds, bool) {
 	if phone || values == nil {

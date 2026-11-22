@@ -17,11 +17,22 @@ export function codexPresence(status) {
   return Array.isArray(status.clients) && status.clients.includes("codex") ? "present" : "absent";
 }
 
+// /status reports presence only for a controller that says so once per
+// connection: capability "clients" in its connection manifest. A window the
+// workload serves itself (direct, or a tenant VM's own page) has no manifest
+// and is that same build. Anything else, an older remote host or local
+// controller included, is no evidence: presence is unknown there.
+export function presenceReported(context) {
+  const manifest = context?.connection?.manifest;
+  if (manifest) return manifest.capabilities?.clients === true;
+  return context?.mode === "local" && !context.desktop_gateway && !context.client_only;
+}
+
 // menu: the 新建 row; link: 账号管理 in the sidebar; accounts: the
-// /codex-accounts read; providers: what the session list asks for. A macOS
+// /codex-accounts read; providers: what the session lists ask for. A macOS
 // or Windows guest is never read: unknown, so as before (and no 新建 row).
-export function codexSurfaces(status, system) {
-  const presence = status && !codexTerminalSupported(system) ? "unknown" : codexPresence(status);
+export function codexSurfaces(status, system, context) {
+  const presence = status && (!codexTerminalSupported(system) || !presenceReported(context)) ? "unknown" : codexPresence(status);
   const shown = presence === "present" || presence === "unknown";
   return { presence, menu: shown && codexTerminalSupported(system), link: shown, accounts: shown,
     providers: presence === "absent" ? "claude" : "claude,codex" };

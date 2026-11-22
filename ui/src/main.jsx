@@ -173,7 +173,7 @@ function App() {
     : clientStatus;
   const system = status?.guest_system || account?.guest_system;
   // Codex surfaces follow presence (choice C); unknown shows them as before.
-  const codexUI = codexSurfaces(status, system);
+  const codexUI = codexSurfaces(status, system, getClientContext());
   const codexProfiles = useCodexAccounts(codexUI.accounts);
   const macGuest = system === "macos";
   const nativeGuestLabel = {macos: "macOS", "windows-11": "Windows", "windows-remote": "Windows 云端"}[system];

@@ -274,3 +274,56 @@ func TestPhoneCodexFollowsClientPresence(t *testing.T) {
 		})
 	}
 }
+
+// The window reads presence only from a controller that declares it once per
+// connection; a workload that does not track presence never declares it.
+func TestRemoteManifestDeclaresClientPresence(t *testing.T) {
+	for _, tracked := range []bool{false, true} {
+		s := testServer(t)
+		s.clientsTracked = tracked
+		response := httptest.NewRecorder()
+		s.remoteManifest(response, httptest.NewRequest("GET", "/api/remote/manifest", nil))
+		var entry RemoteEntry
+		if err := json.Unmarshal(response.Body.Bytes(), &entry); err != nil {
+			t.Fatal(err)
+		}
+		if got, declared := entry.Capabilities["clients"]; got != tracked || declared != tracked {
+			t.Fatalf("tracked=%v: capabilities %v", tracked, entry.Capabilities)
+		}
+	}
+}
+
+// The phone's session list follows presence like its Codex kind; the
+// desktop's follows the providers it names.
+func TestPhoneSessionListFollowsClientPresence(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		tracked    bool
+		codex      bool
+	}{
+		{"older controller", "", false, true},
+		{"unknown", "", true, true},
+		{"absent", "agent-clients/1 present= receipts=", true, false},
+		{"present", "agent-clients/1 present=codex receipts=", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testServer(t)
+			s.clientsTracked = tc.tracked
+			if tc.line != "" {
+				s.clients = presenceReading(t, tc.line)
+			}
+			phone, ok := s.sessionListKinds(true, nil)
+			if !ok || !phone.claude || phone.codex != tc.codex {
+				t.Fatalf("phone list %+v", phone)
+			}
+			both, ok := s.sessionListKinds(false, []string{"claude,codex"})
+			if !ok || !both.codex {
+				t.Fatalf("desktop list %+v", both)
+			}
+			claude, ok := s.sessionListKinds(false, []string{"claude"})
+			if !ok || claude.codex {
+				t.Fatalf("desktop Claude-only list %+v", claude)
+			}
+		})
+	}
+}

@@ -32,10 +32,17 @@ function ArchiveSelection({ items, selected, onToggle, disabled, label, children
 const HIDDEN_STOP_MS = 30000;
 const listRequest = (path, { signal }) => api(path.replace(/^\/api/, ""), undefined, undefined, {}, { signal, empty: true });
 
+// The providers the window's list asks for (codexSurfaces); the archive asks
+// for the same set.
+let windowProviders;
+
 export function useCLISessions(enabled, visible, providers) {
   const [store] = useState(() => createSessionList({ request: listRequest, providers }));
   // Before the effect that starts the list, so it starts with these providers.
-  useEffect(() => { store.setProviders(providers); }, [store, providers]);
+  useEffect(() => {
+    windowProviders = providers;
+    store.setProviders(providers);
+  }, [store, providers]);
   useEffect(() => {
     const refresh = () => store.refresh();
     window.addEventListener("cage-cli-sessions-changed", refresh);
@@ -80,7 +87,7 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
         // The desktop asks for Codex rows; the phone lists both already, and an
         // older phone link may refuse parameters it does not know.
         const result = await request(request === desktopSessionRequest
-          ? sessionListPath({ archived: true }).replace(/^\/api\/cli/, "") : "/sessions?archived=true");
+          ? sessionListPath({ archived: true, providers: windowProviders }).replace(/^\/api\/cli/, "") : "/sessions?archived=true");
         if (live) {
           const list = result.sessions || [];
           setSessions(list); setReadError(result.notice || "");

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
-import { codexAccountName, codexActiveCounts, codexPresence, codexQuotaView, codexSurfaces, codexTerminalDetail,
+import { codexAccountName, codexActiveCounts, codexPresence, codexQuotaView, codexSurfaces, codexTerminalDetail, presenceReported,
   codexTerminalLabel, codexTerminalSupported, codexWindowLabel } from "./codex-accounts-state.mjs";
 import { SESSION_PROVIDERS } from "./session-provider.mjs";
 
@@ -12,6 +12,7 @@ test("Codex terminals are offered only in Linux guests", () => {
 });
 
 test("Codex surfaces follow presence; unknown shows them as before", () => {
+  const direct = { mode: "local", connection_id: "local" };
   const unknown = { clients_unknown: true }, absent = {}, present = { clients: ["codex"] };
   assert.equal(codexPresence(null), "pending");
   assert.equal(codexPresence(unknown), "unknown");
@@ -21,16 +22,42 @@ test("Codex surfaces follow presence; unknown shows them as before", () => {
   assert.equal(codexPresence({ clients: ["codex"], clients_unknown: true }), "unknown");
   const today = { menu: true, link: true, accounts: true, providers: SESSION_PROVIDERS };
   for (const [status, presence] of [[unknown, "unknown"], [present, "present"]]) {
-    assert.deepEqual(codexSurfaces(status, "debian-13"), { presence, ...today });
+    assert.deepEqual(codexSurfaces(status, "debian-13", direct), { presence, ...today });
   }
-  assert.deepEqual(codexSurfaces(absent, "debian-13"), { presence: "absent", menu: false, link: false, accounts: false, providers: "claude" });
+  assert.deepEqual(codexSurfaces(absent, "debian-13", direct), { presence: "absent", menu: false, link: false, accounts: false, providers: "claude" });
   // Before the first /status nothing is read and nothing shown yet.
-  assert.deepEqual(codexSurfaces(null, undefined), { presence: "pending", menu: false, link: false, accounts: false, providers: SESSION_PROVIDERS });
+  assert.deepEqual(codexSurfaces(null, undefined, direct), { presence: "pending", menu: false, link: false, accounts: false, providers: SESSION_PROVIDERS });
   // A macOS or Windows guest is never read: as before, without the Codex row.
   for (const system of ["macos", "windows-11", "windows-remote"]) {
-    assert.deepEqual(codexSurfaces(absent, system), { presence: "unknown", ...today, menu: false });
+    assert.deepEqual(codexSurfaces(absent, system, direct), { presence: "unknown", ...today, menu: false });
   }
-  assert.equal(codexSurfaces(null, "macos").accounts, false, "still nothing before the first /status");
+  assert.equal(codexSurfaces(null, "macos", direct).accounts, false, "still nothing before the first /status");
+});
+
+test("presence counts only from a controller that reports it", () => {
+  const manifest = (capabilities) => ({ connection: { state: "connected", manifest: { version: "0.1.15", capabilities } } });
+  const direct = { mode: "local", connection_id: "local", connection: { state: "disconnected" } };
+  const tenantPage = { mode: "local", connection_id: "local", tenant_workspace: true };
+  const newRemote = { mode: "remote", ...manifest({ terminal: true, clients: true }) };
+  const oldRemote = { mode: "remote", ...manifest({ terminal: true }) };
+  const oldLocal = { mode: "local", desktop_gateway: true, ...manifest({ terminal: true }) };
+  const tenantViaDesktop = { mode: "remote", ...manifest({ client_project_share: false }) };
+  assert.equal(presenceReported(direct), true);
+  assert.equal(presenceReported(tenantPage), true);
+  assert.equal(presenceReported(newRemote), true);
+  for (const context of [oldRemote, oldLocal, tenantViaDesktop, { mode: "none", connection_id: "" },
+    { mode: "local", desktop_gateway: true }, { mode: "local", client_only: true }, undefined]) {
+    assert.equal(presenceReported(context), false, JSON.stringify(context));
+  }
+  // An older remote host with Codex installed sends neither field: as today.
+  const today = { presence: "unknown", menu: true, link: true, accounts: true, providers: SESSION_PROVIDERS };
+  assert.deepEqual(codexSurfaces({}, "debian-13", oldRemote), today);
+  assert.deepEqual(codexSurfaces({}, "debian-13", oldLocal), today);
+  // A controller that reports presence and found none: hidden.
+  assert.deepEqual(codexSurfaces({}, "debian-13", newRemote),
+    { presence: "absent", menu: false, link: false, accounts: false, providers: "claude" });
+  assert.equal(codexSurfaces({ clients: ["codex"] }, "debian-13", newRemote).presence, "present");
+  assert.equal(codexSurfaces({}, "debian-13", direct).presence, "absent");
 });
 
 test("window labels follow the reported window length", () => {
