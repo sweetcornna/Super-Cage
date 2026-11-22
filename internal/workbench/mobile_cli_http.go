@@ -273,9 +273,10 @@ func (s *Server) mobileProjects(w http.ResponseWriter, r *http.Request) {
 		available := s.windowsCapabilitiesLocked()["available"].(map[string]bool)
 		shared = shared && available["cli"] && available["terminal"] && available["projects"]
 	}
+	codex := s.codexOfferedLocked()
 	s.mu.Unlock()
 	name, _ := os.Hostname()
-	jsonReply(w, map[string]any{"projects": projects, "ready": ready, "host": name, "shared_sessions": shared, "codex": s.codexGuestSupported()})
+	jsonReply(w, map[string]any{"projects": projects, "ready": ready, "host": name, "shared_sessions": shared, "codex": codex})
 }
 
 // Session list protocol (GET /api/cli/sessions, GET /api/mobile/cli/sessions):

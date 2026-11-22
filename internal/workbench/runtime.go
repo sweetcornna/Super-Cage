@@ -187,7 +187,8 @@ func (s *Server) attach() error {
 	if err != nil {
 		return errors.New("环境尚未准备好")
 	}
-	credentials, manifest, err := parseGuestConnection(b)
+	credentials, manifest, presence, err := parseGuestConnection(b)
+	s.recordClientPresence(presence)
 	s.mu.Lock()
 	s.guestManifest = manifest
 	s.guestUpdateRequired = errors.Is(err, errGuestUpdateRequired)

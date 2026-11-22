@@ -29,7 +29,7 @@ func TestGuestConnectionRequiresSuccessfulMatchingManifest(t *testing.T) {
 			if name == "broken" {
 				encoded = []byte("{")
 			}
-			credentials, current, err := parseGuestConnection(append([]byte("{\"token\":\"guest-test\"}\npassword\n"), encoded...))
+			credentials, current, _, err := parseGuestConnection(append([]byte("{\"token\":\"guest-test\"}\npassword\n"), encoded...))
 			if name == "current" {
 				if err != nil || current == nil || credentials.Token != "guest-test" || credentials.VNCPassword != "password" {
 					t.Fatal(current, err)
