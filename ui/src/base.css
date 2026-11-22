@@ -68,7 +68,7 @@
   }
 
   /* Buttons. Secondary is the default; .primary is ink, .clay is the one
-     call to action a page may have, .danger is destructive text. */
+     call to action a page may have, .danger is the destructive style. */
   :where(button) {
     display: inline-flex;
     align-items: center;
@@ -123,16 +123,20 @@
     border-color: color-mix(in srgb, var(--clay) 88%, #000);
     background: color-mix(in srgb, var(--clay) 88%, #000);
   }
-  :where(button.danger) {
+  /* One destructive style everywhere (design-language.md §3): error text on a faint
+     error tint with an error hairline. Never a solid red fill; .danger-fill is the
+     same style under the name the confirm dialogs already use. */
+  :where(button.danger, button.danger-fill) {
+    border-color: color-mix(in srgb, var(--error) 40%, var(--line-strong));
+    background: color-mix(in srgb, var(--error) 8%, var(--surface));
     color: var(--error);
   }
-  :where(button.danger-fill) {
-    border-color: var(--error);
-    background: var(--error);
-    color: var(--paper);
+  :where(button.danger:hover:not(:disabled), button.danger-fill:hover:not(:disabled)) {
+    border-color: color-mix(in srgb, var(--error) 55%, var(--line-strong));
+    background: color-mix(in srgb, var(--error) 14%, var(--surface));
   }
-  :where(button.danger-fill:hover:not(:disabled)) {
-    background: color-mix(in srgb, var(--error) 88%, var(--ink));
+  :where(button.danger:active:not(:disabled), button.danger-fill:active:not(:disabled)) {
+    background: color-mix(in srgb, var(--error) 20%, var(--surface));
   }
   :where(button.large) {
     min-height: var(--h-hero);

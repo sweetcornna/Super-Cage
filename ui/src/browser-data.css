@@ -130,6 +130,15 @@
 .bd-suggest { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 10px 0 0; color: var(--muted); font-size: var(--fs-caption); }
 .bd-suggest button { display: inline-flex; align-items: center; gap: 4px; }
 .bd-block .field-help { margin-bottom: 0; }
+/* 了解详情: the longer explanation behind a disclosure, quiet until opened. */
+.bd-details { margin-top: 8px; }
+.bd-details > summary { display: inline-flex; align-items: center; gap: 4px; list-style: none; border-radius: var(--r-sm); color: var(--muted); font-size: var(--fs-secondary); cursor: var(--control-cursor, default); }
+.bd-details > summary::-webkit-details-marker { display: none; }
+.bd-details > summary:hover { color: var(--ink); }
+.bd-details > summary svg { transition: transform var(--dur-fast) var(--ease-out); }
+.bd-details[open] > summary svg { transform: rotate(90deg); }
+.bd-details > .field-help { margin-top: 6px; }
+@media (prefers-reduced-motion: reduce) { .bd-details > summary svg { transition: none; } }
 .bd-block .toggle-row { padding-top: 8px; }
 .bd-auto { padding-top: 14px; }
 .bd-auto .choice-list { margin-bottom: 12px; }
