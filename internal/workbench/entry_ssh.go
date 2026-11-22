@@ -488,12 +488,12 @@ type entryOutput struct {
 // writes and notifications already acted. restart is output that does not
 // continue what the window shows (a re-join, or history past what the
 // client received): what the last bytes left open is ended and the window
-// cleared first, with the soft reset, not ESC c, which would erase the
-// owner's scrollback.
+// cleared first, as the filter clears for ESC c (Clear). The scrollback
+// erase in it passes, attach's default; the entry has no --keep-scrollback.
 func (o *entryOutput) frame(out, data []byte, replay, restart bool) []byte {
 	if restart {
 		// Focus reports go back on at once, as attach's restart flushes.
-		out = append(append(o.filter.Abort(out), termfilter.ClearReset...), entryFocusOn...)
+		out = append(o.filter.Clear(o.filter.Abort(out)), entryFocusOn...)
 		o.focusOwed = false
 	}
 	o.filter.SetReplay(replay)

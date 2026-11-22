@@ -42,14 +42,14 @@ func TestEntryOutputFramesLikeAttach(t *testing.T) {
 	if got := frame("h\x1b]52;c;QUJD\x07\x1b[6n", true, false); got != "h" {
 		t.Fatalf("replay %q", got)
 	}
-	// A restart spoils the write the window is inside, clears with the soft
-	// reset (never ESC c, which erases scrollback) and turns focus reports
-	// back on.
+	// A restart spoils the write the window is inside, clears the window as
+	// the filter does for ESC c and turns focus reports back on.
 	frame("\x1b]52;c;QUJ", false, false)
 	if !output.filter.Streaming() {
 		t.Fatal("the write is not streaming")
 	}
-	if got, want := frame("again", true, true), "!\x07"+termfilter.ClearReset+entryFocusOn+"again"; got != want {
+	clear := string(termfilter.New(termfilter.Options{}).Clear(nil))
+	if got, want := frame("again", true, true), "!\x07"+clear+entryFocusOn+"again"; got != want || !strings.HasPrefix(clear, termfilter.ClearReset) {
 		t.Fatalf("restart %q, want %q", got, want)
 	}
 	// A reset by the guest owes focus reports, written only once no
