@@ -192,9 +192,23 @@ internal sealed class MainWindow : Form
             }
             // Before the browser process starts: no network prediction with
             // the switches, the default without them.
-            ScienceFrame.SeedPreferences(Path.Combine(Backend.Root, "webview2"), arguments != null);
-            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Backend.Root, "webview2"),
-                arguments == null ? null : new CoreWebView2EnvironmentOptions(arguments));
+            var data = Path.Combine(Backend.Root, "webview2");
+            ScienceFrame.SeedPreferences(data, arguments != null);
+            // No crash report goes to Microsoft, with or without host
+            // rendering: a dump holds the workbench's tokens and the pages'
+            // memory. What crash reporting wrote is deleted before each start
+            // (nothing holds it then), also where a runtime ignores the option.
+            CrashReports.Sweep(data);
+            var options = new CoreWebView2EnvironmentOptions(arguments) { IsCustomCrashReportingEnabled = true };
+            var environment = await CoreWebView2Environment.CreateAsync(null, data, options);
+            // A runtime without custom crash reporting has no failure report
+            // folder either (they came together): said in the diagnostics,
+            // the sweep still runs.
+            try { _ = environment.FailureReportFolderPath; }
+            catch (Exception error) when (error is NotImplementedException or InvalidCastException or System.Runtime.InteropServices.COMException)
+            {
+                _ = Backend.Report("WebView2 runtime " + environment.BrowserVersionString + " has no custom crash reporting; crash dumps are deleted at start.");
+            }
             webArguments = arguments;
             await web.EnsureCoreWebView2Async(environment);
             smokePhase = "webview_initialized";

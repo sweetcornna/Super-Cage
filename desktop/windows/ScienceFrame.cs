@@ -43,6 +43,16 @@ internal static partial class ScienceFrame
     public const int CrashWaitMilliseconds = 1500;
     public const int ListEveryMilliseconds = 1000;
 
+    // The worker cap (round-2 N11: every attach costs calls on the window's
+    // UI thread): more live worker targets under the frame than
+    // MaxLiveWorkers, or more targets attaching under it than MaxAttaches
+    // within AttachWindowMilliseconds, end the frame (Action.Reason
+    // EndWorkers) and later targets stay paused: fail closed.
+    public const int MaxLiveWorkers = 64;
+    public const int MaxAttaches = 200;
+    public const int AttachWindowMilliseconds = 10000;
+    public const string EndWorkers = "workers";
+
     public sealed record Call(string Method, JsonObject Params);
 
     // The profiles a workload can run in: the default one and each named VM.
@@ -356,7 +366,8 @@ internal static partial class ScienceFrame
     // front's session for the frame (EndFront), crashing a frame's process
     // (Crash, on Session), removing the frame element, or letting the held
     // navigation go.
-    public sealed record Action(string Session, Call? Call, bool End = false, bool Remove = false, bool Proceed = false, bool EndFront = false, bool Crash = false);
+    // An End's Reason is "" or EndWorkers.
+    public sealed record Action(string Session, Call? Call, bool End = false, bool Remove = false, bool Proceed = false, bool EndFront = false, bool Crash = false, string Reason = "");
 
     // Policy is what the window does with each DevTools target while host
     // rendering may show a frame (science_shell_test.go scienceFramePolicy):
@@ -398,6 +409,23 @@ internal static partial class ScienceFrame
         // target.
         private readonly Dictionary<string, string> parents = new(StringComparer.Ordinal);
         private readonly Dictionary<string, string> targets = new(StringComparer.Ordinal);
+        // The worker cap: the live worker targets, the times of the attaches
+        // under the frame within the window, and whether the cap ended the
+        // frame (targets that attach after it stay paused).
+        private readonly int maxLiveWorkers, maxAttaches;
+        private readonly long attachWindow;
+        private readonly HashSet<string> workers = new(StringComparer.Ordinal);
+        private readonly Queue<long> attaches = new();
+        private bool tripped;
+
+        public Policy() : this(MaxLiveWorkers, MaxAttaches, AttachWindowMilliseconds) { }
+
+        public Policy(int maxLiveWorkers, int maxAttaches, long attachWindowMilliseconds)
+        {
+            this.maxLiveWorkers = maxLiveWorkers;
+            this.maxAttaches = maxAttaches;
+            attachWindow = attachWindowMilliseconds;
+        }
 
         public bool Attached { get; private set; }
         public bool Detaching => detaching;
@@ -409,6 +437,8 @@ internal static partial class ScienceFrame
             if (navigating) return [new Action("", null, End: true)];
             identity = next;
             detaching = false;
+            attaches.Clear();
+            tripped = false;
             var actions = new List<Action>();
             if (!Attached)
             {
@@ -470,7 +500,9 @@ internal static partial class ScienceFrame
             return [new Action("", null, End: true)];
         }
 
-        public List<Action> AttachedTarget(string parent, string session, string type, string target)
+        // AttachedTarget answers a target's attach at now (milliseconds, any
+        // monotonic origin).
+        public List<Action> AttachedTarget(string parent, string session, string type, string target, long now)
         {
             if (parent.Length == 0)
             {
@@ -487,6 +519,20 @@ internal static partial class ScienceFrame
             }
             parents[session] = parent;
             targets[session] = target;
+            if (type == "worker") workers.Add(session);
+            while (attaches.Count > 0 && attaches.Peek() <= now - attachWindow) attaches.Dequeue();
+            attaches.Enqueue(now);
+            if (tripped)
+            {
+                held.Add(session);
+                return [];
+            }
+            if (workers.Count > maxLiveWorkers || attaches.Count > maxAttaches)
+            {
+                tripped = true;
+                held.Add(session);
+                return [new Action("", null, End: true, Reason: EndWorkers)];
+            }
             if (!guests.TryGetValue(parent, out var inherited))
             {
                 // Under a paused or unknown target: stays paused.
@@ -557,6 +603,7 @@ internal static partial class ScienceFrame
                 failed.Remove(item);
                 parents.Remove(item);
                 targets.Remove(item);
+                workers.Remove(item);
             }
         }
     }

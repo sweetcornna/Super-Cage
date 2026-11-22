@@ -179,11 +179,17 @@ assertions = 0;
             {
                 var step = steps[i]!.AsObject();
                 string Field(string name) => step[name]?.GetValue<string>() ?? "";
+                if (Field("do") == "caps")
+                {
+                    var caps = step["caps"]!.AsObject();
+                    policy = new ScienceFrame.Policy(caps["live"]!.GetValue<int>(), caps["attaches"]!.GetValue<int>(), caps["window_ms"]!.GetValue<long>());
+                }
                 var actions = Field("do") switch
                 {
+                    "caps" => [],
                     "arm" => policy.Arm(identity!),
                     "detach" => policy.Detach(),
-                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type"), "T" + Field("session")),
+                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type"), "T" + Field("session"), step["at"]?.GetValue<long>() ?? 0),
                     "listed" => policy.Listed((step["targets"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList(),
                         (step["known"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList()),
                     "failed" => policy.CallFailed(Field("session")),
@@ -193,14 +199,39 @@ assertions = 0;
                     "navigate_timeout" => policy.NavigateTimedOut(),
                     var other => throw new InvalidDataException("unknown scenario step " + other),
                 };
-                var got = actions.Select(action => action.End ? "end" : action.EndFront ? "endfront" : action.Crash ? action.Session + " crash" :
+                var got = actions.Select(action => action.End ? ("end " + action.Reason).TrimEnd() : action.EndFront ? "endfront" : action.Crash ? action.Session + " crash" :
                     action.Remove ? "remove" : action.Proceed ? "proceed" : (action.Session.Length == 0 ? "page" : action.Session) + " " + action.Call!.Method).ToArray();
                 var want = step["expect"]!.AsArray().Select(item => item!.GetValue<string>()).ToArray();
                 Check(got.SequenceEqual(want), scenario["name"] + ", step " + i + ": " + string.Join(", ", got));
             }
             scenarios++;
         }
-        Check(scenarios == 18, "scenario count " + scenarios);
+        Check(scenarios == 21, "scenario count " + scenarios);
+        var cap = golden["worker_cap"]!.AsObject();
+        Check(cap["live"]!.GetValue<int>() == ScienceFrame.MaxLiveWorkers && cap["attaches"]!.GetValue<int>() == ScienceFrame.MaxAttaches &&
+            cap["window_ms"]!.GetValue<int>() == ScienceFrame.AttachWindowMilliseconds, "worker cap differs from the contract");
+
+        // Crash reports: the dumps and attachments go, the crash database's
+        // own files and anything outside the folder stay.
+        var crashData = Path.Combine(scienceRoot, "webview2-crash");
+        Check(CrashReports.Sweep(crashData) == 0 && !Directory.Exists(crashData), "a sweep without crash reports created something");
+        var crashpad = CrashReports.Folder(crashData);
+        Directory.CreateDirectory(Path.Combine(crashpad, "reports"));
+        Directory.CreateDirectory(Path.Combine(crashpad, "attachments", "a1"));
+        foreach (var name in new[] { "reports/x.dmp", "reports/y.dmp", "attachments/a1/z.txt", "metadata", "settings.dat", "reports/keep.json" })
+            File.WriteAllText(Path.Combine(crashpad, name), "x");
+        File.WriteAllText(Path.Combine(crashData, "outside.dmp"), "x");
+        Check(CrashReports.Sweep(crashData) == 3, "the sweep did not delete the two dumps and the attachment");
+        Check(!File.Exists(Path.Combine(crashpad, "reports", "x.dmp")) && !File.Exists(Path.Combine(crashpad, "attachments", "a1", "z.txt")) &&
+            File.Exists(Path.Combine(crashpad, "metadata")) && File.Exists(Path.Combine(crashpad, "settings.dat")) &&
+            File.Exists(Path.Combine(crashpad, "reports", "keep.json")) && File.Exists(Path.Combine(crashData, "outside.dmp")), "the sweep deleted the wrong files");
+        if (OperatingSystem.IsWindows())
+        {
+            // A dump crash reporting still writes is left for the next sweep.
+            using (File.Open(Path.Combine(crashpad, "reports", "held.dmp"), FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                Check(CrashReports.Sweep(crashData) == 0, "a dump in use counted as deleted");
+            Check(CrashReports.Sweep(crashData) == 1, "a dump left in use was not deleted later");
+        }
 
         // The renderer processes the host terminates for a frame's origin.
         IReadOnlyList<string> Sources(params string[] sources) => sources;

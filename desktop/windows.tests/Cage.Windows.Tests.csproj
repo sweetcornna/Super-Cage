@@ -21,6 +21,7 @@
     <Compile Include="../windows/Authenticode.cs" Link="Authenticode.cs" />
     <Compile Include="../windows/WindowLayout.cs" Link="WindowLayout.cs" />
     <Compile Include="../windows/ScienceFrame.cs" Link="ScienceFrame.cs" />
+    <Compile Include="../windows/CrashReports.cs" Link="CrashReports.cs" />
     <EmbeddedResource Include="../../internal/workbench/testdata/science-cdp.json" LogicalName="Cage.ScienceCDP.json" />
   </ItemGroup>
   <ItemGroup Condition="'$(WindowsNativeInputTests)' == 'true'">

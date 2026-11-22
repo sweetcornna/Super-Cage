@@ -24,6 +24,7 @@ internal sealed class ScienceFrameHost
     private const string Ended = "页面的一个后台线程或子页面没能使用环境的时区与语言，已停止本机渲染。";
     private const string NavigationDropped = "本机渲染页面没有及时关闭，窗口没有跳转。请再试一次。";
     private const string FrameGone = "本机渲染页面的进程意外退出，已改用隔离浏览器。";
+    private const string TooManyWorkers = "页面启动的后台线程过多，已停止本机渲染。";
     // POST /_cage/end goes straight to the front's loopback port: never
     // through a proxy.
     private static readonly HttpClient Front = new(new SocketsHttpHandler { UseProxy = false, AllowAutoRedirect = false })
@@ -210,7 +211,7 @@ internal sealed class ScienceFrameHost
         var crashes = new List<Task>();
         foreach (var action in list)
         {
-            if (action.End) failed(Ended);
+            if (action.End) failed(action.Reason == ScienceFrame.EndWorkers ? TooManyWorkers : Ended);
             else if (action.EndFront) await EndFront(ending);
             else if (action.Crash) crashes.Add(Crash(action.Session, ending));
             else if (action.Remove)
@@ -283,6 +284,18 @@ internal sealed class ScienceFrameHost
                 .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
         }
         catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { seen.TrySetResult(); }
+        _ = SweepAfterCrash();
+    }
+
+    // Page.crash leaves a minidump, written as the process goes: deleted
+    // once it is there, and again later (CrashReports).
+    private async Task SweepAfterCrash()
+    {
+        foreach (var wait in new[] { 2000, 10000 })
+        {
+            await Task.Delay(wait);
+            await Task.Run(() => CrashReports.Sweep(data));
+        }
     }
 
     // Terminate ends the renderer processes that hold the frames of origin
@@ -443,7 +456,7 @@ internal sealed class ScienceFrameHost
 
     private void Attached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)
     {
-        if (Read(e.ParameterObjectAsJson, out var session, out var type, out var target)) _ = Apply(policy.AttachedTarget(e.SessionId ?? "", session, type, target), "");
+        if (Read(e.ParameterObjectAsJson, out var session, out var type, out var target)) _ = Apply(policy.AttachedTarget(e.SessionId ?? "", session, type, target, Environment.TickCount64), "");
     }
 
     private void Detached(object? sender, CoreWebView2DevToolsProtocolEventReceivedEventArgs e)

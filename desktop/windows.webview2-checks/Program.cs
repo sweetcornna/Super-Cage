@@ -787,7 +787,7 @@ internal sealed class ChecksForm : Form
                 _ = Apply(policy.DetachedTarget(session), "");
                 return;
         }
-        _ = Apply(policy.AttachedTarget(parent, session, type, info?["targetId"]?.GetValue<string>() ?? ""), "");
+        _ = Apply(policy.AttachedTarget(parent, session, type, info?["targetId"]?.GetValue<string>() ?? "", Now), "");
     }
 
     private void Finish()

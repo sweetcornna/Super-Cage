@@ -66,7 +66,30 @@ type scienceFramePolicy struct {
 	// target.
 	parents map[string]string
 	targets map[string]string
+	// The worker cap (ScienceFrame.MaxLiveWorkers, MaxAttaches): the live
+	// worker targets, the times of the attaches under the frame in the
+	// window, and whether the cap ended the frame (targets that attach after
+	// it stay paused).
+	caps     scienceWorkerCap
+	workers  map[string]bool
+	attaches []int64
+	tripped  bool
 }
+
+// scienceWorkerCap ends the frame, failing closed, when more worker
+// targets than Live are alive under it or more than Attaches targets
+// attached under it within WindowMS (round-2 N11: each attach costs calls
+// on the window's UI thread).
+type scienceWorkerCap struct {
+	Live     int   `json:"live"`
+	Attaches int   `json:"attaches"`
+	WindowMS int64 `json:"window_ms"`
+}
+
+var scienceWorkerCaps = scienceWorkerCap{Live: 64, Attaches: 200, WindowMS: 10000}
+
+// scienceEndWorkers is the reason of an end the worker cap produced.
+const scienceEndWorkers = "workers"
 
 // scienceAction is one thing the window does, in list order: a call on a
 // session ("" is the page), ending the frame (the pane falls back), ending
@@ -77,6 +100,7 @@ type scienceAction struct {
 	Session  string
 	Call     cdpCall
 	End      bool
+	Reason   string // of an End: "" or scienceEndWorkers
 	EndFront bool
 	Crash    bool
 	Remove   bool
@@ -84,8 +108,12 @@ type scienceAction struct {
 }
 
 func newScienceFramePolicy() *scienceFramePolicy {
+	return newScienceFramePolicyWith(scienceWorkerCaps)
+}
+
+func newScienceFramePolicyWith(caps scienceWorkerCap) *scienceFramePolicy {
 	return &scienceFramePolicy{guests: map[string]scienceIdentity{}, held: map[string]bool{}, failed: map[string]bool{},
-		parents: map[string]string{}, targets: map[string]string{}}
+		parents: map[string]string{}, targets: map[string]string{}, caps: caps, workers: map[string]bool{}}
 }
 
 func scienceActionsOn(session string, calls []cdpCall) []scienceAction {
@@ -101,6 +129,7 @@ func (p *scienceFramePolicy) arm(identity scienceIdentity) []scienceAction {
 		return []scienceAction{{End: true}}
 	}
 	p.identity, p.detaching = &identity, false
+	p.attaches, p.tripped = nil, false
 	var actions []scienceAction
 	if !p.attached {
 		p.attached = true
@@ -168,7 +197,9 @@ func (p *scienceFramePolicy) navigateTimedOut() []scienceAction {
 	return []scienceAction{{End: true}}
 }
 
-func (p *scienceFramePolicy) attachedTarget(parent, session, kind, target string) []scienceAction {
+// attachedTarget answers a target's attach at now (milliseconds, any
+// monotonic origin).
+func (p *scienceFramePolicy) attachedTarget(parent, session, kind, target string, now int64) []scienceAction {
 	if parent == "" {
 		if kind != "iframe" {
 			return scienceActionsOn(session, scienceResumeCalls())
@@ -182,6 +213,25 @@ func (p *scienceFramePolicy) attachedTarget(parent, session, kind, target string
 		return scienceActionsOn(session, scienceFrameCalls(*p.identity))
 	}
 	p.parents[session], p.targets[session] = parent, target
+	if kind == "worker" {
+		p.workers[session] = true
+	}
+	kept := p.attaches[:0]
+	for _, at := range p.attaches {
+		if at > now-p.caps.WindowMS {
+			kept = append(kept, at)
+		}
+	}
+	p.attaches = append(kept, now)
+	if p.tripped {
+		p.held[session] = true
+		return nil
+	}
+	if len(p.workers) > p.caps.Live || len(p.attaches) > p.caps.Attaches {
+		p.tripped = true
+		p.held[session] = true
+		return []scienceAction{{End: true, Reason: scienceEndWorkers}}
+	}
 	identity, ok := p.guests[parent]
 	if !ok {
 		// Under a paused or unknown target: stays paused.
@@ -269,6 +319,7 @@ func (p *scienceFramePolicy) forget(session string) {
 		delete(p.failed, session)
 		delete(p.parents, session)
 		delete(p.targets, session)
+		delete(p.workers, session)
 	}
 }
 
@@ -490,7 +541,7 @@ func (s *scienceShell) handle(message cdpMessage) {
 	s.mu.Lock()
 	var actions []scienceAction
 	if message.Method == "Target.attachedToTarget" {
-		actions = s.policy.attachedTarget(parent, event.SessionID, event.TargetInfo.Type, event.TargetInfo.TargetID)
+		actions = s.policy.attachedTarget(parent, event.SessionID, event.TargetInfo.Type, event.TargetInfo.TargetID, time.Now().UnixMilli())
 		if !s.workers && event.TargetInfo.Type == "worker" && len(actions) > 0 {
 			// The probe's negative case: workers run without the identity.
 			actions = scienceActionsOn(event.SessionID, scienceResumeCalls())

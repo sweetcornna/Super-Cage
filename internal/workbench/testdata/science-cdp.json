@@ -1113,6 +1113,317 @@
           ]
         }
       ]
+    },
+    {
+      "name": "more live workers under the frame than the cap end it, and later targets stay paused",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 2,
+            "attaches": 100,
+            "window_ms": 10000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "W1",
+          "session": "W2",
+          "type": "worker",
+          "expect": [
+            "W2 Emulation.setUserAgentOverride",
+            "W2 Runtime.evaluate",
+            "W2 Target.setAutoAttach",
+            "W2 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W3",
+          "type": "worker",
+          "expect": [
+            "end workers"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W1",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W4",
+          "type": "worker",
+          "expect": []
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "more attaches under the frame within the window than the cap end it",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 10,
+            "attaches": 3,
+            "window_ms": 1000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W1",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W2",
+          "type": "worker",
+          "at": 400,
+          "expect": [
+            "W2 Emulation.setUserAgentOverride",
+            "W2 Runtime.evaluate",
+            "W2 Target.setAutoAttach",
+            "W2 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W2",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W3",
+          "type": "worker",
+          "at": 800,
+          "expect": [
+            "W3 Emulation.setUserAgentOverride",
+            "W3 Runtime.evaluate",
+            "W3 Target.setAutoAttach",
+            "W3 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W3",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W4",
+          "type": "worker",
+          "at": 1200,
+          "expect": [
+            "W4 Emulation.setUserAgentOverride",
+            "W4 Runtime.evaluate",
+            "W4 Target.setAutoAttach",
+            "W4 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "W4",
+          "expect": []
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W5",
+          "type": "worker",
+          "at": 1300,
+          "expect": [
+            "end workers"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a new session counts its workers afresh",
+      "steps": [
+        {
+          "do": "caps",
+          "caps": {
+            "live": 1,
+            "attaches": 100,
+            "window_ms": 10000
+          },
+          "expect": []
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W1",
+          "type": "worker",
+          "expect": [
+            "W1 Emulation.setUserAgentOverride",
+            "W1 Runtime.evaluate",
+            "W1 Target.setAutoAttach",
+            "W1 Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "F",
+          "session": "W2",
+          "type": "worker",
+          "expect": [
+            "end workers"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "detached",
+          "session": "F",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "G",
+          "type": "iframe",
+          "expect": [
+            "G Emulation.setTimezoneOverride",
+            "G Emulation.setLocaleOverride",
+            "G Emulation.setUserAgentOverride",
+            "G Page.enable",
+            "G Page.setInterceptFileChooserDialog",
+            "G Target.setAutoAttach",
+            "G Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "attached",
+          "parent": "G",
+          "session": "W3",
+          "type": "worker",
+          "expect": [
+            "W3 Emulation.setUserAgentOverride",
+            "W3 Runtime.evaluate",
+            "W3 Target.setAutoAttach",
+            "W3 Runtime.runIfWaitingForDebugger"
+          ]
+        }
+      ]
     }
   ],
   "settle_ms": 2000,
@@ -1158,5 +1469,10 @@
       "method": "Runtime.runIfWaitingForDebugger",
       "params": {}
     }
-  ]
+  ],
+  "worker_cap": {
+    "live": 64,
+    "attaches": 200,
+    "window_ms": 10000
+  }
 }

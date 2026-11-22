@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -40,6 +41,9 @@ func TestScienceCDPGolden(t *testing.T) {
 			"ended_header":  scienceEndedHeader,
 		},
 		"crash_wait_ms": scienceCrashWait.Milliseconds(),
+		// More live workers or attaches than these end the frame (round-2
+		// N11); the scenarios set smaller caps with a "caps" step.
+		"worker_cap": scienceWorkerCaps,
 		// The proxy proof prepare runs (F5) and the preferences the shell
 		// writes before the WebView starts with the switches.
 		"proxy_check": map[string]any{
@@ -86,7 +90,11 @@ type scienceScenarioStep struct {
 	Type    string   `json:"type,omitempty"`
 	Targets []string `json:"targets,omitempty"`
 	Known   []string `json:"known,omitempty"`
-	Expect  []string `json:"expect"`
+	// At is an attach's time in milliseconds; a "caps" step starts the
+	// scenario's policy with Caps.
+	At     int64             `json:"at,omitempty"`
+	Caps   *scienceWorkerCap `json:"caps,omitempty"`
+	Expect []string          `json:"expect"`
 }
 
 type scienceScenario struct {
@@ -112,7 +120,7 @@ func scienceScenarios() []scienceScenario {
 	id := testScienceIdentity
 	frame, worker, resume := scienceFrameCalls(id), scienceWorkerCalls(id), scienceResumeCalls()
 	none := []string{}
-	end := []string{"end"}
+	end, endWorkers := []string{"end"}, []string{"end " + scienceEndWorkers}
 	attach, detach := scienceExpect("", sciencePageAttachCalls()), scienceExpect("", sciencePageDetachCalls())
 	// teardown is detach's order for the page-level guest frames given.
 	teardown := func(frames ...string) []string {
@@ -260,6 +268,44 @@ func scienceScenarios() []scienceScenario {
 			{Do: "navigate", Expect: none},
 			{Do: "detached", Session: "F", Expect: append(detach, "proceed")},
 		}},
+		{"more live workers under the frame than the cap end it, and later targets stay paused", []scienceScenarioStep{
+			{Do: "caps", Caps: &scienceWorkerCap{Live: 2, Attaches: 100, WindowMS: 10000}, Expect: none},
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W1", Type: "worker", Expect: scienceExpect("W1", worker)},
+			{Do: "attached", Parent: "W1", Session: "W2", Type: "worker", Expect: scienceExpect("W2", worker)},
+			{Do: "attached", Parent: "F", Session: "W3", Type: "worker", Expect: endWorkers},
+			{Do: "detached", Session: "W1", Expect: none},
+			{Do: "attached", Parent: "F", Session: "W4", Type: "worker", Expect: none},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "detached", Session: "F", Expect: detach},
+		}},
+		{"more attaches under the frame within the window than the cap end it", []scienceScenarioStep{
+			{Do: "caps", Caps: &scienceWorkerCap{Live: 10, Attaches: 3, WindowMS: 1000}, Expect: none},
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W1", Type: "worker", At: 0, Expect: scienceExpect("W1", worker)},
+			{Do: "detached", Session: "W1", Expect: none},
+			{Do: "attached", Parent: "F", Session: "W2", Type: "worker", At: 400, Expect: scienceExpect("W2", worker)},
+			{Do: "detached", Session: "W2", Expect: none},
+			{Do: "attached", Parent: "F", Session: "W3", Type: "worker", At: 800, Expect: scienceExpect("W3", worker)},
+			{Do: "detached", Session: "W3", Expect: none},
+			{Do: "attached", Parent: "F", Session: "W4", Type: "worker", At: 1200, Expect: scienceExpect("W4", worker)},
+			{Do: "detached", Session: "W4", Expect: none},
+			{Do: "attached", Parent: "F", Session: "W5", Type: "worker", At: 1300, Expect: endWorkers},
+		}},
+		{"a new session counts its workers afresh", []scienceScenarioStep{
+			{Do: "caps", Caps: &scienceWorkerCap{Live: 1, Attaches: 100, WindowMS: 10000}, Expect: none},
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "attached", Parent: "F", Session: "W1", Type: "worker", Expect: scienceExpect("W1", worker)},
+			{Do: "attached", Parent: "F", Session: "W2", Type: "worker", Expect: endWorkers},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "detached", Session: "F", Expect: detach},
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "G", Type: "iframe", Expect: scienceExpect("G", frame)},
+			{Do: "attached", Parent: "G", Session: "W3", Type: "worker", Expect: scienceExpect("W3", worker)},
+		}},
 	}
 }
 
@@ -271,12 +317,14 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 		for i, step := range scenario.Steps {
 			var actions []scienceAction
 			switch step.Do {
+			case "caps":
+				policy = newScienceFramePolicyWith(*step.Caps)
 			case "arm":
 				actions = policy.arm(testScienceIdentity)
 			case "detach":
 				actions = policy.detach()
 			case "attached":
-				actions = policy.attachedTarget(step.Parent, step.Session, step.Type, "T"+step.Session)
+				actions = policy.attachedTarget(step.Parent, step.Session, step.Type, "T"+step.Session, step.At)
 			case "listed":
 				actions = policy.listed(step.Targets, step.Known)
 			case "failed":
@@ -296,7 +344,7 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 			for _, action := range actions {
 				switch {
 				case action.End:
-					got = append(got, "end")
+					got = append(got, strings.TrimSpace("end "+action.Reason))
 					continue
 				case action.EndFront:
 					got = append(got, "endfront")

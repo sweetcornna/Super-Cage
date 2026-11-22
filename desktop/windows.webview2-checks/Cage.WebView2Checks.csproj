@@ -17,6 +17,7 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4314.35" />
     <Compile Include="../windows/ScienceFrame.cs" Link="ScienceFrame.cs" />
     <Compile Include="../windows/ScienceFrameHost.cs" Link="ScienceFrameHost.cs" />
+    <Compile Include="../windows/CrashReports.cs" Link="CrashReports.cs" />
   </ItemGroup>
   <Target Name="RemoveUnusedWebView2WpfReference" BeforeTargets="ResolveAssemblyReferences">
     <ItemGroup><Reference Remove="@(Reference)" Condition="'%(Reference.Filename)' == 'Microsoft.Web.WebView2.Wpf'" /></ItemGroup>
