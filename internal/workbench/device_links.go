@@ -213,11 +213,17 @@ func (s *Server) deviceRelaySetting() string {
 }
 
 // deviceWindow is the gate of every joining-side route and of a window's
-// requests to a joined computer: the SSH entry's own pair of checks
-// (entryLocal), kept in every process kind. An agent session carries the
-// trusted-view cookie too, so its header is what tells it apart.
+// requests to a joined computer, after the session cookie that every /api/
+// request needs. No process kind answers an agent: an agent session carries
+// the window's cookies too, so its header is what tells it apart. A workload
+// also requires the trusted view, the SSH entry's pair of checks
+// (entryLocal), since SSH-entry and tenant sessions hold its session cookie.
+// The desktop gateway and the client-only process give their window the
+// session cookie only (POST /api/session): the trusted view stays in the
+// launcher's jar (trusted_login.go), where it also gates POST
+// /api/agent/native, so there the session is the window.
 func (s *Server) deviceWindow(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get(agentRequestHeader) != "" || !s.hasTrustedView(r) {
+	if r.Header.Get(agentRequestHeader) != "" || (!s.desktopEntry && !s.clientOnly && !s.hasTrustedView(r)) {
 		http.Error(w, errDeviceWindowOnly.Error(), http.StatusForbidden)
 		return false
 	}

@@ -435,9 +435,6 @@ func TestJoinedComputerThroughDesktopGatewayAndClientOnly(t *testing.T) {
 	if w := deviceRequest(gateway, "GET", "/api/settings", "", deviceCall{connection: connection}); w.Code != http.StatusConflict {
 		t.Fatalf("non-mobile route through the gateway: HTTP %d", w.Code)
 	}
-	if w := deviceRequest(gateway, "GET", "/api/mobile/cli/sessions", "", deviceCall{connection: connection, untrusted: true}); w.Code != http.StatusForbidden {
-		t.Fatalf("untrusted view through the gateway: HTTP %d", w.Code)
-	}
 	if w := deviceRequest(gateway, "GET", "/api/mobile/cli/sessions", "", deviceCall{connection: connection, agent: true}); w.Code != http.StatusForbidden {
 		t.Fatalf("agent through the gateway: HTTP %d", w.Code)
 	}
