@@ -276,7 +276,7 @@ type attacher struct {
 	focusState atomic.Int32 // focusUnknown, focusIn or focusOut
 	lastInput  atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
 	inPaste    bool         // input is inside a bracketed paste
-	dropPaste  bool         // the rest of a paste cut by a reconnect is dropped
+	dropPaste  bool         // the rest of a paste cut by a reconnect is dropped (noteUnit)
 	endPaste   bool         // the program received a paste's start, not its end
 	resets     int          // the filter's Resets, to turn focus reports on again
 	// input reads the window's input across reads; hold waits for the
@@ -332,6 +332,7 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 	}
 	a.settings, _ = localterm.LoadSettings(filepath.Dir(cfg.ConfigPath))
 	a.filter = termfilter.New(termfilter.Options{ClipboardWrite: a.settings.ClipboardWrite, ClipboardNow: a.ownerHere, KeepScrollback: a.cfg.KeepScrollback})
+	a.input.PasteOn = a.filter.BracketedPaste
 	a.viewer = attachViewerID()
 	if exit, ok := a.connectController(ctx); !ok {
 		return exit
@@ -422,6 +423,16 @@ func (a *attacher) releaseInput() []byte {
 }
 
 func (a *attacher) noteUnit(out []byte, owner bool, unit []byte, kind termfilter.InputKind) ([]byte, bool) {
+	if a.dropPaste && !a.cfg.Observe {
+		if kind == termfilter.InputPaste {
+			// The rest of a paste a reconnect cut: the program had its
+			// start on the old stream. It ends where input ends the
+			// paste: its end marker, bracketed paste going off, or the
+			// paste's bound.
+			return out, true
+		}
+		a.dropPaste = false
+	}
 	switch kind {
 	case termfilter.InputFocusIn, termfilter.InputFocusOut:
 		state := focusIn
@@ -485,23 +496,14 @@ func (a *attacher) afterHold(inputs <-chan []byte) []byte {
 }
 
 // forward passes input on to the program. An observer only detaches, on
-// Ctrl-C or Ctrl-D; the rest of a paste cut by a reconnect is dropped.
+// Ctrl-C or Ctrl-D. The rest of a paste cut by a reconnect was dropped
+// already (noteUnit).
 func (a *attacher) forward(ctx context.Context, data []byte, paste *attachPaste) (detach bool, err error) {
 	if len(data) == 0 {
 		return false, nil
 	}
 	if a.cfg.Observe {
 		return bytes.ContainsAny(data, "\x03\x04"), nil
-	}
-	if a.dropPaste {
-		end := bytes.Index(data, []byte(attachPasteEnd))
-		if end < 0 {
-			return false, nil
-		}
-		data, a.dropPaste = data[end+len(attachPasteEnd):], false
-		if len(data) == 0 {
-			return false, nil
-		}
 	}
 	return false, paste.feed(ctx, data)
 }

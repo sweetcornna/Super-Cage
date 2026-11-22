@@ -4,10 +4,14 @@ param(
     [switch]$Release,
     [switch]$Sign,
     [switch]$SkipUI,
+    # Claude Science host rendering's real-window run: lifts the server's
+    # gate and the window's together (see below).
+    [switch]$ScienceHostVerified,
     [string]$OutputDirectory,
     [string]$DependencyCache
 )
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
+if ($Release -and $ScienceHostVerified) { throw 'A release never carries the lifted Claude Science host-rendering gate: -ScienceHostVerified is for the real-window run only, until a reviewed commit lifts the gate in the sources.' }
 $repository = Split-Path $PSScriptRoot -Parent
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repository '_output/windows-amd64/app' }
 if (-not $DependencyCache) { $DependencyCache = Join-Path $repository '_output/windows-deps' }
@@ -108,7 +112,13 @@ try {
     $tags = 'external_hcs,external_wsl2,yq_noxml,yq_nolua,yq_noini,yq_nohcl,yq_notoml,yq_noprops,yq_nocsv,yq_nouri,yq_nobase64,yq_nosh,yq_noshell'
     # One stamp per build in cage.exe and cage-attach.exe: the controller accepts only the cage-attach built with it.
     $stamp = [guid]::NewGuid().ToString('N')
-    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/sylvinus/agent-vm/internal/version.Stamp=$stamp -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion"
+    # Claude Science host rendering is offered only by the build for its
+    # real-window run. This one parameter lifts both gates, the server's
+    # (workbench.scienceHostVerified) and the window's (SCIENCE_HOST_VERIFIED,
+    # ScienceFrame.HostVerified); never one alone (TestScienceHostGatesMoveTogether).
+    $scienceGo = if ($ScienceHostVerified) { ' -X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows' } else { '' }
+    $scienceShell = if ($ScienceHostVerified) { 'true' } else { 'false' }
+    $ldflags = "-s -w -X github.com/sylvinus/agent-vm/internal/version.Version=$version -X github.com/sylvinus/agent-vm/internal/version.Stamp=$stamp -X github.com/lima-vm/lima/v2/pkg/version.Version=$limaVersion$scienceGo"
     Invoke-BuildTool $go @('build', '-trimpath', '-tags', $tags, '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage.exe'), './cmd/cage')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-vm-assets')
     Invoke-BuildTool (Join-Path $resources 'cage.exe') @('verify-web-assets')
@@ -118,7 +128,8 @@ try {
     $env:CGO_ENABLED = '0'
     try { Invoke-BuildTool $go @('build', '-trimpath', '-ldflags', $ldflags, '-o', (Join-Path $resources 'cage-attach.exe'), './cmd/cage-attach') } finally { $env:CGO_ENABLED = $cgo }
     Invoke-BuildTool $dotnet @('publish', 'desktop/windows/Cage.Windows.csproj', '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
-        '-p:EnableWindowsTargeting=true', '-p:PublishSingleFile=true', '-p:RestoreLockedMode=true', "-p:Version=$version", "-p:InformationalVersion=$version", '-o', $app)
+        '-p:EnableWindowsTargeting=true', '-p:PublishSingleFile=true', '-p:RestoreLockedMode=true', "-p:Version=$version", "-p:InformationalVersion=$version", "-p:ScienceHostVerified=$scienceShell", '-o', $app)
+    if ($ScienceHostVerified) { Write-Host 'Claude Science host rendering: offered in this build (server and window gates lifted for the real-window run).' }
     Get-ChildItem -LiteralPath $app -File | Where-Object { $_.Extension -in @('.pdb', '.xml') } | Remove-Item -Force
     Invoke-BuildTool $node @('scripts/bundle-cloud-kit.mjs', $resources)
     $coreArchive = Get-VerifiedDependency $dependencies.mihomo $DependencyCache

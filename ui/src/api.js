@@ -126,8 +126,7 @@ async function suspendBeforeQuit(context) {
     throw error;
   }
 }
-// quiet: a failure is the caller's to handle, without a diagnostic.
-export async function native(action, extra = {}, { quiet = false } = {}) {
+export async function native(action, extra = {}) {
   const context = getClientContext();
   const connection = context.connection_id;
   if (action === "quitNow") {
@@ -141,7 +140,7 @@ export async function native(action, extra = {}, { quiet = false } = {}) {
     return result;
   }
   catch (error) {
-    if (!quiet) reportDiagnostic("frontend", error);
+    reportDiagnostic("frontend", error);
     const original = error?.message || String(error);
     const message = nativeFailureMessage(action, original);
     if (message === original) throw error;

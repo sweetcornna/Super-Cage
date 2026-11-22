@@ -20,17 +20,22 @@ const confirmations = {
 const icons = { install: Download, start: Play, open: ExternalLink, stop: Power, update: RefreshCw, refresh: RotateCcw };
 
 // Host rendering (science_host.go, desktop/windows/ScienceFrame.cs). The
-// window's bridge answers scienceFrame with op (contract 2):
-//   capabilities -> {contract}: an older window has no such op (F8).
-//   prepare -> {backstop, proxy}: drops any earlier identity; backstop says
+// window publishes its frame contract as window.cageNativeScienceFrame (its
+// bridge script sets it at document start; an older window has none: F8),
+// and its bridge answers scienceFrame with op (contract 3):
+//   prepare -> {backstop, proxy}: drops any earlier identity (the frame
+//              before goes as on detach); backstop says
 //              the WebView runs with the network switches the frame needs,
 //              proxy is "verified" when the window proved in this WebView
 //              that the proxy switch is in force (F5).
 //   attach {url} -> true: the guest's identity for the frame's own targets
 //              (its workers and frames) and frame navigation allowed to
 //              that session's origin only. The workbench keeps the host's.
-//   detach -> true: no identity for new frames; the window stops watching
-//              once the frame's targets are gone.
+//   detach -> true: no identity for new frames; the frame goes in one
+//              order (round-2 N1): the front ends the frame's session, the
+//              window crashes the frame's process, then removes the frame
+//              element (the pane parks it first). It answers once that has
+//              run; the window stops watching once the targets are gone.
 //   restart -> true: the WebView again, with the switches.
 const frameMessages = {
   restart: "本机渲染已开启，需要重新载入窗口一次才能生效。",
@@ -50,13 +55,27 @@ const hostMeasure = () => ({
 // Why the frame gave way, kept across visits to the pane until the switch
 // changes or the window reloads, so a refused probe is not retried on every
 // visit.
-const remembered = { fallback: null, release: Promise.resolve(), contract: null };
-// F8: the bridge's frame contract, asked once per document and only where
-// the switch could show.
-// Quiet: a window without the op is the normal case on integration builds,
-// not an error worth a diagnostic.
-const bridgeContract = () => remembered.contract ??= native("scienceFrame", { op: "capabilities" }, { quiet: true })
-  .then((reply) => Number(reply?.contract) || 0, () => 0);
+const remembered = { fallback: null, release: Promise.resolve() };
+// F8: the window's frame contract, read without asking the bridge (an older
+// window answers nothing and files no error). A browser that cannot park
+// the frame (moveBefore) cannot keep its teardown order: no host rendering.
+const bridgeContract = () =>
+  typeof Element !== "undefined" && "moveBefore" in Element.prototype ? Number(window.cageNativeScienceFrame) || 0 : 0;
+// park keeps the frame element alive when React removes it: the window
+// tears the frame down (the front's end, a crash, then the removal), and a
+// removed frame's workers could run on without the environment's identity.
+// moveBefore moves it without reloading it; hidden, it waits for the
+// window's removal (at most 10 s if the window never comes).
+const parked = new WeakSet();
+function park(frame) {
+  if (!frame || parked.has(frame) || !frame.isConnected) return;
+  parked.add(frame);
+  frame.hidden = true;
+  frame.style.display = "none";
+  frame.removeAttribute("title");
+  document.body.moveBefore(frame, null);
+  setTimeout(() => frame.remove(), 10000);
+}
 // One automatic reload when the window's document predates the front (its
 // frame-src cannot change); a second refusal asks instead.
 const reloadKey = "cage-science-frame-reload";
@@ -93,6 +112,7 @@ function HostRenderSwitch({ toggle, pending, onChange }) {
 function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
   const [url, setURL] = useState("");
   const [phase, setPhase] = useState("preparing");
+  const frameRef = useRef(null);
   const [render, setRender] = useState(data.host_render);
   const disposed = useRef(false);
   const phaseRef = useRef("preparing");
@@ -106,6 +126,8 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
   const move = (next) => { phaseRef.current = next; setPhase(next); };
   const start = async () => {
     move("preparing");
+    // The frame before this ticket parks; prepare tears it down.
+    park(frameRef.current);
     setURL("");
     try {
       // A release from the previous frame must not land after this ticket.
@@ -136,13 +158,16 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
       disposed.current = true;
     };
   }, []);
-  // Round-2 N1: the front ends the session first (release returns once its
-  // requests and sockets are gone), then the window is told to detach. A
-  // layout cleanup runs before React removes the frame element, so the
-  // release is on its way before the frame's targets start to go.
+  // Round-2 N1: a layout cleanup runs before React removes the frame's
+  // wrapper: the frame parks, and the window's detach ends the front's
+  // session, crashes the frame and removes it, in that order. The release
+  // ends the session from the workbench too. The next start() waits for
+  // both.
   useLayoutEffect(() => () => {
-    remembered.release = api("/claude-science/release", {}).then(() => {}, () => {});
-    void remembered.release.then(() => native("scienceFrame", { op: "detach" })).catch(() => {});
+    park(frameRef.current);
+    const release = api("/claude-science/release", {}).then(() => {}, () => {});
+    const detach = native("scienceFrame", { op: "detach" }).then(() => {}, () => {});
+    remembered.release = Promise.all([release, detach]);
   }, []);
   useEffect(() => {
     if (!url) return;
@@ -214,8 +239,11 @@ function ScienceFrame({ data, contract, toolbar, onFallback, onSignIn }) {
       </div>
       <div className="science-frame-body">
         {url ? (
-          <iframe key={url} src={url} title="Claude Science" sandbox={frameSandbox} allow="clipboard-write" referrerPolicy="no-referrer"
-            data-phase={phase} data-science-frame="" />
+          // React only ever removes the wrapper: the frame may be parked.
+          <div key={url} className="science-frame-slot">
+            <iframe ref={frameRef} src={url} title="Claude Science" sandbox={frameSandbox} allow="clipboard-write" referrerPolicy="no-referrer"
+              data-phase={phase} data-science-frame="" />
+          </div>
         ) : <div className="science-frame-wait"><span className="live-dot" aria-hidden="true" />{status.text}</div>}
       </div>
     </>
@@ -235,15 +263,8 @@ export function ClaudeSciencePanel({ status, onOpen, onConfirm, onDetails }) {
   const [hostPending, setHostPending] = useState(false);
   const [hostNotice, setHostNotice] = useState("");
   const [signInWaiting, setSignInWaiting] = useState(null);
-  const [contract, setContract] = useState(null);
   const lastSignIn = useRef(0);
-  const probeHere = Boolean(data?.host_render?.available) && hostRenderHere(getClientContext(), nativeAvailable());
-  useEffect(() => {
-    if (!probeHere) return;
-    let live = true;
-    void bridgeContract().then((value) => { if (live) setContract(value); });
-    return () => { live = false; };
-  }, [probeHere]);
+  const contract = Boolean(data?.host_render?.available) && hostRenderHere(getClientContext(), nativeAvailable()) ? bridgeContract() : null;
   const mounted = useRef(true);
   const request = useRef(null);
   const revision = useRef(0);

@@ -15,7 +15,11 @@
 //   3. cage desktop --json, what the window starts, then the page it loads, in
 //      headless Chrome with the native bridge mirrored: the page enters the
 //      local workbench by itself on a fresh launch;
-//   4. the picker's own choice of the local environment (candidate, commit);
+//   4. the picker's own choice of the local environment (candidate, commit).
+//      Its disconnect releases the idle controller the gateway started, so the
+//      choice again starts a second one. After each start the gateway has no
+//      defunct child: the starter of a controller ends with it, and the
+//      gateway lives on;
 //   5. the local controller's launch answer names the companion and its
 //      status answer does not (the layout really is the installed one), and
 //      it is the instance the gateway reports;
@@ -190,6 +194,25 @@ async function windowEntry() {
   assert.equal(entry.status, "ready", stdout);
   assert.match(entry.url, /^http:\/\/localhost:\d+\/\?launch=[0-9a-f]+#[0-9a-f]+$/, "the window's entry URL");
   return entry;
+}
+
+// A child of pid that ended and was never waited for: a zombie, state Z in ps.
+function defunctChildren(pid) {
+  const r = spawnSync("ps", ["-axo", "pid=,ppid=,stat=,command="], { encoding: "utf8" });
+  assert.ifError(r.error);
+  return r.stdout.split("\n").map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)\s*(.*)$/))
+    .filter((m) => m && Number(m[2]) === pid && m[3].startsWith("Z")).map((m) => m[1] + " " + m[3] + " " + m[4]);
+}
+// The gateway lives on after it starts a local controller, so whatever ends
+// under it has to be waited for. The starter of a controller ends with it:
+// the gateway gets a moment to wait for that, no more.
+async function assertNoDefunctChild(gatewayPid, where) {
+  let zombies = defunctChildren(gatewayPid);
+  for (let i = 0; i < 30 && zombies.length; i++) {
+    await sleep(100);
+    zombies = defunctChildren(gatewayPid);
+  }
+  assert.deepEqual(zombies, [], "the gateway (pid " + gatewayPid + ") keeps defunct children " + where + ":\n" + zombies.join("\n"));
 }
 
 // ---- stopping what this run started ---------------------------------------
@@ -386,9 +409,18 @@ try {
     });
   }
 
+  const gw = await step("the window's entry is redeemed for a gateway session", async () => gatewaySession((await windowEntry()).url));
+  if (noBrowser) {
+    // Without the page, the picker's choice is what starts the local controller.
+    await step("the picker's choice of the local environment starts the local controller", async () => {
+      assertLocalConnected(await chooseLocal(gw), "first choice");
+      await noteControllers();
+    });
+  }
+  await step("the gateway has no defunct child while the local controller runs", () => assertNoDefunctChild(entry.controller.pid, "with the local controller running"));
+
   let localContext;
-  await step("the picker's choice of the local environment (candidate, commit)", async () => {
-    const gw = await gatewaySession((await windowEntry()).url);
+  await step("the picker's choice again: disconnect releases the local controller and a second one starts (candidate, commit)", async () => {
     const context = await chooseLocal(gw);
     assertLocalConnected(context, "after the choice");
     localContext = context;
@@ -402,6 +434,7 @@ try {
     assert.equal(account.status, 200, "account through the gateway: " + account.text);
   });
   await noteControllers();
+  await step("the gateway has no defunct child after the controller it released started again", () => assertNoDefunctChild(entry.controller.pid, "after the first local controller ended"));
 
   await step("the local controller names the companion in its launch answer, and not in its status answer", async () => {
     const record = await readJSON(path.join(profile, "control.json"));

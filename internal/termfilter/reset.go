@@ -87,6 +87,7 @@ const defaultTabStops = "\x1b7\x1b[3g" +
 // and, unless KeepScrollback, the scrollback erase. A program relaying the
 // stream writes it when the output it relays starts over.
 func (f *Filter) Clear(dst []byte) []byte {
+	f.paste.Store(false)
 	dst = append(dst, ClearReset...)
 	if f.opts.KeepScrollback {
 		return dst
@@ -104,6 +105,7 @@ func (f *Filter) Clear(dst []byte) []byte {
 func (f *Filter) End(dst []byte, cols int) []byte {
 	left := f.left
 	f.left = leftState{}
+	f.paste.Store(false)
 	dst = append(f.Abort(dst), resetStart...)
 	dst = append(dst, resetScreen...)
 	if left.tabs {

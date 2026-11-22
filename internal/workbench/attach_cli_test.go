@@ -78,6 +78,9 @@ func TestAttachChild(t *testing.T) {
 			fmt.Printf("size=%dx%d\r\n", cols, rows)
 		case strings.Contains(chunk, "?query"):
 			fmt.Print("\x1b[c")
+		case strings.Contains(chunk, "?paste-on"):
+			// Bracketed paste, as a shell's line editor turns it on.
+			fmt.Print("\x1b[?2004hpaste-on-shown\r\n")
 		case strings.Contains(chunk, "?effects"):
 			// A query, a clipboard write, a notification and a bell.
 			fmt.Print("\x1b[c\x1b]52;c;aGk=\x07\x1b]9;done\x07\x07effects-shown\r\n")
@@ -1521,6 +1524,8 @@ func TestAttachDropsKeysWhileReconnecting(t *testing.T) {
 	release, streams := holdResume(t)
 	a := startAttach(t, attachTo(s, session.id))
 	a.waitFor("ready", 1)
+	a.typeText("?paste-on")
+	a.waitFor("paste-on-shown", 1)
 	_ = streams()[0].NetConn().Close()
 	time.Sleep(100 * time.Millisecond)
 	a.typeText("lost")
@@ -1571,6 +1576,8 @@ func TestAttachEndsAPasteCutByAReconnect(t *testing.T) {
 	release, streams := holdResume(t)
 	a := startAttach(t, attachTo(s, session.id))
 	a.waitFor("ready", 1)
+	a.typeText("?paste-on")
+	a.waitFor("paste-on-shown", 1)
 	a.typeText("\x1b[200~" + strings.Repeat("a", 70<<10))
 	a.waitFor("got:\"\\x1b[200~", 1)
 	time.Sleep(200 * time.Millisecond)

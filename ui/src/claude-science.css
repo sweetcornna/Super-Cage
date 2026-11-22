@@ -245,6 +245,10 @@
   min-height: 0;
   background: var(--paper);
 }
+/* The frame's wrapper (the frame may be parked outside it). */
+.claude-science .science-frame-slot {
+  display: contents;
+}
 .claude-science .science-frame-body iframe {
   flex: 1;
   width: 100%;

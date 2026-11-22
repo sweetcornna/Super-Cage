@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
 
 // Claude Science phase 2a, workbench side: when host rendering is on, the
@@ -31,7 +32,8 @@ import (
 // checks of /api; errors are plain Chinese text):
 //
 //	GET /api/claude-science -> host_render (scienceHostRenderState):
-//	  available / unavailable_code ("platform" | "client" | "guest") /
+//	  available / unavailable_code ("platform" | "unverified" | "client" |
+//	  "guest") /
 //	  unavailable_reason, enabled, running, error, audit_note, and the
 //	  front's refused / blocked / audit / session / signin fields. The
 //	  front port is never in it: the Windows shell reads it from control.json.
@@ -59,11 +61,53 @@ import (
 // scienceHostOS is where host rendering may run (tests replace it).
 var scienceHostOS = runtime.GOOS
 
+// scienceHostVerified lists the platforms (GOOS values, comma separated)
+// where host rendering has run a real Claude Science session in the real
+// window. The switch is offered nowhere else, whatever frame contract the
+// window answers: the pane hides it (unavailable_code "unverified"), turning
+// it on is refused, and a stored "on" is turned off (syncScienceFront says
+// so in the log).
+//
+// The Windows window has the matching gate (ScienceFrame.HostVerified, the
+// SCIENCE_HOST_VERIFIED symbol): without it the window never adds its
+// network switches. The two are lifted together, never one alone
+// (TestScienceHostGatesMoveTogether). It is empty: no real session has run
+// in the real window yet. The build for that run lifts both with one
+// parameter:
+//
+//	scripts/build-windows.ps1 -ScienceHostVerified
+//
+// which passes -ldflags "-X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows"
+// to cage.exe and -p:ScienceHostVerified=true to Cage.exe. After a
+// successful run, windows is written here and the default of
+// ScienceHostVerified in desktop/windows/Cage.Windows.csproj becomes true,
+// in one reviewed commit.
+var scienceHostVerified = ""
+
+// scienceHostRenderVerified reports whether the gate is lifted for goos.
+func scienceHostRenderVerified(goos string) bool {
+	if goos == "" {
+		return false
+	}
+	for _, platform := range strings.Split(scienceHostVerified, ",") {
+		if strings.TrimSpace(platform) == goos {
+			return true
+		}
+	}
+	return false
+}
+
+// scienceLog notes what the server decided on its own (tests replace it).
+var scienceLog = diagnostics.Log
+
 type scienceHost struct {
 	mu    sync.Mutex
 	front *scienceFront
 	err   string
 	stop  context.CancelFunc
+	// unverified: the log has said once that a stored "on" was turned
+	// off in this build (scienceHostVerified).
+	unverified sync.Once
 	// vmRunning replaces Server.vmRunning in tests.
 	vmRunning func() bool
 }
@@ -83,6 +127,7 @@ const (
 	scienceReasonHostPlatform = "本机渲染目前只在 Windows 版 Super Cage 窗口中提供：只有它的网页组件能把页面的时区、语言和浏览器标识换成环境的。"
 	scienceReasonHostClient   = "本机渲染只能在这台电脑的 Super Cage 窗口中使用；浏览器、手机和远程连接继续使用隔离浏览器。"
 	scienceReasonHostGuest    = "这个环境不能运行 Claude Science。"
+	scienceReasonUnverified   = "本机渲染还没有在真实的 Windows 窗口中验证过，这个版本暂不提供。"
 )
 
 // scienceHostPlatform: what this workbench process allows regardless of the
@@ -91,6 +136,8 @@ func (s *Server) scienceHostPlatform() (string, string) {
 	switch {
 	case scienceHostOS != "windows":
 		return "platform", scienceReasonHostPlatform
+	case !scienceHostRenderVerified(scienceHostOS):
+		return "unverified", scienceReasonUnverified
 	case s.desktopEntry || s.clientOnly:
 		return "client", scienceReasonHostClient
 	case s.windowsGuest != nil || s.macosGuest != nil || scienceHostArch != "amd64":
@@ -124,7 +171,8 @@ func (s *Server) scienceHostRender(r *http.Request) *scienceHostRenderState {
 	state.UnavailableCode, state.UnavailableReason = s.scienceHostAvailability(r)
 	state.Available = state.UnavailableCode == ""
 	s.mu.Lock()
-	state.Enabled = s.preferences.ScienceHostRender
+	// A stored "on" this build does not offer is off (scienceHostVerified).
+	state.Enabled = s.preferences.ScienceHostRender && state.UnavailableCode != "unverified"
 	s.mu.Unlock()
 	s.scienceHost.mu.Lock()
 	front, startErr := s.scienceHost.front, s.scienceHost.err
@@ -144,10 +192,32 @@ func (s *Server) scienceHostRender(r *http.Request) *scienceHostRenderState {
 
 // syncScienceFront starts or stops the front to match the setting.
 func (s *Server) syncScienceFront() {
+	code, _ := s.scienceHostPlatform()
 	s.mu.Lock()
 	enabled, closing := s.preferences.ScienceHostRender, s.closing
+	// A stored "on" this build does not offer (it came from a build that
+	// did) is turned off, so a later build that offers it does not start
+	// on by surprise.
+	var cleared error
+	unverified := enabled && code == "unverified"
+	if unverified {
+		next := s.preferences
+		next.ScienceHostRender = false
+		if cleared = writePrivate(filepath.Join(s.profile, "workbench.json"), next); cleared == nil {
+			s.preferences.ScienceHostRender = false
+		}
+		enabled = false
+	}
 	s.mu.Unlock()
-	code, _ := s.scienceHostPlatform()
+	if unverified {
+		s.scienceHost.unverified.Do(func() {
+			message := "host rendering was stored on, but this build does not offer it on " + scienceHostOS + " (scienceHostVerified is empty): turned off"
+			if cleared != nil {
+				message = "host rendering is stored on, but this build does not offer it on " + scienceHostOS + " (scienceHostVerified is empty): treated as off; the setting could not be cleared: " + cleared.Error()
+			}
+			scienceLog("warn", "claude-science", message)
+		})
+	}
 	want := enabled && code == "" && !closing
 	h := &s.scienceHost
 	h.mu.Lock()
@@ -422,7 +492,9 @@ func (s *Server) publishScienceControl(port int, end string, identity *scienceId
 // workloads published in their control files. Read when a document is
 // served, never on a timer.
 func (s *Server) localScienceFronts() []int {
-	if scienceHostOS != "windows" || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
+	// A build that does not offer host rendering frames and connects
+	// nowhere new, whatever a control file says (scienceHostVerified).
+	if scienceHostOS != "windows" || !scienceHostRenderVerified(scienceHostOS) || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
 		return nil
 	}
 	root := s.remote.desktop.localVMs.defaultProfile
@@ -460,28 +532,31 @@ func (s *Server) scienceDocumentSources(r *http.Request) (frames, connect string
 	for _, port := range ports {
 		sources = append(sources, scienceFrameSource(port))
 	}
-	return strings.Join(sources, " "), " " + scienceProxyCheckOrigin
+	return strings.Join(sources, " "), " " + scienceProxyCheckOrigin + " " + scienceProxyLoopbackOrigin
 }
 
-// scienceProxyCheckOrigin is the address the window's proxy proof loads
-// (ScienceFrame.ProxyCheckURL): .invalid never resolves. The workbench
-// document may connect to it only while a front runs, since the check is
-// held to the document's connect-src.
-const scienceProxyCheckOrigin = "http://cage-proxy-check.invalid"
+// scienceProxyCheckOrigin and scienceProxyLoopbackOrigin are the addresses
+// the window's proxy proof loads (ScienceFrame.ProxyCheckURL and
+// ProxyLoopbackURL): .invalid never resolves, and 127.0.0.3 is a loopback
+// address only the shell's bypass list (<-loopback>) sends to the proxy;
+// under any other proxy it goes direct (round-2 N3). The workbench document
+// may connect to them only while a front runs, since the check is held to
+// the document's connect-src.
+const (
+	scienceProxyCheckOrigin    = "http://cage-proxy-check.invalid"
+	scienceProxyLoopbackOrigin = "http://127.0.0.3:8099"
+)
 
 // scienceBridgeContract is the scienceFrame bridge version this server's
 // pane needs (claude-science-state.mjs hostRenderContract; the window's
-// ScienceFrame.Contract): 2 scoped the identity to the frame's targets; 3
-// also ends the front session before a frame is torn down and follows
-// nested workers (round-2 N1, N2). A window answering 2 is never offered
-// the switch.
+// ScienceFrame.Contract, which the golden testdata/science-cdp.json pins):
+// 2 scoped the identity to the frame's targets; 3 also tears the frame down
+// in order (the front's session ends, the frame crashes, then it goes) and
+// follows nested workers (round-2 N1, N2), proves the shell's own proxy
+// (N3), clears what a killed window's frame stored (N6), and is published as
+// window.cageNativeScienceFrame instead of answered to a probe. A window
+// publishing 2 (or nothing) is never offered the switch.
 const scienceBridgeContract = 3
-
-// scienceFramePolicyContract is the version of the frame policy the golden
-// (testdata/science-cdp.json) describes and ScienceFrame.cs implements. It
-// reaches scienceBridgeContract only once the shell's policy has the round-2
-// fixes.
-const scienceFramePolicyContract = 2
 
 const (
 	scienceReasonUpdateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。"
@@ -606,7 +681,11 @@ func (s *Server) scienceTicketAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// F5: the shell proved, in this WebView, that a request to an address
-	// nobody can serve ends at the switched proxy (ScienceFrame.ProxyCheck).
+	// nobody can serve ends at the switched proxy, and that a loopback
+	// address outside the bypass list does too (round-2 N3,
+	// ScienceFrame.ProxyCheck). The verdict is the window's own word,
+	// carried by the pane: it keeps a window without the switches (or with
+	// someone else's proxy) from framing, not a page that lies about it.
 	if input.Proxy != "verified" {
 		http.Error(w, scienceReasonProxyUnproven, http.StatusConflict)
 		return

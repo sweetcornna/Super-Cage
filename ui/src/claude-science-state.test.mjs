@@ -228,6 +228,11 @@ test("host rendering: off by default, a quiet switch where it can be used", () =
   }
   assert.equal(render("running-host-render-available", { bridge: false }).toggle, null);
   assert.equal(render("running-host-render-elsewhere").toggle, null);
+  // A build that does not offer it (the server's gate): no switch, even
+  // with an "on" stored by a build that did, and no frame.
+  const fixture = body("running-host-render-available");
+  const unverified = { ...fixture, host_render: { ...fixture.host_render, available: false, unavailable_code: "unverified", enabled: false } };
+  assert.deepEqual(hostRenderView({ data: unverified, client: windowsWindow, bridge: true, contract: hostRenderContract, running: true }), { toggle: null, frame: false, fallback: "", notice: "" });
 });
 
 test("host rendering: the frame only while everything holds", () => {

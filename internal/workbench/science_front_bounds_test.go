@@ -262,12 +262,16 @@ func TestScienceEndWaitsForTheSession(t *testing.T) {
 	waitFor(t, 5*time.Second, "the held request", func() bool {
 		return slices.ContainsFunc(env.daemon.seen(), func(r fakeScienceRequest) bool { return r.Path == "/api/hold" })
 	})
-	end := func(host, secret, origin string) *http.Response {
+	end := func(host, secret, origin string, label ...string) *http.Response {
 		t.Helper()
 		request, _ := http.NewRequest("POST", fmt.Sprintf("http://127.0.0.1:%d/_cage/end", env.front.port), nil)
 		request.Host = host
 		if secret != "" {
 			request.Header.Set("X-Cage-End", secret)
+		}
+		request.Header.Set("X-Cage-End-Label", env.label)
+		if len(label) > 0 {
+			request.Header.Set("X-Cage-End-Label", label[0])
 		}
 		if origin != "" {
 			request.Header.Set("Origin", origin)
@@ -292,6 +296,22 @@ func TestScienceEndWaitsForTheSession(t *testing.T) {
 	}
 	if !env.front.snapshot().Session {
 		t.Fatal("a refused end ended the session")
+	}
+	// A teardown of a frame the pane already replaced changes nothing; one
+	// of an entry that never entered only revokes that entry.
+	if r := end(local, env.front.endSecret, "", strings.Repeat("0", 32)); r.StatusCode != http.StatusNoContent || r.Header.Get("X-Cage-Ended") != "stale" {
+		t.Fatalf("stale end: %d %q", r.StatusCode, r.Header.Get("X-Cage-Ended"))
+	}
+	entry := env.front.issue(scienceTicket{epoch: env.epoch, identity: testScienceIdentity, host: testHostIdentity()})
+	issued := strings.TrimSuffix(strings.TrimPrefix(entry, "http://"), fmt.Sprintf(".localhost:%d/_cage/enter", env.front.port))
+	if r := end(local, env.front.endSecret, "", issued); r.StatusCode != http.StatusNoContent || r.Header.Get("X-Cage-Ended") != "complete" {
+		t.Fatalf("issued end: %d %q", r.StatusCode, r.Header.Get("X-Cage-Ended"))
+	}
+	if state := env.front.labelState(issued); state != "" {
+		t.Fatalf("the ended entry is still %q", state)
+	}
+	if env.front.labelState(env.label) != "session" || unwound.Load() != 0 {
+		t.Fatal("an end for another label ended the session")
 	}
 	started := time.Now()
 	r := end(local, env.front.endSecret, "")

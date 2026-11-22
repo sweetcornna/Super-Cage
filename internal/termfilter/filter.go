@@ -95,6 +95,7 @@ type Filter struct {
 	hold     [HoldLimit]byte
 
 	focus   atomic.Bool    // the guest asked for focus reports (mode 1004)
+	paste   atomic.Bool    // the window has bracketed paste on (mode 2004 passed)
 	resets  int            // full and soft resets passed to the application
 	dropped map[string]int // what was dropped, by kind
 	left    leftState      // what the guest changed that End undoes
@@ -150,6 +151,12 @@ type leftState struct {
 // never passes mode 1004: the viewer owns the host terminal's focus reports.
 // Unlike the rest of the filter, it may be called from another goroutine.
 func (f *Filter) GuestFocus() bool { return f.focus.Load() }
+
+// BracketedPaste reports whether the window has bracketed paste on: the
+// filter passed mode 2004 on and no reset or mode change since turned it
+// off. Only then does the window's ESC [200~ start a paste. Like
+// GuestFocus, it may be called from another goroutine.
+func (f *Filter) BracketedPaste() bool { return f.paste.Load() }
 
 // Resets counts the full (RIS) and soft (DECSTR) resets that passed; a reset
 // also turns off what the viewer itself set in the application.
@@ -837,7 +844,7 @@ func (f *Filter) decideOSC() bool {
 			return false
 		}
 		query := contains(text, '?')
-		if query && (f.replay || !f.spendQueries(count(text, '?'))) {
+		if query && (f.replay || string(body[:semi]) == "4" && !shortIndexes(text) || !f.spendQueries(count(text, '?'))) {
 			return false
 		}
 		if !query || string(body[:semi]) == "4" && setsColour(text) {
@@ -866,6 +873,19 @@ func (f *Filter) decideOSC() bool {
 		return true
 	}
 	return false
+}
+
+// shortIndexes reports whether every colour an OSC 4 body asks for has an
+// index of one to three digits: the answer echoes it, and only so is it read
+// as an answer (NextInput), not as keys.
+func shortIndexes(text []byte) bool {
+	fields := splitParams(text)
+	for i := 1; i < len(fields); i += 2 {
+		if string(fields[i]) == "?" && (!number(fields[i-1]) || len(fields[i-1]) > 3) {
+			return false
+		}
+	}
+	return true
 }
 
 // setsColour reports whether an OSC 4 body (index;spec pairs) sets any

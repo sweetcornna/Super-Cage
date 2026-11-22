@@ -60,6 +60,374 @@ Check(WindowLayout.Bounds(new(0, 0, 3840, 2080), 96, null).Width > 2500, "4K win
 Check(WindowLayout.Bounds(new(0, 0, 3840, 2080), 192, new(100, 100, 1000, 700, 96, false)).Width == 2000,
     "restoring a user size did not account for the new monitor DPI");
 Console.WriteLine($"Windows window layout: {assertions} assertions passed.");
+
+// Claude Science host rendering: ScienceFrame.cs against the contract the Go
+// tests drive headless Chromium with (internal/workbench/testdata/science-cdp.json).
+assertions = 0;
+{
+    using var goldenStream = typeof(Program).Assembly.GetManifestResourceStream("Cage.ScienceCDP.json")!;
+    var golden = System.Text.Json.Nodes.JsonNode.Parse(goldenStream)!.AsObject();
+    bool Same(System.Text.Json.Nodes.JsonNode? a, System.Text.Json.Nodes.JsonNode? b) => System.Text.Json.Nodes.JsonNode.DeepEquals(a, b);
+    System.Text.Json.Nodes.JsonArray Calls(IEnumerable<ScienceFrame.Call> calls) =>
+        new(calls.Select(call => (System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject { ["method"] = call.Method, ["params"] = call.Params.DeepClone() }).ToArray());
+    var scienceRoot = Path.Combine(Path.GetTempPath(), "cage-science-" + Guid.NewGuid().ToString("N"));
+    try
+    {
+        Directory.CreateDirectory(Path.Combine(scienceRoot, "vms", "lab"));
+        Check(ScienceFrame.Arguments(scienceRoot, true) == null, "switches without any profile");
+        File.WriteAllText(Path.Combine(scienceRoot, "workbench.json"), "{\n  \"science_host_render\": false\n}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{ broken");
+        Check(ScienceFrame.Arguments(scienceRoot, true) == null, "switches while host rendering is off");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{\n  \"keyboard\": \"pc\",\n  \"science_host_render\": true\n}");
+        Check(ScienceFrame.Arguments(scienceRoot, true) == ScienceFrame.BackstopArguments, "no switches with host rendering on in a named environment");
+        // A window built without host rendering (the gate not lifted) never
+        // has the switches, whatever workbench.json says, and publishes no
+        // frame contract.
+        Check(ScienceFrame.Arguments(scienceRoot, false) == null, "switches in a window built without host rendering");
+        Check(ScienceFrame.Arguments(scienceRoot) == (ScienceFrame.HostVerified ? ScienceFrame.BackstopArguments : null), "the window's switches do not follow its build");
+        Check(ScienceFrame.PublishedContract == (ScienceFrame.HostVerified ? ScienceFrame.Contract : 0), "the published contract does not follow the window's build");
+        Check(ScienceFrame.BackstopArguments == string.Join(' ', golden["backstop"]!.AsArray().Select(item => item!.GetValue<string>())),
+            "the window's switches differ from the ones the browser tests prove");
+
+        var control = golden["control"]!.DeepClone().AsObject();
+        control["pid"] = Environment.ProcessId; // the golden record names no process
+        var origin = "http://0123456789abcdef0123456789abcdef.localhost:" + control["science_port"];
+        var entry = origin + "/_cage/enter";
+        Check(ScienceFrame.LabelOrigin(entry) == origin, "label origin of an entry address");
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity without a control file");
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+        var identity = ScienceFrame.Identity(scienceRoot, entry);
+        Check(identity != null && Same(identity, control["science_identity"]), "identity differs from the control file");
+        foreach (var other in new[] {
+            entry.Replace(":17840", ":17841"), entry.Replace("0123456789abcdef0123456789abcdef.localhost", "localhost"),
+            entry.Replace("0123456789abcdef0123456789abcdef", "0123456789abcdef0123456789abcde"), entry.Replace("0123456789abcdef0123456789abcdef", "0123456789ABCDEFX123456789abcdef"),
+            entry.Replace(".localhost", ".localhost.evil"), entry.Replace("http://", "https://"), entry.Replace("http://", "http://user@"),
+            entry.Replace("/_cage/enter", "/"), entry + "?x=1", entry + "#ticket", "http://127.0.0.1:17840/_cage/enter",
+            "http://0123456789abcdef0123456789abcdef.localhost/_cage/enter", "not a url",
+        })
+            Check(ScienceFrame.Identity(scienceRoot, other) == null, "identity for a foreign address: " + other);
+        // A record left by an exited workload with the same port is skipped.
+        var stale = control.DeepClone().AsObject();
+        stale["pid"] = int.MaxValue;
+        stale["science_identity"]!["timezone"] = "Europe/Paris";
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), stale.ToJsonString());
+        Check(Same(ScienceFrame.Identity(scienceRoot, entry), control["science_identity"]), "a stale control file shadowed the running workload");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), stale.ToJsonString());
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity from an exited workload");
+        File.WriteAllText(Path.Combine(scienceRoot, "control.json"), "{\"port\":17776,\"pid\":1}");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+        var unsafeIdentity = control.DeepClone().AsObject();
+        unsafeIdentity["science_identity"]!["platform"] = "Linux\"; alert(1); \"";
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), unsafeIdentity.ToJsonString());
+        Check(ScienceFrame.Identity(scienceRoot, entry) == null, "identity with a value that is not plain text");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+
+        // Ending a frame's session: the running workload's science_end for the front's port, the label from the origin.
+        var endContract = golden["end"]!.AsObject();
+        Check(ScienceFrame.EndPath == endContract["path"]!.GetValue<string>() && ScienceFrame.EndSecretHeader == endContract["secret_header"]!.GetValue<string>() &&
+            ScienceFrame.EndLabelHeader == endContract["label_header"]!.GetValue<string>() && ScienceFrame.EndedHeader == endContract["ended_header"]!.GetValue<string>(), "the end differs from the front's");
+        Check(ScienceFrame.End(scienceRoot, origin)?.Secret == "SECRET", "the end's secret is not the golden control file's science_end");
+        var ending = control.DeepClone().AsObject();
+        ending.Remove("science_end");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), ending.ToJsonString());
+        Check(ScienceFrame.End(scienceRoot, origin) == null, "an end without science_end");
+        ending["science_end"] = "0123456789abcdefABCDEF_-";
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), ending.ToJsonString());
+        var end = ScienceFrame.End(scienceRoot, origin);
+        Check(end != null && end.Address.ToString() == "http://127.0.0.1:" + control["science_port"] + "/_cage/end" &&
+            end.Label == "0123456789abcdef0123456789abcdef" && end.Secret == "0123456789abcdefABCDEF_-", "end of a frame's session");
+        foreach (var other in new[] { origin.Replace(":17840", ":17841"), "http://localhost:17840", origin.Replace("http://", "https://"), "", "not a url" })
+            Check(ScienceFrame.End(scienceRoot, other) == null, "an end for a foreign origin: " + other);
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
+
+        // The journal of framed origins: nothing at all without one (the window's
+        // start reads one path), recorded once, forgotten once cleared.
+        var journalData = Path.Combine(scienceRoot, "webview2-journal");
+        Check(ScienceFrame.Journal(journalData).Count == 0 && !Directory.Exists(journalData), "a missing journal read or created something");
+        Check(ScienceFrame.Forget(journalData, [origin]) && !Directory.Exists(journalData), "forgetting without a journal wrote something");
+        Check(ScienceFrame.Record(journalData, origin, "http://localhost") && ScienceFrame.Record(journalData, origin, "http://localhost") &&
+            ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(origin, "http://localhost")]), "journal after recording one origin twice");
+        var second = origin.Replace("0123456789abcdef0123456789abcdef", "fedcba9876543210fedcba9876543210");
+        Check(ScienceFrame.Record(journalData, second, "http://localhost") && ScienceFrame.Forget(journalData, [origin]) &&
+            ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(second, "http://localhost")]), "journal after forgetting one of two");
+        Check(ScienceFrame.Forget(journalData, [second]) && !File.Exists(ScienceFrame.JournalPath(journalData)), "an empty journal stays on disk");
+        File.WriteAllText(ScienceFrame.JournalPath(journalData), "{\"framed\":[{\"origin\":\"http://localhost:1\",\"site\":\"x\"},{\"origin\":\"" + origin + "\",\"site\":\"http://localhost\"}]}");
+        Check(ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(origin, "http://localhost")]), "a journal entry that is no session origin was kept");
+
+        // The start's sweep (SweepJournal): what it cleared is forgotten; once
+        // the window went on without it (late), it clears nothing more and the
+        // journal stays for the next start.
+        var sweptOrigins = new List<string>();
+        ScienceFrame.Record(journalData, second, "http://localhost");
+        ScienceFrame.SweepJournal(journalData, (framedOrigin, framedSite) => { sweptOrigins.Add(framedOrigin); return Task.FromResult(framedOrigin == origin); }, CancellationToken.None).Wait();
+        Check(sweptOrigins.SequenceEqual([origin, second]) && ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(second, "http://localhost")]),
+            "the sweep forgot an origin it did not clear, or kept one it cleared");
+        using (var late = new CancellationTokenSource())
+        {
+            var hung = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ScienceFrame.Record(journalData, origin, "http://localhost");
+            var lateCalls = 0;
+            var lateSweep = ScienceFrame.SweepJournal(journalData, (_, _) => { lateCalls++; return hung.Task; }, late.Token);
+            late.Cancel();
+            hung.SetResult(true);
+            Check(lateSweep.Wait(TimeSpan.FromSeconds(5)) && lateCalls == 1 && ScienceFrame.Journal(journalData).Count == 2,
+                "a sweep the window stopped waiting for went on clearing or forgot what it cleared");
+        }
+        File.Delete(ScienceFrame.JournalPath(journalData));
+
+        // The calls and the policy are the ones the Go tests prove in headless Chromium.
+        Check(golden["contract"]!.GetValue<int>() == ScienceFrame.Contract, "bridge contract differs");
+        Check(golden["settle_ms"]!.GetValue<int>() == ScienceFrame.SettleMilliseconds, "settle time differs");
+        Check(golden["navigate_wait_ms"]!.GetValue<int>() == ScienceFrame.NavigateWaitMilliseconds, "navigation wait differs");
+        Check(golden["end_wait_ms"]!.GetValue<int>() == ScienceFrame.EndWaitMilliseconds, "end wait differs");
+        Check(golden["crash_wait_ms"]!.GetValue<int>() == ScienceFrame.CrashWaitMilliseconds, "crash wait differs");
+        Check(Same(Calls(ScienceFrame.PageAttach), golden["page_attach"]), "page attach calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.PageDetach), golden["page_detach"]), "page detach calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Frame(identity!)), golden["frame"]), "frame calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Worker(identity!)), golden["worker"]), "worker calls differ from the contract");
+        Check(Same(Calls(ScienceFrame.Resume), golden["resume"]), "resume differs from the contract");
+        Check(Same(Calls(ScienceFrame.ClearOrigin("ORIGIN", "SITE")), golden["clear_origin"]), "origin clearing differs from the contract");
+        Check(ScienceFrame.Benign("Another locale override is already in effect") && !ScienceFrame.Benign("Target closed"), "benign locale error");
+        var proxy = golden["proxy_check"]!.AsObject();
+        Check(ScienceFrame.ProxyCheckURL("NONCE") == proxy["url"]!.GetValue<string>(), "proxy check address differs");
+        Check(ScienceFrame.ProxyLoopbackURL("NONCE") == proxy["loopback_url"]!.GetValue<string>(), "proxy check loopback address differs");
+        Check(Same(ScienceFrame.ProxyCheckOptions(), proxy["options"]), "proxy check options differ");
+        Check(ScienceFrame.ProxyVerified == proxy["verified"]!.GetValue<string>(), "proxy check error differs");
+        Check(ScienceFrame.ProxyVerdict(false, ScienceFrame.ProxyVerified) == "verified" && ScienceFrame.ProxyVerdict(false, "net::ERR_NAME_NOT_RESOLVED") == "failed" &&
+            ScienceFrame.ProxyVerdict(true, "") == "failed" && ScienceFrame.ProxyVerdict(false, "net::ERR_HTTP_RESPONSE_CODE_FAILURE") == "failed", "proxy verdicts");
+        var scenarios = 0;
+        foreach (var scenario in golden["scenarios"]!.AsArray())
+        {
+            var policy = new ScienceFrame.Policy();
+            var steps = scenario!["steps"]!.AsArray();
+            for (var i = 0; i < steps.Count; i++)
+            {
+                var step = steps[i]!.AsObject();
+                string Field(string name) => step[name]?.GetValue<string>() ?? "";
+                if (Field("do") == "caps")
+                {
+                    var caps = step["caps"]!.AsObject();
+                    policy = new ScienceFrame.Policy(caps["live"]!.GetValue<int>(), caps["attaches"]!.GetValue<int>(), caps["window_ms"]!.GetValue<long>());
+                }
+                var actions = Field("do") switch
+                {
+                    "caps" => [],
+                    "arm" => policy.Arm(identity!),
+                    "detach" => policy.Detach(),
+                    "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type"), "T" + Field("session"), step["at"]?.GetValue<long>() ?? 0),
+                    "listed" => policy.Listed((step["targets"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList(),
+                        (step["known"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList()),
+                    "failed" => policy.CallFailed(Field("session")),
+                    "settle" => policy.Settle(Field("session")),
+                    "detached" => policy.DetachedTarget(Field("session")),
+                    "navigate" => policy.Navigate(),
+                    "navigate_timeout" => policy.NavigateTimedOut(),
+                    var other => throw new InvalidDataException("unknown scenario step " + other),
+                };
+                var got = actions.Select(action => action.End ? ("end " + action.Reason).TrimEnd() : action.EndFront ? "endfront" : action.Crash ? action.Session + " crash" :
+                    action.Remove ? "remove" : action.Proceed ? "proceed" : (action.Session.Length == 0 ? "page" : action.Session) + " " + action.Call!.Method).ToArray();
+                var want = step["expect"]!.AsArray().Select(item => item!.GetValue<string>()).ToArray();
+                Check(got.SequenceEqual(want), scenario["name"] + ", step " + i + ": " + string.Join(", ", got));
+            }
+            scenarios++;
+        }
+        Check(scenarios == 21, "scenario count " + scenarios);
+        var cap = golden["worker_cap"]!.AsObject();
+        Check(cap["live"]!.GetValue<int>() == ScienceFrame.MaxLiveWorkers && cap["attaches"]!.GetValue<int>() == ScienceFrame.MaxAttaches &&
+            cap["window_ms"]!.GetValue<int>() == ScienceFrame.AttachWindowMilliseconds, "worker cap differs from the contract");
+
+        // Crash reports: the dumps and attachments go, the crash database's
+        // own files and anything outside the folder stay.
+        var crashData = Path.Combine(scienceRoot, "webview2-crash");
+        Check(CrashReports.Sweep(crashData) == 0 && !Directory.Exists(crashData), "a sweep without crash reports created something");
+        var crashpad = CrashReports.Folder(crashData);
+        Directory.CreateDirectory(Path.Combine(crashpad, "reports"));
+        Directory.CreateDirectory(Path.Combine(crashpad, "attachments", "a1"));
+        foreach (var name in new[] { "reports/x.dmp", "reports/y.dmp", "attachments/a1/z.txt", "metadata", "settings.dat", "reports/keep.json" })
+            File.WriteAllText(Path.Combine(crashpad, name), "x");
+        File.WriteAllText(Path.Combine(crashData, "outside.dmp"), "x");
+        Check(CrashReports.Sweep(crashData) == 3, "the sweep did not delete the two dumps and the attachment");
+        Check(!File.Exists(Path.Combine(crashpad, "reports", "x.dmp")) && !File.Exists(Path.Combine(crashpad, "attachments", "a1", "z.txt")) &&
+            File.Exists(Path.Combine(crashpad, "metadata")) && File.Exists(Path.Combine(crashpad, "settings.dat")) &&
+            File.Exists(Path.Combine(crashpad, "reports", "keep.json")) && File.Exists(Path.Combine(crashData, "outside.dmp")), "the sweep deleted the wrong files");
+        if (OperatingSystem.IsWindows())
+        {
+            // A dump crash reporting still writes is left for the next sweep.
+            using (File.Open(Path.Combine(crashpad, "reports", "held.dmp"), FileMode.Create, FileAccess.ReadWrite, FileShare.None))
+                Check(CrashReports.Sweep(crashData) == 0, "a dump in use counted as deleted");
+            Check(CrashReports.Sweep(crashData) == 1, "a dump left in use was not deleted later");
+
+            // Nothing is followed through a junction: not the user data
+            // folder, EBWebView, Crashpad or reports. (mklink /J needs no
+            // privilege; a host that refuses it skips these.)
+            bool Junction(string at, string to)
+            {
+                using var mklink = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + at + "\" \"" + to + "\"")
+                    { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+                mklink.WaitForExit();
+                return mklink.ExitCode == 0 && File.GetAttributes(at).HasFlag(FileAttributes.ReparsePoint);
+            }
+            var linkTarget = Path.Combine(scienceRoot, "link-target");
+            var targetReports = Path.Combine(CrashReports.Folder(linkTarget), "reports");
+            Directory.CreateDirectory(targetReports);
+            var targetDump = Path.Combine(targetReports, "kept.dmp");
+            File.WriteAllText(targetDump, "x");
+            var linkCases = new (string Data, string Link, string Target)[] {
+                (Path.Combine(scienceRoot, "linked-data"), Path.Combine(scienceRoot, "linked-data"), linkTarget),
+                (Path.Combine(scienceRoot, "linked-ebwebview"), Path.Combine(scienceRoot, "linked-ebwebview", "EBWebView"), Path.Combine(linkTarget, "EBWebView")),
+                (Path.Combine(scienceRoot, "linked-crashpad"), Path.Combine(scienceRoot, "linked-crashpad", "EBWebView", "Crashpad"), CrashReports.Folder(linkTarget)),
+                (Path.Combine(scienceRoot, "linked-reports"), Path.Combine(scienceRoot, "linked-reports", "EBWebView", "Crashpad", "reports"), targetReports),
+            };
+            foreach (var (linkedData, link, target) in linkCases)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(link)!);
+                if (!Junction(link, target)) { Console.WriteLine("junction not created, skipped: " + link); continue; }
+                // Removed here, not by the recursive delete of scienceRoot:
+                // .NET's recursive delete reports a junction as an error
+                // (DeleteVolumeMountPoint, invalid parameter).
+                try { Check(CrashReports.Sweep(linkedData) == 0 && File.Exists(targetDump), "the sweep followed a junction: " + link); }
+                finally { Directory.Delete(link); }
+            }
+            Check(CrashReports.Sweep(linkTarget) == 1 && !File.Exists(targetDump), "the plain folder behind the junctions was not swept");
+        }
+
+        // The renderer processes the host terminates for a frame's origin.
+        IReadOnlyList<string> Sources(params string[] sources) => sources;
+        var workbenchProcess = (2, Sources("http://localhost:4321/", ""));
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/_cage/enter")), workbenchProcess, (3, Sources())], origin) is [1], "the frame's process not chosen alone");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/a", "about:blank", "about:srcdoc", "")), (4, Sources(origin + "/b"))], origin) is [1, 4], "frames of the origin's documents not all chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/a", "http://localhost:4321/"))], origin) == null, "a process with a frame of another origin was chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin.Replace("0123", "f123") + "/", origin[..origin.LastIndexOf(':')] + ":1/", "http://user@" + origin[7..] + "/")), workbenchProcess], origin) is [], "a process of another origin was chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources("")), workbenchProcess], "") is [], "a process chosen for no origin");
+        // A renderer's id taken over by a process started after the
+        // snapshot is never terminated (ScienceFrameHost.EndRenderer).
+        var killSnapshot = DateTime.UtcNow;
+        // Process start times come from the system clock tick, coarser than
+        // DateTime.UtcNow: the later process starts well after the snapshot.
+        Thread.Sleep(100);
+        using (var self = System.Diagnostics.Process.GetCurrentProcess())
+            Check(ScienceFrame.SameProcess(self.StartTime.ToUniversalTime(), killSnapshot), "a process started before the snapshot was not the renderer");
+        using (var later = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh", OperatingSystem.IsWindows() ? "/c exit 0" : "-c \"exit 0\"") { UseShellExecute = false, CreateNoWindow = true })!)
+        {
+            var laterStart = later.StartTime.ToUniversalTime();
+            later.WaitForExit();
+            Check(!ScienceFrame.SameProcess(laterStart, killSnapshot), "a process started after the snapshot was taken for the renderer");
+        }
+
+        // Preferences: written before the browser starts, the default again without the switches.
+        var data = Path.Combine(scienceRoot, "webview2");
+        var preferences = ScienceFrame.PreferencesPath(data);
+        Check(ScienceFrame.SeedPreferences(data, false) && !File.Exists(preferences), "preferences written while off");
+        Directory.CreateDirectory(Path.GetDirectoryName(preferences)!);
+        File.WriteAllText(preferences, "{\"browser\":{\"x\":1},\"net\":{\"other\":true}}");
+        Check(ScienceFrame.SeedPreferences(data, true), "preferences not written");
+        var seeded = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(preferences))!;
+        Check(Same(seeded["net"]!["network_prediction_options"], golden["preferences"]!["net"]!["network_prediction_options"]) &&
+            seeded["browser"]!["x"]!.GetValue<int>() == 1 && seeded["net"]!["other"]!.GetValue<bool>(), "preferences differ from the contract or lost a value");
+        Check(ScienceFrame.SeedPreferences(data, false), "preferences not restored");
+        var restored = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(preferences))!;
+        Check(restored["net"]!["network_prediction_options"] == null && restored["net"]!["other"]!.GetValue<bool>(), "prediction stayed off without the switches");
+        // Off, with nothing of ours in the file: the file is not rewritten.
+        var untouched = "{\"net\": {\"other\": true},  \"browser\": {}}";
+        File.WriteAllText(preferences, untouched);
+        var written = File.GetLastWriteTimeUtc(preferences);
+        Check(ScienceFrame.SeedPreferences(data, false) && File.ReadAllText(preferences) == untouched && File.GetLastWriteTimeUtc(preferences) == written, "preferences rewritten while off");
+        File.WriteAllText(preferences, "{ broken");
+        Check(!ScienceFrame.SeedPreferences(data, true) && File.ReadAllText(preferences) == "{ broken", "an unreadable preferences file was replaced");
+    }
+    finally { Directory.Delete(scienceRoot, true); }
+}
+Console.WriteLine($"Claude Science frame: {assertions} assertions passed.");
+
+// The window's startup steps belong to the WebView they began in
+// (WebGeneration): a restart while a Bootstrap still waits for the backend.
+assertions = 0;
+var generations = new WebGeneration();
+var firstView = generations.Begin();
+Check(!generations.TryBootstrap(out _), "a Bootstrap started before its WebView was ready");
+generations.Ready(firstView);
+Check(generations.TryBootstrap(out var waiting) && waiting == firstView, "the first WebView's Bootstrap did not start");
+Check(!generations.TryBootstrap(out _), "two Bootstraps ran at once in one WebView");
+Check(generations.TryRestart() && !generations.TryRestart(), "a second restart request of one WebView was not the same restart");
+var restartedView = generations.Begin();
+Check(!generations.IsCurrent(waiting) && generations.IsCurrent(restartedView), "the replaced WebView's Bootstrap still counted as current");
+Check(!generations.TryBootstrap(out _), "a Bootstrap started before the new WebView was ready");
+generations.Ready(firstView);
+Check(!generations.TryBootstrap(out _), "the replaced WebView's readiness counted for the new one");
+generations.Ready(restartedView);
+Check(generations.TryBootstrap(out var fresh) && fresh == restartedView, "the waiting Bootstrap of the replaced WebView held up the new one's");
+generations.Bootstrapped(waiting);
+Check(!generations.TryBootstrap(out _), "the replaced WebView's Bootstrap ending released the new one's");
+generations.Bootstrapped(fresh);
+Check(generations.TryBootstrap(out var again) && again == restartedView, "no Bootstrap could start after the last one ended");
+generations.Bootstrapped(again);
+Check(generations.TryRestart(), "the new WebView could not restart");
+var nextView = generations.Begin();
+Check(!generations.IsCurrent(restartedView) && generations.IsCurrent(nextView) && generations.TryRestart(), "a restart under way did not make the previous WebView's steps stale");
+Console.WriteLine($"Window startup generations: {assertions} assertions passed.");
+
+// One backend launch at a time per window (LaunchQueue): Retry during a slow
+// start gets the launch in flight, a different launch waits for it, a failed
+// one holds up nothing.
+assertions = 0;
+var launches = new LaunchQueue<int>();
+var launched = new System.Collections.Concurrent.ConcurrentQueue<string>();
+var slowLaunch = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var firstLaunch = launches.Run("", () => { launched.Enqueue("desktop"); return slowLaunch.Task; });
+var retriedLaunch = launches.Run("", () => { launched.Enqueue("desktop again"); return Task.FromResult(2); });
+Check(retriedLaunch == firstLaunch && launched.Count == 1 && launches.Joined == 1, "a retry during a launch started a second process");
+var existingLaunch = launches.Run("--existing", () => { launched.Enqueue("existing"); return Task.FromResult(3); });
+Check(launched.Count == 1 && !existingLaunch.IsCompleted, "a different launch started while one was in flight");
+slowLaunch.SetResult(1);
+Check(firstLaunch.Wait(TimeSpan.FromSeconds(5)) && firstLaunch.Result == 1 && retriedLaunch.Result == 1, "the retry did not get the launch's reply");
+Check(existingLaunch.Wait(TimeSpan.FromSeconds(5)) && existingLaunch.Result == 3 && launched.SequenceEqual(["desktop", "existing"]), "the waiting launch did not run after the one in flight");
+var failingLaunch = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var failedLaunch = launches.Run("", () => failingLaunch.Task);
+var afterFailure = launches.Run("--complete-update", () => Task.FromResult(4));
+failingLaunch.SetException(new IOException("backend failed"));
+try { failedLaunch.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
+Check(failedLaunch.IsFaulted && afterFailure.Wait(TimeSpan.FromSeconds(5)) && afterFailure.Result == 4, "a failed launch held up the next");
+var thrownLaunch = launches.Run("", () => throw new IOException("no process"));
+try { thrownLaunch.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
+var afterThrow = launches.Run("", () => Task.FromResult(5));
+Check(thrownLaunch.IsFaulted && afterThrow.Wait(TimeSpan.FromSeconds(5)) && afterThrow.Result == 5, "a launch that threw held up the next, or its failure was reused");
+// The page's refreshSession (no key): its reply's ticket is its own.
+var heldBootstrap = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var bootstrapLaunch = launches.Run("", () => heldBootstrap.Task);
+var refreshLaunch = launches.Run(null, () => Task.FromResult(6));
+var refreshAgain = launches.Run(null, () => Task.FromResult(7));
+var bootstrapAfter = launches.Run("", () => Task.FromResult(8));
+Check(refreshLaunch != bootstrapLaunch && refreshAgain != refreshLaunch && bootstrapAfter != bootstrapLaunch && !refreshLaunch.IsCompleted && launches.Joined == 1,
+    "a launch without a key joined one in flight, was joined, or ran beside it");
+heldBootstrap.SetResult(5);
+Check(refreshLaunch.Wait(TimeSpan.FromSeconds(5)) && refreshLaunch.Result == 6 && refreshAgain.Wait(TimeSpan.FromSeconds(5)) && refreshAgain.Result == 7 &&
+    bootstrapAfter.Wait(TimeSpan.FromSeconds(5)) && bootstrapAfter.Result == 8, "the launches without a key did not run in turn");
+Console.WriteLine($"Window backend launches: {assertions} assertions passed.");
+
+// The Claude Science smoke driver (ScienceSmoke): smoke mode only, never
+// the default profile.
+assertions = 0;
+var smokeHome = Path.Combine(Path.GetTempPath(), "cage-smoke-home");
+var defaultProfile = Path.Combine(smokeHome, ".claude-cage");
+var isolated = Path.Combine(smokeHome, "cage-smoke-profile");
+var smokeReport = Path.Combine(smokeHome, "smoke.json");
+Check(ScienceSmoke.Of(null, "on", isolated, smokeHome) == ("", false), "the driver ran outside smoke mode");
+Check(ScienceSmoke.Of(smokeReport, null, isolated, smokeHome) == ("", false) && ScienceSmoke.Of(smokeReport, "ON", isolated, smokeHome) == ("", false), "an unknown mode was driven");
+foreach (var mode in new[] { "on", "off", "probe", "retry" })
+{
+    Check(ScienceSmoke.Of(smokeReport, mode, isolated, smokeHome) == (mode, false), "an isolated profile refused " + mode);
+    Check(ScienceSmoke.Of(smokeReport, mode, defaultProfile, smokeHome) == ("", true), "the default profile ran " + mode);
+}
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(defaultProfile, "client"), smokeHome) == ("", true), "the default client profile ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", defaultProfile + Path.DirectorySeparatorChar, smokeHome) == ("", true), "the default profile with a trailing separator ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(smokeHome, "x", "..", ".claude-cage"), smokeHome) == ("", true), "a path through .. into the default profile ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(smokeHome, ".claude-cage-smoke"), smokeHome) == ("on", false), "a sibling with the same prefix was refused");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(defaultProfile, "..", "cage-smoke-profile"), smokeHome) == ("on", false), "a path out of the default profile was refused");
+if (OperatingSystem.IsWindows())
+    Check(ScienceSmoke.Of(smokeReport, "on", defaultProfile.ToUpperInvariant(), smokeHome) == ("", true), "the default profile in other letter case ran the driver");
+Console.WriteLine($"Claude Science smoke driver: {assertions} assertions passed.");
+
 assertions = 0;
 Check(UpdatePolicy.IsWorkbench("http://localhost:4321/", 4321), "expected local origin rejected");
 foreach (var origin in new[] { "https://localhost:4321/", "http://localhost:4322/", "http://localhost.evil:4321/", "http://user@localhost:4321/", "http://127.0.0.1:4321/", "file:///C:/workbench.html" })

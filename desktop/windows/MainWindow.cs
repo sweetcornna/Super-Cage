@@ -16,11 +16,37 @@ internal sealed class MainWindow : Form
     private readonly NotifyIcon tray;
     private readonly AppUpdater updater;
     private int expectedPort;
-    private bool controllerNeedsUpdate, allowQuit, bootstrapping, webFailed;
+    private bool controllerNeedsUpdate, allowQuit, webFailed;
+    // Which WebView a startup step belongs to (Initialize, Bootstrap).
+    private readonly WebGeneration generation = new();
+    // Every cage desktop --json of the window, one at a time (DesktopLaunch),
+    // and how many ran, and the most at once (the smoke report's launches).
+    private readonly LaunchQueue<(int Exit, JsonElement Data)> desktopLaunches = new();
+    private int desktopRunning, desktopMostAtOnce, desktopStarted;
+    // Smoke only (CAGE_SMOKE_SCIENCE=retry): the first launch holds its reply
+    // while the smoke retries the window (SmokeRetry).
+    private bool smokeSlowLaunch;
+    // The start's journal sweep once took too long: said once (Initialize).
+    private bool sweepLateReported;
     private bool completingSmoke;
     private string smokePhase = "starting";
+    // Smoke only: what the Claude Science part of a smoke test recorded
+    // (SmokeReady, CompleteSmoke).
+    private readonly Dictionary<string, object?> smokeScience = new();
+    private System.Diagnostics.Stopwatch? smokeRestart;
+    // Smoke only: what the window showed (Error) after the smoke asked for
+    // the restart; a restart that works shows nothing.
+    private readonly List<string> smokeShown = [];
     private readonly CancellationTokenSource lifetime = new();
     private readonly Dictionary<string, (string[] Paths, DateTime Expires)> fileSelections = new();
+    // Claude Science host rendering: the switches this WebView was created
+    // with (null: none, as always) and the frame support that needs them.
+    private string? webArguments;
+    private ScienceFrameHost? science;
+    // Navigations ScienceFrameHost held: cancelling one still raises
+    // NavigationCompleted (WebErrorStatus OperationCanceled), which is not a
+    // failure to load the workbench.
+    private readonly HashSet<ulong> heldNavigations = [];
 
     public MainWindow()
     {
@@ -52,6 +78,7 @@ internal sealed class MainWindow : Form
         updater = new AppUpdater(PublishUpdate, () => { allowQuit = true; Close(); }, () => _ = Bootstrap());
         Shown += async (_, _) => {
             if (Program.SmokeOutput != null) _ = SmokeDeadline();
+            smokeSlowLaunch = SmokeScience.Mode == "retry";
             await Initialize();
         };
         Resize += (_, _) => PublishVisibility(); VisibleChanged += (_, _) => PublishVisibility();
@@ -59,7 +86,7 @@ internal sealed class MainWindow : Form
             SaveWindowPlacement();
             if (!allowQuit && e.CloseReason is not (CloseReason.WindowsShutDown or CloseReason.TaskManagerClosing)) { e.Cancel = true; Hide(); }
         };
-        FormClosed += (_, _) => { lifetime.Cancel(); updater.Dispose(); tray.Dispose(); trayMenu.Dispose(); web.Dispose(); };
+        FormClosed += (_, _) => { science?.EndForExit(); lifetime.Cancel(); updater.Dispose(); tray.Dispose(); trayMenu.Dispose(); web.Dispose(); };
     }
 
     protected override void OnLoad(EventArgs e)
@@ -152,36 +179,117 @@ internal sealed class MainWindow : Form
     private void Error(string text)
     {
         _ = Backend.Report(text);
+        if (smokeRestart != null) smokeShown.Add(text);
         message.Text = text; status.Show(); status.BringToFront(); retry.Show(); web.Hide();
     }
 
     private async Task Initialize(bool recreate = false)
     {
+        // From here on, what an earlier WebView's steps still await is stale:
+        // after each await below, and in Bootstrap, a step of an earlier
+        // generation stops without touching the window.
+        var turn = generation.Begin();
         smokePhase = "initializing_webview";
         retry.Enabled = false;
         try
         {
+            var arguments = ScienceFrame.Arguments(Backend.Root);
             if (recreate)
             {
+                // New switches need the old browser process gone: one user
+                // data folder runs with one set of options.
+                var previous = arguments != webArguments ? web.CoreWebView2?.Environment : null;
+                var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                void BrowserExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs args) => exited.TrySetResult();
+                if (previous != null) previous.BrowserProcessExited += BrowserExited;
+                science?.EndForExit();
+                science = null;
                 Controls.Remove(web); web.Dispose();
                 web = new WebView2 { Dock = DockStyle.Fill, Visible = false };
                 Controls.Add(web); status.BringToFront();
+                if (previous != null)
+                {
+                    try { await exited.Task.WaitAsync(TimeSpan.FromSeconds(15), lifetime.Token); }
+                    catch (TimeoutException) { }
+                    finally { previous.BrowserProcessExited -= BrowserExited; }
+                }
+                if (!generation.IsCurrent(turn)) return;
             }
-            var environment = await CoreWebView2Environment.CreateAsync(null, Path.Combine(Backend.Root, "webview2"));
+            // Before the browser process starts: no network prediction with
+            // the switches, the default without them.
+            var data = Path.Combine(Backend.Root, "webview2");
+            ScienceFrame.SeedPreferences(data, arguments != null);
+            // No crash report goes to Microsoft, with or without host
+            // rendering: a dump holds the workbench's tokens and the pages'
+            // memory. What crash reporting wrote is deleted before each start
+            // (nothing holds it then), also where a runtime ignores the option.
+            CrashReports.Sweep(data);
+            var options = new CoreWebView2EnvironmentOptions(arguments) { IsCustomCrashReportingEnabled = true };
+            var environment = await CoreWebView2Environment.CreateAsync(null, data, options);
+            if (!generation.IsCurrent(turn)) return;
+            // A runtime without custom crash reporting has no failure report
+            // folder either (they came together): said in the diagnostics,
+            // the sweep still runs.
+            try { _ = environment.FailureReportFolderPath; }
+            catch (Exception error) when (error is NotImplementedException or InvalidCastException or System.Runtime.InteropServices.COMException)
+            {
+                _ = Backend.Report("WebView2 runtime " + environment.BrowserVersionString + " has no custom crash reporting; crash dumps are deleted at start.");
+            }
+            webArguments = arguments;
             await web.EnsureCoreWebView2Async(environment);
+            if (!generation.IsCurrent(turn)) return;
             smokePhase = "webview_initialized";
             var core = web.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false; core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.IsStatusBarEnabled = false; core.Settings.IsZoomControlEnabled = false;
             core.Settings.AreBrowserAcceleratorKeysEnabled = false;
             core.Settings.IsPasswordAutosaveEnabled = false; core.Settings.IsGeneralAutofillEnabled = false;
-            core.NavigationStarting += (_, e) => { if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true; };
+            core.NavigationStarting += (_, e) => {
+                if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true;
+                // The pane's document is going away: its frame goes first.
+                else if (science?.Hold(e.Uri, e.NavigationKind == CoreWebView2NavigationKind.Reload) == true) { e.Cancel = true; heldNavigations.Add(e.NavigationId); }
+            };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.WebMessageReceived += Receive;
-            core.ProcessFailed += (_, _) => { webFailed = true; Error("工作台显示进程已退出。后台任务保留，可重试连接。"); };
+            core.ProcessFailed += (_, e) => {
+                if (!generation.IsCurrent(turn)) return;
+                // A frame's own process (the Claude Science frame's) leaves
+                // the window's document running (N4).
+                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited && science != null)
+                {
+                    science.FrameExited(e.FrameInfosForFailedProcess);
+                    return;
+                }
+                science?.EndForExit();
+                webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。");
+            };
+            // What a killed or crashed window's Claude Science frame stored
+            // (N6); without a journal, one existence check. A sweep that takes
+            // longer than a few seconds (a DevTools call that never returns)
+            // does not hold up the window: it stops, the journal stays for the
+            // next start, and the diagnostics say so once.
+            var late = new CancellationTokenSource();
+            try { await ScienceFrameHost.Sweep(core, data, late.Token).WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException)
+            {
+                late.Cancel();
+                if (!sweepLateReported)
+                {
+                    sweepLateReported = true;
+                    _ = Backend.Report("Claude Science journal sweep took longer than 5 s at the window's start; the window went on and the journal stays for the next start.");
+                }
+            }
+            if (!generation.IsCurrent(turn)) return;
+            science = arguments == null ? null : new ScienceFrameHost(core, Backend.Root, Path.Combine(Backend.Root, "webview2"), reason =>
+                Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
+                (uri, reload) => {
+                    if (web.IsDisposed || web.CoreWebView2 != core) return;
+                    if (reload) core.Reload(); else core.Navigate(uri);
+                });
             core.NavigationCompleted += (_, e) => {
+                if (heldNavigations.Remove(e.NavigationId) || !generation.IsCurrent(turn)) return;
                 if (!e.IsSuccess) {
                     var reason = e.WebErrorStatus.ToString() switch {
                         "Timeout" => "等待本机后台响应超时",
@@ -195,16 +303,22 @@ internal sealed class MainWindow : Form
             };
             await core.AddScriptToExecuteOnDocumentCreatedAsync(BridgeScript);
             if (Program.SmokeOutput != null) await core.AddScriptToExecuteOnDocumentCreatedAsync(SmokeDiagnosticsScript);
+            if (!generation.IsCurrent(turn)) return;
             webFailed = false;
+            generation.Ready(turn);
             await Bootstrap();
         }
         catch (WebView2RuntimeNotFoundException)
         {
+            if (!generation.IsCurrent(turn)) return;
             Error("缺少 Microsoft Edge WebView2 Runtime。请运行 Super Cage 安装程序安装随附运行时后重试。");
             webFailed = true;
         }
-        catch (Exception error) { webFailed = true; Error("无法初始化工作台：" + error.Message); }
-        finally { retry.Enabled = true; }
+        // A stale step's failure (its WebView was disposed under it) is the
+        // newer WebView's business, which reports its own.
+        catch (Exception error) when (generation.IsCurrent(turn)) { webFailed = true; Error("无法初始化工作台：" + error.Message); }
+        catch (Exception) { }
+        finally { if (generation.IsCurrent(turn)) retry.Enabled = true; }
     }
 
     private async Task SmokeDeadline()
@@ -228,6 +342,19 @@ internal sealed class MainWindow : Form
         string? prepareStatus = null;
         string? prepareMessage = null;
         if (failure != null) errors.Add(failure);
+        if (SmokeScience.Refused)
+        {
+            smokeScience["refused"] = true;
+            errors.Add(ScienceSmoke.Variable + " 只在独立的配置目录中运行：默认配置目录上不更改本机渲染设置");
+        }
+        if (smokeShown.Count != 0)
+        {
+            smokeScience["shown"] = smokeShown;
+            errors.Add("重新载入窗口时显示了错误：" + smokeShown[0]);
+        }
+        smokeScience["launches"] = new { started = desktopStarted, mostAtOnce = desktopMostAtOnce, joined = desktopLaunches.Joined };
+        if (desktopMostAtOnce > 1) errors.Add("工作台同时运行了 " + desktopMostAtOnce + " 个后台启动进程");
+        if (SmokeScience.Mode == "retry" && (!smokeScience.ContainsKey("retry") || desktopLaunches.Joined == 0)) errors.Add("自检没有在工作台启动期间重试");
         try
         {
             if (!nativeBridgeReady && web.CoreWebView2 != null)
@@ -240,6 +367,13 @@ internal sealed class MainWindow : Form
                     await web.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, capture);
                 }
                 catch (Exception error) { errors.Add("无法保存工作台画面：" + error.Message); }
+            }
+            if (nativeBridgeReady && web.CoreWebView2 != null)
+            {
+                smokeScience["switches"] = webArguments != null;
+                if (smokeRestart != null) smokeScience["restartMilliseconds"] = smokeRestart.ElapsedMilliseconds;
+                try { smokeScience["page"] = await SmokeEvaluate(SmokeScienceProbe.Replace("ASK", SmokeScience.Mode.Length != 0 ? "true" : "false")); }
+                catch (Exception error) { smokeScience["pageError"] = error.Message; }
             }
             var controllers = Backend.CaptureSmokeControllers();
             try
@@ -280,7 +414,7 @@ internal sealed class MainWindow : Form
             File.WriteAllText(Program.SmokeOutput, JsonSerializer.Serialize(new {
                 success = nativeBridgeReady && errors.Count == 0, nativeBridgeReady, version = AppUpdater.Version,
                 phase = smokePhase, nativeStatus = message.Text, prepareExit, prepareStatus, prepareMessage, errors, page,
-                pageURL, webviewVersion,
+                pageURL, webviewVersion, science = smokeScience,
                 windowBounds = Bounds, workingArea = Screen.FromHandle(Handle).WorkingArea, deviceDpi = DeviceDpi,
                 nativeMenuBar = MainMenuStrip != null,
             }));
@@ -289,16 +423,67 @@ internal sealed class MainWindow : Form
         finally { allowQuit = true; BeginInvoke(Close); }
     }
 
+    // Smoke only. CAGE_SMOKE_SCIENCE=on does from the page what the Claude
+    // Science pane's switch and then its reload prompt do (neither needs a
+    // guest) and completes in the WebView the reload made; =off turns the
+    // switch off; =probe only asks. Each then asks the frame ops what the
+    // pane would (SmokeScienceProbe). ScienceSmoke.Of is where the variable
+    // is decided: smoke mode only, never on the default profile.
+    private static (string Mode, bool Refused) SmokeScience => ScienceSmoke.Of(Program.SmokeOutput,
+        Environment.GetEnvironmentVariable(ScienceSmoke.Variable), Backend.Root, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+    private async Task SmokeReady()
+    {
+        if (Program.SmokeOutput == null || completingSmoke) return;
+        var mode = SmokeScience.Mode;
+        if (mode is "on" or "off" && !smokeScience.ContainsKey("switch"))
+        {
+            try
+            {
+                smokeScience["switch"] = await SmokeEvaluate(SmokeScienceSwitch.Replace("ENABLED", mode == "on" ? "true" : "false"));
+                if (mode == "on" && webArguments == null && ScienceFrame.Arguments(Backend.Root) != null)
+                {
+                    smokeRestart = System.Diagnostics.Stopwatch.StartNew();
+                    smokeScience["restart"] = "requested";
+                    // Neither the script nor the bridge's replies are
+                    // awaited: they race the end of this WebView. The smoke
+                    // completes when the reloaded one is ready. A reconnect
+                    // (Bootstrap) and refreshSession, both backend round
+                    // trips, are still in flight when the restart replaces
+                    // the WebView, as any request of the page can be.
+                    _ = web.CoreWebView2.ExecuteScriptAsync("const cage = window.webkit.messageHandlers.cage; void cage.postMessage({action:'reconnect'}).catch(() => {}); void cage.postMessage({action:'refreshSession'}).catch(() => {}); void cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
+                        .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
+                    return;
+                }
+            }
+            catch (Exception error) { smokeScience["switchError"] = error.Message; }
+        }
+        await CompleteSmoke();
+    }
+
+    // Smoke only: what a page expression evaluates to (a promise awaited).
+    private async Task<JsonElement?> SmokeEvaluate(string expression)
+    {
+        var reply = await web.CoreWebView2.CallDevToolsProtocolMethodAsync("Runtime.evaluate",
+            JsonSerializer.Serialize(new { expression, awaitPromise = true, returnByValue = true })).WaitAsync(TimeSpan.FromSeconds(30));
+        using var document = JsonDocument.Parse(reply);
+        if (document.RootElement.TryGetProperty("exceptionDetails", out var failure))
+            throw new InvalidDataException(failure.TryGetProperty("exception", out var thrown) ? thrown.Text("description") : failure.Text("text"));
+        return document.RootElement.GetProperty("result").TryGetProperty("value", out var value) ? value.Clone() : null;
+    }
+
     private async Task Bootstrap(params string[] options)
     {
-        if (bootstrapping || web.CoreWebView2 == null) return;
-        bootstrapping = true;
+        if (web.CoreWebView2 == null || !generation.TryBootstrap(out var turn)) return;
         message.Text = "正在连接 Super Cage 工作台…"; status.Show(); status.BringToFront();
         retry.Hide(); existing.Hide(); complete.Hide();
         try
         {
             smokePhase = "starting_backend";
-            var (exit, data) = await Backend.Json(["desktop", "--json", ..options], lifetime.Token);
+            var (exit, data) = await DesktopLaunch(options, join: true);
+            // A restart replaced the WebView meanwhile: its own Bootstrap
+            // connects it, and this one's reply is for a window that is gone.
+            if (!generation.IsCurrent(turn)) return;
             smokePhase = "backend_returned";
             if (exit != 0) throw new IOException(data.Text("message") is { Length: > 0 } detail ? detail : "工作台未能启动");
             controllerNeedsUpdate = data.Text("status") != "ready";
@@ -311,12 +496,51 @@ internal sealed class MainWindow : Form
             Text = controllerNeedsUpdate ? "Super Cage（更新待完成）" : "Super Cage";
             web.CoreWebView2.Navigate(entry.AbsoluteUri);
         }
-        catch (OperationCanceledException) { if (!lifetime.IsCancellationRequested) Error("启动工作台失败：等待本机后台响应超时。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。"); }
+        catch (OperationCanceledException) { if (!lifetime.IsCancellationRequested && generation.IsCurrent(turn)) Error("启动工作台失败：等待本机后台响应超时。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。"); }
         catch (Exception error) {
+            if (!generation.IsCurrent(turn)) return;
             _ = Backend.Report("Workbench startup failed: " + error);
             Error(error.Message.Any(c => c is >= '\u4E00' and <= '\u9FFF') ? error.Message : "启动工作台失败：本机后台未返回可识别的原因（错误类型 " + error.GetType().Name + "）。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。");
         }
-        finally { bootstrapping = false; }
+        finally { generation.Bootstrapped(turn); }
+    }
+
+    // DesktopLaunch runs cage desktop --json with options through
+    // desktopLaunches: never two at once for this window. The reply's URL
+    // carries a single-use ticket, so only a Bootstrap joins (join) the same
+    // launch of a Bootstrap in flight: the earlier one belongs to a replaced
+    // WebView (WebGeneration allows one Bootstrap per WebView) and discards
+    // its reply. The page's refreshSession waits its turn for its own.
+    private Task<(int Exit, JsonElement Data)> DesktopLaunch(string[] options, bool join) =>
+        desktopLaunches.Run(join ? string.Join(' ', options) : null, async () => {
+            desktopStarted++;
+            desktopMostAtOnce = Math.Max(desktopMostAtOnce, ++desktopRunning);
+            try
+            {
+                var reply = await Backend.Json(["desktop", "--json", ..options], lifetime.Token);
+                if (smokeSlowLaunch)
+                {
+                    smokeSlowLaunch = false;
+                    BeginInvoke(SmokeRetry);
+                    await Task.Delay(TimeSpan.FromSeconds(6), lifetime.Token);
+                }
+                return reply;
+            }
+            finally { desktopRunning--; }
+        });
+
+    // Smoke only (CAGE_SMOKE_SCIENCE=retry): what Retry does after the WebView
+    // crashed (webFailed), while the first Bootstrap's launch still holds its
+    // reply. The new WebView's Bootstrap joins that launch; the smoke
+    // completes in the new WebView and fails if the window showed an error
+    // (smokeShown), ran two launches at once or the retry joined nothing
+    // (CompleteSmoke).
+    private async void SmokeRetry()
+    {
+        smokeRestart = System.Diagnostics.Stopwatch.StartNew();
+        smokeScience["retry"] = "during_bootstrap";
+        webFailed = true;
+        await Initialize(true);
     }
 
     private object RememberFiles(string[] paths)
@@ -338,11 +562,45 @@ internal sealed class MainWindow : Form
         return new { fileSelection = selection, count = paths.Length };
     }
 
+    // The Claude Science pane's frame (ui/src/claude-science.jsx documents
+    // the ops). Attaching needs the switches; without them the pane asks for
+    // restart, which recreates the WebView with them. The agent transport
+    // cannot reach these ops (agentNativeAccess in ui/src/agent-native.js).
+    private async Task<object> ScienceFrameRequest(string op, string url)
+    {
+        switch (op)
+        {
+            case "prepare":
+                if (science == null) return new { backstop = false, proxy = "" };
+                return await science.Prepare();
+            case "attach":
+                if (science == null) throw new InvalidDataException("窗口缺少本机渲染需要的网络限制，请重新载入窗口后再打开。");
+                await science.Attach(url);
+                return true;
+            case "detach":
+                if (science != null) await science.Detach();
+                return true;
+            case "restart":
+                if (ScienceFrame.Arguments(Backend.Root) == webArguments) return true;
+                // webArguments changes only once the new WebView's
+                // environment exists: until then a second request (a double
+                // click) is the same restart, not a second Initialize.
+                if (generation.TryRestart()) BeginInvoke(async () => await Initialize(true));
+                return true;
+            default:
+                throw new InvalidDataException("未知的本机渲染操作");
+        }
+    }
+
     private async void Receive(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
         // CoreWebView2.WebMessageReceived is top-document only. Frame messages
         // have a separate CoreWebView2Frame event, which this host never handles.
         if (!UpdatePolicy.IsWorkbench(e.Source, expectedPort)) return;
+        // The reply goes to the WebView that asked. A restart (Initialize)
+        // can replace it while the request is pending; the new one's
+        // document never sent it, and its CoreWebView2 may not exist yet.
+        var view = web;
         string id = "";
         try
         {
@@ -375,7 +633,7 @@ internal sealed class MainWindow : Form
                     break;
                 case "workbenchReady":
                     if (controllerNeedsUpdate) throw new IOException("后台版本尚未同步，更新未完成");
-                    updater.MarkReady(); result = true; _ = CompleteSmoke(); break;
+                    updater.MarkReady(); result = true; _ = SmokeReady(); break;
                 case "appUpdate": result = updater.Handle(request.Text("operation")); break;
                 case "importTheme":
                     using (var picker = new OpenFileDialog { Filter = "Super Cage 主题 (*.json)|*.json", Title = "导入主题", Multiselect = false })
@@ -484,6 +742,7 @@ internal sealed class MainWindow : Form
                     var appReference = request.Text("kind") switch {
                         "source" => "https://github.com/sweetcornna/Super-Cage/commits/main",
                         "releases" => "https://github.com/sweetcornna/Super-Cage/releases",
+                        "claude-science-host-render" => "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/claude-science.md#本机渲染实验性",
                         _ => throw new InvalidDataException("未知的项目页面")
                     };
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(appReference) { UseShellExecute = true });
@@ -534,21 +793,80 @@ internal sealed class MainWindow : Form
                     if (request.Text("operation") != "status") throw new InvalidDataException("此平台暂不支持快捷登录");
                     result = new { supported = false }; break;
                 case "refreshSession":
-                    var (exit, data) = await Backend.Json(controllerNeedsUpdate ? ["desktop", "--json", "--existing"] : ["desktop", "--json"], lifetime.Token);
+                    var (exit, data) = await DesktopLaunch(controllerNeedsUpdate ? ["--existing"] : [], join: false);
                     if (exit != 0) throw new IOException("工作台会话恢复失败");
                     result = new { url = UpdatePolicy.Entry(data.Text("url")).AbsoluteUri }; break;
                 case "reconnect": result = true; _ = Bootstrap(); break;
+                case "scienceFrame": result = await ScienceFrameRequest(request.Text("op"), request.Text("url")); break;
                 case "quitNow": result = true; allowQuit = true; BeginInvoke(Close); break;
                 default: throw new InvalidDataException("未知原生操作");
             }
-            if (!web.IsDisposed) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id, result }));
+            Reply(view, JsonSerializer.Serialize(new { id, result }));
         }
         catch (Exception error)
         {
             _ = Backend.Report(error.ToString());
-            if (id.Length != 0 && !IsDisposed && !web.IsDisposed) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id, error = error.Message }));
+            if (id.Length != 0) Reply(view, JsonSerializer.Serialize(new { id, error = error.Message }));
         }
     }
+
+    private void Reply(WebView2 view, string json)
+    {
+        if (!IsDisposed && view == web && !view.IsDisposed && view.CoreWebView2 is { } core) core.PostWebMessageAsJson(json);
+    }
+
+    // Smoke only: the pane's requests (ui/src/claude-science.jsx), as the
+    // page sends them. Nothing in the reports is an address or a credential.
+    private const string SmokeScienceRequests = """
+          const context = await (await fetch('/api/client/context')).json();
+          const headers = {'Content-Type': 'application/json', 'X-Cage-Connection': context.connection_id || 'disconnected'};
+          const call = async (path, body) => {
+            const response = await fetch('/api' + path, body === undefined ? {headers} : {method: 'POST', headers, body: JSON.stringify(body)});
+            const text = await response.text();
+            let value = null;
+            try { value = JSON.parse(text); } catch {}
+            return {status: response.status, value: value || {}, text: response.ok ? '' : text.slice(0, 300)};
+          };
+          const state = reply => ({status: reply.status, available: reply.value.available, code: reply.value.unavailable_code || '',
+            enabled: reply.value.enabled, running: reply.value.running, error: reply.value.error || reply.text});
+        """;
+
+    private const string SmokeScienceSwitch = "(async () => {" + SmokeScienceRequests + """
+          return state(await call('/claude-science/host-render', {enabled: ENABLED, contract: window.cageNativeScienceFrame}));
+        })()
+        """;
+
+    private const string SmokeScienceProbe = """
+        (async () => {
+          const report = {contract: window.cageNativeScienceFrame ?? null, moveBefore: 'moveBefore' in Element.prototype,
+            frames: document.querySelectorAll('iframe').length};
+          // The window's 本机终端 settings read, as the page makes it at
+          // start (ui/src/local-terminal-open.mjs): status and names only.
+          try {
+            const response = await fetch('/api/client/local-terminal');
+            const value = response.ok ? await response.json() : {};
+            report.localTerminal = {status: response.status, keys: Object.keys(value).sort(),
+              settings: Object.keys(value.settings || {}).sort(), supported: value.supported ?? null};
+          } catch (error) { report.localTerminal = {error: String(error && error.message).slice(0, 300)}; }
+          if (!ASK) return report;
+        """ + SmokeScienceRequests + """
+          const bridge = window.webkit.messageHandlers.cage;
+          const ask = async request => {
+            try { return {result: await bridge.postMessage(request)}; }
+            catch (error) { return {error: String(error && error.message).slice(0, 300)}; }
+          };
+          report.prepare = await ask({action: 'scienceFrame', op: 'prepare'});
+          report.hostRender = state(await call('/claude-science/host-render'));
+          const ticket = await call('/claude-science/ticket', {host: {timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+            offset: new Date().getTimezoneOffset(), languages: [...(navigator.languages || [])].slice(0, 8)},
+            proxy: String(report.prepare.result?.proxy || ''), contract: window.cageNativeScienceFrame});
+          report.ticket = {status: ticket.status, url: Boolean(ticket.value.url), error: ticket.text};
+          report.attachUnknown = await ask({action: 'scienceFrame', op: 'attach', url: 'http://' + '0'.repeat(32) + '.localhost:9/_cage/enter'});
+          report.detach = await ask({action: 'scienceFrame', op: 'detach'});
+          report.frames = document.querySelectorAll('iframe').length;
+          return report;
+        })()
+        """;
 
     private const string SmokeDiagnosticsScript = """
         (() => {
@@ -586,10 +904,14 @@ internal sealed class MainWindow : Form
         })();
         """;
 
-    private const string BridgeScript = """
+    // The workbench reads the Claude Science frame contract from
+    // window.cageNativeScienceFrame, so it never has to ask a window that
+    // has no scienceFrame op (and files no error there).
+    private static readonly string BridgeScript = """
         (() => {
           if (window !== window.top || location.protocol !== 'http:' || location.hostname !== 'localhost') return;
           window.cageNativeIMEAvailable = true;
+          Object.defineProperty(window, 'cageNativeScienceFrame', {value: SCIENCE_FRAME_CONTRACT, writable: false});
           const pending = new Map();
           const fileActions = new Set([
             'uploadHostFiles', 'chooseUploadFiles', 'clipboardSyncRead', 'clipboardSyncWrite',
@@ -610,5 +932,5 @@ internal sealed class MainWindow : Form
           }); }};
           Object.defineProperty(window, 'webkit', {value: {messageHandlers: {cage}}, writable: false});
         })();
-        """;
+        """.Replace("SCIENCE_FRAME_CONTRACT", ScienceFrame.PublishedContract.ToString(System.Globalization.CultureInfo.InvariantCulture));
 }

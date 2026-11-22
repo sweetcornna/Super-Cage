@@ -4,8 +4,20 @@ import (
 	"io"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/localterm"
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
+
+// entryWindow is an ssh window's presence and output filter: clipboard
+// writes follow the owner's presence, and the window's input reads ESC
+// [200~ as a paste start only while the filter has passed bracketed paste
+// on to it.
+func entryWindow(settings localterm.Settings) (*entryPresence, *entryOutput) {
+	presence := &entryPresence{}
+	output := &entryOutput{filter: termfilter.New(termfilter.Options{ClipboardWrite: settings.ClipboardWrite, ClipboardNow: presence.here})}
+	presence.input.PasteOn = output.filter.BracketedPaste
+	return presence, output
+}
 
 // entryReadInput reads an ssh window's input and hands it to send in whole
 // units: entryPresence.note holds an escape sequence cut at the end of a
