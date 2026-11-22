@@ -179,6 +179,12 @@ func TestRealWindowJoinsAndOpensAnotherComputer(t *testing.T) {
 				}
 			}
 			ok("list", window.call("GET", "/api/client/devices", "", nil))
+			// The documents 打开 and 返回本机 navigate to.
+			for _, page := range []string{"/", "/mobile.html"} {
+				if w := window.call("GET", page, "", nil); w.Code != 200 || !strings.HasPrefix(w.Header().Get("Content-Type"), "text/html") {
+					t.Fatalf("%s: HTTP %d %q", page, w.Code, w.Header().Get("Content-Type"))
+				}
+			}
 
 			// 不一致 ends a join; 一致 saves it.
 			window.joinToConfirm(t, deviceTestHost(t, relayOrigin))
