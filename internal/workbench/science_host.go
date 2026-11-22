@@ -464,17 +464,14 @@ const (
 
 // scienceBridgeContract is the scienceFrame bridge version this server's
 // pane needs (claude-science-state.mjs hostRenderContract; the window's
-// ScienceFrame.Contract): 2 scoped the identity to the frame's targets; 3
-// also ends the front session before a frame is torn down and follows
-// nested workers (round-2 N1, N2). A window answering 2 is never offered
-// the switch.
+// ScienceFrame.Contract, which the golden testdata/science-cdp.json pins):
+// 2 scoped the identity to the frame's targets; 3 also tears the frame down
+// in order (the front's session ends, the frame crashes, then it goes) and
+// follows nested workers (round-2 N1, N2), proves the shell's own proxy
+// (N3), clears what a killed window's frame stored (N6), and is published as
+// window.cageNativeScienceFrame instead of answered to a probe. A window
+// publishing 2 (or nothing) is never offered the switch.
 const scienceBridgeContract = 3
-
-// scienceFramePolicyContract is the version of the frame policy the golden
-// (testdata/science-cdp.json) describes and ScienceFrame.cs implements. It
-// reaches scienceBridgeContract only once the shell's policy has the round-2
-// fixes.
-const scienceFramePolicyContract = 2
 
 const (
 	scienceReasonUpdateWindows = "请更新 Windows 应用后再开启本机渲染：这个窗口还不能把环境的身份只交给 Claude Science 页面。"

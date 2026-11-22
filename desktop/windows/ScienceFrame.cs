@@ -15,9 +15,12 @@ namespace Cage.Windows;
 internal static partial class ScienceFrame
 {
     // The scienceFrame bridge version, published to the workbench as
-    // window.cageNativeScienceFrame (MainWindow.BridgeScript): 2 gives the
-    // identity to the frame's targets only; the workbench keeps the host's.
-    public const int Contract = 2;
+    // window.cageNativeScienceFrame (MainWindow.BridgeScript): 2 gave the
+    // identity to the frame's targets only (the workbench keeps the host's);
+    // 3 also tears the frame down in order and follows nested workers
+    // (round-2 N1, N2), proves this window's own proxy (N3) and clears what
+    // a killed window's frame stored (N6).
+    public const int Contract = 3;
 
     // Only while some environment has host rendering on: no proxy (loopback
     // still bypasses it, so the workbench and the front load), no non-proxied

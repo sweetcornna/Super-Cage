@@ -22,7 +22,7 @@
       }
     }
   ],
-  "contract": 2,
+  "contract": 3,
   "control": {
     "port": 17777,
     "token": "",
