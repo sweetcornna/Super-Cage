@@ -112,6 +112,46 @@ func (p *mobilePairing) deviceForRequestLocked(r *http.Request) *pairedDevice {
 	return found
 }
 
+// deviceRoutes are the device list of this computer (docs/design/devices.md).
+// They belong to the workload: the desktop gateway forwards them to the local
+// one and refuses them for an SSH host or a cloud workspace (routeRemote).
+func (s *Server) deviceRoutes(mux routeRegistrar) {
+	mux.HandleFunc("GET /api/devices", s.devicesLocal(s.listDevices))
+	mux.HandleFunc("POST /api/devices/invite", s.deviceWindowOnly(s.inviteDevice))
+	mux.HandleFunc("GET /api/devices/invite", s.devicesLocal(s.inviteState))
+	mux.HandleFunc("DELETE /api/devices/invite", s.devicesLocal(s.cancelInvite))
+	mux.HandleFunc("DELETE /api/devices/{id}", s.devicesLocal(s.removeDevice))
+}
+
+func (s *Server) devicesLocal(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.desktopEntry || s.clientOnly {
+			http.NotFound(w, r)
+			return
+		}
+		handler(w, r)
+	}
+}
+
+// deviceWindowOnly guards minting a code, which changes who can reach this
+// computer. Like the SSH entry (entryLocal) it refuses the agent transport's
+// header and requires the desktop window's trusted view. An agent session
+// carries the trusted-view cookie too, so the header is what tells them apart;
+// the CLI refuses these routes before sending (agentWindowRoutes).
+func (s *Server) deviceWindowOnly(handler http.HandlerFunc) http.HandlerFunc {
+	return s.devicesLocal(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(agentRequestHeader) != "" {
+			http.Error(w, "添加设备会改变谁能访问这台电脑，只能在桌面窗口操作。", http.StatusForbidden)
+			return
+		}
+		if !s.hasTrustedView(r) {
+			http.Error(w, "请在这台电脑的 Super Cage 窗口里添加设备。", http.StatusForbidden)
+			return
+		}
+		handler(w, r)
+	})
+}
+
 // phoneRoomRoute is a route a paired device may use through its room.
 func phoneRoomRoute(path string) bool {
 	switch path {
@@ -674,7 +714,8 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		if p.invite == invite && invite.state == "waiting" {
-			if ctx.Err() != nil {
+			// The relay ends a waiting room at the same time the code expires.
+			if ctx.Err() != nil || !time.Now().Before(invite.expires) {
 				p.inviteStateLocked(invite, "expired", "")
 			} else {
 				p.inviteStateLocked(invite, "failed", "")

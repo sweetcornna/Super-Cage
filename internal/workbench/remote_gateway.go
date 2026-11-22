@@ -323,6 +323,10 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 		http.Error(w, "请切换到这台电脑的本机环境，再管理手机配对", http.StatusForbidden)
 		return true
 	}
+	if remote && (r.URL.Path == "/api/devices" || strings.HasPrefix(r.URL.Path, "/api/devices/")) {
+		http.Error(w, "请切换到这台电脑的本机环境，再管理设备", http.StatusForbidden)
+		return true
+	}
 	if remote && r.Method == "GET" && r.URL.Path == "/api/browser/files/saved" {
 		profile, err := clientDownloadProfile(s.profile, ClientContext{Mode: "remote", InstanceID: session.Ref.InstanceID})
 		if err != nil {

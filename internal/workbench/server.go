@@ -378,9 +378,10 @@ func (s *Server) handler() http.Handler {
 	s.mobileControlRoutes(mux)
 	s.mobileSurfaceRoutes(mux)
 	mux.HandleFunc("GET /api/mobile-pair", s.phoneStatus)
-	mux.HandleFunc("POST /api/mobile-pair", s.inviteDevice)
+	mux.HandleFunc("POST /api/mobile-pair", s.deviceWindowOnly(s.inviteDevice))
 	mux.HandleFunc("DELETE /api/mobile-pair", s.removePhone)
 	mux.HandleFunc("POST /api/mobile/device", s.reportPhoneDevice)
+	s.deviceRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonReply(w, map[string]bool{"ready": true}) })
 	mux.HandleFunc("POST /api/launch", func(w http.ResponseWriter, r *http.Request) {
 		if !s.launcherAuthenticated(w, r) {
