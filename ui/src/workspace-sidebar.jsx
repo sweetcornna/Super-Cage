@@ -226,11 +226,10 @@ export function WorkspaceSidebar({
           const project = projectName(path, projectGroups);
           const rows = mixedSessionRows(tabs.filter(tab => tab.kind === "terminal" && folders.includes(tab.workspace)),
             sessions.filter(session => folders.includes(session.workspace)), saved, saved.sessionOrder?.[path], sessionBaseline.current)
-            // A Codex session's account, on its history row or its open tab: "Codex · 工作" in
-            // the row's name and tooltip, and the account alone in its chip (the mark names the provider).
+            // A Codex session's account, on its history row or its open tab: "Codex · 工作".
             .map(row => {
               const session = row.historySession || (row.cli_session_provider === "codex" && sessions.find(item => item.id === row.cli_session_id));
-              return session?.codexAccountLabel ? { ...row, claudeLabel: "Codex · " + session.codexAccountLabel, accountChip: session.codexAccountLabel } : row;
+              return session?.codexAccountLabel ? { ...row, claudeLabel: "Codex · " + session.codexAccountLabel } : row;
             });
           const rowMetadata = { ...saved };
           for (const row of rows) rowMetadata[row.id] = { ...saved[row.id], pinned: row.sessionPinned };

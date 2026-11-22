@@ -20,7 +20,7 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
     let longPressed = null;
 
     const labelOf = (element) => element.getAttribute("title") || element.getAttribute("aria-label")
-      || element.querySelector("img[alt]")?.getAttribute("alt") || element.querySelector(".visually-hidden")?.textContent;
+      || element.querySelector("img[alt]")?.getAttribute("alt") || element.querySelector(".status-label")?.textContent;
 
     function candidate(node) {
       const element = node instanceof Element ? node.closest('button, a[href], [role="button"], [role="img"][aria-label], svg[aria-label]') : null;
@@ -30,6 +30,8 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
       if (!isImage) {
         const clone = element.cloneNode(true);
         clone.querySelectorAll('svg, img, [aria-hidden="true"], .sr-only, .visually-hidden').forEach(child => child.remove());
+        // A status bar label that the layout folds into its icon (touch.css) is not text.
+        if (element.querySelector(".status-label")?.offsetWidth <= 1) clone.querySelector(".status-label").remove();
         if (clone.textContent.trim()) return null;
         if (!element.querySelector('svg, img, [aria-hidden="true"]')) return null;
       }

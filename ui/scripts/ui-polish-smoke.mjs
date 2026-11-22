@@ -49,7 +49,7 @@ const ready = async (page, state) => {
 
     // The status bar keeps its words on a mouse window, even a narrow one.
     await page.setViewportSize({ width: 744, height: 900 });
-    assert.equal(await page.locator(".status-bar .visually-hidden").count(), 0, "a mouse window keeps the status bar's words");
+    assert.equal(await page.locator(".status-bar .status-label").evaluateAll((labels) => labels.filter((label) => label.offsetWidth <= 1).length), 0, "a mouse window keeps the status bar's words");
     await page.setViewportSize({ width: 1440, height: 900 });
 
     // Item 2: a Codex launch the computer refused (exit 75) says it did not open, and why, on one line.
@@ -184,9 +184,10 @@ const ready = async (page, state) => {
 
     // Item 6: icons only, with the words in the accessibility tree and the tooltip.
     const bar = page.locator(".status-bar");
-    const folded = await page.locator(".status-bar > button:has(> .visually-hidden)").evaluateAll((nodes) => nodes.map((node) => ({
+    const foldedLabels = () => [...document.querySelectorAll(".status-bar .status-label")].filter((label) => label.offsetWidth <= 1).length;
+    const folded = await page.locator(".status-bar > button:has(> .status-label)").evaluateAll((nodes) => nodes.map((node) => ({
       name: node.textContent.trim(), width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height,
-      label: node.querySelector(".visually-hidden").getBoundingClientRect().width })));
+      label: node.querySelector(".status-label").offsetWidth })));
     assert.ok(folded.length >= 3, JSON.stringify(folded));
     for (const item of folded) assert.ok(item.width >= 44 && item.height >= 44 && item.label <= 1, "a 44 px icon button: " + JSON.stringify(item));
     await page.getByRole("button", { name: "重启环境", exact: true }).waitFor();
@@ -201,9 +202,9 @@ const ready = async (page, state) => {
     assert.equal(await page.getByRole("dialog").count(), 0, "the long press that showed the tooltip did not restart");
     ok("744 px touch: status bar icons only (44 px buttons), names kept, long press shows the tooltip");
     await page.setViewportSize({ width: 1024, height: 1133 });
-    await page.waitForFunction(() => document.querySelectorAll(".status-bar .visually-hidden").length === 0);
+    await page.waitForFunction((fold) => eval("(" + fold + ")")() === 0, foldedLabels.toString());
     await page.setViewportSize({ width: 744, height: 1133 });
-    await page.waitForFunction(() => document.querySelectorAll(".status-bar .visually-hidden").length >= 3);
+    await page.waitForFunction((fold) => eval("(" + fold + ")")() >= 3, foldedLabels.toString());
     ok("the labels are back above 900 px and fold again below it");
 
     // Item 6: a long press on a sidebar row opens a menu to move it.

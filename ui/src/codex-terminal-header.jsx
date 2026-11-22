@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { LoaderCircle, Pencil, Pin, PinOff, RotateCcw, Square } from "lucide-react";
 import { api } from "./api";
 import { useSessionSnapshot } from "./cli-sessions";
-import { codexLaunchRefused, codexStateWord, sessionOwner } from "./session-provider.mjs";
+import { codexStateWord, sessionOwner } from "./session-provider.mjs";
 import "./codex-terminal-header.css";
 
 // Pieces of the header of a bound Codex terminal (a tab whose
@@ -34,7 +34,7 @@ const useRow = (store, id) => useSessionSnapshot(store, (list) => list.sessions.
 
 export function CodexTerminalDetail({ store, tab, label }) {
   const row = useRow(store, tab.cli_session_id);
-  const state = codexStateWord(row || { provider: "codex", owner: "desktop" }, { closed: tab.closed, refused: codexLaunchRefused(tab) });
+  const state = codexStateWord(row || { provider: "codex", owner: "desktop" }, { closed: tab.closed });
   // The session's own account label first, as on its row and the home.
   return <>{["Codex", row?.account_label || label, state].filter(Boolean).join(" · ")}</>;
 }

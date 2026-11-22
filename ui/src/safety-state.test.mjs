@@ -8,7 +8,6 @@ import {
   isSafetyCheckMessage,
   needsEnvironmentRestart,
   countdownText,
-  countdownWords,
   explanationView,
   withLeaseClock,
   adviceAction,
@@ -213,15 +212,15 @@ test("a newer server's stable sentences carry one live countdown, in one next-st
   assert.equal(browser.reason, waiting.reason, "the server's stable reason, shown once");
   assert.equal(browser.next, "浏览器内存回落后会自动重检并恢复联网，最迟 58 秒后。", "one next sentence, one countdown");
   assert.deepEqual(browser.nextParts, ["浏览器内存回落后会自动重检并恢复联网，最迟 ", "58 秒后", "。"]);
-  assert.equal(browser.countdown.text, "", "the countdown lives in the sentence, not beside it");
+  assert.equal(browser.countdown, null, "the countdown lives in the sentence, not beside it");
   assert.equal(view({ ...waiting, memory_cause: "environment" }).next, "环境内存回落后会自动重检并恢复联网，最迟 58 秒后。");
   assert.equal(view({ ...waiting, memory_cause: "machine" }).next, "这台机器的内存回落后会自动重检并恢复联网，最迟 58 秒后。");
   assert.equal(view(waiting, undefined, now + 20_000).nextParts[1], "38 秒后", "the same answer counts down on this client's clock");
   assert.equal(view({ ...waiting, deadline_ms: now + 125_000 }).nextParts[1], "2 分 5 秒后");
   assert.equal(view({ ...waiting, deadline_ms: now + 120_000 }).nextParts[1], "2 分钟后");
   const due = view(waiting, undefined, now + 70_000);
-  assert.equal(due.nextParts[1], null, "past the deadline: no number, no negative time");
-  assert.match(due.next, /马上就会重检/);
+  assert.equal(due.next, waiting.next, "past the deadline: the server's own sentence, no number, no negative time");
+  assert.equal(due.countdown, null);
 
   const scheduled = view({ state: "recheck_scheduled", reason: "安全检查读不到系统的时区和语言，所以暂时关闭了外网。", next: "稍后会自动重检，通过后恢复联网。", deadline_ms: now + 15_000 });
   assert.equal(scheduled.next, "将在 15 秒后自动重检，通过后恢复联网。");
@@ -235,15 +234,13 @@ test("a newer server's stable sentences carry one live countdown, in one next-st
   // A state with no deadline says what the server says, as it is.
   const checking = view({ state: "rechecking", reason: "r", next: "正在自动重检，通过后恢复联网。" }, { mode: "checking", until: "2026-11-21T08:25:00Z" });
   assert.equal(checking.next, "正在自动重检，通过后恢复联网。");
-  assert.equal(checking.nextParts, null);
+  assert.deepEqual(checking.nextParts, ["正在自动重检，通过后恢复联网。", undefined]);
   assert.equal(checking.countdown, null);
-  assert.equal(countdownWords(59), "59 秒后");
-  assert.equal(countdownWords(3600), "60 分钟后");
 
   // An older server (no deadline_ms) keeps today's reading.
   const older = view({ state: "waiting_memory", reason: "r", next: "外网暂停中。自动完整重检正在等待内存压力缓解，最迟约 60 秒后也会进行，通过后自动恢复联网。", recheck_at: "2026-11-21T08:21:00Z", memory_short: true });
-  assert.equal(older.nextParts, null);
   assert.equal(older.countdown.text, "最迟约 1 分钟后自动完整重检。");
+  assert.equal(older.nextParts[1], older.countdown.text, "an older server's countdown follows its sentence");
 });
 
 test("a newer server's remaining lease decides open or closed on this client's clock", () => {

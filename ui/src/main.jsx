@@ -52,7 +52,6 @@ import { EnvironmentRestartContext, SafetyChecklistContext, SafetyMessage } from
 import { networkState, isGuestLocalURL, needsEnvironmentRestart, withLeaseClock } from "./safety-state.mjs";
 import { needsProxySetup } from "./onboarding-state.mjs";
 import { NetworkLatency } from "./network-latency";
-import { StatusLabel } from "./status-label";
 import { WorkbenchHome } from "./workbench-home";
 import { BrandMark } from "./brand";
 import { Drawing } from "./drawings";
@@ -1424,7 +1423,7 @@ function App() {
   const displayTabs = orderedTabs(tabs, metadata).map((tab) =>
     tab.claude_account_id || tab.terminalKind === "claude-login" ? { ...tab,
       claudeLabel: terminalAccountName(tab), claudeAccountNumber: claudeNumbers.get(tab.claude_account_id) }
-      : codexTerminalLabel(tab, codexProfiles.accounts) ? { ...tab, claudeLabel: "Codex · " + codexTerminalLabel(tab, codexProfiles.accounts), accountChip: codexTerminalLabel(tab, codexProfiles.accounts) } : tab);
+      : codexTerminalLabel(tab, codexProfiles.accounts) ? { ...tab, claudeLabel: "Codex · " + codexTerminalLabel(tab, codexProfiles.accounts) } : tab);
   const browserTabs = displayTabs.filter((tab) => tab.kind !== "terminal");
   const switchTabs =
     terminal && !showHome
@@ -1986,7 +1985,7 @@ function App() {
             <span className="status-divider" />
             <button onClick={() => openSettings("network")}>
               <MapPin size={12} />
-              <StatusLabel>
+              <span className="status-label">
                 {status.network_error
                   ? "出口待确认"
                   : status.location || status.safety?.exit_ip
@@ -1996,7 +1995,7 @@ function App() {
                         status.location?.city,
                       ].filter(Boolean).join(" · ")
                     : "指定代理出口"}
-              </StatusLabel>
+              </span>
             </button>
             <span className="status-divider" />
             <button onClick={() => openSettings("region")}>
@@ -2040,7 +2039,7 @@ function App() {
               title="停止并重新启动当前环境"
             >
               <RotateCcw size={12} />
-              <StatusLabel>重启环境</StatusLabel>
+              <span className="status-label">重启环境</span>
             </button>
             <button
               onClick={stop}
@@ -2050,7 +2049,7 @@ function App() {
               title="停止当前环境"
             >
               <Power size={12} />
-              <StatusLabel>停止环境</StatusLabel>
+              <span className="status-label">停止环境</span>
             </button>
           </footer>
         </div>

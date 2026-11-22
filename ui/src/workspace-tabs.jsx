@@ -5,8 +5,6 @@ import {
   FileCode2,
   Anchor,
   Archive,
-  ArrowDown,
-  ArrowUp,
   LoaderCircle,
   Monitor,
   ChevronDown,
@@ -21,7 +19,6 @@ import {
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
 import { api } from "./api";
-import { TOUCH, useMedia } from "./touch-query";
 
 const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
 // A Codex session another device or process writes: a quiet chip at the row's end.
@@ -89,8 +86,8 @@ export function WorkspaceTabs({
   // Until when the click that ends a long press is ignored (it would land on the menu's backdrop).
   const settle = useRef(0);
   // Under a finger the sidebar's rows scroll and the browser tabs may too, so a drag cannot reorder them:
-  // a long press on a row opens a menu to move it, and tabs keep a readable width and scroll sideways.
-  const touch = useMedia(TOUCH);
+  // a long press on a row opens a menu to move it, and tabs keep a readable width and scroll sideways
+  // (touch.css).
   const suppressClick = useRef(false);
   const trigger = useRef();
   const list = useRef();
@@ -104,7 +101,7 @@ export function WorkspaceTabs({
   }, [horizontal]);
   const gap = tabs.length > 20 ? 1 : 4;
   const available = Math.max(0, width - gap * Math.max(0, tabs.length - 1));
-  const minTab = horizontal && touch ? 156 : 0;
+  const minTab = horizontal && matchMedia("(pointer: coarse) and (hover: none)").matches ? 156 : 0;
   const regularWidth = Math.max(minTab, Math.min(220, available / Math.max(1, tabs.length)));
   const activeWidth =
     tabs.length > 1 && tabs.some((tab) => tab.id === active)
@@ -116,8 +113,7 @@ export function WorkspaceTabs({
   );
   const tabWidth = (id) =>
     id === active ? activeWidth : Math.min(220, otherWidth);
-  const scrolls = minTab > 0 && width > 0 &&
-    tabs.reduce((sum, tab) => sum + tabWidth(tab.id), 0) > available + 0.5;
+  const scrolls = minTab > 0 && tabs.length * (minTab + gap) - gap > width;
   const matchingTabs = tabs.filter((tab) =>
     `${tabName(tab, saved)} ${tab.url || ""}`
       .toLowerCase()
@@ -157,7 +153,7 @@ export function WorkspaceTabs({
     document.addEventListener("keydown", cancel, true);
     return () => document.removeEventListener("keydown", cancel, true);
   }, [Boolean(drag)]);
-  useEffect(() => () => { splitDrag.clear(); clearTimeout(press.current); }, []);
+  useEffect(() => () => splitDrag.clear(), []);
   const startDrag = (event, tab) => {
     suppressClick.current = false;
     if (busy || (!ready && tab.kind !== "terminal") || event.button !== 0 ||
@@ -174,12 +170,12 @@ export function WorkspaceTabs({
       items, group, order: items.map(item => item.id), moved: false,
     };
     clearTimeout(press.current);
-    if (touch && !horizontal && !vertical && event.pointerType === "touch") {
-      const row = event.currentTarget;
+    if (!horizontal && !vertical && event.pointerType === "touch") {
+      const row = event.currentTarget.firstElementChild;
       press.current = setTimeout(() => {
         if (!pointer.current || pointer.current.moved) return;
         settle.current = Infinity;
-        showOrder(tab, row);
+        openMenu(tab, row, true);
       }, 450);
     }
     (event.target.closest("button") || event.currentTarget).setPointerCapture(event.pointerId);
@@ -192,7 +188,6 @@ export function WorkspaceTabs({
     // A fingertip wanders a few pixels during a tap: only a longer move is a drag.
     if (!current.moved && Math.hypot(dx, event.clientY - current.startY) < (event.pointerType === "touch" ? 10 : 5)) return;
     current.moved = true;
-    clearTimeout(press.current);
     const dropSide = tabs.find(tab => tab.id === current.id)?.historySession ? null : splitDrag.hover(current.id, event.clientX, event.clientY);
     if (!horizontal || dropSide) {
       setDrag({ id: current.id, offsets: {}, widths: {} });
@@ -236,31 +231,25 @@ export function WorkspaceTabs({
       ),
     });
   };
-  const showOrder = (tab, row) => {
-    trigger.current = row.querySelector('[role="tab"], .sidebar-session');
-    const rect = row.getBoundingClientRect();
+  // The tab's menu under its button; order: only the move up / down choices (a long press on a sidebar row).
+  const openMenu = (tab, button, order) => {
+    trigger.current = button;
+    const rect = button.getBoundingClientRect();
     setMenu({
       tab,
-      order: true,
-      left: Math.max(8, Math.min(rect.left + 24, window.innerWidth - 224)),
-      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 112)),
+      order,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
+      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
     });
   };
   const showMenu = (tab, event) => {
     event.preventDefault();
     if (!horizontal && !vertical) {
-      if (touch && event.type === "contextmenu") return showOrder(tab, event.currentTarget.closest("[data-tab-id]"));
       event.currentTarget.focus();
       event.currentTarget.parentElement.querySelector(".terminal-row-actions button:not(:disabled)")?.focus();
       return;
     }
-    trigger.current = event.currentTarget;
-    const rect = event.currentTarget.getBoundingClientRect();
-    setMenu({
-      tab,
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
-      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
-    });
+    openMenu(tab, event.currentTarget);
   };
   useEffect(() => {
     if (horizontal && !scrolls) return;
@@ -290,24 +279,16 @@ export function WorkspaceTabs({
     };
   }, [menu, allOpen]);
   const at = menu?.order ? tabs.findIndex((tab) => tab.id === menu.tab.id) : -1;
-  const moving = menu?.order && (
-    <div className="menu workspace-tab-menu" style={{ top: menu.top, left: menu.left }} role="menu" aria-label="调整顺序">
-      <button role="menuitem" disabled={at < 1}
-        onClick={() => { setMenu(null); onReorder(menu.tab.id, tabs[at - 1].id); }}>
-        <ArrowUp size={15} />
-        上移
-      </button>
-      <button role="menuitem" disabled={at < 0 || at >= tabs.length - 1}
-        onClick={() => { setMenu(null); onReorder(menu.tab.id, tabs[at + 1].id); }}>
-        <ArrowDown size={15} />
-        下移
-      </button>
-    </div>
-  );
-  const actions = menu && !menu.order && (
+  const actions = menu && (
     <div className="menu workspace-tab-menu"
       style={{ top: menu.top, left: menu.left }}
-      role="menu" aria-label="标签操作">
+      role="menu" aria-label={menu.order ? "调整顺序" : "标签操作"}>
+      {menu.order ? [["上移", -1], ["下移", 1]].map(([text, step]) => (
+        <button key={step} role="menuitem" disabled={!tabs[at + step]}
+          onClick={() => { setMenu(null); onReorder(menu.tab.id, tabs[at + step].id); }}>
+          {text}
+        </button>
+      )) : <>
               <button
                 role="menuitem"
                 onClick={() => {
@@ -349,6 +330,7 @@ export function WorkspaceTabs({
                 <X size={15} />
                 关闭标签<kbd>{shortcut("⌘W")}</kbd>
               </button>
+      </>}
     </div>
   );
   return (
@@ -386,7 +368,7 @@ export function WorkspaceTabs({
           const errorID = `session-open-error-${tab.cli_session_id}`;
           // The row's chip: the account (the provider is in the mark, so the label
           // is the account alone), or where an ssh terminal came from.
-          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.accountChip ?? tab.claudeLabel }
+          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.claudeLabel.replace(/^Codex · /, "") }
             : tab.origin?.kind === "ssh" ? { text: `来自 ${tab.origin.device}${tab.origin.kept ? " · 已保留" : ""}`,
               title: tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束" } : null;
           const chipElement = chip && <small className="claude-tab-profile" title={chip.title}>{chip.text}</small>;
@@ -578,7 +560,6 @@ export function WorkspaceTabs({
           <>
             <div className="menu-dismiss" onClick={() => { if (performance.now() >= settle.current) setMenu(null); }} />
             {actions}
-            {moving}
           </>,
           document.body,
         )}

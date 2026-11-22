@@ -359,7 +359,6 @@
 .claude-profile-actions .claude-icon-action { width: var(--h-compact); padding: 0; justify-content: center; }
 /* 撤销添加 is the quietest action in the row: muted like the glyphs, ink on hover. */
 .claude-profile-actions .text-button { color: var(--muted); font-weight: 400; }
-.claude-profile-actions .text-button:hover:enabled { color: var(--ink); }
 .claude-profile-actions .claude-remove-action:hover:enabled svg { color: var(--error); }
 .claude-profile-toggle svg { transition: transform var(--dur-fast) var(--ease-out); }
 .claude-profile-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
