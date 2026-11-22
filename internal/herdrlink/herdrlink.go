@@ -10,8 +10,14 @@
 //
 // What the filter keeps:
 //   - owner to guest: the hello's params.core.name (the owner's host name)
-//     becomes a neutral name; everything else passes. The owner's core is
-//     trusted: it is the owner's own program.
+//     becomes a neutral name, and the owner's core id becomes a pseudonym
+//     of this environment's (Pseudonym) wherever the owner's core writes it
+//     on channel 0 (the hello, callers, parents); everything else passes.
+//     The owner's core is trusted: it is the owner's own program.
+//   - guest to owner: a reply or an event line holding an address of the
+//     owner's own terminals ("<owner id>/t1", "<owner name>/t1") does not
+//     reach the owner: Herdr's core reads those as its own (remote.rs
+//     localize_in), so a forged "finished" would end hc wait t1 there.
 //   - guest to owner: nothing structural the guest wrote reaches the owner
 //     byte for byte. The hello reply and every channel-0 message are read
 //     and written again as Go encodes them (canonical): the owner's core
@@ -23,8 +29,10 @@
 //     (terminal.send, get, read, wait, notes): without the filter a program in
 //     the environment can type into a terminal on the owner's computer (E14).
 //   - stream bytes reach the owner only from channels a reply announced for
-//     the owner's own terminal.attach or events.subscribe call, and only
-//     through termfilter, as cage attach shows a Cage terminal. Bytes the
+//     the owner's own terminal.attach or events.subscribe call: a terminal's
+//     through termfilter, as cage attach shows a Cage terminal; the events
+//     stream as JSON lines, each read and written again like a channel-0
+//     message. Bytes the
 //     filter removes are credited back to the guest, or its flow-control
 //     window would shrink until the stream stalled (wire.rs: credit counts
 //     payload bytes).
@@ -35,11 +43,16 @@ package herdrlink
 import (
 	"bufio"
 	"bytes"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"math"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,8 +106,21 @@ const (
 // owner's host name never reaches it.
 const PeerName = "super-cage"
 
+// OwnerAddressMessage answers the owner's call in place of a reply that
+// named one of the owner's own terminals.
+const OwnerAddressMessage = "Super Cage dropped the environment's reply: it named a terminal on this computer"
+
 // DeniedMessage answers a call-back the filter dropped.
 const DeniedMessage = "Super Cage does not let the environment call back into this computer"
+
+// Pseudonym is what the environment calls the owner's core whose id is id:
+// the same for one key, unrelated across keys, shaped like a core id (32
+// hexadecimal digits).
+func Pseudonym(key []byte, id string) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(id))
+	return hex.EncodeToString(mac.Sum(nil)[:16])
+}
 
 // ErrProtocol ends a link that broke the protocol's bounds.
 var ErrProtocol = errors.New("herdr link: protocol violation")
@@ -111,6 +137,10 @@ type Options struct {
 	Window time.Duration
 	// Count hears of what the filter did, by kind; never content.
 	Count func(event string)
+	// IDKey is the environment's own key for the owner's core id: the
+	// environment sees Pseudonym(IDKey, id) instead (none: a key of this
+	// link's own).
+	IDKey []byte
 }
 
 // Result says how a link ended.
@@ -127,10 +157,14 @@ type Link struct {
 
 	toGuestMu sync.Mutex
 	toGuest   io.Writer
+	key       []byte // IDKey, or this link's own
 
 	mu          sync.Mutex
 	helloID     string // the owner's hello id, canonical
 	helloFramed bool
+	// ownerID and ownerName are the owner's core id and name from its
+	// hello; alias is the pseudonym the environment sees for ownerID.
+	ownerID, ownerName, alias string
 	// pending are the owner's calls still waiting for their reply, by
 	// canonical id: one reply each reaches the owner.
 	pending map[string]ownerCall
@@ -157,10 +191,13 @@ const (
 	streamEvents                         // events.subscribe
 )
 
-// stream is one announced stream from the guest.
+// stream is one announced stream from the guest: a terminal's (filter)
+// or the events stream (events, with held its unfinished line).
 type stream struct {
 	filter   *termfilter.Filter
 	presence *Presence
+	events   bool
+	held     []byte
 	// debt is what the guest spent that the owner will not credit (bytes
 	// the filter removed or holds); credited is what this link credited.
 	debt, credited int64
@@ -168,7 +205,12 @@ type stream struct {
 
 // New returns a link that writes toward the guest with toGuest.
 func New(opts Options, toGuest io.Writer) *Link {
-	return &Link{opts: opts, toGuest: toGuest, pending: map[string]ownerCall{}, streams: map[uint32]*stream{}, closing: map[uint32]bool{}}
+	key := opts.IDKey
+	if len(key) == 0 {
+		key = make([]byte, 32)
+		_, _ = rand.Read(key)
+	}
+	return &Link{opts: opts, toGuest: toGuest, key: key, pending: map[string]ownerCall{}, streams: map[uint32]*stream{}, closing: map[uint32]bool{}}
 }
 
 func (l *Link) count(event string) {
@@ -254,6 +296,9 @@ func (l *Link) Up(owner io.Reader) error {
 		if err := l.ownerFrame(channel, kind, payload); err != nil {
 			return err
 		}
+		if channel == 0 {
+			payload = l.aliasID(payload)
+		}
 		if err := l.writeGuest(frame(channel, kind, payload)); err != nil {
 			return err
 		}
@@ -261,7 +306,7 @@ func (l *Link) Up(owner io.Reader) error {
 }
 
 // ownerLine handles one plain line from the owner: a hello gets the neutral
-// name; a framed hello ends plain mode on this side.
+// name and the pseudonym; a framed hello ends plain mode on this side.
 func (l *Link) ownerLine(line []byte) (framed bool, out []byte) {
 	trimmed := bytes.TrimSpace(line)
 	var message map[string]json.RawMessage
@@ -279,12 +324,23 @@ func (l *Link) ownerLine(line []byte) (framed bool, out []byte) {
 	if raw, ok := params["core"]; ok {
 		var core map[string]json.RawMessage
 		if json.Unmarshal(raw, &core) == nil {
+			var id, name string
+			_ = json.Unmarshal(core["id"], &id)
+			_ = json.Unmarshal(core["name"], &name)
 			if _, named := core["name"]; named {
 				core["name"], _ = json.Marshal(PeerName)
-				params["core"], _ = json.Marshal(core)
-				message["params"], _ = json.Marshal(params)
 				l.count("hello:renamed")
 			}
+			l.mu.Lock()
+			l.ownerName = name
+			if len(id) >= minIDLength {
+				l.ownerID, l.alias = id, Pseudonym(l.key, id)
+				core["id"], _ = json.Marshal(l.alias)
+				l.count("hello:pseudonym")
+			}
+			l.mu.Unlock()
+			params["core"], _ = json.Marshal(core)
+			message["params"], _ = json.Marshal(params)
 		}
 	}
 	var on bool
@@ -296,7 +352,61 @@ func (l *Link) ownerLine(line []byte) (framed bool, out []byte) {
 	if err != nil {
 		return on, line
 	}
-	return on, append(rewritten, '\n')
+	return on, append(l.aliasID(rewritten), '\n')
+}
+
+// minIDLength is the shortest owner core id the filter replaces byte for
+// byte (Herdr's are 32 hexadecimal digits, platform random_hex).
+const minIDLength = 8
+
+// aliasID gives the environment the pseudonym wherever the owner's core
+// wrote its id: callers ("<id>/t3", remote.rs route), parents ($/orphaned,
+// remote.rs orphaned_afar), waits on children (api/waiting.rs). Herdr
+// writes JSON without escaping letters, so the id's own bytes are all its
+// spellings.
+func (l *Link) aliasID(payload []byte) []byte {
+	l.mu.Lock()
+	id, alias := l.ownerID, l.alias
+	l.mu.Unlock()
+	if id == "" || !bytes.Contains(payload, []byte(id)) {
+		return payload
+	}
+	return bytes.ReplaceAll(payload, []byte(id), []byte(alias))
+}
+
+// addressKeys are the members Herdr's core reads addresses from
+// (remote.rs map_addresses), and callers.
+var addressKeys = map[string]bool{"address": true, "parent": true, "terminal": true, "from": true, "removed": true, "caller": true}
+
+// namesOwner reports whether a value from the guest holds an address of the
+// owner's own terminals: "<owner id>/…" anywhere, or "<owner name>/…" where
+// Herdr reads an address. The environment knows neither (it has the
+// pseudonym and PeerName), so only a forgery holds one.
+func (l *Link) namesOwner(value any) bool {
+	l.mu.Lock()
+	id, name := l.ownerID, l.ownerName
+	l.mu.Unlock()
+	var walk func(value any, key string) bool
+	walk = func(value any, key string) bool {
+		switch v := value.(type) {
+		case string:
+			return id != "" && strings.HasPrefix(v, id+"/") || name != "" && addressKeys[key] && strings.HasPrefix(v, name+"/")
+		case map[string]any:
+			for k, item := range v {
+				if id != "" && strings.HasPrefix(k, id+"/") || walk(item, k) {
+					return true
+				}
+			}
+		case []any:
+			for _, item := range v {
+				if walk(item, key) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	return walk(value, "")
 }
 
 // ownerFrame learns from a frame the owner sends: its calls (which open
@@ -459,6 +569,35 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 			if _, err := io.CopyN(io.Discard, r, int64(size)); err != nil {
 				return eofIsUnexpected(err)
 			}
+		case kind == KindData && s.events:
+			remaining := int64(size)
+			in, emitted := int64(0), int64(0)
+			for remaining > 0 {
+				n := min(remaining, piece)
+				if _, err := io.ReadFull(r, pieceBuf[:n]); err != nil {
+					return eofIsUnexpected(err)
+				}
+				remaining -= n
+				in += n
+				var err error
+				out, err = l.eventLines(s, out[:0], pieceBuf[:n])
+				if err != nil {
+					return err
+				}
+				if len(out) > 0 {
+					if _, err := toOwner.Write(frame(channel, KindData, out)); err != nil {
+						return err
+					}
+					emitted += int64(len(out))
+				}
+			}
+			// A line held whole is credited now: one longer than the
+			// guest's window would otherwise stall it. Its bytes are
+			// credited again when the owner reads them; Herdr adds
+			// credit without a cap (wire.rs credit).
+			if err := l.creditBack(channel, s, in-emitted); err != nil {
+				return err
+			}
 		case kind == KindData:
 			remaining := int64(size)
 			in, emitted := int64(0), int64(0)
@@ -510,6 +649,44 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 			}
 		}
 	}
+}
+
+// eventLines reads the events stream the way the owner's core does, as JSON
+// lines (remote.rs mirror_events), and passes each whole line written again
+// (canonical), unless it does not read or names the owner's own terminals.
+// An unfinished line longer than MaxLine ends the link.
+func (l *Link) eventLines(s *stream, out, data []byte) ([]byte, error) {
+	s.held = append(s.held, data...)
+	rest := s.held
+	for {
+		i := bytes.IndexByte(rest, '\n')
+		if i < 0 {
+			break
+		}
+		line := rest[:i]
+		rest = rest[i+1:]
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		value, canon, err := canonical(line)
+		switch {
+		case err != nil:
+			l.count("dropped:event")
+		case l.namesOwner(value):
+			l.count("dropped:owner-address")
+		default:
+			out = append(append(out, canon...), '\n')
+		}
+	}
+	if len(rest) > MaxLine {
+		return out, ErrProtocol
+	}
+	if len(rest) == 0 {
+		s.held = nil
+	} else if len(rest) < len(s.held) {
+		s.held = append([]byte(nil), rest...)
+	}
+	return out, nil
 }
 
 // plainReason keeps the printable text of a CLOSE frame's reason: the
@@ -650,6 +827,14 @@ func (l *Link) guestMessage(payload []byte, toOwner io.Writer) error {
 		l.count("dropped:unasked")
 		return nil
 	}
+	if l.namesOwner(message) {
+		l.count("dropped:owner-address")
+		reply, _ := encode(map[string]any{"jsonrpc": "2.0", "id": message["id"], "error": map[string]any{
+			"code": -32000, "message": OwnerAddressMessage, "data": map[string]any{"kind": "denied", "hint": ""},
+		}})
+		_, err := toOwner.Write(frame(0, KindData, reply))
+		return err
+	}
 	if asked.opens != 0 {
 		if result, ok := message["result"].(map[string]any); ok {
 			if raw, has := result["channel"]; has {
@@ -682,13 +867,10 @@ func streamChannel(raw any) (uint32, bool) {
 // or closed by the owner and not yet answered, ends the link: the owner's
 // core would give it to the new stream, the filter to the old one.
 func (l *Link) open(channel uint32, kind streamKind) error {
-	s := &stream{}
+	s := &stream{events: kind == streamEvents}
 	if kind == streamTerminal {
 		s.presence = &Presence{window: l.opts.Window}
 		s.filter = termfilter.New(termfilter.Options{ClipboardWrite: l.opts.ClipboardWrite, ClipboardNow: s.presence.Here})
-	} else {
-		// Events are JSON lines: nothing in them is a terminal's to act on.
-		s.filter = termfilter.New(termfilter.Options{})
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

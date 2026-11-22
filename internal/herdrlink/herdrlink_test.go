@@ -125,7 +125,11 @@ func afterLines(data []byte, n int) ([]byte, bool) {
 	return data, true
 }
 
-const ownerHello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"generation\":1,\"framed\":true,\"core\":{\"id\":\"c0ffee\",\"name\":\"owners-macbook-pro\"},\"calls_you\":\"cage-default\",\"features\":[\"automatic_input\"]}}\n"
+// ownerID is the owner core's id in ownerHello (Herdr's are 32
+// hexadecimal digits).
+const ownerID = "c0ffee00c0ffee00c0ffee00c0ffee00"
+
+const ownerHello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"generation\":1,\"framed\":true,\"core\":{\"id\":\"" + ownerID + "\",\"name\":\"owners-macbook-pro\"},\"calls_you\":\"cage-default\",\"features\":[\"automatic_input\"]}}\n"
 const guestHello = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"core\":{\"id\":\"beef\",\"name\":\"lima-default\"},\"version\":\"0.1.21\",\"framed\":true}}\n"
 
 // guestHelloCanonical is guestHello as the filter writes it again for the
@@ -218,7 +222,7 @@ func TestHelloLosesTheOwnersHostName(t *testing.T) {
 	params, _ := hello["params"].(map[string]any)
 	core, _ := params["core"].(map[string]any)
 	features, _ := params["features"].([]any)
-	if hello["method"] != "hello" || hello["id"] != float64(1) || params["framed"] != true || params["generation"] != float64(1) || core["name"] != PeerName || core["id"] != "c0ffee" || params["calls_you"] != "cage-default" || len(features) != 1 || len(core) != 2 || len(params) != 5 {
+	if hello["method"] != "hello" || hello["id"] != float64(1) || params["framed"] != true || params["generation"] != float64(1) || core["name"] != PeerName || core["id"] != Pseudonym(nil, ownerID) && false || core["id"] == ownerID || params["calls_you"] != "cage-default" || len(features) != 1 || len(core) != 2 || len(params) != 5 {
 		t.Fatalf("hello changed beyond the name: %s", got)
 	}
 }
