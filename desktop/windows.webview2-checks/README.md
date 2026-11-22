@@ -26,10 +26,11 @@ front, so the policy's front end is only recorded.
 | `storage` | the frame stores, the teardown clears its origin; a probe of that origin |
 | `navigation` | a top-level navigation and a reload held and issued again |
 | `frame-navigation` | the frame navigates itself to the workbench's origin |
+| `children` | the frame's page adds child frames of other origins, of its own origin and a srcdoc: the calls on their targets |
 | `locale-twice` | two frames of one origin: the locale override's error text |
 | `two-labels` | two frames of two labels armed at once: separate processes, call errors |
 | `kill-sweep` | the frame stores, the browser process is killed, a new WebView sweeps the journal (`ScienceFrameHost.Sweep`) |
-| `host` | the shell's own `ScienceFrameHost` against a recording front: attach, detach, an unexpected frame exit, a held reload |
+| `host` | the shell's own `ScienceFrameHost` against a recording front: attach, detach, an unexpected frame exit, a held reload, a frame whose page adds child frames |
 
 The `host` case runs last: a `ScienceFrameHost` stays subscribed to its
 WebView for the WebView's life, as in `MainWindow`.

@@ -125,6 +125,12 @@ internal sealed class ChecksForm : Form
         if (query.Contains("busy")) script += "addEventListener('pagehide', () => { const t = Date.now(); while (Date.now() - t < 3000) {} });";
         if (query.Contains("store")) script += Store;
         if (query.Contains("escape")) script += "setTimeout(() => { location.href = 'http://localhost:" + workbenchPort + "/escape'; }, 300);";
+        // Child frames the window refuses (other origins) or keeps (its own
+        // origin, srcdoc), as the exfiltration fixture's frames.
+        if (query.Contains("children"))
+            script += "setTimeout(() => { for (const src of ['http://127.0.0.1:' + location.port + '/frame', 'http://localhost:" + workbenchPort + "/', " +
+                "'http://0123456789abcdef0123456789abcdef.localhost:' + location.port + '/', '/blank', 'http://frame.invalid/']) { const f = document.createElement('iframe'); f.src = src; document.body.append(f); } " +
+                "const s = document.createElement('iframe'); s.srcdoc = '<meta http-equiv=refresh content=\"0;url=http://refresh.invalid/x\">'; document.body.append(s); }, 300);";
         return "<!doctype html><meta charset=\"utf-8\"><title>label</title><script>" + script + "</script>";
     }
 
@@ -187,7 +193,7 @@ internal sealed class ChecksForm : Form
                 ("proxy", ProxyCase), ("remove", () => FrameCase("remove", "")), ("remove-busy", () => FrameCase("remove-busy", "busy")),
                 ("teardown", () => FrameCase("teardown", "")), ("page-crash", PageCrashCase), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
                 ("steady", () => FrameCase("steady", "")), ("storage", StorageCase), ("navigation", NavigationCase),
-                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase),
+                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("children", () => FrameCase("children", "children")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase),
                 // The host case runs last: a ScienceFrameHost stays subscribed to its
                 // core for the core's life (as in MainWindow, one host per WebView), and
                 // its frame navigation filter cancels every frame once it is detached.
@@ -303,7 +309,9 @@ internal sealed class ChecksForm : Form
         var host = await Frame(query);
         record["host"] = host;
         record["all_reporting"] = await Until(10000, () => new[] { "doc", "direct", "nested" }.All(from => Reports(host).Any(report => report["from"]?.GetValue<string>() == from)));
-        await Task.Delay(name == "steady" ? 15000 : 500);
+        await Task.Delay(name switch { "steady" => 15000, "children" => 3000, _ => 500 });
+        lock (gate) record["call_errors"] = new JsonArray(callErrors.Select(item => item!.DeepClone()).ToArray());
+        record["policy_attached_before"] = policy.Attached;
         record["targets_before"] = await Targets();
         lock (gate) record["frame_session"] = frameSession;
         var teardown = Now;
@@ -458,6 +466,15 @@ internal sealed class ChecksForm : Form
             await core.ExecuteScriptAsync("location.reload(); true");
             record["reloaded"] = await Until(8000, () => Since(reload).Any(item => item?["kind"]?.GetValue<string>() == "NavigationCompleted" && item["success"]?.GetValue<bool>() == true));
             record["third_reports"] = Summary(third, reload);
+            // A frame whose page adds child frames: whether the window keeps it.
+            int before;
+            lock (gate) before = failedCalls.Count;
+            var fourth = await HostFrame("children");
+            record["fourth"] = fourth;
+            await Task.Delay(3000);
+            lock (gate) record["children_failed"] = new JsonArray(failedCalls.Skip(before).Select(item => item!.DeepClone()).ToArray());
+            record["children_reporting"] = Reports(fourth).Count(report => report["t"]!.GetValue<long>() > Now - 1000);
+            await host.Detach();
         }
         finally
         {
@@ -475,13 +492,13 @@ internal sealed class ChecksForm : Form
     }
 
     // HostFrame is the pane's attach and frame for a new label.
-    private async Task<string> HostFrame()
+    private async Task<string> HostFrame(string query = "")
     {
         var name = Guid.NewGuid().ToString("N") + ".localhost:" + labels.Port;
         var entry = "http://" + name + "/_cage/enter";
         await host!.Attach(entry);
         await core.ExecuteScriptAsync("(() => { const f = document.createElement('iframe'); f.dataset.scienceFrame = ''; f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms'); f.style.cssText = 'width:300px;height:120px;border:0'; f.src = " +
-            JsonSerializer.Serialize(entry) + "; document.getElementById('pane').append(f); return true; })()");
+            JsonSerializer.Serialize(entry + (query.Length == 0 ? "" : "?" + query)) + "; document.getElementById('pane').append(f); return true; })()");
         await Until(10000, () => Reports(name).Any(report => report["from"]?.GetValue<string>() == "nested"));
         return name;
     }
