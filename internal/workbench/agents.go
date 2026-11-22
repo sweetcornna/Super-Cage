@@ -63,11 +63,12 @@ import (
 //	      architecture, withdrawn, keyring), environment stopped, the client
 //	      already installed by the person (install), another job running
 //	  503 the workbench is closing
-//	  Window only: cage agent gets native_transport_required.
+//	  Window only: cage agent gets native_transport_required, and the server
+//	  refuses the agent transport's header with 403 (agentsWindowOnly).
 //
 //	POST /api/agents/cancel   body {"job": "<job id>"}
 //	  204 canceled (or already ended); 404 no such job; 409 the running job
-//	      is not an agent job. Window only.
+//	      is not an agent job. Window only, as above.
 
 // agentsHostArch is the guest's architecture: a local guest has the host's.
 var agentsHostArch = runtime.GOARCH
@@ -355,6 +356,20 @@ func (a *agentState) presentLocked(id string, presence clientPresence) *agentPre
 		return p
 	}
 	return nil
+}
+
+// agentsWindowOnly refuses the agent transport (its X-Cage-Agent header) on
+// the server too, as deviceWindowOnly and entryLocal do: the CLI's table
+// (agentWindowRoutes, POST /api/agents/) is not the only check, so a client
+// that skips it is refused here. Listing (GET /api/agents) stays open.
+func agentsWindowOnly(handler http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(agentRequestHeader) != "" {
+			http.Error(w, "添加、更新或移除其他客户端只能在桌面窗口操作。", http.StatusForbidden)
+			return
+		}
+		handler(w, r)
+	}
 }
 
 func (s *Server) agentsAction(w http.ResponseWriter, r *http.Request) {
