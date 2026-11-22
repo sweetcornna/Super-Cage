@@ -225,7 +225,7 @@ var reviewWant = map[string]string{
 	"ESC % G":                      "",
 	"DECSCL 8bit":                  "",
 	"MC 5i printer":                "",
-	"CSI 3J erase scrollback":      "\x1b[3J",
+	"CSI 3J erase scrollback":      "", // round 2, N5: the owner's scrollback stays
 	"mouse 1003+1006":              "\x1b[?1003;1006h",
 	"inband resize 2048":           "",
 	"color scheme 2031":            "",

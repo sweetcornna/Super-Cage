@@ -90,6 +90,20 @@ type Filter struct {
 	focus   atomic.Bool    // the guest asked for focus reports (mode 1004)
 	resets  int            // full and soft resets passed to the application
 	dropped map[string]int // what was dropped, by kind
+	left    leftState      // what the guest changed that End undoes
+}
+
+// leftState is what the guest changed in the application, beyond what the
+// exit reset always sets, so that End undoes it and only it: the owner's
+// palette and cursor style stay unless the guest changed them.
+type leftState struct {
+	palette     bool // OSC 4, 10, 11 or 12 set, or a colour reset
+	cursorStyle bool // CSI Ps SP q
+	tabs        bool // CSI g or ESC H
+	blink       bool // DEC mode 12
+	link        bool // an OSC 8 link is open
+	progress    bool // OSC 9;4 shows progress
+	command     bool // OSC 133;C: a command runs
 }
 
 // GuestFocus reports whether the guest turned on focus reporting. The filter
@@ -385,9 +399,17 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 		f.n = 0
 		return dst
 	}
-	if f.n == 2 && b == 'c' {
+	switch {
+	case f.n == 2 && b == 'c':
+		// A full reset would also erase the owner's scrollback (and in
+		// kitty the window's colour schemes): a soft reset that clears the
+		// screen keeps reset and tput reset useful.
 		f.resets++
 		f.focus.Store(false)
+		f.n = 0
+		return append(dst, ClearReset...)
+	case f.n == 2 && b == 'H':
+		f.left.tabs = true
 	}
 	return f.emitHold(dst)
 }
@@ -720,6 +742,7 @@ func (f *Filter) decideOSC() bool {
 		// Colour resets take no parameter.
 		switch string(body) {
 		case "104", "110", "111", "112":
+			f.left.palette = true
 			return true
 		}
 		return false
@@ -729,14 +752,27 @@ func (f *Filter) decideOSC() bool {
 	case "0", "1", "2":
 		return len(text) <= NoticeLimit
 	case "8":
-		return allowLink(text)
+		if !allowLink(text) {
+			return false
+		}
+		_, uri, _ := cut(text, ';')
+		f.left.link = len(uri) > 0
+		return true
 	case "9":
-		return !f.replay && allowOSC9(text)
+		if f.replay || !allowOSC9(text) {
+			return false
+		}
+		if state, ok := progressState(text); ok {
+			f.left.progress = state != '0'
+		}
+		return true
 	case "777":
 		return !f.replay && len(text) <= NoticeLimit && hasPrefix(text, "notify;")
 	case "99":
 		return !f.replay && f.rewriteKittyNotification(semi)
-	case "4", "10", "11", "12", "104", "110", "111", "112":
+	case "4", "10", "11", "12":
+		// Cage's web terminal answers every one of these queries, even
+		// those dropped below: the server counts them all.
 		if f.opts.OnQuery != nil {
 			for _, c := range text {
 				if c == '?' {
@@ -744,11 +780,63 @@ func (f *Filter) decideOSC() bool {
 				}
 			}
 		}
-		return !f.replay || !contains(text, '?')
+		// OSC 10, 11 and 12 take one colour: further fields run on to 11,
+		// 12, 17, 19 and on, whose answers no viewer recognises and whose
+		// colours the exit reset does not restore.
+		if string(body[:semi]) != "4" && contains(text, ';') {
+			return false
+		}
+		query := contains(text, '?')
+		if f.replay && query {
+			return false
+		}
+		if !query || string(body[:semi]) == "4" && setsColour(text) {
+			f.left.palette = true
+		}
+		return true
+	case "104":
+		// Reset palette entries: numbers only (kitty answers OSC 104;?).
+		for _, field := range splitParams(text) {
+			if !number(field) || len(field) > 3 {
+				return false
+			}
+		}
+		f.left.palette = true
+		return true
 	case "133":
-		return allowMark(text)
+		if !allowMark(text) {
+			return false
+		}
+		switch text[0] {
+		case 'C':
+			f.left.command = true
+		case 'A', 'D':
+			f.left.command = false
+		}
+		return true
 	}
 	return false
+}
+
+// setsColour reports whether an OSC 4 body (index;spec pairs) sets any
+// colour rather than only asking.
+func setsColour(text []byte) bool {
+	fields := splitParams(text)
+	for i := 1; i < len(fields); i += 2 {
+		if string(fields[i]) != "?" {
+			return true
+		}
+	}
+	return false
+}
+
+// progressState returns the state of an OSC 9;4 progress report.
+func progressState(text []byte) (byte, bool) {
+	first, rest, more := cut(text, ';')
+	if string(first) != "4" || !more || len(rest) == 0 {
+		return 0, false
+	}
+	return rest[0], true
 }
 
 // allowOSC9 keeps the two meanings of OSC 9 that stay in the window: a

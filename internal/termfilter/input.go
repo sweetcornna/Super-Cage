@@ -18,6 +18,9 @@ const (
 	InputFocusIn
 	InputFocusOut
 	InputReply
+	// InputMotion is a mouse report of the pointer moving with no button
+	// pressed: the owner did not act, the pointer only passed over.
+	InputMotion
 )
 
 // Reply names the query an answer is for.
@@ -88,7 +91,7 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 	final, n := data[i], i+1
 	if final == 'M' && len(params) == 0 && len(inter) == 0 {
 		if len(data) >= n+3 {
-			return n + 3, InputMouse, ReplyNone // X10 mouse
+			return n + 3, mouseKind(int(data[n]) - 32), ReplyNone // X10 mouse
 		}
 		return n, InputKey, ReplyNone
 	}
@@ -96,13 +99,20 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 	if len(params) > 0 && params[0] >= '<' && params[0] <= '?' {
 		marker, params = params[0], params[1:]
 	}
+	// kitty ends its DA1 answer with an empty field: CSI ?62;c, ?62;52;c.
+	if marker == '?' && len(inter) == 0 && final == 'c' && len(params) > 1 && params[len(params)-1] == ';' {
+		params = params[:len(params)-1]
+	}
 	fields, ok := numbers(params)
 	switch {
 	case !ok:
 	case marker == '<' && len(inter) == 0 && (final == 'M' || final == 'm') && fields == 3:
-		return n, InputMouse, ReplyNone // SGR mouse
+		if final == 'm' {
+			return n, InputMouse, ReplyNone // SGR release
+		}
+		return n, mouseKind(firstNumber(params)), ReplyNone // SGR mouse
 	case marker == 0 && len(inter) == 0 && final == 'M' && fields == 3:
-		return n, InputMouse, ReplyNone // urxvt mouse
+		return n, mouseKind(firstNumber(params) - 32), ReplyNone // urxvt mouse
 	case marker == 0 && len(inter) == 0 && len(params) == 0 && final == 'I':
 		return n, InputFocusIn, ReplyNone
 	case marker == 0 && len(inter) == 0 && len(params) == 0 && final == 'O':
@@ -120,6 +130,27 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 		return n, InputReply, ReplyMode
 	}
 	return n, InputKey, ReplyNone
+}
+
+// mouseKind tells pointer motion with no button pressed (motion bit 32,
+// button code 3, no wheel bit 64; modifier bits allowed) from the rest.
+func mouseKind(button int) InputKind {
+	if button >= 0 && button&32 != 0 && button&3 == 3 && button&64 == 0 {
+		return InputMotion
+	}
+	return InputMouse
+}
+
+// firstNumber reads the first field of a parameter list numbers accepted.
+func firstNumber(params []byte) int {
+	n := 0
+	for _, c := range params {
+		if c == ';' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // numbers counts the fields of a parameter list made only of numbers.

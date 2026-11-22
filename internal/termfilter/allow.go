@@ -26,6 +26,9 @@ var privateModes = map[int]bool{
 	1047: true, 1048: true, 1049: true, 2004: true, 2026: true,
 }
 
+// maxParam bounds every parameter of a control sequence that passes.
+const maxParam = 65535
+
 // ansiModes are the ANSI modes (CSI Pm h/l): insert and new line.
 var ansiModes = map[int]bool{4: true, 20: true}
 
@@ -81,11 +84,19 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 			break
 		}
 	}
+	value := 0
 	for _, c := range params {
-		if c == ':' && final == 'm' && marker == 0 {
-			continue // SGR sub-parameters
+		if c == ':' && final == 'm' && marker == 0 || c == ';' {
+			value = 0 // SGR sub-parameters, or the next parameter
+			continue
 		}
-		if (c < '0' || c > '9') && c != ';' {
+		if c < '0' || c > '9' {
+			return false
+		}
+		// No emulator acts on a count above 65535 (kitty and iTerm2 clamp
+		// a repeat there, Alacritty and Ghostty read 16 bits); WezTerm
+		// loops once per count for REP, ICH, CHT and CBT.
+		if value = value*10 + int(c-'0'); value > maxParam {
 			return false
 		}
 	}
@@ -109,13 +120,19 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 			return len(params) == 0
 		case 'T': // scroll down; five parameters start mouse highlight tracking
 			return count(params, ';') == 0
+		case 'J': // erase in display, but not the owner's scrollback (3)
+			return firstParam(params) != 3
+		case 'g': // tab clear
+			f.left.tabs = true
 		}
 		return final < 128 && plainCSI[final]
 	case marker == '?' && in == 0:
 		switch final {
 		case 'h', 'l':
 			return f.privateModes(params, final)
-		case 'J', 'K': // selective erase
+		case 'J': // selective erase, but not the scrollback (3)
+			return firstParam(params) != 3
+		case 'K':
 			return true
 		case 'n': // cursor position report
 			return !f.replay && string(params) == "6"
@@ -124,7 +141,11 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 		switch final {
 		case 'q': // cursor style
 			n := firstParam(params)
-			return n >= 0 && n <= 6 && count(params, ';') == 0
+			if n < 0 || n > 6 || count(params, ';') != 0 {
+				return false
+			}
+			f.left.cursorStyle = true
+			return true
 		case '@', 'A': // scroll left and right
 			return true
 		}
@@ -149,17 +170,21 @@ func (f *Filter) privateModes(params []byte, final byte) bool {
 	if len(params) == 0 {
 		return false
 	}
-	focus := false
+	focus, blink := false, false
 	ok := everyParam(params, func(n int) bool {
-		if n == 1004 {
+		switch n {
+		case 1004:
 			focus = true
 			return true
+		case 12:
+			blink = true
 		}
 		return privateModes[n]
 	})
 	if !ok {
 		return false
 	}
+	f.left.blink = f.left.blink || blink
 	if !focus {
 		return true
 	}

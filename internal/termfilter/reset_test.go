@@ -41,10 +41,10 @@ func TestEndAbortsThenResets(t *testing.T) {
 	if !f.Streaming() {
 		t.Fatalf("the write did not stream through: %q", out)
 	}
-	if got := string(f.End(nil)); got != "!\x07"+ResetSequence || f.Streaming() || f.Pending() != 0 {
+	if got := string(f.End(nil, 80)); !strings.HasPrefix(got, "!\x07"+resetStart+resetScreen) || !strings.HasSuffix(got, titlePop) || f.Streaming() || f.Pending() != 0 {
 		t.Fatalf("%q", got)
 	}
-	if got := string(New(Options{}).End([]byte("x"))); got != "x"+ResetSequence {
+	if got := string(New(Options{}).End([]byte("x"), 0)); !strings.HasPrefix(got, "x"+resetStart) || !strings.HasSuffix(got, titlePop) {
 		t.Fatalf("%q", got)
 	}
 }
