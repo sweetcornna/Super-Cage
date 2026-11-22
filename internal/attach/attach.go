@@ -279,6 +279,10 @@ type attacher struct {
 	dropPaste  bool         // the rest of a paste cut by a reconnect is dropped
 	endPaste   bool         // the program received a paste's start, not its end
 	resets     int          // the filter's Resets, to turn focus reports on again
+	// input reads the window's input across reads; hold waits for the
+	// rest of a sequence it holds.
+	input termfilter.InputReader
+	hold  *time.Timer
 
 	filter  *termfilter.Filter
 	in      []byte // one read of output; output is never held whole
@@ -391,51 +395,115 @@ func (a *attacher) ownerHere() bool {
 // pastes and mouse reports mark the owner as here; focus reports set the
 // focus and are kept from the program unless it asked for them. Answers to
 // queries are neither.
+//
+// The window's input is read in pieces cut anywhere, and the program can ask
+// for many answers: a.input carries a sequence cut at the end of a read over
+// to the next, so a cut answer is still an answer, and what is passed on is
+// whole units (the server classifies them again).
 func (a *attacher) noteInput(data []byte) []byte {
 	out := make([]byte, 0, len(data))
 	owner := false
-	for i := 0; i < len(data); {
-		if a.inPaste {
-			end := bytes.Index(data[i:], []byte(attachPasteEnd))
-			owner = true
-			if end < 0 {
-				out = append(out, data[i:]...)
-				break
-			}
-			end += len(attachPasteEnd)
-			out = append(out, data[i:i+end]...)
-			i += end
-			a.inPaste = false
-			continue
+	a.input.Read(data, func(unit []byte, kind termfilter.InputKind, _ termfilter.Reply) {
+		out, owner = a.noteUnit(out, owner, unit, kind)
+	})
+	return a.noted(out, owner)
+}
+
+// releaseInput passes on what input held when its rest did not come within
+// termfilter.InputHold: a lone Esc key, say. It is typed, not the owner's
+// presence: an answer cut by a read looks the same.
+func (a *attacher) releaseInput() []byte {
+	var out []byte
+	owner := false
+	a.input.Release(func(unit []byte, kind termfilter.InputKind, _ termfilter.Reply) {
+		out, owner = a.noteUnit(out, owner, unit, kind)
+	})
+	return a.noted(out, owner)
+}
+
+func (a *attacher) noteUnit(out []byte, owner bool, unit []byte, kind termfilter.InputKind) ([]byte, bool) {
+	switch kind {
+	case termfilter.InputFocusIn, termfilter.InputFocusOut:
+		state := focusIn
+		if kind == termfilter.InputFocusOut {
+			state = focusOut
 		}
-		n, kind, _ := termfilter.NextInput(data[i:])
-		unit := data[i : i+n]
-		i += n
-		switch kind {
-		case termfilter.InputFocusIn, termfilter.InputFocusOut:
-			state := focusIn
-			if kind == termfilter.InputFocusOut {
-				state = focusOut
-			}
-			a.focusState.Store(state)
-			if !a.filter.GuestFocus() {
-				continue
-			}
-		case termfilter.InputKey:
-			owner = true
-			a.inPaste = string(unit) == attachPasteStart
-		case termfilter.InputMouse:
-			owner = true
-		case termfilter.InputMotion:
-			// The pointer passing over the window: not a sign the owner
-			// is at it.
+		a.focusState.Store(state)
+		if !a.filter.GuestFocus() {
+			return out, owner
 		}
-		out = append(out, unit...)
+	case termfilter.InputKey, termfilter.InputPaste, termfilter.InputMouse:
+		owner = true
+	case termfilter.InputMotion:
+		// The pointer passing over the window: not a sign the owner is at
+		// it.
+	case termfilter.InputFragment:
+		// Given up waiting for its rest: passed on, but not a sign either.
 	}
+	return append(out, unit...), owner
+}
+
+func (a *attacher) noted(out []byte, owner bool) []byte {
+	a.inPaste = a.input.InPaste()
 	if owner {
 		a.lastInput.Store(time.Now().UnixNano())
 	}
 	return out
+}
+
+// armHold starts the wait for the rest of a sequence input holds, after
+// what was read has been passed on (the wait is for the owner's terminal,
+// not for the program), or ends it.
+func (a *attacher) armHold() {
+	if a.hold != nil {
+		a.hold.Stop()
+		a.hold = nil
+	}
+	if a.input.Held() {
+		a.hold = time.NewTimer(termfilter.InputHold)
+	}
+}
+
+// held fires when the rest of a sequence input holds did not come in time.
+func (a *attacher) held() <-chan time.Time {
+	if a.hold == nil {
+		return nil
+	}
+	return a.hold.C
+}
+
+// afterHold is the input to pass on when the wait for a held sequence ends:
+// input that came meanwhile first, else what was held.
+func (a *attacher) afterHold(inputs <-chan []byte) []byte {
+	a.hold = nil
+	select {
+	case data := <-inputs:
+		return a.noteInput(data)
+	default:
+		return a.releaseInput()
+	}
+}
+
+// forward passes input on to the program. An observer only detaches, on
+// Ctrl-C or Ctrl-D; the rest of a paste cut by a reconnect is dropped.
+func (a *attacher) forward(ctx context.Context, data []byte, paste *attachPaste) (detach bool, err error) {
+	if len(data) == 0 {
+		return false, nil
+	}
+	if a.cfg.Observe {
+		return bytes.ContainsAny(data, "\x03\x04"), nil
+	}
+	if a.dropPaste {
+		end := bytes.Index(data, []byte(attachPasteEnd))
+		if end < 0 {
+			return false, nil
+		}
+		data, a.dropPaste = data[end+len(attachPasteEnd):], false
+		if len(data) == 0 {
+			return false, nil
+		}
+	}
+	return false, paste.feed(ctx, data)
 }
 
 // connectionID reports whether id has the form the desktop's launcher
@@ -816,30 +884,15 @@ func (a *attacher) run(ctx context.Context, ws *controlwire.Conn) Exit {
 			case <-a.tty.Resized:
 				a.sendSize()
 			case data := <-inputs:
-				if data = a.noteInput(data); len(data) == 0 {
-					continue
-				}
-				if a.cfg.Observe {
-					if bytes.ContainsAny(data, "\x03\x04") {
-						detached = true
-						break pump
-					}
-					continue
-				}
-				if a.dropPaste {
-					end := bytes.Index(data, []byte(attachPasteEnd))
-					if end < 0 {
-						continue
-					}
-					data, a.dropPaste = data[end+len(attachPasteEnd):], false
-					if len(data) == 0 {
-						continue
-					}
-				}
-				if err := paste.feed(ctx, data); err != nil {
-					streamErr = err
+				if detached, streamErr = a.forward(ctx, a.noteInput(data), paste); detached || streamErr != nil {
 					break pump
 				}
+				a.armHold()
+			case <-a.held():
+				if detached, streamErr = a.forward(ctx, a.afterHold(inputs), paste); detached || streamErr != nil {
+					break pump
+				}
+				a.armHold()
 			case <-paste.timer():
 				if err := paste.flush(); err != nil {
 					streamErr = err
@@ -919,12 +972,17 @@ func (a *attacher) reconnect(ctx context.Context, cause error, inputs <-chan []b
 			return detach()
 		case data := <-inputs:
 			data = a.noteInput(data)
+			a.armHold()
 			if a.cfg.Observe && bytes.ContainsAny(data, "\x03\x04") {
 				return detach()
 			}
 			if !told && typedKey(data) {
 				told = a.notify(reconnectNotice)
 			}
+		case <-a.held():
+			// Dropped like the rest typed while reconnecting.
+			a.hold = nil
+			a.releaseInput()
 		}
 	}
 }

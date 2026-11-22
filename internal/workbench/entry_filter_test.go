@@ -3,6 +3,7 @@
 package workbench
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/localterm"
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
@@ -304,5 +306,28 @@ func TestEntryEveryWayOutEndsTheWindow(t *testing.T) {
 			}
 			t.Logf("%s: after the reset %q", c.name, tail)
 		})
+	}
+}
+
+// Settings that cannot be read do not let the environment write this
+// computer's clipboard over ssh either.
+func TestEntryClipboardOffWhenSettingsUnreadable(t *testing.T) {
+	f := newEntryFixture(t, true)
+	f.on()
+	paths, err := f.s.entryPaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.ComputerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(paths.ComputerDir, localterm.SettingsFile), []byte("{\"clipboard_write\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	shell := entryOpenShell(t, f.client(), 100, 30, "")
+	shell.send("printf 'C1=%s\\033]52;c;QUJD\\007\\n' x\n")
+	shell.expect("C1=")
+	if strings.Contains(shell.text(), "\x1b]52;c;") {
+		t.Fatalf("the write passed with unreadable settings: %q", shell.text())
 	}
 }
