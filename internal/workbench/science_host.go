@@ -492,7 +492,9 @@ func (s *Server) publishScienceControl(port int, end string, identity *scienceId
 // workloads published in their control files. Read when a document is
 // served, never on a timer.
 func (s *Server) localScienceFronts() []int {
-	if scienceHostOS != "windows" || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
+	// A build that does not offer host rendering frames and connects
+	// nowhere new, whatever a control file says (scienceHostVerified).
+	if scienceHostOS != "windows" || !scienceHostRenderVerified(scienceHostOS) || !s.desktopEntry || s.remote == nil || s.remote.desktop == nil || s.remote.desktop.localVMs == nil {
 		return nil
 	}
 	root := s.remote.desktop.localVMs.defaultProfile

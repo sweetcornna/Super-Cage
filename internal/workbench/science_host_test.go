@@ -313,6 +313,27 @@ func TestScienceHostRenderGate(t *testing.T) {
 	}
 }
 
+// A release build's entry document frames and connects nowhere new, even
+// with a science_port in a local control file (hand-edited, or left by a
+// workload of a build that offered host rendering).
+func TestScienceEntryDocumentClosedGate(t *testing.T) {
+	workload := scienceWorkload(t)
+	entry := scienceEntry(t, workload)
+	if err := workload.publishScienceControl(47999, "SECRET", nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := frameSources(t, entry); got != scienceFrameSource(47999) {
+		t.Fatalf("lifted gate: entry frame-src %q", got)
+	}
+	withScienceHostVerified(t, "")
+	if got := frameSources(t, entry); got != "'none'" {
+		t.Fatalf("closed gate: entry frame-src %q", got)
+	}
+	if got := documentDirective(t, entry, "connect-src"); strings.Contains(got, scienceProxyCheckOrigin) || strings.Contains(got, scienceProxyLoopbackOrigin) {
+		t.Fatalf("closed gate: entry connect-src %q", got)
+	}
+}
+
 func TestScienceHostRenderAvailability(t *testing.T) {
 	trusted := requestShape{method: "GET", path: "/api/claude-science", trusted: true}
 	cases := []struct {
