@@ -27,6 +27,7 @@
     <Compile Include="../windows/ScienceFrame.cs" Link="ScienceFrame.cs" />
     <Compile Include="../windows/CrashReports.cs" Link="CrashReports.cs" />
     <Compile Include="../windows/WebGeneration.cs" Link="WebGeneration.cs" />
+    <Compile Include="../windows/LaunchQueue.cs" Link="LaunchQueue.cs" />
     <Compile Include="../windows/ScienceSmoke.cs" Link="ScienceSmoke.cs" />
     <EmbeddedResource Include="../../internal/workbench/testdata/science-cdp.json" LogicalName="Cage.ScienceCDP.json" />
   </ItemGroup>

@@ -343,6 +343,33 @@ var nextView = generations.Begin();
 Check(!generations.IsCurrent(restartedView) && generations.IsCurrent(nextView) && generations.TryRestart(), "a restart under way did not make the previous WebView's steps stale");
 Console.WriteLine($"Window startup generations: {assertions} assertions passed.");
 
+// One backend launch at a time per window (LaunchQueue): Retry during a slow
+// start gets the launch in flight, a different launch waits for it, a failed
+// one holds up nothing.
+assertions = 0;
+var launches = new LaunchQueue<int>();
+var launched = new System.Collections.Concurrent.ConcurrentQueue<string>();
+var slowLaunch = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var firstLaunch = launches.Run("", () => { launched.Enqueue("desktop"); return slowLaunch.Task; });
+var retriedLaunch = launches.Run("", () => { launched.Enqueue("desktop again"); return Task.FromResult(2); });
+Check(retriedLaunch == firstLaunch && launched.Count == 1, "a retry during a launch started a second process");
+var existingLaunch = launches.Run("--existing", () => { launched.Enqueue("existing"); return Task.FromResult(3); });
+Check(launched.Count == 1 && !existingLaunch.IsCompleted, "a different launch started while one was in flight");
+slowLaunch.SetResult(1);
+Check(firstLaunch.Wait(TimeSpan.FromSeconds(5)) && firstLaunch.Result == 1 && retriedLaunch.Result == 1, "the retry did not get the launch's reply");
+Check(existingLaunch.Wait(TimeSpan.FromSeconds(5)) && existingLaunch.Result == 3 && launched.SequenceEqual(["desktop", "existing"]), "the waiting launch did not run after the one in flight");
+var failingLaunch = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+var failedLaunch = launches.Run("", () => failingLaunch.Task);
+var afterFailure = launches.Run("--complete-update", () => Task.FromResult(4));
+failingLaunch.SetException(new IOException("backend failed"));
+try { failedLaunch.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
+Check(failedLaunch.IsFaulted && afterFailure.Wait(TimeSpan.FromSeconds(5)) && afterFailure.Result == 4, "a failed launch held up the next");
+var thrownLaunch = launches.Run("", () => throw new IOException("no process"));
+try { thrownLaunch.Wait(TimeSpan.FromSeconds(5)); } catch (AggregateException) { }
+var afterThrow = launches.Run("", () => Task.FromResult(5));
+Check(thrownLaunch.IsFaulted && afterThrow.Wait(TimeSpan.FromSeconds(5)) && afterThrow.Result == 5, "a launch that threw held up the next, or its failure was reused");
+Console.WriteLine($"Window backend launches: {assertions} assertions passed.");
+
 // The Claude Science smoke driver (ScienceSmoke): smoke mode only, never
 // the default profile.
 assertions = 0;
@@ -352,7 +379,7 @@ var isolated = Path.Combine(smokeHome, "cage-smoke-profile");
 var smokeReport = Path.Combine(smokeHome, "smoke.json");
 Check(ScienceSmoke.Of(null, "on", isolated, smokeHome) == ("", false), "the driver ran outside smoke mode");
 Check(ScienceSmoke.Of(smokeReport, null, isolated, smokeHome) == ("", false) && ScienceSmoke.Of(smokeReport, "ON", isolated, smokeHome) == ("", false), "an unknown mode was driven");
-foreach (var mode in new[] { "on", "off", "probe" })
+foreach (var mode in new[] { "on", "off", "probe", "retry" })
 {
     Check(ScienceSmoke.Of(smokeReport, mode, isolated, smokeHome) == (mode, false), "an isolated profile refused " + mode);
     Check(ScienceSmoke.Of(smokeReport, mode, defaultProfile, smokeHome) == ("", true), "the default profile ran " + mode);
