@@ -521,5 +521,10 @@ func startControllerExecutable(configPath, exe string, extraEnv ...string) error
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	return cmd.Process.Release()
+	// Reap the child when it ends. A caller that lives on (the desktop
+	// gateway starting the local controller) would otherwise keep one
+	// defunct process for every start; a caller that exits first loses
+	// nothing.
+	go func() { _ = cmd.Wait() }()
+	return nil
 }
