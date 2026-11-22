@@ -156,14 +156,15 @@ func TestInputReaderHoldsOnlyWhatCouldContinue(t *testing.T) {
 		r.Read([]byte(chunk), func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) })
 	}
 	r.Release(func(unit []byte, kind InputKind, _ Reply) { units = append(units, inputUnit{string(unit), kind}) })
-	if r.Held() || joined(units) != long || units[0] != (inputUnit{long[:replyLimit], InputFragment}) || joined(units[1:]) != strings.Join(presence(units[1:]), "") {
-		t.Fatalf("a sequence longer than any answer, then read afresh: held %v, %q", r.Held(), units)
+	if r.Held() || joined(units) != long || units[0] != (inputUnit{long[:replyLimit], InputFragment}) || len(presence(units)) != 0 {
+		t.Fatalf("a sequence longer than any answer: held %v, %q", r.Held(), units)
 	}
 }
 
-// Once part of a unit was given up on, the rest of it is given at once as it
-// comes, never held again, and only up to the longest answer: past that no
-// answer goes on, and input is read afresh.
+// Once part of a unit was given up on for want of its rest, the rest of it
+// is given at once as it comes, never held again, and only up to the
+// longest answer: past that no answer goes on, and input is read afresh. A
+// sequence given up on for its length is given at once to its end.
 func TestInputReaderGivenUpUnitIsNotHeldAgain(t *testing.T) {
 	for start, filler := range map[string]string{"\x1b]": "j", "\x1bP": "j", "\x1b[12;1": "1"} {
 		var r InputReader
@@ -189,7 +190,8 @@ func TestInputReaderGivenUpUnitIsNotHeldAgain(t *testing.T) {
 	long := "\x1b]" + strings.Repeat("a", replyLimit)
 	r.Read([]byte(long), each)
 	r.Read([]byte("b"), each)
-	if r.Held() || fmt.Sprint(units) != fmt.Sprint([]inputUnit{{long, InputFragment}, {"b", InputKey}}) {
+	r.Read([]byte("\x07c"), each)
+	if r.Held() || fmt.Sprint(units) != fmt.Sprint([]inputUnit{{long, InputFragment}, {"b", InputFragment}, {"\x07", InputFragment}, {"c", InputKey}}) {
 		t.Fatalf("after a sequence longer than any answer: held %v, %q", r.Held(), units)
 	}
 }

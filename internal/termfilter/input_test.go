@@ -44,8 +44,8 @@ func TestNextInput(t *testing.T) {
 		{"\x1b[c", 3, InputKey, ReplyNone},
 		{"\x1b[?c", 4, InputKey, ReplyNone},
 		{"\x1b[5n", 4, InputKey, ReplyNone},
-		{"\x1b[?999999c", 10, InputKey, ReplyNone},
-		{"\x1b[24", 4, InputKey, ReplyNone}, // unfinished
+		{"\x1b[?999999c", 10, InputFragment, ReplyNone}, // an answer's form, too many digits
+		{"\x1b[24", 4, InputKey, ReplyNone},             // unfinished
 	} {
 		n, kind, reply := NextInput([]byte(row.in))
 		if n != row.n || kind != row.kind || reply != row.reply {

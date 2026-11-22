@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/localterm"
 )
 
 // The review's case (review3-ssh R3-1), for the ssh window: answers to 5000
@@ -126,5 +128,25 @@ func TestEntryReadInputEndSendsWhatIsHeld(t *testing.T) {
 	}, never)
 	if strings.Join(sent, "") != "\x1b[12;1" || p.lastInput.Load() != 0 {
 		t.Fatalf("sent %q, owner %v", sent, p.lastInput.Load() != 0)
+	}
+}
+
+// The ssh window reads ESC [200~ as a paste start only while its filter has
+// passed bracketed paste on to the window (review round 4, finding 2).
+func TestEntryWindowPasteFollowsBracketedPaste(t *testing.T) {
+	presence, output := entryWindow(localterm.DefaultSettings())
+	presence.note([]byte("\x1b[200~abc"), output.filter.GuestFocus)
+	if presence.input.InPaste() {
+		t.Fatal("a paste with bracketed paste off")
+	}
+	output.filter.Append(nil, []byte("\x1b[?2004h"))
+	presence.note([]byte("\x1b[200~abc"), output.filter.GuestFocus)
+	if !presence.input.InPaste() {
+		t.Fatal("no paste with bracketed paste on")
+	}
+	output.filter.Append(nil, []byte("\x1b[?2004l"))
+	presence.note([]byte("def"), output.filter.GuestFocus)
+	if presence.input.InPaste() {
+		t.Fatal("still a paste after bracketed paste went off")
 	}
 }

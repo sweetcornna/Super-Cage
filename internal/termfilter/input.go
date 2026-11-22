@@ -73,9 +73,15 @@ func NextInput(data []byte) (n int, kind InputKind, reply Reply) {
 		if n, ok := colorReply(data); ok {
 			return n, InputReply, ReplyColor
 		}
+		if n, ok := refusedAnswer(data); ok {
+			return n, InputFragment, ReplyNone
+		}
 	case 'P':
 		if n, ok := settingReply(data); ok {
 			return n, InputReply, ReplySetting
+		}
+		if n, ok := refusedAnswer(data); ok {
+			return n, InputFragment, ReplyNone
 		}
 	case 'O':
 		if len(data) >= 3 {
@@ -122,6 +128,11 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 	fields, ok := numbers(params, digits)
 	switch {
 	case !ok:
+		if answerShape(marker, inter, final) && tooManyDigits(params, digits) {
+			// An answer's form with a longer number than any viewer
+			// reads in one: typed, but never a key.
+			return n, InputFragment, ReplyNone
+		}
 	case marker == '<' && len(inter) == 0 && (final == 'M' || final == 'm') && fields == 3:
 		if final == 'm' {
 			return n, InputMouse, ReplyNone // SGR release
@@ -146,6 +157,39 @@ func csiInput(data []byte) (int, InputKind, Reply) {
 		return n, InputReply, ReplyMode
 	}
 	return n, InputKey, ReplyNone
+}
+
+// answerShape reports whether a control sequence has the marker,
+// intermediate and final of an answer to a query: DA1, DA2, a status or
+// cursor position report, a mode report.
+func answerShape(marker byte, inter []byte, final byte) bool {
+	switch {
+	case len(inter) == 0 && final == 'c':
+		return marker == '?' || marker == '>'
+	case len(inter) == 0 && final == 'n':
+		return marker == 0
+	case len(inter) == 0 && final == 'R', string(inter) == "$" && final == 'y':
+		return marker == 0 || marker == '?'
+	}
+	return false
+}
+
+// tooManyDigits reports whether params are numbers separated by ';' with
+// one of more than most digits.
+func tooManyDigits(params []byte, most int) bool {
+	digits, long := 0, false
+	for _, c := range params {
+		switch {
+		case c >= '0' && c <= '9':
+			digits++
+			long = long || digits > most
+		case c == ';':
+			digits = 0
+		default:
+			return false
+		}
+	}
+	return long
 }
 
 // mouseKind tells pointer motion with no button pressed (motion bit 32,
@@ -252,6 +296,42 @@ func colorReply(data []byte) (int, bool) {
 		}
 	}
 	return n, parts == 3 && digits > 0
+}
+
+// refusedAnswer measures a complete string shaped like an answer to a
+// colour or setting query (OSC 4;n;rgb:, OSC 10|11|12;rgb:, DCS 0|1 $ r)
+// that colorReply or settingReply refuse, however long: it is typed, but
+// never a key. It reports false while the string has not ended.
+func refusedAnswer(data []byte) (int, bool) {
+	body := data[2:]
+	switch {
+	case data[1] == 'P':
+		if len(body) < 3 || body[0] != '0' && body[0] != '1' || body[1] != '$' || body[2] != 'r' {
+			return 0, false
+		}
+	case hasPrefix(body, "10;rgb:") || hasPrefix(body, "11;rgb:") || hasPrefix(body, "12;rgb:"):
+	case hasPrefix(body, "4;"):
+		i := 2
+		for i < len(body) && body[i] >= '0' && body[i] <= '9' {
+			i++
+		}
+		if i == 2 || !hasPrefix(body[i:], ";rgb:") {
+			return 0, false
+		}
+	default:
+		return 0, false
+	}
+	for i := 2; i < len(data); i++ {
+		switch c := data[i]; {
+		case c == 0x07 && data[1] == ']':
+			return i + 1, true
+		case c == 0x1b:
+			return i + 2, i+1 < len(data) && data[i+1] == '\\'
+		case c < 0x20 || c >= 0x7f:
+			return 0, false
+		}
+	}
+	return 0, false
 }
 
 // settingReply accepts DCS 0|1 $ r Pt ST with printable Pt.
