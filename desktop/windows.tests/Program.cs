@@ -276,6 +276,20 @@ assertions = 0;
         Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/a", "http://localhost:4321/"))], origin) == null, "a process with a frame of another origin was chosen");
         Check(ScienceFrame.FrameProcesses([(1, Sources(origin.Replace("0123", "f123") + "/", origin[..origin.LastIndexOf(':')] + ":1/", "http://user@" + origin[7..] + "/")), workbenchProcess], origin) is [], "a process of another origin was chosen");
         Check(ScienceFrame.FrameProcesses([(1, Sources("")), workbenchProcess], "") is [], "a process chosen for no origin");
+        // A renderer's id taken over by a process started after the
+        // snapshot is never terminated (ScienceFrameHost.EndRenderer).
+        var killSnapshot = DateTime.UtcNow;
+        // Process start times come from the system clock tick, coarser than
+        // DateTime.UtcNow: the later process starts well after the snapshot.
+        Thread.Sleep(100);
+        using (var self = System.Diagnostics.Process.GetCurrentProcess())
+            Check(ScienceFrame.SameProcess(self.StartTime.ToUniversalTime(), killSnapshot), "a process started before the snapshot was not the renderer");
+        using (var later = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(OperatingSystem.IsWindows() ? "cmd.exe" : "/bin/sh", OperatingSystem.IsWindows() ? "/c exit 0" : "-c \"exit 0\"") { UseShellExecute = false, CreateNoWindow = true })!)
+        {
+            var laterStart = later.StartTime.ToUniversalTime();
+            later.WaitForExit();
+            Check(!ScienceFrame.SameProcess(laterStart, killSnapshot), "a process started after the snapshot was taken for the renderer");
+        }
 
         // Preferences: written before the browser starts, the default again without the switches.
         var data = Path.Combine(scienceRoot, "webview2");

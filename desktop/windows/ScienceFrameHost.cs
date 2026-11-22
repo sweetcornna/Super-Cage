@@ -305,6 +305,8 @@ internal sealed class ScienceFrameHost
     internal static async Task<bool> Terminate(CoreWebView2 core, string origin)
     {
         List<(int, IReadOnlyList<string>)> renderers;
+        // A process started after this moment has the id of one that is gone.
+        var snapshot = DateTime.UtcNow;
         try
         {
             var infos = await core.Environment.GetProcessExtendedInfosAsync();
@@ -315,14 +317,15 @@ internal sealed class ScienceFrameHost
         var chosen = ScienceFrame.FrameProcesses(renderers, origin);
         if (chosen == null || chosen.Count == 0) return false;
         foreach (var id in chosen)
-            if (!await EndRenderer(id)) return false;
+            if (!await EndRenderer(id, snapshot)) return false;
         return true;
     }
 
     // EndRenderer terminates one of the WebView's renderer processes: true
     // once it is gone, also when it was already going (a second frame of the
-    // same process).
-    private static async Task<bool> EndRenderer(int id)
+    // same process) and when its id now names a process started after the
+    // snapshot (ScienceFrame.SameProcess), which is never terminated.
+    private static async Task<bool> EndRenderer(int id, DateTime snapshot)
     {
         Process process;
         try { process = Process.GetProcessById(id); }
@@ -332,6 +335,7 @@ internal sealed class ScienceFrameHost
             try
             {
                 if (process.ProcessName != "msedgewebview2") return false;
+                if (!ScienceFrame.SameProcess(process.StartTime.ToUniversalTime(), snapshot)) return true;
                 process.Kill();
                 return true;
             }

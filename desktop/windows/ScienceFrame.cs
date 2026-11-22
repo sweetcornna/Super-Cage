@@ -89,6 +89,11 @@ internal static partial class ScienceFrame
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { return null; }
     }
 
+    // SameProcess: a process whose id the renderer list named at snapshot
+    // is still that renderer only if it started before the snapshot; one
+    // started later reuses the id of a renderer that is gone.
+    public static bool SameProcess(DateTime startedUtc, DateTime snapshotUtc) => startedUtc <= snapshotUtc;
+
     // Arguments is null (the environment options the window always had)
     // unless the window is built for host rendering (verified) and some
     // profile's workbench.json has science_host_render.
