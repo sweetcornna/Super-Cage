@@ -25,6 +25,8 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
+	"github.com/sylvinus/agent-vm/internal/cloudproxy"
 	"github.com/sylvinus/agent-vm/internal/entryproxy"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
@@ -105,7 +107,13 @@ func defaultEntryPaths(profile, executable string) (entryPaths, error) {
 // Windows it starts the command line directly), so the executable is quoted
 // for that and its % doubled.
 func entryProxyCommand(executable, environment string) string {
-	if slim := attach.Beside(executable); slim != "" {
+	if _, cloud := cloudentry.VMOf(environment); cloud {
+		// A cloud workspace's proxy speaks TLS: cage-cloud-entry, never
+		// the slim cage-attach (internal/cloudproxy), else cage itself.
+		if program := cloudproxy.Beside(executable); program != "" {
+			executable = program
+		}
+	} else if slim := attach.Beside(executable); slim != "" {
 		executable = slim
 	}
 	quoted := shellescape.Quote(executable)

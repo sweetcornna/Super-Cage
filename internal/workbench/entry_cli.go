@@ -15,6 +15,7 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
@@ -315,6 +316,11 @@ func entryIncludePrompt(preview entryInclude) string {
 // the Include line.
 func SSHCommand(defaultConfig, environment string, args []string) ([]string, error) {
 	configPath, err := entryProfileConfig(defaultConfig, environment)
+	if _, cloud := cloudentry.VMOf(environment); cloud {
+		// A cloud workspace has no profile here; its Host block is this
+		// computer's.
+		configPath, err = defaultConfig, nil
+	}
 	if err != nil {
 		return nil, err
 	}

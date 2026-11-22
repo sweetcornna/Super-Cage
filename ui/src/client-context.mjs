@@ -7,6 +7,12 @@ export function setClientContext(value) {
 export const getClientContext = () => current;
 export const isCloudWorkbench = () => current.mode === "remote" || current.tenant_workspace === true;
 export const isRemoteClient = () => current.mode === "remote";
+// 本机终端's entry writes this computer's ~/.ssh: the window on the
+// environment's own computer manages it, and the desktop app for the cloud
+// workspace it is connected to when the server offers that (cloud_entry,
+// only in a build with the cloud entry).
+export const localEntryAvailable = (context = current) =>
+  (context.mode !== "remote" && context.tenant_workspace !== true) || (context.desktop_gateway === true && context.cloud_entry === true);
 
 export function assertConnection(connectionID) {
   if (current.connection_id !== connectionID) {

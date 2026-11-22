@@ -1,7 +1,17 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { api, native } from "./api.js";
-import { clientKeyboard, clientStorageKey, isCloudWorkbench, isRemoteClient, runtimeURL, setClientContext } from "./client-context.mjs";
+import { clientKeyboard, clientStorageKey, isCloudWorkbench, isRemoteClient, localEntryAvailable, runtimeURL, setClientContext } from "./client-context.mjs";
+
+test("本机终端's entry: this computer's environments, and a cloud workspace only when the desktop offers it", () => {
+  assert.equal(localEntryAvailable({ mode: "local", connection_id: "local" }), true);
+  assert.equal(localEntryAvailable({ mode: "local", connection_id: "local", tenant_workspace: true }), false);
+  // The desktop app connected to a cloud workspace: only with the server's field.
+  assert.equal(localEntryAvailable({ mode: "remote", desktop_gateway: true }), false);
+  assert.equal(localEntryAvailable({ mode: "remote", desktop_gateway: true, cloud_entry: true }), true);
+  // A field from anything but the desktop app is not enough.
+  assert.equal(localEntryAvailable({ mode: "remote", cloud_entry: true }), false);
+});
 
 test("tenant browser uses cloud tools with the guest's local API generation", (t) => {
   environment(t);

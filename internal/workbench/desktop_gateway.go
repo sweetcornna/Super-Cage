@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
@@ -50,6 +51,7 @@ type desktopCandidate struct {
 type desktopTarget struct {
 	id, mode  string
 	vmID      string
+	hostID    string // the saved remote host of a "remote" target
 	remote    *remotehost.Manager
 	local     DesktopLocalController
 	ctx       context.Context
@@ -167,6 +169,10 @@ func (d *desktopGateway) context() ClientContext {
 				c.HostFingerprint = p.HostKey.Fingerprint
 			}
 		}
+		// The 本机终端 page of the cloud workspace (entry_cloud_desktop.go).
+		if _, cloud := d.cloudProfileOf(active); cloud {
+			c.CloudEntry = cloudentry.Open()
+		}
 	}
 	if c.State.Manifest != nil {
 		c.ServerPlatform = c.State.Manifest.Platform
@@ -215,6 +221,7 @@ func (d *desktopGateway) prepareLocked(in switchRequest) (*desktopCandidate, err
 	t := &desktopTarget{mode: in.Mode, vmID: in.VMID, ctx: ctx, cancel: cancel}
 	switch in.Mode {
 	case "remote":
+		t.hostID = in.HostID
 		t.remote = remotehost.NewManager(d.store)
 		secret := []byte(in.Passphrase)
 		st, err := t.remote.Connect(in.HostID, remotehost.ConnectSecrets{Passphrase: secret, Deploy: in.Deploy})

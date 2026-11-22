@@ -67,6 +67,9 @@ type ClientContext struct {
 	HostFingerprint string                     `json:"host_fingerprint,omitempty"`
 	ServerPlatform  string                     `json:"server_platform"`
 	Name            string                     `json:"name,omitempty"`
+	// CloudEntry: the desktop offers the 本机终端 page for the cloud
+	// workspace it is connected to (entry_cloud_desktop.go).
+	CloudEntry bool `json:"cloud_entry,omitempty"`
 }
 
 func (g *remoteGateway) context() ClientContext {
@@ -306,6 +309,10 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if err != nil {
 		http.Error(w, "连接不可用或已切换，请重新选择工作环境", 409)
+		return true
+	}
+	// The cloud entry's page is this computer's (entry_cloud_desktop.go).
+	if remote && s.cloudEntryRoute(w, r, session) {
 		return true
 	}
 	if r.URL.Path == "/api/diagnostics/export" {

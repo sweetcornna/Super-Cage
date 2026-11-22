@@ -4,7 +4,7 @@ import { Smartphone } from "lucide-react";
 import { PasswordVaultSettings } from "./password-vault";
 import { KeyRound } from "lucide-react";
 import { InlineSelect } from "./inline-select";
-import { clientKeyboard, getClientContext, isCloudWorkbench, isRemoteClient, saveClientKeyboard } from "./client-context.mjs";
+import { clientKeyboard, getClientContext, isCloudWorkbench, isRemoteClient, localEntryAvailable as entryAvailable, saveClientKeyboard } from "./client-context.mjs";
 import { shortcut, usesControl } from "./platform.mjs";
 import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -70,8 +70,9 @@ export function SettingsPanel({
   const vmContext = getClientContext();
   const vmName = vmContext.virtual_machines && !isRemoteClient() ? vmContext.name || "" : "";
   // 本机终端 writes this computer's ~/.ssh, so only the window on the
-  // environment's own computer manages it; the cloud path comes later.
-  const localEntryAvailable = !isRemoteClient() && !isCloudWorkbench();
+  // environment's own computer manages it, or the desktop app for its cloud
+  // workspace when the server offers it (client-context.mjs).
+  const localEntryAvailable = entryAvailable(vmContext);
   const [accountDirty, setAccountDirty] = useState(false);
   const [proxyDirty, setProxyDirty] = useState(false);
   const [resourceDirty, setResourceDirty] = useState(false);
