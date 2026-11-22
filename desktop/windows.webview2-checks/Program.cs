@@ -176,7 +176,10 @@ internal sealed class ChecksForm : Form
                 ("teardown", () => FrameCase("teardown", "")), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
                 ("steady", () => FrameCase("steady", "")), ("storage", StorageCase), ("navigation", NavigationCase),
                 ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase),
-                ("host", HostCase), ("kill-sweep", KillSweepCase),
+                // The host case runs last: a ScienceFrameHost stays subscribed to its
+                // core for the core's life (as in MainWindow, one host per WebView), and
+                // its frame navigation filter cancels every frame once it is detached.
+                ("kill-sweep", KillSweepCase), ("host", HostCase),
             })
             {
                 try { cases[name] = await run(); }

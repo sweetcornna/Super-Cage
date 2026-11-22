@@ -26,7 +26,12 @@ front, so the policy's front end is only recorded.
 | `navigation` | a top-level navigation and a reload held and issued again |
 | `frame-navigation` | the frame navigates itself to the workbench's origin |
 | `locale-twice` | two frames of one origin: the locale override's error text |
-| `kill-sweep` | the frame stores, the browser process is killed, a new WebView sweeps the journal |
+| `two-labels` | two frames of two labels armed at once: separate processes, call errors |
+| `kill-sweep` | the frame stores, the browser process is killed, a new WebView sweeps the journal (`ScienceFrameHost.Sweep`) |
+| `host` | the shell's own `ScienceFrameHost` against a recording front: attach, detach, an unexpected frame exit, a held reload |
+
+The `host` case runs last: a `ScienceFrameHost` stays subscribed to its
+WebView for the WebView's life, as in `MainWindow`.
 
 For each case it records the DevTools target events (with the session they
 arrived on), `ProcessFailed`, navigation events, `Target.getTargets` on the page
