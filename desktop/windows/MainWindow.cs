@@ -16,7 +16,9 @@ internal sealed class MainWindow : Form
     private readonly NotifyIcon tray;
     private readonly AppUpdater updater;
     private int expectedPort;
-    private bool controllerNeedsUpdate, allowQuit, bootstrapping, webFailed;
+    private bool controllerNeedsUpdate, allowQuit, webFailed;
+    // Which WebView a startup step belongs to (Initialize, Bootstrap).
+    private readonly WebGeneration generation = new();
     private bool completingSmoke;
     private string smokePhase = "starting";
     // Smoke only: what the Claude Science part of a smoke test recorded
@@ -173,6 +175,10 @@ internal sealed class MainWindow : Form
 
     private async Task Initialize(bool recreate = false)
     {
+        // From here on, what an earlier WebView's steps still await is stale:
+        // after each await below, and in Bootstrap, a step of an earlier
+        // generation stops without touching the window.
+        var turn = generation.Begin();
         smokePhase = "initializing_webview";
         retry.Enabled = false;
         try
@@ -197,6 +203,7 @@ internal sealed class MainWindow : Form
                     catch (TimeoutException) { }
                     finally { previous.BrowserProcessExited -= BrowserExited; }
                 }
+                if (!generation.IsCurrent(turn)) return;
             }
             // Before the browser process starts: no network prediction with
             // the switches, the default without them.
@@ -209,6 +216,7 @@ internal sealed class MainWindow : Form
             CrashReports.Sweep(data);
             var options = new CoreWebView2EnvironmentOptions(arguments) { IsCustomCrashReportingEnabled = true };
             var environment = await CoreWebView2Environment.CreateAsync(null, data, options);
+            if (!generation.IsCurrent(turn)) return;
             // A runtime without custom crash reporting has no failure report
             // folder either (they came together): said in the diagnostics,
             // the sweep still runs.
@@ -219,6 +227,7 @@ internal sealed class MainWindow : Form
             }
             webArguments = arguments;
             await web.EnsureCoreWebView2Async(environment);
+            if (!generation.IsCurrent(turn)) return;
             smokePhase = "webview_initialized";
             var core = web.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false; core.Settings.AreDefaultContextMenusEnabled = false;
@@ -235,6 +244,7 @@ internal sealed class MainWindow : Form
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.WebMessageReceived += Receive;
             core.ProcessFailed += (_, e) => {
+                if (!generation.IsCurrent(turn)) return;
                 // A frame's own process (the Claude Science frame's) leaves
                 // the window's document running (N4).
                 if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited && science != null)
@@ -248,6 +258,7 @@ internal sealed class MainWindow : Form
             // What a killed or crashed window's Claude Science frame stored
             // (N6); without a journal, one existence check.
             await ScienceFrameHost.Sweep(core, Path.Combine(Backend.Root, "webview2"));
+            if (!generation.IsCurrent(turn)) return;
             science = arguments == null ? null : new ScienceFrameHost(core, Backend.Root, Path.Combine(Backend.Root, "webview2"), reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
                 (uri, reload) => {
@@ -255,7 +266,7 @@ internal sealed class MainWindow : Form
                     if (reload) core.Reload(); else core.Navigate(uri);
                 });
             core.NavigationCompleted += (_, e) => {
-                if (heldNavigations.Remove(e.NavigationId)) return;
+                if (heldNavigations.Remove(e.NavigationId) || !generation.IsCurrent(turn)) return;
                 if (!e.IsSuccess) {
                     var reason = e.WebErrorStatus.ToString() switch {
                         "Timeout" => "等待本机后台响应超时",
@@ -269,16 +280,22 @@ internal sealed class MainWindow : Form
             };
             await core.AddScriptToExecuteOnDocumentCreatedAsync(BridgeScript);
             if (Program.SmokeOutput != null) await core.AddScriptToExecuteOnDocumentCreatedAsync(SmokeDiagnosticsScript);
+            if (!generation.IsCurrent(turn)) return;
             webFailed = false;
+            generation.Ready(turn);
             await Bootstrap();
         }
         catch (WebView2RuntimeNotFoundException)
         {
+            if (!generation.IsCurrent(turn)) return;
             Error("缺少 Microsoft Edge WebView2 Runtime。请运行 Super Cage 安装程序安装随附运行时后重试。");
             webFailed = true;
         }
-        catch (Exception error) { webFailed = true; Error("无法初始化工作台：" + error.Message); }
-        finally { retry.Enabled = true; }
+        // A stale step's failure (its WebView was disposed under it) is the
+        // newer WebView's business, which reports its own.
+        catch (Exception error) when (generation.IsCurrent(turn)) { webFailed = true; Error("无法初始化工作台：" + error.Message); }
+        catch (Exception) { }
+        finally { if (generation.IsCurrent(turn)) retry.Enabled = true; }
     }
 
     private async Task SmokeDeadline()
@@ -302,6 +319,11 @@ internal sealed class MainWindow : Form
         string? prepareStatus = null;
         string? prepareMessage = null;
         if (failure != null) errors.Add(failure);
+        if (SmokeScience.Refused)
+        {
+            smokeScience["refused"] = true;
+            errors.Add(ScienceSmoke.Variable + " 只在独立的配置目录中运行：默认配置目录上不更改本机渲染设置");
+        }
         if (smokeShown.Count != 0)
         {
             smokeScience["shown"] = smokeShown;
@@ -324,7 +346,7 @@ internal sealed class MainWindow : Form
             {
                 smokeScience["switches"] = webArguments != null;
                 if (smokeRestart != null) smokeScience["restartMilliseconds"] = smokeRestart.ElapsedMilliseconds;
-                try { smokeScience["page"] = await SmokeEvaluate(SmokeScienceProbe.Replace("ASK", SmokeScience.Length != 0 ? "true" : "false")); }
+                try { smokeScience["page"] = await SmokeEvaluate(SmokeScienceProbe.Replace("ASK", SmokeScience.Mode.Length != 0 ? "true" : "false")); }
                 catch (Exception error) { smokeScience["pageError"] = error.Message; }
             }
             var controllers = Backend.CaptureSmokeControllers();
@@ -379,18 +401,21 @@ internal sealed class MainWindow : Form
     // Science pane's switch and then its reload prompt do (neither needs a
     // guest) and completes in the WebView the reload made; =off turns the
     // switch off; =probe only asks. Each then asks the frame ops what the
-    // pane would (SmokeScienceProbe).
-    private static string SmokeScience => Environment.GetEnvironmentVariable("CAGE_SMOKE_SCIENCE") switch { "on" => "on", "off" => "off", "probe" => "probe", _ => "" };
+    // pane would (SmokeScienceProbe). ScienceSmoke.Of is where the variable
+    // is decided: smoke mode only, never on the default profile.
+    private static (string Mode, bool Refused) SmokeScience => ScienceSmoke.Of(Program.SmokeOutput,
+        Environment.GetEnvironmentVariable(ScienceSmoke.Variable), Backend.Root, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
 
     private async Task SmokeReady()
     {
         if (Program.SmokeOutput == null || completingSmoke) return;
-        if (SmokeScience is "on" or "off" && !smokeScience.ContainsKey("switch"))
+        var mode = SmokeScience.Mode;
+        if (mode is "on" or "off" && !smokeScience.ContainsKey("switch"))
         {
             try
             {
-                smokeScience["switch"] = await SmokeEvaluate(SmokeScienceSwitch.Replace("ENABLED", SmokeScience == "on" ? "true" : "false"));
-                if (SmokeScience == "on" && webArguments == null && ScienceFrame.Arguments(Backend.Root) != null)
+                smokeScience["switch"] = await SmokeEvaluate(SmokeScienceSwitch.Replace("ENABLED", mode == "on" ? "true" : "false"));
+                if (mode == "on" && webArguments == null && ScienceFrame.Arguments(Backend.Root) != null)
                 {
                     smokeRestart = System.Diagnostics.Stopwatch.StartNew();
                     smokeScience["restart"] = "requested";
@@ -423,14 +448,16 @@ internal sealed class MainWindow : Form
 
     private async Task Bootstrap(params string[] options)
     {
-        if (bootstrapping || web.CoreWebView2 == null) return;
-        bootstrapping = true;
+        if (web.CoreWebView2 == null || !generation.TryBootstrap(out var turn)) return;
         message.Text = "正在连接 Super Cage 工作台…"; status.Show(); status.BringToFront();
         retry.Hide(); existing.Hide(); complete.Hide();
         try
         {
             smokePhase = "starting_backend";
             var (exit, data) = await Backend.Json(["desktop", "--json", ..options], lifetime.Token);
+            // A restart replaced the WebView meanwhile: its own Bootstrap
+            // connects it, and this one's reply is for a window that is gone.
+            if (!generation.IsCurrent(turn)) return;
             smokePhase = "backend_returned";
             if (exit != 0) throw new IOException(data.Text("message") is { Length: > 0 } detail ? detail : "工作台未能启动");
             controllerNeedsUpdate = data.Text("status") != "ready";
@@ -443,12 +470,13 @@ internal sealed class MainWindow : Form
             Text = controllerNeedsUpdate ? "Super Cage（更新待完成）" : "Super Cage";
             web.CoreWebView2.Navigate(entry.AbsoluteUri);
         }
-        catch (OperationCanceledException) { if (!lifetime.IsCancellationRequested) Error("启动工作台失败：等待本机后台响应超时。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。"); }
+        catch (OperationCanceledException) { if (!lifetime.IsCancellationRequested && generation.IsCurrent(turn)) Error("启动工作台失败：等待本机后台响应超时。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。"); }
         catch (Exception error) {
+            if (!generation.IsCurrent(turn)) return;
             _ = Backend.Report("Workbench startup failed: " + error);
             Error(error.Message.Any(c => c is >= '\u4E00' and <= '\u9FFF') ? error.Message : "启动工作台失败：本机后台未返回可识别的原因（错误类型 " + error.GetType().Name + "）。请点击“重试连接”；仍失败时请保留此提示并反馈给维护者。");
         }
-        finally { bootstrapping = false; }
+        finally { generation.Bootstrapped(turn); }
     }
 
     private object RememberFiles(string[] paths)
@@ -490,7 +518,10 @@ internal sealed class MainWindow : Form
                 return true;
             case "restart":
                 if (ScienceFrame.Arguments(Backend.Root) == webArguments) return true;
-                BeginInvoke(async () => await Initialize(true));
+                // webArguments changes only once the new WebView's
+                // environment exists: until then a second request (a double
+                // click) is the same restart, not a second Initialize.
+                if (generation.TryRestart()) BeginInvoke(async () => await Initialize(true));
                 return true;
             default:
                 throw new InvalidDataException("未知的本机渲染操作");

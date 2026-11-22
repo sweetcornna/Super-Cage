@@ -267,6 +267,56 @@ assertions = 0;
 }
 Console.WriteLine($"Claude Science frame: {assertions} assertions passed.");
 
+// The window's startup steps belong to the WebView they began in
+// (WebGeneration): a restart while a Bootstrap still waits for the backend.
+assertions = 0;
+var generations = new WebGeneration();
+var firstView = generations.Begin();
+Check(!generations.TryBootstrap(out _), "a Bootstrap started before its WebView was ready");
+generations.Ready(firstView);
+Check(generations.TryBootstrap(out var waiting) && waiting == firstView, "the first WebView's Bootstrap did not start");
+Check(!generations.TryBootstrap(out _), "two Bootstraps ran at once in one WebView");
+Check(generations.TryRestart() && !generations.TryRestart(), "a second restart request of one WebView was not the same restart");
+var restartedView = generations.Begin();
+Check(!generations.IsCurrent(waiting) && generations.IsCurrent(restartedView), "the replaced WebView's Bootstrap still counted as current");
+Check(!generations.TryBootstrap(out _), "a Bootstrap started before the new WebView was ready");
+generations.Ready(firstView);
+Check(!generations.TryBootstrap(out _), "the replaced WebView's readiness counted for the new one");
+generations.Ready(restartedView);
+Check(generations.TryBootstrap(out var fresh) && fresh == restartedView, "the waiting Bootstrap of the replaced WebView held up the new one's");
+generations.Bootstrapped(waiting);
+Check(!generations.TryBootstrap(out _), "the replaced WebView's Bootstrap ending released the new one's");
+generations.Bootstrapped(fresh);
+Check(generations.TryBootstrap(out var again) && again == restartedView, "no Bootstrap could start after the last one ended");
+generations.Bootstrapped(again);
+Check(generations.TryRestart(), "the new WebView could not restart");
+var nextView = generations.Begin();
+Check(!generations.IsCurrent(restartedView) && generations.IsCurrent(nextView) && generations.TryRestart(), "a restart under way did not make the previous WebView's steps stale");
+Console.WriteLine($"Window startup generations: {assertions} assertions passed.");
+
+// The Claude Science smoke driver (ScienceSmoke): smoke mode only, never
+// the default profile.
+assertions = 0;
+var smokeHome = Path.Combine(Path.GetTempPath(), "cage-smoke-home");
+var defaultProfile = Path.Combine(smokeHome, ".claude-cage");
+var isolated = Path.Combine(smokeHome, "cage-smoke-profile");
+var smokeReport = Path.Combine(smokeHome, "smoke.json");
+Check(ScienceSmoke.Of(null, "on", isolated, smokeHome) == ("", false), "the driver ran outside smoke mode");
+Check(ScienceSmoke.Of(smokeReport, null, isolated, smokeHome) == ("", false) && ScienceSmoke.Of(smokeReport, "ON", isolated, smokeHome) == ("", false), "an unknown mode was driven");
+foreach (var mode in new[] { "on", "off", "probe" })
+{
+    Check(ScienceSmoke.Of(smokeReport, mode, isolated, smokeHome) == (mode, false), "an isolated profile refused " + mode);
+    Check(ScienceSmoke.Of(smokeReport, mode, defaultProfile, smokeHome) == ("", true), "the default profile ran " + mode);
+}
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(defaultProfile, "client"), smokeHome) == ("", true), "the default client profile ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", defaultProfile + Path.DirectorySeparatorChar, smokeHome) == ("", true), "the default profile with a trailing separator ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(smokeHome, "x", "..", ".claude-cage"), smokeHome) == ("", true), "a path through .. into the default profile ran the driver");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(smokeHome, ".claude-cage-smoke"), smokeHome) == ("on", false), "a sibling with the same prefix was refused");
+Check(ScienceSmoke.Of(smokeReport, "on", Path.Combine(defaultProfile, "..", "cage-smoke-profile"), smokeHome) == ("on", false), "a path out of the default profile was refused");
+if (OperatingSystem.IsWindows())
+    Check(ScienceSmoke.Of(smokeReport, "on", defaultProfile.ToUpperInvariant(), smokeHome) == ("", true), "the default profile in other letter case ran the driver");
+Console.WriteLine($"Claude Science smoke driver: {assertions} assertions passed.");
+
 assertions = 0;
 Check(UpdatePolicy.IsWorkbench("http://localhost:4321/", 4321), "expected local origin rejected");
 foreach (var origin in new[] { "https://localhost:4321/", "http://localhost:4322/", "http://localhost.evil:4321/", "http://user@localhost:4321/", "http://127.0.0.1:4321/", "file:///C:/workbench.html" })
