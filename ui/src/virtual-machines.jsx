@@ -4,6 +4,8 @@ import { Check, LoaderCircle, Monitor, Plus } from "lucide-react";
 import { api } from "./api";
 import { getClientContext } from "./client-context.mjs";
 import { Modal } from "./modal";
+import { EmptyState } from "./drawings";
+import "./virtual-machines.css";
 
 const endpoint = "/client/virtual-machines";
 
@@ -104,10 +106,10 @@ export function VirtualMachines({ onClose }) {
   }
 
   return createPortal(<Modal title="虚拟机" onClose={busy ? undefined : onClose}>
-    <div className="modal-body project-form">
+    <div className="modal-body project-form vm-dialog">
       {error && <p className="error-message" role="alert">{error}</p>}
       {!inventory && (error
-        ? <button type="button" onClick={() => { setError(""); setLoadAttempt((value) => value + 1); }}>重新读取</button>
+        ? <button type="button" className="vm-retry" onClick={() => { setError(""); setLoadAttempt((value) => value + 1); }}>重新读取</button>
         : <p role="status">正在读取虚拟机…</p>)}
       {inventory && <>
         {inventory.vms.length > 0 ? <fieldset className="project-picker-list" disabled={Boolean(busy)}>
@@ -116,13 +118,13 @@ export function VirtualMachines({ onClose }) {
             const current = vm.id === inventory.current_id;
             return <button type="button" className="ssh-host-row" key={vm.id} aria-current={current || undefined}
               disabled={current} onClick={() => void run(vm.id, () => open(vm.id))}>
-              <Monitor size={16} aria-hidden="true" />
+              <i className="vm-mark" aria-hidden="true"><Monitor size={16} /></i>
               <span><strong>{vm.name}</strong>{current && <small>当前虚拟机</small>}</span>
               {current && <Check size={15} aria-hidden="true" />}
               {busy === vm.id && <LoaderCircle size={15} className="spin" aria-label="正在切换" />}
             </button>;
           })}
-        </fieldset> : <p>还没有虚拟机。</p>}
+        </fieldset> : <EmptyState compact drawing="server" title="还没有虚拟机">还没有虚拟机。新建一台，为不同的项目分开环境。</EmptyState>}
         <form className="project-form" onSubmit={create}>
           <label htmlFor={nameID}>虚拟机名称</label>
           <div className="folder-input">

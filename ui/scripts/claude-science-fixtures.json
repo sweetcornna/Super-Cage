@@ -1,0 +1,259 @@
+{
+  "unsupported-architecture": {
+    "status": 200,
+    "body": {
+      "supported": false,
+      "unsupported_code": "architecture",
+      "unsupported_reason": "Claude Science 暂无 Linux arm64 官方版本，只能在 x86-64 Linux 客机中使用。",
+      "installed": false,
+      "version": "",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": false,
+      "ready": false,
+      "failed": false,
+      "signed_in": null
+    }
+  },
+  "not-installed": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": false,
+      "version": "",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": false,
+      "ready": false,
+      "failed": false,
+      "signed_in": null,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 11264
+    }
+  },
+  "installing": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": false,
+      "version": "",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": false,
+      "ready": false,
+      "failed": false,
+      "signed_in": null,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 11264,
+      "operation": "install"
+    }
+  },
+  "stopped": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": false,
+      "ready": false,
+      "failed": false,
+      "signed_in": null,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024
+    }
+  },
+  "running-signed-out": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": false,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z"
+    }
+  },
+  "running-signed-in": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z"
+    }
+  },
+  "running-host-render-available": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": false,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": true,
+        "enabled": false,
+        "running": false,
+        "audit": {
+          "timezone": false,
+          "offset": false,
+          "locale": false,
+          "known": false
+        },
+        "session": false
+      }
+    }
+  },
+  "running-host-render": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": true,
+        "enabled": true,
+        "running": true,
+        "audit": {
+          "timezone": true,
+          "offset": true,
+          "locale": true,
+          "known": true
+        },
+        "session": true,
+        "transport": "in-process"
+      }
+    }
+  },
+  "running-host-render-elsewhere": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "host_render": {
+        "available": false,
+        "unavailable_code": "platform",
+        "unavailable_reason": "本机渲染目前只在 Windows 版 Super Cage 窗口中提供：只有它的网页组件能把页面的时区、语言和浏览器标识换成环境的。",
+        "enabled": false,
+        "running": false,
+        "audit": {
+          "timezone": false,
+          "offset": false,
+          "locale": false,
+          "known": false
+        },
+        "session": false
+      }
+    }
+  },
+  "update-required": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": true,
+      "running": true,
+      "ready": true,
+      "failed": false,
+      "signed_in": true,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "port": 47800,
+      "started_at": "2026-11-20T09:30:00.000Z",
+      "required_version": "0.1.80",
+      "update_via": "super-cage",
+      "update_hint": "Anthropic 要求 Claude Science 0.1.80 或更高版本才能继续使用，当前 Super Cage 提供的是 0.1.73。请先更新 Super Cage，再在这里更新 Claude Science。"
+    }
+  },
+  "error": {
+    "status": 200,
+    "body": {
+      "supported": true,
+      "architecture": "x86_64",
+      "installed": true,
+      "version": "0.1.73",
+      "pinned_version": "0.1.73",
+      "update_available": false,
+      "update_required": null,
+      "running": false,
+      "ready": false,
+      "failed": true,
+      "signed_in": null,
+      "disk_free_mb": 38912,
+      "disk_required_mb": 1024,
+      "failure_reason": "exit"
+    }
+  },
+  "unreachable": {
+    "status": 502,
+    "text": "读取 Claude Science 状态失败：未能取得可识别的错误原因。请确认环境仍在运行；重新连接后再打开。持续失败时导出诊断包。"
+  }
+}

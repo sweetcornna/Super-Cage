@@ -82,6 +82,33 @@ func TestCodexBalancedSchedulingUsesLoadHeadroomRotationAndAffinity(t *testing.T
 	}
 }
 
+func TestCodexAllocationCountsPhoneTurns(t *testing.T) {
+	s := testServer(t)
+	a, b := strings.Repeat("a", 24), strings.Repeat("b", 24)
+	list := codexAccountList{Scheduling: (claudeScheduling{}).defaults(), Accounts: []codexAccount{codexFixture(a, "a@example.test"), codexFixture(b, "b@example.test")}}
+	if err := s.saveCodexAccounts(list); err != nil {
+		t.Fatal(err)
+	}
+	none := func(context.Context, []string) (map[string]codexGuestQuota, error) { return nil, nil }
+	if selection, err := s.allocateCodexAccount(list, "", none); err != nil || selection.ID != a {
+		t.Fatal("idle roster", selection, err)
+	}
+	id := "6a1e8b4e-6f1d-4c1a-9b2e-0c3d4e5f6a7b"
+	s.mobileCLI.mu.Lock()
+	s.mobileCLI.catalog = map[string]mobileSummary{id: {ID: id, Provider: codexProvider, CodexAccountID: a}}
+	s.mobileCLI.codexOwner = map[string]string{id: "phone"}
+	s.mobileCLI.mu.Unlock()
+	if selection, err := s.allocateCodexAccount(list, "", none); err != nil || selection.ID != b {
+		t.Fatal("a phone turn's account was not counted", selection, err)
+	}
+	s.mobileCLI.mu.Lock()
+	s.mobileCLI.codexOwner[id] = ""
+	s.mobileCLI.mu.Unlock()
+	if selection, _ := s.allocateCodexAccount(list, "", none); selection.ID != a {
+		t.Fatal("an idle session still counted", selection)
+	}
+}
+
 func TestCodexEmptyRosterFallsBackToDefaultCodexHome(t *testing.T) {
 	s := testServer(t)
 	s.codexAccounts.probe = func(context.Context, string) (codexGuestSnapshot, error) { return codexGuestSnapshot{}, nil }

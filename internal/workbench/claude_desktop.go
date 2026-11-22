@@ -318,14 +318,34 @@ if test -n "$manager" && test "$(cat /run/cage-desktop/display-scale 2>/dev/null
   printf '%%s\n' "$scale" > /run/cage-desktop/display-scale
 fi
 name=cage-%dx%d
-if ! xrandr --query | grep -q " $name "; then
-  xrandr --newmode "$name" %.3f %d %d %d %d %d %d %d %d +HSync -VSync
-  xrandr --addmode VNC-0 "$name"
+# The last four sizes stay defined. Switching to one of them is one xrandr
+# call, so a sidebar that opens and closes does not rebuild a mode each time;
+# a new size takes three. Older modes go after the switch, in the background
+# and outside the lock, so that no viewer waits for a removal.
+modes=/run/cage-desktop/resize-modes
+sweep=
+if test -f "$modes" && grep -qx -- "$name" "$modes" && xrandr --output VNC-0 --mode "$name" 2>/dev/null; then
+  :
+else
+  # The mode may exist already, created by an earlier run or an earlier
+  # version and perhaps on the output too. Only the switch has to succeed.
+  xrandr --newmode "$name" %.3f %d %d %d %d %d %d %d %d +HSync -VSync 2>/dev/null || true
+  xrandr --addmode VNC-0 "$name" 2>/dev/null || true
+  xrandr --output VNC-0 --mode "$name"
 fi
-xrandr --output VNC-0 --mode "$name"
-for old in $(xrandr --query | awk '/^ +cage-/ {print $1}'); do
-  if [ "$old" != "$name" ]; then xrandr --delmode VNC-0 "$old"; xrandr --rmmode "$old"; fi
-done`, scale, wid, hei, wid, hei, float64((wid+32)*(hei+8)*60)/1000000, wid, wid+8, wid+16, wid+32, hei, hei+1, hei+2, hei+8)
+# Without a list, modes of an earlier version may be left over.
+test -f "$modes" || sweep=1
+{ grep -vx -- "$name" "$modes" 2>/dev/null || true; printf '%%s\n' "$name"; } > "$modes.new"
+if test "$(awk 'END {print NR}' "$modes.new")" -gt 4; then sweep=1; fi
+tail -n 4 "$modes.new" > "$modes.keep"
+mv "$modes.keep" "$modes"
+rm -f "$modes.new"
+if test -n "$sweep"; then
+  # Closing the lock and the output lets the caller's session finish now.
+  ( for old in $(xrandr --query | awk '/^ +cage-[0-9]+x[0-9]+ / {print $1}'); do
+      if ! grep -qx -- "$old" "$modes"; then xrandr --delmode VNC-0 "$old" || true; xrandr --rmmode "$old" || true; fi
+    done ) </dev/null >/dev/null 2>&1 9>&- &
+fi`, scale, wid, hei, wid, hei, float64((wid+32)*(hei+8)*60)/1000000, wid, wid+8, wid+16, wid+32, hei, hei+1, hei+2, hei+8)
 }
 
 func (s *Server) claudeDesktopVNC(w http.ResponseWriter, r *http.Request) {
@@ -337,12 +357,10 @@ func (s *Server) claudeDesktopVNC(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "环境尚未启动", 409)
 		return
 	}
-	release, err := s.acquireDesktopView()
-	if err != nil {
-		http.Error(w, "无法恢复 Claude Desktop 画面，请重新连接", http.StatusBadGateway)
-		return
-	}
-	defer release()
+	// The application's windows are restored in the background, in parallel
+	// with the connection to the display below.
+	viewer := s.joinDesktopView()
+	defer viewer.close()
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	// No extra localhost port or public VNC listener on the host. SSH is bound
@@ -366,5 +384,5 @@ func (s *Server) claudeDesktopVNC(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { cancel(); writer.Close(); reader.Close(); _ = cmd.Wait() }()
-	s.streamVNC(w, r, reader, writer, func() { cancel(); _ = writer.Close(); _ = reader.Close() })
+	s.streamDisplay(w, r, reader, writer, func() { cancel(); _ = writer.Close(); _ = reader.Close() }, viewer)
 }

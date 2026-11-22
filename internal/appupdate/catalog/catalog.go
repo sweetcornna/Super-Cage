@@ -5,7 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"golang.org/x/mod/semver"
 )
@@ -25,17 +28,71 @@ type Asset struct {
 	Size   int64  `json:"size"`
 	Digest string `json:"digest"`
 	State  string `json:"state"`
+	// UpdatedAt is when the file was last uploaded. Replacing a file of an
+	// old release moves it, while the release's publication time stays.
+	UpdatedAt string `json:"updated_at"`
 }
 type Release struct {
-	Tag        string  `json:"tag_name"`
-	Draft      bool    `json:"draft"`
-	Prerelease bool    `json:"prerelease"`
-	Assets     []Asset `json:"assets"`
+	Tag        string `json:"tag_name"`
+	Draft      bool   `json:"draft"`
+	Prerelease bool   `json:"prerelease"`
+	// PublishedAt is GitHub's RFC 3339 publication time. Unattended updates
+	// require a minimum age; an absent or invalid time is never old enough.
+	PublishedAt string  `json:"published_at"`
+	Assets      []Asset `json:"assets"`
 }
 type Candidate struct {
-	Version   string `json:"version"`
+	Version     string `json:"version"`
+	PublishedAt string `json:"published_at,omitempty"`
+	// ChangedAt and Release are Release.ChangedAt and Release.Key.
+	ChangedAt string `json:"changed_at,omitempty"`
+	Release   string `json:"release,omitempty"`
 	Archive   Asset  `json:"archive"`
 	Checksums Asset  `json:"checksums"`
+}
+
+// ChangedAt is the newest of the release's publication time and every
+// file's upload time, in RFC 3339: the moment the release last changed. It
+// is empty when any of them is missing or invalid, which the unattended age
+// rule reads as "too new".
+func (r Release) ChangedAt() string {
+	newest, err := time.Parse(time.RFC3339, r.PublishedAt)
+	if err != nil {
+		return ""
+	}
+	for _, a := range r.Assets {
+		t, err := time.Parse(time.RFC3339, a.UpdatedAt)
+		if err != nil {
+			return ""
+		}
+		if t.After(newest) {
+			newest = t
+		}
+	}
+	return newest.UTC().Format(time.RFC3339)
+}
+
+// Key identifies the published files of a release: it changes when any file
+// is added, removed or replaced.
+func (r Release) Key() string {
+	assets := append([]Asset(nil), r.Assets...)
+	sort.Slice(assets, func(i, j int) bool { return assets[i].Name < assets[j].Name })
+	hash := sha256.New()
+	fmt.Fprintf(hash, "%s\x00%s\n", r.Tag, r.PublishedAt)
+	for _, a := range assets {
+		fmt.Fprintf(hash, "%s\x00%d\x00%s\x00%s\x00%s\n", a.Name, a.Size, a.Digest, a.UpdatedAt, a.State)
+	}
+	return hex.EncodeToString(hash.Sum(nil))[:32]
+}
+
+// Newer is the newest release on the current channel, whether or not it has a
+// package this platform may install in place.
+type Newer struct {
+	Version     string
+	PublishedAt string
+	// Reason explains, in the product's words, why the release can only be
+	// installed by hand. It is empty when Select would choose this release.
+	Reason string
 }
 
 // archiveNames lists the accepted package names, current name first. Releases
@@ -58,28 +115,89 @@ func archiveNames(version, goos, goarch string) ([]string, error) {
 	return []string{"Super-Cage-" + version + suffix, "Cage-" + version + suffix}, nil
 }
 
+// onChannel reports whether r is a published release newer than current on
+// current's channel: a stable version never moves to a prerelease.
+func onChannel(r Release, currentTag string) bool {
+	if r.Draft || !strings.HasPrefix(r.Tag, "v") || !semver.IsValid(r.Tag) || semver.Canonical(r.Tag) != r.Tag || semver.Compare(r.Tag, currentTag) <= 0 {
+		return false
+	}
+	pre := r.Prerelease || semver.Prerelease(r.Tag) != ""
+	return semver.Prerelease(currentTag) != "" || !pre
+}
+
+func currentTag(current string) (string, error) {
+	tag := "v" + current
+	if !semver.IsValid(tag) || semver.Canonical(tag) != tag {
+		return "", errors.New("当前应用版本无效，无法安全比较更新")
+	}
+	return tag, nil
+}
+
+// Latest returns the newest release on current's channel and, when Select
+// would not install it in place, the reason a person must install it. A
+// newer release without a usable package is therefore reported instead of
+// looking like "no update". It never widens what Select accepts.
+func Latest(releases []Release, current, goos, goarch string) (*Newer, error) {
+	tag, err := currentTag(current)
+	if err != nil {
+		return nil, err
+	}
+	var newest *Release
+	for i, r := range releases {
+		if onChannel(r, tag) && (newest == nil || semver.Compare(r.Tag, newest.Tag) > 0) {
+			newest = &releases[i]
+		}
+	}
+	if newest == nil {
+		return nil, nil
+	}
+	version := strings.TrimPrefix(newest.Tag, "v")
+	n := &Newer{Version: version, PublishedAt: newest.PublishedAt}
+	if c, err := Select([]Release{*newest}, current, goos, goarch); err != nil || c == nil {
+		n.Reason = manualReason(*newest, version, goos, goarch)
+	}
+	return n, nil
+}
+
+// manualReason names the published package a person can install by hand.
+// Unnotarized macOS images and unsigned Windows installers are published for
+// manual installation only; the in-app updater keeps refusing them.
+func manualReason(r Release, version, goos, goarch string) string {
+	has := func(name string) bool {
+		for _, a := range r.Assets {
+			if a.Name == name && a.State == "uploaded" {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case goos == "darwin" && goarch == "arm64" && has("Super-Cage-"+version+"-macos-arm64-signed.dmg"):
+		return "此版本的 macOS 安装包未经 Apple 公证，暂不能在应用内安装。请下载 DMG，退出 Super Cage 后替换应用。"
+	case goos == "windows" && goarch == "amd64" && has("Super-Cage-"+version+"-windows-amd64-setup-unsigned.exe"):
+		return "此版本的 Windows 安装包没有发布者签名，不能在应用内安装。请保存工作、停止环境并退出 Super Cage 后运行安装包。"
+	}
+	return "此版本没有可在应用内安装的本平台安装包，请从发布页面下载。"
+}
+
 func Select(releases []Release, current, goos, goarch string) (*Candidate, error) {
 	if _, err := archiveNames(current, goos, goarch); err != nil {
 		return nil, err
 	}
-	currentTag := "v" + current
-	if !semver.IsValid(currentTag) || semver.Canonical(currentTag) != currentTag {
-		return nil, errors.New("当前应用版本无效，无法安全比较更新")
+	currentTag, err := currentTag(current)
+	if err != nil {
+		return nil, err
 	}
 	var best *Candidate
 	for _, r := range releases {
-		if r.Draft || !strings.HasPrefix(r.Tag, "v") || !semver.IsValid(r.Tag) || semver.Canonical(r.Tag) != r.Tag || semver.Compare(r.Tag, currentTag) <= 0 {
-			continue
-		}
-		pre := r.Prerelease || semver.Prerelease(r.Tag) != ""
-		if semver.Prerelease(currentTag) == "" && pre {
+		if !onChannel(r, currentTag) {
 			continue
 		}
 		v := strings.TrimPrefix(r.Tag, "v")
 		if best != nil && semver.Compare(r.Tag, "v"+best.Version) <= 0 {
 			continue
 		}
-		c := Candidate{Version: v}
+		c := Candidate{Version: v, PublishedAt: r.PublishedAt, ChangedAt: r.ChangedAt(), Release: r.Key()}
 		names, _ := archiveNames(v, goos, goarch)
 		rank := len(names)
 		for _, a := range r.Assets {

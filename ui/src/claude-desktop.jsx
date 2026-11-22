@@ -17,7 +17,15 @@ import { DeviceCheckButton } from "./device-checks";
 import { RemoteView } from "./views";
 import { useWindowVisibility } from "./window-visibility";
 import { guestCapability } from "./guest-capabilities.mjs";
+import { getClientContext } from "./client-context.mjs";
+import { displayKey, displaySessions } from "./remote-session.js";
 import "./claude-desktop.css";
+
+// The last status read for each workbench connection. A return to the pane
+// shows the kept picture at once instead of the empty state until the first
+// read finishes; the read that follows corrects it.
+const desktopStatus = new Map();
+const statusKey = () => getClientContext().connection_id || "";
 
 const desktopZooms = [0.75, 0.9, 1, 1.1, 1.25, 1.5];
 
@@ -135,12 +143,21 @@ export function ClaudeDesktop({
   const [zoom, setZoom] = useDesktopZoom(automatic);
   const windowVisible = useWindowVisibility();
   const screenVisible = visible && windowVisible;
-  const [desktop, setDesktop] = useState(null);
+  const [desktop, setDesktopState] = useState(() => desktopStatus.get(statusKey()) ?? null);
+  const setDesktop = (value) => {
+    desktopStatus.set(statusKey(), value);
+    // A stopped app has no picture to come back to: end a kept stream now.
+    if (value && !value.running) displaySessions.release(displayKey(true));
+    setDesktopState(value);
+  };
   const [error, setError] = useState("");
   const [statusError, setStatusError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [jobID, setJobID] = useState("");
   const opened = useRef(false);
+  // The poll below outlives renders; it reads the current job from here.
+  const jobRef = useRef("");
+  jobRef.current = jobID;
   const statusRequest = useRef(null);
   const statusRevision = useRef(0);
   const ownJob = status.job?.kind?.startsWith("claude-desktop-");
@@ -186,7 +203,7 @@ export function ClaudeDesktop({
       if (disposed) return;
       if (value && !opened.current) {
         opened.current = true;
-        if (value.installed && !value.running && !value.failed && !jobID)
+        if (value.installed && !value.running && !value.failed && !jobRef.current)
           await run("start");
       }
       if (!disposed) timer = setTimeout(poll, 5000);

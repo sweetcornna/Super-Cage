@@ -14,22 +14,55 @@
  *   xl 26px  section title
  */
 .settings-page {
-  --s-xs: 0.9286rem;
-  --s-sm: 1rem;
-  --s-md: 1.0714rem;
-  --s-lg: 1.2143rem;
-  --s-xl: 1.8571rem;
-  --s-radius: 10px;
-  --s-control: 40px;
-  --s-content: 760px;
+  --s-xs: var(--fs-secondary);
+  --s-sm: var(--fs-body);
+  --s-md: var(--fs-body);
+  --s-lg: var(--fs-lead);
+  --s-xl: var(--fs-title);
+  --s-radius: var(--r-md);
+  --s-control: var(--h-control);
+  --s-content: var(--content-form);
   --s-gutter: max(48px, calc((100% - var(--s-content)) / 2));
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  background: var(--paper);
   line-height: 1.6;
+  animation: surface-enter 160ms var(--ease-out);
+}
+.settings-page .settings-main {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.settings-page .settings-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+.settings-page .settings-sidebar nav {
+  display: flex;
+  flex-direction: column;
+}
+.settings-page .back-to-workspace {
+  justify-content: flex-start;
+  gap: 8px;
+  border: 0;
+  background: none;
+  font-weight: 400;
 }
 
 /* ── Sidebar ─────────────────────────────────────────────── */
 .settings-page .settings-sidebar {
+  display: flex;
+  flex: none;
+  flex-direction: column;
   width: max(var(--sidebar-width), 248px);
-  padding: 20px 14px;
+  padding: 12px 10px;
+  border-right: 1px solid var(--line);
+  background: var(--sidebar);
 }
 .settings-page .back-to-workspace {
   align-self: flex-start;
@@ -44,10 +77,12 @@
   color: var(--strong);
 }
 .settings-page .settings-sidebar h2 {
-  margin: 28px 12px 16px;
-  font-size: 1.5714rem;
-  font-weight: 650;
-  letter-spacing: 0.01em;
+  margin: 24px 10px 14px;
+  font-family: var(--font-serif);
+  font-size: var(--fs-title);
+  font-weight: 500;
+  line-height: var(--lh-title);
+  letter-spacing: var(--track-cjk);
   color: var(--strong);
 }
 .settings-page .settings-sidebar .settings-scope {
@@ -62,11 +97,15 @@
   gap: 2px;
 }
 .settings-page .settings-sidebar nav button {
-  min-height: 40px;
-  padding: 8px 12px;
-  gap: 12px;
-  border-radius: 8px;
-  font-size: var(--s-md);
+  justify-content: flex-start;
+  min-height: 2.4286rem;
+  padding: 0 10px;
+  gap: 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  font-size: var(--fs-nav);
+  font-weight: 450;
   color: var(--ink);
 }
 .settings-page .settings-sidebar nav button svg {
@@ -76,7 +115,8 @@
   background: var(--hover);
 }
 .settings-page .settings-sidebar nav button.selected {
-  font-weight: 600;
+  background: var(--selected);
+  font-weight: 550;
   color: var(--strong);
 }
 .settings-page .settings-sidebar nav button.selected svg {
@@ -98,10 +138,11 @@
 }
 .settings-page .settings-content .section-title h3 {
   margin: 0 0 8px;
+  font-family: var(--font-serif);
   font-size: var(--s-xl);
-  font-weight: 650;
-  line-height: 1.3;
-  letter-spacing: 0.01em;
+  font-weight: 500;
+  line-height: var(--lh-title);
+  letter-spacing: var(--track-cjk);
   color: var(--strong);
 }
 .settings-page .settings-content .section-title p {
@@ -160,18 +201,12 @@
 }
 .settings-page .settings-content input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]),
 .settings-page .settings-content .inline-select-trigger {
+  width: 100%;
   height: var(--s-control);
   padding: 0 12px;
-  border-radius: 8px;
   font-size: var(--s-md);
   font-weight: 400;
-  color: var(--strong);
-  transition: border-color 0.12s, box-shadow 0.12s;
-}
-.settings-page .settings-content input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="color"]):focus-visible {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--ink);
 }
 .settings-page .settings-content input::placeholder {
   color: color-mix(in srgb, var(--muted) 75%, transparent);
@@ -199,10 +234,11 @@
 }
 
 /* ── Buttons ─────────────────────────────────────────────── */
-.settings-page .settings-content button:not(.text-button):not(.icon-button) {
-  min-height: 36px;
-  padding: 6px 14px;
-  border-radius: 8px;
+/* The sub-pages (settings-pages.css) size their own buttons; :where keeps
+   this rule's weight unchanged for 通用 and 外观. */
+.settings-page .settings-content:where(:not(.settings-subpage)) button:not(.text-button):not(.icon-button):not(.inline-select-trigger) {
+  min-height: var(--h-control);
+  padding: 0 14px;
   font-size: var(--s-sm);
 }
 .settings-page .settings-content .text-button {
@@ -226,28 +262,14 @@
   line-height: 1.65;
   color: var(--muted);
 }
-.settings-page .toggle-row input,
-.settings-page .appearance-row input[role="switch"] {
-  width: 40px;
-  height: 24px;
-}
-.settings-page .toggle-row input:after,
-.settings-page .appearance-row input[role="switch"]:after {
-  width: 18px;
-  height: 18px;
-}
-.settings-page .toggle-row input:checked:after,
-.settings-page .appearance-row input[role="switch"]:checked:after {
-  transform: translateX(16px);
-}
 
 /* Inline notes under an automatic setting. */
 .settings-page .settings-content .inline-info {
   align-items: center;
   gap: 10px;
   margin: -8px 0 24px;
-  padding: 12px 14px;
-  border-radius: var(--s-radius);
+  padding: 10px 14px;
+  border-radius: var(--r-md);
   font-size: var(--s-xs);
   line-height: 1.6;
 }
@@ -258,21 +280,11 @@
 
 /* ── Choice cards (keyboard habit) ───────────────────────── */
 .settings-page .settings-content .choice-list {
-  gap: 12px;
   margin-bottom: 16px;
 }
 .settings-page .settings-content .choice {
   gap: 14px;
   padding: 16px 18px;
-  border-radius: var(--s-radius);
-  transition: border-color 0.12s, background 0.12s;
-}
-.settings-page .settings-content .choice:hover:not(.checked) {
-  background: var(--hover);
-}
-.settings-page .settings-content .choice.checked {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
 }
 .settings-page .settings-content .choice input {
   width: 16px;
@@ -289,13 +301,6 @@
   font-size: var(--s-xs);
   line-height: 1.65;
 }
-
-/* ── Shortcut list ───────────────────────────────────────── */
-.settings-page .settings-content .shortcut-list {
-  border: 1px solid var(--line);
-  border-radius: var(--s-radius);
-  overflow: hidden;
-}
 .settings-page .settings-content .shortcut-list > div {
   align-items: center;
   min-height: 48px;
@@ -305,16 +310,6 @@
 }
 .settings-page .settings-content .shortcut-list > div:last-child {
   border-bottom: 0;
-}
-.settings-page .settings-content .shortcut-list kbd {
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-bottom-width: 2px;
-  border-radius: 6px;
-  background: var(--chrome);
-  font-size: var(--s-xs);
-  font-variant-numeric: tabular-nums;
-  color: var(--strong);
 }
 
 /* ── Summary rows, explanations, results ─────────────────── */
@@ -330,12 +325,12 @@
   font-size: var(--s-md);
 }
 .settings-page .settings-content .project-explanation {
-  gap: 16px;
+  gap: 14px;
   margin: 8px 0 0;
-  padding: 18px 20px;
-  border: 1px solid var(--line);
-  border-radius: var(--s-radius);
-  background: var(--chrome);
+  padding: 16px 18px;
+  border: 0;
+  border-radius: var(--r-lg);
+  background: var(--soft);
 }
 .settings-page .settings-content .project-explanation strong {
   font-size: var(--s-md);
@@ -464,19 +459,6 @@
   font-size: var(--s-xs);
 }
 
-/* ── Password vault ──────────────────────────────────────── */
-.settings-page .vault-note {
-  font-size: var(--s-xs);
-}
-.settings-page .vault-entry strong {
-  font-size: var(--s-md);
-}
-.settings-page .settings-content .vault-actions button {
-  min-height: 32px;
-  padding: 4px 12px;
-  font-size: var(--s-xs);
-}
-
 /* ── Appearance ──────────────────────────────────────────── */
 .settings-page .appearance-row > div:first-child > span {
   font-size: var(--s-md);
@@ -552,45 +534,25 @@
   font-size: var(--s-md);
 }
 
-/* ── About ───────────────────────────────────────────────── */
-.settings-page .about-build > div {
-  padding: 14px 0;
-  font-size: var(--s-md);
-}
-.settings-page .about-result h4 {
-  margin: 0 0 8px;
-  font-size: var(--s-md);
-}
-.settings-page .about-result-detail {
-  font-size: var(--s-xs);
-}
-
-/* ── Remote connection ───────────────────────────────────── */
-.settings-page .settings-content .remote-link-settings .section-title h3 {
-  font-size: var(--s-xl);
-}
-.settings-page .settings-content .remote-relay-settings h4 {
-  margin-top: 0;
-}
-.settings-page .remote-pair-privacy {
-  font-size: var(--s-xs);
-}
-
 /* ── Footer ──────────────────────────────────────────────── */
 .settings-page .settings-footer {
-  padding: 14px var(--s-gutter);
-  gap: 12px;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 12px var(--s-gutter);
+  border-top: 1px solid var(--line);
   background: color-mix(in srgb, var(--paper) 92%, transparent);
   backdrop-filter: blur(8px);
+  animation: appear var(--dur) var(--ease-out);
 }
 .settings-page .settings-footer .save-note {
   margin-right: auto;
   font-size: var(--s-sm);
 }
 .settings-page .settings-footer button {
-  min-height: 38px;
-  padding: 6px 18px;
-  border-radius: 8px;
+  min-height: var(--h-control);
+  padding: 0 16px;
   font-size: var(--s-sm);
 }
 .settings-page .settings-footer button.primary {

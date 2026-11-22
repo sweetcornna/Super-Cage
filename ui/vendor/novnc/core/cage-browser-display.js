@@ -6,12 +6,9 @@
 import Display from './display.js';
 
 export default class CageBrowserDisplay extends Display {
-    autoscale() {
-        // CSS follows the pane in the same layout pass, even before the guest
-        // receives its first resize request.
-        this._target.style.width = '100%';
-        this._target.style.height = '100%';
-    }
+    // The workbench replaces autoscale per display with its own fit (see
+    // canvasFit in ui/src/remote-display.mjs). Without it the frame is fitted
+    // uniformly: a frame is never stretched to a box of another shape.
 
     absX(x) {
         const width = this._target.getBoundingClientRect().width;
@@ -39,13 +36,15 @@ export default class CageBrowserDisplay extends Display {
         // The decoder needs the unscaled overlap for incremental updates and CopyRect.
         ctx.drawImage(previous, 0, 0);
 
-        // Reuse the retiring buffer to hold the last presented frame while
-        // resizing the canvas. Its edges stay painted until the refresh arrives.
+        // Keep the last presented frame at its own size in the corner while the
+        // refresh is on its way; the rest of the canvas stays empty. A frame
+        // drawn at another size would be a stretched, blurred picture. The
+        // retiring buffer holds the presented frame, not later decoded data.
         this._drawCtx.globalCompositeOperation = 'copy';
         this._drawCtx.drawImage(this._target, 0, 0);
         this._target.width = width;
         this._target.height = height;
-        this._targetCtx.drawImage(previous, 0, 0, width, height);
+        this._targetCtx.drawImage(previous, 0, 0);
         previous.width = 0;
 
         this._backbuffer = next;

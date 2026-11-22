@@ -7,8 +7,10 @@ import "@xterm/xterm/css/xterm.css";
 import { base64ToBytes, terminals } from "./services.mjs";
 import { accessDenied } from "./transport.mjs";
 import { deviceCommand, haptic } from "./device-navigation.mjs";
+import { openExternal } from "./web-shell.mjs";
 import { Confirm } from "./sheet";
 import { kindInfo } from "./terminals";
+import { takeInput } from "../terminal-input-chunks.mjs";
 
 const light = { background: "#faf9f5", foreground: "#1f1e1d", cursor: "#d97757", cursorAccent: "#faf9f5", selectionBackground: "#e9d3c6",
   black: "#1f1e1d", red: "#b3261e", green: "#2e7d4f", yellow: "#8a5a00", blue: "#2f5d8a", magenta: "#8c3f72", cyan: "#2c6e6e", white: "#d9d4c7",
@@ -18,13 +20,6 @@ const dark = { background: "#1f1e1d", foreground: "#f3efe5", cursor: "#d97757", 
   brightBlack: "#7d776c", brightRed: "#ffa39a", brightGreen: "#98dcb2", brightYellow: "#f2d29a", brightBlue: "#acc9ea", brightMagenta: "#e6b5d6", brightCyan: "#a3dcd9", brightWhite: "#ffffff" };
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-// Up to 8000 UTF-16 units stays under the 32 KiB input limit.
-function take(text) {
-  let end = Math.min(text.length, 8000);
-  const code = text.charCodeAt(end - 1);
-  if (end < text.length && code >= 0xd800 && code <= 0xdbff) end--;
-  return text.slice(0, end);
-}
 
 export default function TerminalScreen({ id, title, kind, visible, onBack, onDenied }) {
   const host = useRef(null);
@@ -46,7 +41,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     if (sending.current) return;
     sending.current = true;
     while (alive.current && queue.current) {
-      const chunk = take(queue.current);
+      const chunk = takeInput(queue.current);
       queue.current = queue.current.slice(chunk.length);
       try { await terminals.input(id, chunk); }
       catch (err) {
@@ -66,7 +61,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       scrollback: 5000, theme: darkQuery.matches ? dark : light, allowProposedApi: true, macOptionIsMeta: true });
     const f = new FitAddon();
     t.loadAddon(f);
-    t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) window.open(uri, "_blank", "noopener"); }));
+    t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) openExternal(uri); }));
     t.open(host.current);
     term.current = t; fit.current = f;
     const data = t.onData((value) => {

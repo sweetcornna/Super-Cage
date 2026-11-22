@@ -2,6 +2,7 @@ package mobilelink
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"net/http/httptest"
 	"strings"
@@ -74,6 +75,32 @@ func TestScanEnrollsOnlyHolderOfOriginalCode(t *testing.T) {
 		expired.Expires = time.Now().Add(-time.Second).Unix()
 		if _, err = expired.identity(); err == nil {
 			t.Fatal("expired optical pairing accepted")
+		}
+	}
+}
+
+// Every long code, scanned or pasted, whole or cut short, is found in any
+// text that carries it; a mention of the format, a short code or a word
+// shaped like a code is not.
+func TestContainsPairCode(t *testing.T) {
+	_, raw, err := NewPairCode("https://relay.example.com", relay.Invitation{ID: "room", ClientToken: "token", ExpiresAt: time.Now().Add(time.Minute)}, "pin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	manual := "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw))
+	for _, code := range []string{raw, manual} {
+		if _, err := parsePairCode(code); err != nil {
+			t.Fatal(err)
+		}
+		for _, text := range []string{code, "配对码：" + code + "。", "line\n" + code + "\nline", code[:len(code)/2]} {
+			if !ContainsPairCode(text) {
+				t.Errorf("not found in %q", text)
+			}
+		}
+	}
+	for _, text := range []string{"", "4821 9037", "today's CAGE1 QR", `return code, "CAGE1:" + string(b), err`, "CAGE-7QK2-M9XT-4HNA-WB3E-0RCP-YL6D", "cage1:{"} {
+		if ContainsPairCode(text) {
+			t.Errorf("found in %q", text)
 		}
 	}
 }

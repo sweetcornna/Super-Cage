@@ -389,8 +389,10 @@ func (s *Server) readClaudeGuestQuotas(ctx context.Context, ids []string) (map[s
 			return nil, errors.New("Claude 账号 ID 无效")
 		}
 	}
-	// s.guest bounds its output to 64 KiB. Even a large pool uses one
-	// server-controlled deadline; keep completed chunks when a later one fails.
+	// The read is idempotent and runs on every launch, so it shares the
+	// guest's control connection. That bounds its output to 64 KiB. Even a
+	// large pool uses one server-controlled deadline; keep completed chunks
+	// when a later one fails.
 	readings := make(map[string]claudeGuestQuota)
 	for chunk := range slices.Chunk(ids, 96) {
 		if s.windowsGuest != nil {
@@ -399,7 +401,7 @@ func (s *Server) readClaudeGuestQuotas(ctx context.Context, ids []string) (map[s
 			}
 			continue
 		}
-		data, err := s.guest(ctx, "exec /usr/local/bin/cage-claude-account quotas "+strings.Join(chunk, " "))
+		data, err := s.guestQuick(ctx, "exec /usr/local/bin/cage-claude-account quotas "+strings.Join(chunk, " "))
 		if err != nil {
 			return readings, err
 		}
@@ -428,18 +430,27 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 			ids = append(ids, a.guestID())
 		}
 	}
+	// The default login is verified in a login shell and the managed quotas are
+	// small file reads: neither needs the other, so a launch waits for the
+	// slower of them, not for both.
+	defaultSubject := ""
+	var defaultCheck sync.WaitGroup
+	if checkDefault {
+		defaultCheck.Add(1)
+		go func() {
+			defer defaultCheck.Done()
+			if reading, _, err := s.inspectClaudeDefault(epoch, true); err == nil {
+				defaultSubject = reading.subject()
+			}
+		}()
+	}
 	var readings map[string]claudeGuestQuota
 	if len(ids) > 0 {
 		ctx, cancel := context.WithTimeout(epoch, 4*time.Second)
 		readings, _ = read(ctx, ids) // Retain the last snapshot when SSH is unavailable.
 		cancel()
 	}
-	defaultSubject := ""
-	if checkDefault {
-		if reading, _, err := s.inspectClaudeDefault(epoch, true); err == nil {
-			defaultSubject = reading.subject()
-		}
-	}
+	defaultCheck.Wait()
 	m := &s.claudeAccounts
 	m.mu.Lock()
 	defer m.mu.Unlock()

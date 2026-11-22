@@ -82,9 +82,10 @@ jobs:
         run: |
           npm run --prefix ui lint
           npm test --prefix ui
-          node --test internal/cage/clipboard.test.cjs internal/cage/browser-audit.test.mjs internal/cage/browser-downloads.test.mjs internal/cage/browser-uploads.test.mjs internal/cage/browser-login.test.mjs internal/cage/browser-clipboard.test.mjs internal/cage/native-input.test.mjs internal/cage/display-density.test.mjs internal/cage/browser-wheel.test.mjs
+          node --test internal/cage/clipboard.test.cjs internal/cage/browser-audit.test.mjs internal/cage/browser-downloads.test.mjs internal/cage/browser-uploads.test.mjs internal/cage/browser-login.test.mjs internal/cage/browser-clipboard.test.mjs internal/cage/native-input.test.mjs internal/cage/display-density.test.mjs internal/cage/browser-wheel.test.mjs internal/cage/browser-science.test.mjs
           uv run internal/cage/claude-account.test.py
           uv run internal/cage/display-governor.test.py
+          uv run internal/cage/resource-governor.test.py
           uv run internal/cage/save-download.test.py
           uv run internal/cage/editor-migrate.test.py
           uv run --no-project scripts/guest-os/tests/native-maintenance.py
@@ -126,7 +127,7 @@ jobs:
           codesign --verify --deep --strict "_output/Super Cage.app"
           "_output/Super Cage.app/Contents/Resources/cage" --help
           "_output/Super Cage.app/Contents/Resources/mihomo" -v
-          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/mihomo Contents/Resources/intel-macos/runtime/bin/qemu-system-x86_64 Contents/Resources/intel-macos/runtime/bin/qemu-img; do
+          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/cage-attach Contents/Resources/mihomo Contents/Resources/intel-macos/runtime/bin/qemu-system-x86_64 Contents/Resources/intel-macos/runtime/bin/qemu-img; do
             [[ "$(lipo -archs "_output/Super Cage.app/$executable")" == x86_64 ]]
           done
           runtime="_output/Super Cage.app/Contents/Resources/intel-macos/runtime"
@@ -146,7 +147,7 @@ jobs:
           trap 'rm -rf "$check"' EXIT
           tar -xzf "$archive" -C "$check"
           codesign --verify --deep --strict "$check/Super Cage.app"
-          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/mihomo Contents/Resources/CageUpdateInstaller Contents/Resources/intel-macos/runtime/bin/qemu-system-x86_64 Contents/Resources/intel-macos/runtime/bin/qemu-img; do
+          for executable in Contents/MacOS/Cage Contents/Resources/cage Contents/Resources/cage-attach Contents/Resources/mihomo Contents/Resources/CageUpdateInstaller Contents/Resources/intel-macos/runtime/bin/qemu-system-x86_64 Contents/Resources/intel-macos/runtime/bin/qemu-img; do
             test -x "$check/Super Cage.app/$executable"
           done
           (cd _output/ci-macos-test && shasum -a 256 "${archive##*/}" > SHA256SUMS)

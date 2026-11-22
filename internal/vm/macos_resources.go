@@ -25,7 +25,9 @@ type MacOSResourceRequirements struct {
 const macOSRequirementsFile = "cage-macos-resource-requirements.json"
 
 func (requirements MacOSResourceRequirements) Limits(allocation cage.ResourceAllocation) (int, int, error) {
-	memory, cpus, err := allocation.Limits()
+	// A macOS guest has no balloon: it keeps the sizing it had before the
+	// machine-following automatic allocation of Linux guests.
+	memory, cpus, err := allocation.LegacyLimits()
 	if err != nil {
 		return 0, 0, err
 	}

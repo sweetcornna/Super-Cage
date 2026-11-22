@@ -249,6 +249,21 @@ except Exception:
 print(json.dumps(result))
 CAGE_DEVICE_SYSTEM`
 
+// readDeviceSystem returns what the guest reports about itself, or nil when it
+// cannot be read or holds anything that is not public text. The probe runs
+// over the guest's control connection: it is a fixed read the user waits for.
+func (s *Server) readDeviceSystem(ctx context.Context) *deviceSystemObservation {
+	data, err := s.guestQuick(ctx, deviceSystemProbe)
+	if err != nil {
+		return nil
+	}
+	var machine deviceSystemObservation
+	if json.Unmarshal(data, &machine) != nil || !publicDeviceText(machine.Hostname, 255) || !publicDeviceText(machine.Username, 64) || !publicDeviceText(machine.Home, 128) || !publicDeviceText(machine.AudioName, 120) || !publicDeviceText(machine.AudioDescription, 128) {
+		return nil
+	}
+	return &machine
+}
+
 func (s *Server) deviceCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.hasTrustedView(r) {
 		http.Error(w, "请在已信任的工作台中检测客机", http.StatusForbidden)
@@ -282,12 +297,7 @@ func (s *Server) deviceCheck(w http.ResponseWriter, r *http.Request) {
 	}
 	report := deviceCheckReport{Target: in.Target, CheckedAt: time.Now(), Checks: []deviceCheckItem{}}
 	if s.macosGuest == nil && s.windowsGuest == nil {
-		if data, e := s.guest(ctx, deviceSystemProbe); e == nil {
-			var machine deviceSystemObservation
-			if json.Unmarshal(data, &machine) == nil && publicDeviceText(machine.Hostname, 255) && publicDeviceText(machine.Username, 64) && publicDeviceText(machine.Home, 128) && publicDeviceText(machine.AudioName, 120) && publicDeviceText(machine.AudioDescription, 128) {
-				report.System = &machine
-			}
-		}
+		report.System = s.readDeviceSystem(ctx)
 	}
 	if report.System != nil && p != nil {
 		for _, item := range []struct{ id, title, observed, expected string }{{"hostname", "客机主机名", report.System.Hostname, p.Hostname}, {"username", "工作账户", report.System.Username, p.Username}, {"home", "工作主目录", report.System.Home, p.WorkHomePath()}, {"audio-model", "系统音频设备", report.System.AudioDescription, p.AudioDescription}} {

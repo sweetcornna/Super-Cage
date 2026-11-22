@@ -176,7 +176,7 @@ try {
   checks.push('last-tab keyboard close restores the terminal; a destruction event before the close response restores Claude Desktop');
 
   await singlePage();
-  await page.route('**/api/browser/close', route => route.fulfill({ status: 400, body: '标签尚未关闭，请重试' }));
+  await page.route('**/api/browser/close', route => route.fulfill({ status: 400, contentType: 'text/plain; charset=utf-8', body: '标签尚未关闭，请重试' }));
   await page.getByRole('button', { name: '关闭 最后一页', exact: true }).click();
   await page.getByText('标签尚未关闭，请重试', { exact: true }).waitFor();
   assert.equal(await close.count(), 1, 'failed close preserves the browser');

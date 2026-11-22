@@ -8,8 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
@@ -37,7 +40,11 @@ var codexSessionsEncoded = func() string {
 // Codex runs only in Linux guests, so this command is bounded by Linux's
 // 128 KiB argument limit rather than the Claude channel's Windows limit. The
 // helper file is versioned, so a running exec turn keeps its own copy.
-func codexSessionsCommand(mode string) string {
+func codexSessionsCommand(mode string) string { return codexSessionsInvocation(mode, "-") }
+
+// codexSessionsInvocation passes the request as an argument instead of on
+// stdin, which a terminal's Codex needs for itself.
+func codexSessionsInvocation(mode, argument string) string {
 	bootstrap := fmt.Sprintf(`import base64,gzip,os,pathlib,sys,tempfile
 d=pathlib.Path.home()/".local/share/cage/codex-session-code"
 d.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -49,7 +56,7 @@ if not p.exists():
  os.replace(t,p)
 os.execv(sys.executable,[sys.executable,"-I",str(p),*sys.argv[1:]])
 `, sha256.Sum256([]byte(codexSessionsHelper)), codexSessionsEncoded)
-	return shellescape.QuoteCommand([]string{"python3", "-I", "-c", bootstrap, mode, "-"})
+	return shellescape.QuoteCommand([]string{"python3", "-I", "-c", bootstrap, mode, argument})
 }
 
 type codexConversation struct {
@@ -67,6 +74,168 @@ type codexConversation struct {
 	HistoryTruncated bool         `json:"history_truncated"`
 	ConnectionNotice string       `json:"connection_notice"`
 	AccountRefused   bool         `json:"account_refused"`
+	// Owner is the guest's view: "phone" (a phone turn runs), "desktop" (a
+	// Codex TUI under a Cage lease), "external" (another process) or "".
+	Owner string        `json:"owner"`
+	Lease string        `json:"lease"`
+	CLI   *codexCLICaps `json:"cli,omitempty"`
+	// HistoryCompressed: the thread's history is stored compressed, which the
+	// helper cannot read but the Codex TUI resumes.
+	HistoryCompressed bool `json:"history_compressed"`
+}
+
+// codexCLICaps is what the guest's Codex CLI supports, from its own help.
+type codexCLICaps struct {
+	Installed      bool   `json:"installed"`
+	Complete       bool   `json:"complete"`
+	Version        string `json:"version"`
+	Resume         bool   `json:"resume"`
+	NoDaemon       bool   `json:"no_daemon"`
+	ResumeNoDaemon bool   `json:"resume_no_daemon"`
+	Delete         bool   `json:"delete"`
+	WriterLocks    bool   `json:"writer_locks"`
+}
+
+const codexDesktopNotice = "这段会话正在电脑的 Codex 终端中打开，手机上可以查看和停止本轮。"
+
+// A guest lease this server has no terminal for (one that outlived its
+// terminal, or another workbench's) reads as another process.
+const codexExternalNotice = "这段会话正在电脑上的 Codex 终端中打开。请先退出该终端中的 Codex，再从手机继续。"
+
+var errCodexDesktopOwned = errors.New("这段会话正在电脑的 Codex 终端中打开。可在手机的终端页打开该终端继续，或等电脑上退出 Codex 后再发送。")
+
+// codexOwner is who writes a Codex session's thread. A live terminal of this
+// server bound to the session makes it the desktop's whatever the guest last
+// said. A Cage lease without such a terminal is a TUI this server does not
+// know (another workbench, or one that outlived a restart): to this server
+// it is like any other process.
+func codexOwner(bound bool, guest string) string {
+	switch {
+	case bound:
+		return "desktop"
+	case guest == "desktop":
+		return "external"
+	}
+	return guest
+}
+
+// codexPhoneLoad counts the Codex sessions whose phone turn runs, by account.
+func (m *mobileCLIStore) codexPhoneLoad() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	load := map[string]int{}
+	for id, owner := range m.codexOwner {
+		if account := m.catalog[id].CodexAccountID; owner == "phone" && account != "" {
+			load[account]++
+		}
+	}
+	return load
+}
+
+// forgetCodexDesktop drops the guest's report of a desktop lease once this
+// server's terminal for the session has ended; the next look says afresh.
+func (m *mobileCLIStore) forgetCodexDesktop(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.codexOwner[id] == "desktop" {
+		delete(m.codexOwner, id)
+	}
+}
+
+// guestCodexOwner reads the guest's owner; a running thread with no owner
+// is taken as another process's, so nothing writes beside it.
+func guestCodexOwner(item codexConversation) string {
+	if item.Owner == "" && item.Running {
+		return "external"
+	}
+	return item.Owner
+}
+
+func (m *mobileCLIStore) codexOwners() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owners := make(map[string]string, len(m.codexOwner))
+	for id, owner := range m.codexOwner {
+		owners[id] = owner
+	}
+	return owners
+}
+
+// codexSessionsPossible: Codex terminals can be sessions. A custom Codex
+// command (codex --search, a wrapper) stays a plain terminal, as a Claude
+// command that cannot share its session does.
+func (s *Server) codexSessionsPossible() bool {
+	s.mu.Lock()
+	command := strings.TrimSpace(codexTerminalCommand(s.preferences))
+	s.mu.Unlock()
+	return s.codexGuestSupported() && command == "codex"
+}
+
+func (m *mobileCLIStore) codexCLICaps() *codexCLICaps {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.codexCLI == nil {
+		return nil
+	}
+	caps := *m.codexCLI
+	return &caps
+}
+
+func (m *mobileCLIStore) noteCodexCLI(caps *codexCLICaps) {
+	if caps == nil || !caps.Complete {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	copied := *caps
+	m.codexCLI = &copied
+}
+
+// codexAccountLabels names Codex accounts as the account panel does. The
+// accounts file is read again only when it is another file (every save
+// replaces it) or its size or modification time changed.
+func (s *Server) codexAccountLabels() map[string]string {
+	c := &s.codexAccounts
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	info, statErr := os.Stat(filepath.Join(s.profile, "codex-accounts.json"))
+	if statErr == nil && c.labelsFile != nil && os.SameFile(info, c.labelsFile) && info.Size() == c.labelsFile.Size() && info.ModTime().Equal(c.labelsFile.ModTime()) {
+		return maps.Clone(c.labels)
+	}
+	c.labels, c.labelsFile = nil, nil
+	list, err := s.loadCodexAccounts()
+	labels := map[string]string{}
+	if err != nil {
+		return labels
+	}
+	for _, a := range list.Accounts {
+		labels[a.ID] = a.Label
+		if labels[a.ID] == "" {
+			labels[a.ID] = a.Email
+		}
+	}
+	if statErr == nil {
+		c.labels, c.labelsFile = maps.Clone(labels), info
+	}
+	return labels
+}
+
+// codexRows fills in the live state of Codex rows of a list.
+func (s *Server) codexRows(sessions []mobileSummary) {
+	var owners, labels map[string]string
+	for i := range sessions {
+		row := &sessions[i]
+		if row.Provider != codexProvider {
+			continue
+		}
+		if owners == nil {
+			owners, labels = s.mobileCLI.codexOwners(), s.codexAccountLabels()
+		}
+		row.Owner = codexOwner(s.terminals.boundCodex(row.ID) != nil, owners[row.ID])
+		row.Running = row.Owner != ""
+		row.Active = row.Active && row.Running
+		row.AccountLabel = labels[row.CodexAccountID]
+	}
 }
 
 func (record *mobileRecord) codex() bool { return record.Provider == codexProvider }
@@ -155,6 +324,7 @@ func (s *Server) discoverCodexConversations(ctx context.Context, paths []string)
 		}
 	}
 	running := map[string]bool{}
+	owners := map[string]string{}
 	for _, item := range found {
 		var workspace, matched string
 		for guest, path := range workspaces {
@@ -165,9 +335,11 @@ func (s *Server) discoverCodexConversations(ctx context.Context, paths []string)
 		if workspace == "" || item.ThreadID != "" && !validCLIUUID(item.ThreadID) {
 			continue
 		}
-		record := threads[item.ThreadID]
-		if record == nil && item.Connection != "" {
-			record = connections[item.Connection]
+		// The guest state a connection names is the session's own; a thread
+		// match alone could be a second session made for the same thread.
+		record := connections[item.Connection]
+		if record == nil {
+			record = threads[item.ThreadID]
 		}
 		if record != nil && (!record.codex() || record.Deleted || record.Archived || record.codexGuestAccount() != item.Account) {
 			continue
@@ -203,9 +375,13 @@ func (s *Server) discoverCodexConversations(ctx context.Context, paths []string)
 			m.catalog[record.ID] = record.summary()
 		}
 		running[record.ID] = running[record.ID] || item.Running
+		if owners[record.ID] == "" {
+			owners[record.ID] = guestCodexOwner(item)
+		}
 		threads[record.CLIID] = record
 	}
 	m.codexLive = running
+	m.codexOwner = owners
 	return nil
 }
 
@@ -221,8 +397,9 @@ func (s *Server) codexConversationView(ctx context.Context, record *mobileRecord
 	if current.Error != "" {
 		return mobileSession{}, errors.New(current.Error)
 	}
-	if current.ThreadID == "" && len(current.Turns) == 0 {
-		return record.snapshot(), nil
+	label := ""
+	if record.CodexAccount != "" {
+		label = s.codexAccountLabels()[record.CodexAccount]
 	}
 	if current.ThreadID != "" && !validCLIUUID(current.ThreadID) || current.Workspace != "" && !cliWorkspaceWithin(current.Workspace, root, false) {
 		return mobileSession{}, errors.New("Codex 会话的项目已变化，请重新读取会话列表")
@@ -255,9 +432,25 @@ func (s *Server) codexConversationView(ctx context.Context, record *mobileRecord
 	if current.Workspace != "" {
 		record.GuestWorkspace = current.Workspace
 	}
+	// The server's own bound terminal decides before the guest's report,
+	// which can lag the terminal's start by a login shell.
+	bound := s.terminals.boundCodex(id)
+	owner := codexOwner(bound != nil, guestCodexOwner(current))
+	// Only a terminal this server has now can be opened from the phone; one
+	// recorded before a restart is gone.
+	record.TerminalID = ""
+	if bound != nil {
+		record.TerminalID = bound.id
+	}
+	canSend := current.CanSend && owner == ""
 	record.ConnectionNotice = current.ConnectionNotice
-	record.CanSend, record.HistoryTruncated = &current.CanSend, current.HistoryTruncated
-	record.TerminalRunning, record.Active = current.Running, current.Active
+	if owner == "desktop" {
+		record.ConnectionNotice = codexDesktopNotice
+	} else if owner == "external" && current.Owner == "desktop" {
+		record.ConnectionNotice = codexExternalNotice
+	}
+	record.CanSend, record.HistoryTruncated = &canSend, current.HistoryTruncated
+	record.Owner, record.Active = owner, current.Active && owner != ""
 	if after, _ := json.Marshal(record); string(before) != string(after) {
 		record.Revision++
 		if current.UpdatedAt > 0 {
@@ -271,9 +464,15 @@ func (s *Server) codexConversationView(ctx context.Context, record *mobileRecord
 		}
 	}
 	if m.codexLive != nil {
-		m.codexLive[id] = current.Running
+		m.codexLive[id] = owner != ""
 	}
-	return record.snapshot(), nil
+	if m.codexOwner == nil {
+		m.codexOwner = map[string]string{}
+	}
+	m.codexOwner[id] = guestCodexOwner(current)
+	view := record.snapshot()
+	view.Running, view.AccountLabel = owner != "", label
+	return view, nil
 }
 
 // Caller holds the operation lock. The guest admits a message durably before
@@ -283,32 +482,19 @@ func (s *Server) codexConversationAction(ctx context.Context, record *mobileReco
 	payload := map[string]any{"request_id": input["request_id"], "connection": record.Connection}
 	switch action {
 	case "send":
+		// The caller holds the operation lock, as terminal creation does, so
+		// no desktop terminal can start between this check and the send.
+		if s.terminals.boundCodex(record.ID) != nil {
+			return errCodexDesktopOwned
+		}
 		if err := s.codexConnection(record); err != nil {
 			return err
 		}
-		subject := ""
-		if record.CodexAccount != "" {
-			s.mu.Lock()
-			update := s.guestUpdateRequired
-			s.mu.Unlock()
-			if update {
-				return errGuestUpdateRequired
-			}
-			s.codexAccounts.mu.Lock()
-			list, err := s.loadCodexAccounts()
-			s.codexAccounts.mu.Unlock()
-			if err != nil {
-				return err
-			}
-			a := list.find(record.CodexAccount)
-			if a == nil {
-				return errors.New("这段会话所用的 Codex 账号已移除，无法继续")
-			}
-			if a.Email == "" {
-				return errors.New("这段会话所用的 Codex 账号尚未登录，请在 Codex 账号管理中检查")
-			}
-			subject = a.subject()
+		selection, err := s.pinnedCodexSelection(record)
+		if err != nil {
+			return err
 		}
+		subject := selection.Subject
 		directories, err := s.projectAdditionalDirectories(record.Workspace)
 		if err != nil {
 			return err

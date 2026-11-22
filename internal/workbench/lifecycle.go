@@ -48,6 +48,8 @@ func (s *Server) startMonitors() {
 				if err := diagnostics.New(s.profile).Clean(); err != nil {
 					diagnostics.Log("error", "diagnostics", "log cleanup failed: "+err.Error())
 				}
+				// Silent updates share this ticker; manual mode returns at once.
+				s.appUpdateTick(ctx)
 			}
 		}
 	}()
@@ -149,8 +151,7 @@ func (s *Server) closeService() error {
 		if browser != nil {
 			browser.close()
 		}
-		s.controlSession.close()
-		s.nativeControl.close()
+		s.closeGuestSessions()
 		if s.windowsGuest == nil {
 			s.closeErr = s.closeProxyGate("控制服务正在退出，外网保持关闭")
 		}

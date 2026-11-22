@@ -226,8 +226,9 @@ func TestBlockedTerminalInputDoesNotRetainDisconnectedViewer(t *testing.T) {
 			}
 			awaitTerminalSignal(t, file.inputStarted)
 			if strings.HasPrefix(action, "full-queue") {
-				// One message is blocked in the PTY; the next eight fill the
-				// session queue. The last must not retain this HTTP handler.
+				// One message is blocked in the PTY and nine more follow. They
+				// stay within the byte budget; a queue that is really full is
+				// covered by TestTerminalStreamWaitForInputRoomEnds.
 				for i := 0; i < 9; i++ {
 					if err := ws.WriteJSON(map[string]string{"type": "input", "data": "queued"}); err != nil {
 						t.Fatal(err)

@@ -1,12 +1,11 @@
-import { MobilePairSettings } from "./mobile-pair-settings";
 import { ArchivedSessions } from "./cli-sessions";
-import { Smartphone } from "lucide-react";
+import { MonitorSmartphone } from "lucide-react";
 import { PasswordVaultSettings } from "./password-vault";
 import { KeyRound } from "lucide-react";
 import { InlineSelect } from "./inline-select";
 import { clientKeyboard, getClientContext, isCloudWorkbench, isRemoteClient, saveClientKeyboard } from "./client-context.mjs";
 import { shortcut, usesControl } from "./platform.mjs";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import {
   Globe2,
   Clock3,
@@ -20,6 +19,8 @@ import {
   UserRound,
   Archive,
   Info,
+  SquareTerminal,
+  Blocks,
 } from "lucide-react";
 import { api } from "./api";
 import "./settings.css";
@@ -37,16 +38,30 @@ import { MacOSLogin } from "./macos-login";
 import { ScreenSharingChecks } from "./macos-screen-sharing";
 import { AccountSettings } from "./account";
 import { AboutSettings } from "./about-settings";
+import { EmptyState } from "./drawings";
+import { useOtherClientsRow } from "./other-clients-row";
+import "./settings-pages.css";
+// Loaded when its section opens (design 5.13: the UI costs nothing until then).
+// Detecting this computer's terminal applications runs only while this
+// section is open, so its code loads with it.
+const LocalTerminalPage = lazy(() => import("./local-terminal-page.jsx"));
+// 设备 (phones and other computers) is loaded the same way: asking the host for the device list starts with it.
+const DevicesPage = lazy(() => import("./devices-page.jsx"));
+// 其他客户端: its code loads when the section opens; the row itself only exists
+// when something can be added (other-clients-row.js).
+const OtherClientsSection = lazy(() => import("./other-clients-section.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
   ["archived-sessions", "已归档会话", Archive],
   ["keyboard", "通用", Settings],
   ["appearance", "外观", Palette],
-  ["mobile", "远程连接", Smartphone],
+  ["devices", "设备", MonitorSmartphone],
+  ["local-terminal", "本机终端", SquareTerminal],
   ["network", "网络与代理", Globe2],
   ["region", "时区与语言", Clock3],
   ["project", "环境与恢复", RotateCcw],
+  ["other-clients", "其他客户端", Blocks],
   ["about", "关于", Info],
 ];
 export function SettingsPanel({
@@ -61,9 +76,17 @@ export function SettingsPanel({
   // Each VM runs its own workbench, so these settings belong to the VM shown here.
   const vmContext = getClientContext();
   const vmName = vmContext.virtual_machines && !isRemoteClient() ? vmContext.name || "" : "";
+  // 本机终端 writes this computer's ~/.ssh, so only the window on the
+  // environment's own computer manages it; the cloud path comes later.
+  const localEntryAvailable = !isRemoteClient() && !isCloudWorkbench();
   const [accountDirty, setAccountDirty] = useState(false);
   const [proxyDirty, setProxyDirty] = useState(false);
   const [resourceDirty, setResourceDirty] = useState(false);
+  const [localTerminalDirty, setLocalTerminalDirty] = useState(false);
+  // 本机终端: choosing the application belongs to the desktop app, the ssh
+  // entry to a window on the environment's own computer.
+  const showOtherClients = useOtherClientsRow();
+  const shownSections = sections.filter(([id]) => (id !== "local-terminal" || vmContext.desktop_gateway || localEntryAvailable) && (id !== "other-clients" || showOtherClients));
   const [draft, setDraft] = useState({ ...current }),
     [section, setSection] = useState(initialSection),
     [probe, setProbe] = useState(null),
@@ -113,7 +136,7 @@ export function SettingsPanel({
       return;
     }
     if (
-      (!changed && !accountDirty && !proxyDirty && !resourceDirty) ||
+      (!changed && !accountDirty && !proxyDirty && !resourceDirty && !localTerminalDirty) ||
       (await onConfirm({
         title: "放弃尚未保存的修改？",
         body: "当前环境不会改变。关闭后会丢弃这次表单修改。",
@@ -230,7 +253,7 @@ export function SettingsPanel({
         <h2>设置</h2>
         {vmName && <p className="settings-scope" title={vmName}>虚拟机 · {vmName}</p>}
         <nav aria-label="设置分组">
-          {sections.map(([id, label, Icon]) => (
+          {shownSections.map(([id, label, Icon]) => (
             <button
               key={id}
               className={section === id ? "selected" : ""}
@@ -238,6 +261,7 @@ export function SettingsPanel({
               onClick={async () => {
                 if (id !== section && accountDirty && !(await onConfirm({ title: "放弃尚未保存的修改？", body: "已保存的资料和密码保持不变。", confirm: "放弃修改" }))) return;
                 if (id !== section && proxyDirty && !(await onConfirm({ title: "放弃尚未应用的代理修改？", body: "当前代理仍按已应用的链路运行。离开会丢弃这次节点选择。", confirm: "放弃修改" }))) return;
+                if (id !== section && localTerminalDirty && !(await onConfirm({ title: "放弃尚未保存的本机终端设置？", body: "已保存的选择保持不变。", confirm: "放弃修改" }))) return;
                 setSection(id);
               }}
             >
@@ -248,16 +272,25 @@ export function SettingsPanel({
         </nav>
       </aside>
       <div className="settings-main">
-        <div className={section === "archived-sessions" ? "settings-content settings-content--archives" : section === "mobile" ? "settings-content settings-content--remote" : "settings-content"} ref={contentRef}>
+        <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "devices" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
           {section === "appearance" && <AppearanceSettings />}
           {section === "about" && <AboutSettings />}
-          {section === "archived-sessions" && <ArchivedSessions ready={status.ready && !busy} />}
+          {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
+            <LocalTerminalPage opener={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />
+          </Suspense>}
+          {section === "other-clients" && showOtherClients && <Suspense fallback={<p className="field-help">正在加载…</p>}>
+            <OtherClientsSection status={status} />
+          </Suspense>}
+          {section === "archived-sessions" && <>
+            <div className="section-title"><h3>已归档会话</h3><p>归档的会话不在侧栏显示，可以随时取消归档；永久删除后无法恢复。</p></div>
+            <ArchivedSessions ready={status.ready && !busy} empty={<EmptyState drawing="tray" title="归档里还没有会话"><span>暂无已归档会话。</span>归档后的会话会收在这里。</EmptyState>} />
+          </>}
           {section === "vault" && <PasswordVaultSettings onConfirm={onConfirm} onDirty={setAccountDirty} />}
           {section === "account" && <AccountSettings busy={busy} onDirty={setAccountDirty} />}
+          {section === "devices" && <Suspense fallback={<p className="field-help">正在加载…</p>}>
+            <DevicesPage busy={busy} relay={draft.mobile_relay ?? ""} savedRelay={current.mobile_relay ?? ""} onRelayChange={value => update("mobile_relay", value)} onConfirm={onConfirm} />
+          </Suspense>}
           <fieldset className="settings-fields" disabled={busy && !(section === "project" && status.storage_recovery?.required)}>
-            {section === "mobile" && (isRemoteClient()
-              ? <section className="section-title"><h3>连接这台电脑</h3><p>请先切换到这台电脑的本机环境，再生成或管理手机配对码。</p></section>
-              : <MobilePairSettings relay={draft.mobile_relay ?? ""} savedRelay={current.mobile_relay ?? ""} onChange={value => update("mobile_relay",value)} onConfirm={onConfirm} />)}
             {section === "network" && (
               <>
                 {vmName && <p className="field-help">以下网络与代理设置只属于虚拟机「{vmName}」：订阅来源、节点、代理链路、代理端口、加密 DNS 和 IP 变化规则都由这台虚拟机单独保存，修改不会影响其他虚拟机。</p>}
@@ -717,7 +750,9 @@ export function SettingsPanel({
             </div>
           )}
         </div>
-        {(!["appearance", "browser", "account", "vault", "mobile", "archived-sessions", "project", "about"].includes(section) || changed) && (
+        {/* The save bar appears once there is something to save; the network
+            pages keep it because applying a proxy is a separate step. */}
+        {(["network", "region"].includes(section) || changed) && (
           <footer className="settings-footer">
             {" "}
             <>

@@ -1,0 +1,81 @@
+/* Desktop look for components the phone shares (icon-hints, inline-select).
+ * Their own stylesheets stay as the phone needs them; these rules are
+ * unlayered and one :root step more specific, so they win on the desktop
+ * whatever order the bundles load in. brand/design-language.md §1–3. */
+:root .icon-hint {
+  padding: 5px 9px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: var(--ink);
+  color: var(--paper);
+  box-shadow: var(--shadow-float);
+  font-size: var(--fs-caption);
+  line-height: 1.45;
+}
+
+/* History session rows (cli-sessions.css) match the live tab rows beside them. */
+:root .sidebar-tab > .sidebar-session {
+  gap: 8px;
+  min-height: 2.4286rem;
+  padding: 0 8px;
+  font-size: var(--fs-nav);
+  font-weight: 400;
+}
+
+:root .inline-select-trigger {
+  justify-content: space-between;
+  gap: 8px;
+  min-height: var(--h-control);
+  padding: 0 10px 0 12px;
+  border-color: var(--line-strong);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--ink);
+  font-weight: 400;
+  text-align: left;
+}
+:root .inline-select-trigger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--line-strong) 70%, var(--muted));
+  background: var(--surface);
+}
+:root .inline-select-trigger svg {
+  color: var(--faint);
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+:root .inline-select-list {
+  padding: 4px;
+  border-color: var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: var(--shadow-float);
+}
+:root .inline-select-list--inline,
+:root .inline-select-list.is-inline {
+  box-shadow: none;
+}
+:root .inline-select-list [role="option"] {
+  min-height: 2rem;
+  padding: 4px 8px;
+  border-radius: 6px;
+}
+:root .inline-select-list [role="option"]:hover {
+  outline: 0;
+  background: var(--soft);
+}
+:root .inline-select-list [data-active] {
+  outline: 1.5px solid var(--focus);
+  outline-offset: -1.5px;
+}
+:root .inline-select-list [aria-selected="true"] {
+  background: var(--selected);
+  font-weight: 550;
+}
+:root .inline-select-list [role="option"] svg {
+  color: var(--ink);
+}
+:root .inline-select-group {
+  padding: 8px 8px 2px;
+  font-size: var(--fs-caption);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}

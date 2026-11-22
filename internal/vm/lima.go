@@ -599,6 +599,9 @@ func (l *Lima) Start(ctx context.Context, name string, log io.Writer) error {
 			return loadErr
 		}
 		settings.MemoryGiB, settings.CPUs, err = allocation.Limits()
+		if notice := allocation.LimitsNotice(); notice != "" && *inst.Config.OS != limatype.DARWIN {
+			logrus.Warn(notice)
+		}
 		if *inst.Config.OS == limatype.DARWIN && err == nil {
 			cfg, loadErr := cage.Load(configPath)
 			if loadErr != nil {

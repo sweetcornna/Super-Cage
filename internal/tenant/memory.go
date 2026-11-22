@@ -3,6 +3,7 @@ package tenant
 import (
 	"context"
 	"log"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,14 +12,19 @@ import (
 
 // Elastic memory sizes running VMs to this host. Each VM boots at the trusted
 // profile's limits.memory, its ceiling, and the balancer then moves its
-// limits.memory through the virtio balloon:
+// limits.memory through the virtio balloon. The rule is allocateMemory
+// (allocation.go): max-min fair water-filling over held demands. planMemory
+// below is the previous policy, still selectable with
+// CAGE_TENANT_MEMORY_POLICY=legacy:
 //
 //   - A guest that runs short (less than its headroom available) grows at
 //     once, also while the host is short of memory: a guest OOM kill is worse.
 //   - While the host is short of memory, every VM gives back what it holds
 //     beyond its working set plus headroom: mostly page cache.
 //   - A VM above its fair share of the host shrinks toward it, for example
-//     when another VM starts.
+//     when another VM starts, unless it was used within memoryActiveWindow: the
+//     idle VMs give back first, and only a shortage of host memory (the bullet
+//     above) shrinks one that is in use.
 //   - Otherwise sizes stay as they are. Nothing grows only because memory is
 //     free, so a shrink is never undone by itself.
 //
@@ -61,6 +67,20 @@ type InstanceMemory struct {
 	// when the guest did not answer, and then GuestSilent is set.
 	GuestTotal, GuestAvailable int64
 	GuestSilent                bool
+	// GuestStall is the guest's memory stall (PSI some avg10, percent) and
+	// GuestSwapIns its pswpin counter (GuestSwapKnown when it was read); both
+	// are optional readings. NestedShort is what a Cage guest nested in this
+	// VM wants and the VM cannot back now, from the host agent inside.
+	GuestStall     float64
+	GuestSwapIns   uint64
+	GuestSwapKnown bool
+	NestedShort    int64
+	// NestedPressure: the nested guest is under memory pressure itself, so its
+	// shortfall is a shortage, not missing headroom.
+	NestedPressure bool
+	// Active is set by the balancer, not by the runtime: the workspace was
+	// used (browser traffic, a portal open, guest CPU) within memoryActiveWindow.
+	Active bool
 }
 
 const (
@@ -74,6 +94,9 @@ const (
 	// memorySilentSweeps is how many sweeps in a row a running guest may fail
 	// to report its memory before it grows back to its ceiling.
 	memorySilentSweeps = 2
+	// memoryActiveWindow is how long after its last use a workspace counts as
+	// active: it is spared the fair-share shrink while the host is not short.
+	memoryActiveWindow = time.Minute
 )
 
 // memoryBalancing is the elastic memory state of a server.
@@ -87,6 +110,14 @@ type memoryBalancing struct {
 	failure  string
 	// silent counts the sweeps in a row each running guest did not answer.
 	silent map[string]int
+	// held is each VM's held demand and swapIns its last pswpin counter.
+	held    map[string]demandState
+	swapIns map[string]uint64
+	// legacy selects the previous fair-share policy
+	// (CAGE_TENANT_MEMORY_POLICY=legacy in the gateway's environment).
+	legacy bool
+	// report explains the last round, for the status.
+	report allocationResult
 }
 
 type memoryChange struct {
@@ -100,12 +131,17 @@ func (s *Server) startMemoryBalancer() {
 	if s.cfg.MemoryInterval == 0 || !ok || !runtime.ElasticMemory() {
 		return
 	}
-	s.memory = memoryBalancing{runtime: runtime, changes: make(map[string]bool), pause: make(map[string]time.Time), failures: make(map[string]string), silent: make(map[string]int)}
+	s.memory = memoryBalancing{runtime: runtime, changes: make(map[string]bool), pause: make(map[string]time.Time), failures: make(map[string]string), silent: make(map[string]int),
+		held: make(map[string]demandState), swapIns: make(map[string]uint64), legacy: os.Getenv("CAGE_TENANT_MEMORY_POLICY") == "legacy"}
 	reserve := "the larger of 2 GiB and 15% of host memory"
 	if s.cfg.MemoryReserve > 0 {
 		reserve = mib(s.cfg.MemoryReserve)
 	}
-	log.Printf("cage-tenant: elastic VM memory every %s; host reserve %s, VM minimum %s", s.cfg.MemoryInterval, reserve, mib(s.memoryMin()))
+	policy := "max-min fair over held demand"
+	if s.memory.legacy {
+		policy = "legacy fair share"
+	}
+	log.Printf("cage-tenant: elastic VM memory every %s (%s); host reserve %s, VM minimum %s", s.cfg.MemoryInterval, policy, reserve, mib(s.memoryMin()))
 	s.workers.Go(func() {
 		ticker := time.NewTicker(s.cfg.MemoryInterval)
 		defer ticker.Stop()
@@ -151,6 +187,11 @@ func (s *Server) balanceOnce() {
 		if _, owned := s.store.VMs[id]; !owned || s.starting[id] || s.cooling.changes[id] != nil {
 			fixed[id] = true
 		}
+		if s.activeLocked(id, now) {
+			entry := state.Instances[id]
+			entry.Active = true
+			state.Instances[id] = entry
+		}
 	}
 	s.mu.Unlock()
 	holdShrink := make(map[string]bool)
@@ -173,7 +214,30 @@ func (s *Server) balanceOnce() {
 			silent[id] = s.memory.silent[id] >= memorySilentSweeps
 		}
 	}
-	for _, change := range planMemory(state, s.cfg.MemoryReserve, s.memoryMin(), fixed, holdShrink, silent) {
+	swapIn := make(map[string]bool)
+	for id, entry := range state.Instances {
+		if !entry.GuestSwapKnown {
+			continue
+		}
+		if previous, seen := s.memory.swapIns[id]; seen && entry.GuestSwapIns > previous {
+			swapIn[id] = true
+		}
+		s.memory.swapIns[id] = entry.GuestSwapIns
+	}
+	for id := range s.memory.swapIns {
+		if entry, ok := state.Instances[id]; !ok || entry.Status != "Running" {
+			delete(s.memory.swapIns, id)
+		}
+	}
+	var plan []memoryChange
+	if s.memory.legacy {
+		plan = planMemory(state, s.cfg.MemoryReserve, s.memoryMin(), fixed, holdShrink, silent)
+	} else {
+		result := allocateMemory(allocationInput{now: now, state: state, reserve: s.cfg.MemoryReserve, minimum: s.memoryMin(),
+			fixed: fixed, holdShrink: holdShrink, silent: silent, swapIn: swapIn}, s.memory.held)
+		s.memory.held, s.memory.report, plan = result.held, result, result.changes
+	}
+	for _, change := range plan {
 		if s.context.Err() != nil {
 			return
 		}
@@ -205,6 +269,19 @@ func (s *Server) balanceOnce() {
 		delete(s.memory.failures, change.id)
 		log.Printf("cage-tenant: workspace %s memory %s -> %s (%s)", change.id, mib(change.from), mib(change.to), change.reason)
 	}
+}
+
+// activeLocked reports whether a workspace was used within memoryActiveWindow.
+// Unlike lastActiveLocked it never writes, so it is safe while idle cooling is
+// off. Caller holds s.mu.
+func (s *Server) activeLocked(id string, now time.Time) bool {
+	last := s.cooling.activity[id]
+	if workspace := s.workspaces[id]; workspace != nil {
+		if io := workspace.lastActive(); io.After(last) {
+			last = io
+		}
+	}
+	return !last.IsZero() && now.Sub(last) < memoryActiveWindow
 }
 
 // memoryReserve is the host memory kept for the host itself.
@@ -276,6 +353,11 @@ func planMemory(state MemoryState, reserve, minimum int64, fixed, holdShrink, si
 		target, reason := max(need, share), "fair share of the host"
 		if pressure {
 			target, reason = need, "host memory is low"
+		} else if entry.Active {
+			// The fair share is a preparation for other VMs, not a response to a
+			// shortage, and what it takes is page cache the workspace in use is
+			// working with. Idle VMs give back first; a shortage still shrinks all.
+			continue
 		}
 		if entry.Limit-target >= memoryShrinkStep {
 			shrink = append(shrink, memoryChange{id: id, from: entry.Limit, to: max(target, roundUpMemory(entry.Limit-memoryShrinkStep)), reason: reason})

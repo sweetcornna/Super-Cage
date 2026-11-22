@@ -2,7 +2,7 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { AppearanceProvider } from "../src/appearance";
 import { TerminalView } from "../src/views";
-import "../src/style.css";
+import "../src/desktop-styles.js";
 
 const root = createRoot(document.getElementById("terminal"));
 window.showTestTerminal = (visible = true) =>

@@ -43,6 +43,17 @@ type mobileSummary struct {
 	Deleting      bool      `json:"deleting,omitempty"`
 	Revision      uint64    `json:"revision"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// Owner is who writes a Codex session's thread now: "" (nobody), "desktop"
+	// (a terminal of this server), "phone" (a phone turn) or "external" (any
+	// other process). Codex sessions only.
+	Owner string `json:"owner,omitempty"`
+	// CodexAccountID is the Codex account the session is pinned to; empty is
+	// the environment's own ~/.codex login.
+	CodexAccountID string `json:"codex_account_id,omitempty"`
+	// placeholder marks a Codex session that never reached a thread;
+	// menuPlaceholder one that the desktop's menu made (its Codex closed
+	// before it made a thread, so there is nothing to show on either device).
+	placeholder, menuPlaceholder bool
 }
 type mobileTurn struct {
 	Tools       []cliconversation.ToolActivity `json:"tools,omitempty"`
@@ -102,6 +113,11 @@ type mobileRecord struct {
 	// CodexAccount is the Codex account whose CODEX_HOME holds the thread;
 	// empty means the environment's own ~/.codex.
 	CodexAccount string `json:"codex_account,omitempty"`
+	// CodexLease is the guest lease given to the latest desktop terminal.
+	CodexLease string `json:"codex_lease,omitempty"`
+	// DesktopMenu marks a Codex session made by the desktop menu's Codex
+	// entry (the phone's own new sessions are Terminal records too).
+	DesktopMenu bool `json:"desktop_menu,omitempty"`
 }
 
 type claudeExecution struct {
@@ -136,13 +152,59 @@ type mobileRun struct {
 	pending      *mobileDecision
 }
 type mobileCLIStore struct {
-	mu         sync.Mutex
-	active     map[string]*mobileRun
-	catalog    map[string]mobileSummary
-	running    map[string]bool // Fresh guest process observation, never restored from disk.
-	desktop    map[string]bool // Claude Desktop ownership from the same live observation.
-	codexLive  map[string]bool // Codex process observation from the latest Codex discovery.
+	mu        sync.Mutex
+	active    map[string]*mobileRun
+	catalog   map[string]mobileSummary
+	running   map[string]bool // Fresh guest process observation, never restored from disk.
+	desktop   map[string]bool // Claude Desktop ownership from the same live observation.
+	codexLive map[string]bool // Codex process observation from the latest Codex discovery.
+	// codexOwner is the guest's latest owner of each Codex session's thread;
+	// the server's own bound terminals take precedence (codexOwner()).
+	codexOwner map[string]string
+	codexCLI   *codexCLICaps // the guest CLI's support, from the latest probe
 	generation string
+	// escSent is the turn each terminal conversation last got a Stop's Esc
+	// for, and when (claimTerminalStopLocked).
+	escSent map[string]terminalStop
+	// archiveStops holds, per session, the guest stop an archive runs after
+	// the operation lock; it is closed when that stop ends.
+	archiveStops map[string]chan struct{}
+}
+
+type terminalStop struct {
+	turn string
+	at   time.Time
+}
+
+// terminalStopRepeat is how long a repeated Stop for one terminal turn sends
+// no second Esc: the first one's interrupt takes a moment to reach the
+// transcript, during which the turn still reads as running, and a second Esc
+// on an idle Codex or Claude Code composer opens "edit previous message".
+var terminalStopRepeat = 5 * time.Second
+
+// claimTerminalStopLocked reports whether a Stop of turn in session id may
+// send Esc now, and records it when it may.
+func (m *mobileCLIStore) claimTerminalStopLocked(id, turn string, now time.Time) bool {
+	for key, sent := range m.escSent {
+		if now.Sub(sent.at) >= terminalStopRepeat {
+			delete(m.escSent, key)
+		}
+	}
+	if sent, ok := m.escSent[id]; ok && sent.turn == turn {
+		return false
+	}
+	if m.escSent == nil {
+		m.escSent = map[string]terminalStop{}
+	}
+	m.escSent[id] = terminalStop{turn: turn, at: now}
+	return true
+}
+
+// releaseTerminalStopLocked forgets a claim whose Esc was not sent.
+func (m *mobileCLIStore) releaseTerminalStopLocked(id, turn string, at time.Time) {
+	if sent, ok := m.escSent[id]; ok && sent == (terminalStop{turn: turn, at: at}) {
+		delete(m.escSent, id)
+	}
 }
 
 func (m *mobileCLIStore) epochLocked() string {
@@ -170,11 +232,19 @@ func (record *mobileRecord) changed() {
 func (record *mobileRecord) summary() mobileSummary {
 	view := record.mobileSummary
 	view.AccountID = record.Account.ID
+	if record.codex() {
+		view.CodexAccountID = record.CodexAccount
+		view.placeholder = !record.Resume && len(record.Turns) == 0
+		view.menuPlaceholder = view.placeholder && record.DesktopMenu
+	}
 	return view
 }
 func (record *mobileRecord) snapshot() mobileSession {
 	view := record.mobileSession
 	view.AccountID = record.Account.ID
+	if record.codex() {
+		view.CodexAccountID = record.CodexAccount
+	}
 	if sw := record.Switch; sw != nil {
 		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error}
 	}

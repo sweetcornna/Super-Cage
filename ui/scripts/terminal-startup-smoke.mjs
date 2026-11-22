@@ -75,7 +75,13 @@ for (const platform of ["darwin", "windows", "linux"]) {
     terminalSocket.send(Buffer.from("\x1b[2J\x1b[HSelect login method\r\n1. Claude account"));
     await page.clock.fastForward(8100);
     await page.locator(".terminal-host").waitFor({ state: "visible" });
-    assert.ok((await page.locator(".xterm-rows").textContent()).includes("Select login method"));
+    // The terminal writes in its own frame after it is revealed: give the rows a moment to hold the text.
+    let revealed = "";
+    for (let i = 0; i < 200 && !revealed.includes("Select login method"); i++) {
+      revealed = await page.locator(".xterm-rows").textContent();
+      if (!revealed.includes("Select login method")) await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    assert.ok(revealed.includes("Select login method"));
     await page.reload();
     await page.getByRole("tab", { name: "Claude 1", exact: true }).click();
     await page.getByText("正在准备 Claude 会话…", { exact: true }).waitFor();

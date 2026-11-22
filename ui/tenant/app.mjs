@@ -23,6 +23,62 @@ export const IFRAME_REFERRER_POLICY = "no-referrer";
 export function iframeAllow(origin) {
   return `clipboard-read ${origin}; clipboard-write ${origin}`;
 }
+
+// The portal's own reading of the device, for a workspace frame on a phone: internal/webentry's rule for a
+// browser that says it is a phone, else ui/src/entry-layout.mjs's for a phone-sized touch screen that is not
+// showing a desktop site. Such a frame most likely shows the phone UI, so the portal steps back for it (on a
+// phone-sized window, styles.css); the frame itself can bring the portal's bar back but never send it away.
+export function phoneDevice(win) {
+  const nav = win.navigator || {};
+  const mobile = nav.userAgentData?.mobile;
+  const agent = String(nav.userAgent || "");
+  if (mobile === true) return true;
+  if (mobile !== false && !agent.includes("iPad")) {
+    if (agent.includes("iPhone") || agent.includes("iPod")) return true;
+    if (agent.includes("Android") ? agent.includes("Mobile") : agent.includes("Mobi")) return true;
+  }
+  const matches = (query) => Boolean(win.matchMedia?.(query).matches);
+  if (!matches("(pointer: coarse)") || matches("(hover: hover)")) return false;
+  const width = win.innerWidth;
+  const display = win.screen || {};
+  if (width >= 980 || width > Math.max(display.width || 0, display.height || 0) + 1) return false;
+  return width < 740 || win.innerHeight < 500;
+}
+
+// A link a workspace asks the portal to offer (its frame cannot open tabs): http(s) only, no credentials, at
+// most LINK_MAX_LENGTH characters, and nothing that hides or reorders what the person reads (control,
+// invisible and direction characters). Returns what the notice shows, or null.
+export const LINK_MAX_LENGTH = 2048;
+const HIDDEN_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/u;
+export function externalLink(raw) {
+  if (typeof raw !== "string" || raw.length > LINK_MAX_LENGTH || HIDDEN_CHARACTERS.test(raw)) return null;
+  let link;
+  try {
+    link = new URL(raw);
+  } catch {
+    return null;
+  }
+  if ((link.protocol !== "https:" && link.protocol !== "http:") || link.username || link.password || !link.hostname) return null;
+  if (link.href.length > LINK_MAX_LENGTH || HIDDEN_CHARACTERS.test(link.href)) return null;
+  return { href: link.href, host: link.host };
+}
+
+// A workspace that reports its sign-in lapsed makes the portal check its own session and enter it again: at
+// most once a minute per virtual machine, the gap doubling while it keeps asking (to 16 minutes) and back to a
+// minute after a quiet spell, so no frame can make the portal hammer the gateway.
+export const REENTRY_MIN_GAP_MS = 60000;
+export const REENTRY_MAX_GAP_MS = 960000;
+export function createReentryLimiter(now = () => Date.now()) {
+  const last = new Map();
+  return (key) => {
+    const at = now();
+    const previous = last.get(key);
+    if (previous && at - previous.at < previous.gap) return false;
+    const gap = previous && at - previous.at < previous.gap * 2 ? Math.min(previous.gap * 2, REENTRY_MAX_GAP_MS) : REENTRY_MIN_GAP_MS;
+    last.set(key, { at, gap });
+    return true;
+  };
+}
 export const ENTER_PATH = "/_tenant/enter";
 export const SELECTION_KEY = "cage-tenant.selected-vm.v1";
 export const THEME_KEY = "cage-tenant.theme.v1";
@@ -131,8 +187,9 @@ export function normalizeVm(raw) {
     created_at: typeof raw.created_at === "string" ? raw.created_at : "",
   };
   if (state === "error") {
-    const message = cleanText(raw.message);
-    if (message) vm.message = message;
+    const failure = describeVmFailure(raw.message);
+    if (failure) vm.message = failure.message;
+    if (failure?.detail) vm.message_detail = failure.detail;
   }
   return vm;
 }
@@ -203,6 +260,8 @@ const FALLBACK_MESSAGES = Object.freeze({
   invalid_credentials: "用户名或密码不正确。",
   username_taken: "该用户名已被使用。",
   vm_not_found: "虚拟机不存在或无权访问。",
+  not_found: "请求的内容不存在。",
+  forbidden: "没有权限执行此操作。",
   invalid_input: "输入内容无效，请检查后重试。",
   invalid_content_type: "请求格式不受支持。",
   vm_limit: "已达到虚拟机数量上限。",
@@ -227,10 +286,37 @@ function codeForStatus(status) {
 }
 
 export function fallbackMessage(code, status = 0) {
+  // Own keys only: a code such as "constructor" must not pick up an Object.prototype member.
   return (
-    FALLBACK_MESSAGES[code] ||
+    (Object.hasOwn(FALLBACK_MESSAGES, code) && FALLBACK_MESSAGES[code]) ||
     (status ? `请求失败（HTTP ${status}），请稍后重试。` : "请求失败，请稍后重试。")
   );
+}
+
+// The gateway answers in English and the portal speaks Chinese. Text that is already Chinese (a localized
+// server, or the mock) is shown as sent. English text is replaced by the sentence for its error code; with
+// an unknown code the user gets a generic sentence and the server's own words stay as secondary detail.
+const HAN = /\p{Script=Han}/u;
+
+export function describeProblem(code, message, status = 0) {
+  const text = cleanText(message);
+  if (text && HAN.test(text)) return { message: text };
+  if (Object.hasOwn(FALLBACK_MESSAGES, code)) return { message: FALLBACK_MESSAGES[code] };
+  const generic = fallbackMessage(code, status);
+  return text ? { message: generic, detail: text } : { message: generic };
+}
+
+// A failed VM's message carries no code; these are the gateway's fixed sentences for it.
+const VM_FAILURE_MESSAGES = Object.freeze({
+  "The workspace is unavailable. Open it again to retry.": "虚拟机暂时无法启动，可以重新打开再试。",
+});
+
+export function describeVmFailure(message) {
+  const text = cleanText(message);
+  if (!text) return null;
+  if (HAN.test(text)) return { message: text };
+  if (Object.hasOwn(VM_FAILURE_MESSAGES, text)) return { message: VM_FAILURE_MESSAGES[text] };
+  return { message: "虚拟机启动失败，可以重试。", detail: text };
 }
 
 export class ApiError extends Error {
@@ -402,7 +488,7 @@ function errorView(error) {
   return {
     code: error?.code || "bad_response",
     status: error?.status || 0,
-    message: error?.message || fallbackMessage(error?.code, error?.status),
+    ...describeProblem(error?.code, error?.message, error?.status),
   };
 }
 
@@ -1085,6 +1171,9 @@ export const VM_STATE_LABELS = Object.freeze({
   unknown: "状态未知",
 });
 
+// The overview row's action for each state: a VM that is already starting is only watched, not started again.
+export const VM_ACTION_LABELS = Object.freeze({ ready: "打开", starting: "查看进度", stopped: "启动并打开", error: "启动并打开" });
+
 export const TARGET_STATUS_LABELS = Object.freeze({
   opening: "正在连接",
   starting: "开机中",
@@ -1157,23 +1246,116 @@ export function createThemeController(doc, storage) {
 /* ------------------------------------------------------------------ */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
+
+// Functional icons: Lucide geometry on a 24px grid, drawn at stroke 1.75 (see styles.css .icon).
+// A string is a path, { c: [cx, cy, r] } a circle and { r: [x, y, w, h, rx] } a rounded rectangle.
 const ICONS = {
-  logo: ["M7 3.5h10a3 3 0 0 1 3 3v11a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3v-11a3 3 0 0 1 3-3z", "M9.3 3.5v17", "M14.7 3.5v17"],
-  plus: ["M12 5v14", "M5 12h14"],
-  grid: ["M4 4h6v6H4z", "M14 4h6v6h-6z", "M4 14h6v6H4z", "M14 14h6v6h-6z"],
-  refresh: ["M20 12a8 8 0 1 1-2.34-5.66", "M20 4v5h-5"],
-  logout: ["M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3", "M10 16l-4-4 4-4", "M6 12h10"],
-  sun: ["M12 8a4 4 0 1 0 0 8 4 4 0 1 0 0-8z", "M12 2v2", "M12 20v2", "M4.93 4.93l1.41 1.41", "M17.66 17.66l1.41 1.41", "M2 12h2", "M20 12h2", "M4.93 19.07l1.41-1.41", "M17.66 6.34l1.41-1.41"],
-  moon: ["M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"],
-  monitor: ["M3 5h18v11H3z", "M8 20h8", "M12 16v4"],
-  alert: ["M12 3.5l9.5 16.5h-19z", "M12 10v4.5", "M12 17.5v.01"],
-  info: ["M12 3a9 9 0 1 0 0 18 9 9 0 1 0 0-18z", "M12 11v5", "M12 7.5v.01"],
-  close: ["M6 6l12 12", "M18 6L6 18"],
-  server: ["M4 4h16v6H4z", "M4 14h16v6H4z", "M8 7v.01", "M8 17v.01"],
+  plus: ["M5 12h14", "M12 5v14"],
+  grid: [{ r: [3, 3, 7, 7, 1.5] }, { r: [14, 3, 7, 7, 1.5] }, { r: [14, 14, 7, 7, 1.5] }, { r: [3, 14, 7, 7, 1.5] }],
+  refresh: ["M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8", "M21 3v5h-5"],
+  logout: ["M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4", "m16 17 5-5-5-5", "M21 12H9"],
+  sun: [{ c: [12, 12, 4] }, "M12 2v2", "M12 20v2", "m4.93 4.93 1.41 1.41", "m17.66 17.66 1.41 1.41", "M2 12h2", "M20 12h2", "m6.34 17.66-1.41 1.41", "m19.07 4.93-1.41 1.41"],
+  moon: ["M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"],
+  monitor: [{ r: [2, 3, 20, 14, 2] }, "M8 21h8", "M12 17v4"],
+  alert: [{ c: [12, 12, 10] }, "M12 8v4", "M12 16h.01"],
+  info: [{ c: [12, 12, 10] }, "M12 16v-4", "M12 8h.01"],
+  check: [{ c: [12, 12, 10] }, "m9 12 2 2 4-4"],
+  close: ["M18 6 6 18", "m6 6 12 12"],
+  chevron: ["m9 18 6-6-6-6"],
+};
+
+// Hand-drawn art in the brush hand of the Super Cage mark: filled outlines with thick-thin strokes, ink in
+// currentColor and clay as the only colour (k: "clay" maps to a CSS class, so the CSP needs no inline styles).
+// Generated offline from the centerline doodles by a brush renderer (round 1 of the portal redesign).
+// parts reuses another drawing as [name, transform, indexes of its shapes to leave out].
+const ART = {
+  // Server, terminal, sun, moon and squiggle follow the phone doodles (ui/src/mobile-cli/doodles.jsx) line for line.
+  server: {
+    box: "0 0 120 90",
+    shapes: [
+      { d: "M30.6 11.9l5.8 -.4 21.6 -.4 9 .1 24 .8 .3 .8-.4 9-.1 5.3-.5 .8-.6 .4-7.1 .3-29.4 .2-7.2-.2-16.8-.3-.2-.8 .4 -14.4 .5 -.9zM29.4 9.5l-.9 .3-.8 .5-.6 .8-.3 .8-.3 4 0 10.2 .2 1.5 .3 .7 .6 .7 1.3 1 .7 .3 6.8 .5 10.2 .3 6 -.1 15.6 .2 21.7 -.5 .8 0 .9 -.3 .8 -.5 .6 -.7 .4 -.9 .3 -5.8 .1 -9.1-.2-.8-.4-.8-1.9-1.5-.7-.4-8-.6-9.6-.3-21-.3-10.2 .3zM30.3 36.5l2.9 -.2 14.4 -.1 6 -.2 9 0 28.3 .6 .3 .2 .2 .8-.3 5.6 0 8.3-.4 .7-.8 .5-3.4 .3-15.6 0-6.6 .2-29.4-.3-4.1-.2-1.4 0-.3-.2-.1-.4 .3 -7.2-.1-6.6 .1 -.8 .5 -.6zM29.1 34.2l-.8 .3-.8 .6-.5 .8-.3 .9-.3 7.5 .1 6.6 0 .7 .3 .8 .5 .8 2 1.5 .7 .2 19.9 .6 15 -.1 6.6 .2 18.8 -.4 .8 -.1 .9 -.3 .7 -.6 .6 -.7 .4 -.9 .3 -9.4-.2-5.6-.3-.8-.5-.6-1.9-1.5-.8-.3-11.5-.5-10.2-.2-21-.1z" },
+      { d: "M35.9 20.1a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0zM43.7 20.1a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0zM36 44.8a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0zM43.8 44.8a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0z" },
+      { d: "M62.4 20.9l3.6 .3 10.8 0 4.8 -.4 1.6 0 .2 -.2-.2-.2-6.4-1-4.2-.2-6 .1-1.2 .1-3.3 .6-.2 .4 .1 .3zM62.6 45.4l3.6 .3 10.8 0 6.2 -.4 .2 -.2-.2-.2-5.6-.9-8.4-.3-3 .1-3.6 .6-.3 .1-.2 .4 .1 .3z", o: 0.6 },
+      { d: "M59.6 54.4l-.5 3 0 4.2-.3 2.8-.5 1.4-.4 .9-1.4 1.5-1.7 1.2-1.9 .7-2.8 .6-5.4 .3-1.8 .3-2.4 .7-2.9 1.1-.2 .2 .1 .3 .3 .1 1.2 -.4 1.7 -.2 4.7 0 7.4 -.5 1.9 -.4 1.3 -.5 1.2 -.7 1 -.9 1.4 -1.5 .7 -1.2 .6 -1.3 .4 -2 0 -1.9-.1-4.2-.4-2.4 0 -1.2-.1-.3-.5-.3-.3 .1z" },
+      { d: "M84.6 62.4c.7 4.1 2.2 5.9 6.2 6.5-4 .7-5.5 2.4-6.2 6.6-.7-4.2-2.3-5.9-6.4-6.6 4.1-.6 5.7-2.4 6.4-6.5z", k: "clay" },
+    ],
+  },
+  terminal: {
+    box: "0 0 120 90",
+    shapes: [
+      { d: "M19.7 13.7l10.7 -.6 8.4 -.3 22.2 -.2 29.3 .7 12.1 .8 .4 .2 .2 .9 .1 7.2-.4 15.6 .1 15-.4 15 0 3.6-.1 .7-.4 .6-.9 .7-1.3 .3-6 .3-6 .1-15.6 .4-29.9-.2-15.6-.6-8.1-.2-1-.2-.4-.8-.2-1.3 .3 -8.2 0 -9.6-.1-6 .3 -15-.1-16.2 .2 -1 .3 -.6 .8 -.7zM18.8 11.2l-1.5 .4-1.4 1-.8 1.5-.2 1.6-.3 16.8 0 14.4-.2 15.6 .1 8.5 .2 1.4 .3 .7 .5 .7 1.7 1.4 .7 .4 1.4 .3 7.2 .5 31.2 .7 14.5 -.2 7.2 .1 21 -.7 1.6 -.2 .7 -.3 1.3 -1 .6 -.7 .5 -1.6 .1 -3.3 0 -16.2 .4 -14.9 0 -15.1 .2 -6.6-.4-1.5-.4-.7-.5-.6-1.8-1.4-1.4-.5-2.5-.2-23.4-1.1-29.4-.1-21.7 .6z" },
+      { d: "M16.6 25l4.2 .4 27.6 -.5 21.6 .1 26.4 .6 5.4 -.3 2.4 -.1 .2 -.2-.2-.3-7.2-.8-1.8-.2-10.2-.3-21-.3-9 0-21.6 .1-12.6 .4-4.4 .6-.2 .4 0 .2z" },
+      { d: "M21.4 18.4a2.2 2.2 0 1 0 4.5 0a2.2 2.2 0 1 0 -4.5 0zM28.1 18.3a2.2 2.2 0 1 0 4.5 0a2.2 2.2 0 1 0 -4.5 0zM34.8 18.4a2.2 2.2 0 1 0 4.5 0a2.2 2.2 0 1 0 -4.5 0z" },
+      { d: "M30.2 39.5l2.7 2.4 4.3 3.2 4.5 3.8-.5-.4 0 -.8-2.2 2-3.7 2.9-3.3 3.5-2.3 2 0 .4 .4 .2 2.1 -1.1 3.4 -1.5 1.6 -.9 6.2 -4.9 1 -1.6-3.8-3.1-6.7-5.1-3.5-1.7-.3 .2-.1 .2z" },
+      { d: "M50.4 59.8l3.6 .6 6 -.2 7.1 0 4.9 -.4 2.3 0 .2 -.1 .2 -.3-.1-.2-.3-.2-7.1-1.3-12.6-.2-1.2 .1-3.4 .9-.2 .3-.1 .3 .1 .4 .3 .2z", k: "clay" },
+    ],
+  },
+  sun: {
+    box: "21 6 78 78",
+    shapes: [
+      { d: "M60.4 28.2c9.6-.4 17.1 7.2 16.8 16.7-.3 9.2-7.8 16.4-17 16.2-9.4-.2-16.6-7.9-16.2-17.2.4-8.9 7.4-15.4 16.4-15.7z", k: "clay" },
+      { d: "M59.9 8.6l-.7 1.7-.2 4.8 .8 2.5 0 .6 .4 .2 .3 -.2 .2 -.6 1 -2.3 .1 -4.8-.6-2.2-.2-.3-.7 0zM59.8 71.2l-.6 1.8 0 4.8 1.1 2.4 .1 .6 .3 .2 .3 -.2 .1 -.6 .9 -2.4-.2-4.2-.1-.6-.8-2.1-.5-.3-.3 .1zM24.4 45.4l1.8 .6 4.8 -.2 2.4 -.9 .8 -.1 .1 -.3-.1-.3-.8-.1-2.4-.8-4.2 .1-.6 .1-2.1 .8-.3 .5 .1 .3zM86.9 45l1.8 .7 4.8 0 3.1 -.8 .1 -.3-.1-.3-3.1-.9-4.8-.2-2.1 .6-.2 .3-.1 .6zM34.3 18.9l1 1.6 3.3 3.4 2.4 1.8 .4 0 0 -.4-1.6-2.5-3.4-3.5-1.7-1.1-.4 .1-.1 .2zM79.5 63.9l1.1 1.5 3.4 3.4 2.5 1.6 .3 -.1-.1-.3-1.6-2.4-3-2.9-2.2-1.5-.4 .1-.1 .2zM34.7 71.1l1.8 -.7 3.4 -3.4 .4 -.5 .7 -1.8 .5 -.6-.1-.4-.4-.1-.6 .4-1.9 .7-.5 .3-3.5 3.3-.5 1.3-.5 .8 0 .4 .2 .3 .3 .2 .4 0zM80.7 25.9l1.7 -.8 3.5 -3.4 .3 -.5 .7 -1.9 .4 -.7-.1-.4-.4-.1-.7 .5-1.9 .7-.5 .3-3.2 3.6-.5 1.2-.5 .8 0 .4 .2 .3 .3 .2 .4 0z" },
+    ],
+  },
+  moon: {
+    box: "28 11 74 68",
+    shapes: [
+      { d: "M69.2 14.8l-1.7-.6-2.9 1.3-3.7 2.4-2 1.6-1.3 1.4-1.6 2-1.8 2.6-1.2 2.3-.7 1.7-.7 2.5-.4 2.5-.3 2.5 0 1.9 .3 2.5 .6 2.5 .7 2.4 1 2.3 .9 1.7 1.3 2 1.6 2 1.7 1.8 2.9 2.3 1.5 1.1 2.2 1.2 2.2 1.1 2.4 .8 1.8 .5 2.5 .3 3.1 .2 2.5 0 1.9 -.3 0 -.4-1-1.2-1.6 2.1-1.1 1.3-2 2-2.6 2.1-1.9 1.3-1.5 .8-4.3 1.6-3.3 .7-2.9 .1-4.6-.3-3.3-.8-2.2-.7-2.7-1.2-2-1.2-1.4-1-1.7-1.6-1.6-1.7-1.4-1.9-1.2-2-1-2-.9-2.7-.8-2.8-.4-2.3-.1-2.2 .1 -3.5 .2 -2.2 .6 -2.2 .7 -2.2 1.3 -2.6 1.1 -1.9 1.3 -1.9 1.9 -2.1 2.8 -2.8 1.8 -1.4 1.9 -1.2 2.6 -1.3 2.6 -1.1 1.7 -.5 2.2 -.4 3.4 -.2 2.9 0 2.9 .3 2.5 .6 1 -1.6-.1-5zM67.3 16.1l-.1 4.6 .7 -.7 .2 .2-5.5-.9-3.8 0-3.7 .6-3.6 .9-3 1.2-3.3 1.8-3.1 2.2-1.9 1.6-1.3 1.4-1.9 2.5-1.7 2.7-1.1 2.3-.7 1.7-1.2 4.9-.4 2.5-.1 2.5 .2 3.2 .6 3 .7 2.5 .9 2.3 1.2 2.2 1.7 2.6 1.9 2.4 1.8 1.7 3.4 2.7 2 1.5 1.6 .9 2.3 1 2.9 1 2.4 .6 3.8 .4 4.3 -.3 4.4 -.7 3.5 -1.3 3.9 -2.1 1.6 -1.1 1.5 -1.2 2.6 -2.8 1.5 -2 1.1 -1.8-1-1.8-1.1-.2-2.8 .5-2.3 .1-2.9-.2-2.2-.4-2.8-.8-2.2-.9-2-1-2.8-2-2.9-2.9-1-1.4-1.2-2-1.6-3.7-.5-1.6-.4-2.3-.2-2.8 .1 -2.8 .5 -3.4 1.4 -4.2 1 -2.1 1.2 -1.9 1.4 -1.8 1.6 -1.6 1.7 -1.4 1.8 -1.3 2 -1.1 2.1 -.8-.5-1z" },
+      { d: "M84.4 20.2c.6 3.4 1.8 4.8 5.1 5.4-3.3.6-4.5 2-5.1 5.5-.6-3.5-1.9-4.9-5.3-5.5 3.4-.6 4.7-2 5.3-5.4zM95.6 38.8c.4 2 1 2.8 3 3.1-2 .4-2.6 1.2-3 3.2-.4-2-1.1-2.8-3.1-3.2 2-.3 2.7-1.1 3.1-3.1z", k: "clay" },
+      { d: "M33.2 71.1l1.7 -.4 3.8 .3 2.2 .5 4.1 1.5 2.5 .4 1.3 -.2 1.2 -.3 3.1 -1.4 .2 -.3-.3-.3-1.5 .5-1.7 .2-3.9-.2-2.2-.5-4.6-1.7-2.6-.3-1.3 .2-2.4 1-.2 .2-.1 .5 .2 .2z", o: 0.6 },
+    ],
+  },
+  squiggle: {
+    box: "0 0 200 16",
+    shapes: [
+      { d: "M3.8 11.4l1.2 -.3 2.3 -.4 4.9 -1.8 2.7 -.7 2.8 -.3 4 .2 2.8 .4 2.7 .7 3.8 1.5 5 2.3 3.6 1.2 4.4 .7 2.5 .1 2.6 0 1.9 -.2 1.8 -.4 4.3 -1.4 2.9 -1.2 4.1 -2.3 2.6 -1 5 -1.1 3.3 -.2 4.5 .5 4 .9 2.7 1 6 2.9 2.9 1.1 2.4 .7 3.1 .5 4.5 .1 3.2 -.3 3 -.8 4.7 -1.8 5.9 -2.8 2.1 -.8 4.4 -.8 4.5 -.4 4 .5 4.4 1.1 2.7 1 4.9 2.6 4.2 1.4 3.7 .8 3.2 .2 4.4 -.5 3.7 -.8 3 -1.1 7 -3.2 2.7 -1 2.1 -.6 2.8 -.3 6.3 -.4 2.4 .2 1.9 .4 .2 -.4-.2-.2-4.5-1.9-2.5-.8-2.5-.3-2.6 .1-3.8 .6-3 .9-2.4 1-4.2 2.3-5.3 1.9-2.2 .5-1.7 .2-4.5 0-3.4-.3-3.3-.9-3.3-1.2-6.1-2.9-2.9-1-4.4-.9-4.4-.2-1.9 .2-1.9 .3-4.3 1.3-3.5 1.4-4.2 2.1-2.6 1-5.5 1.3-1.7 .1-2.3 .1-4.5-.5-3.3-.8-2.7-1.1-6-2.9-2.3-1-2.4-.7-3.2-.6-4.4-.1-3.8 .4-3.1 .9-5.3 1.9-5.2 2.5-2.7 .9-5 1.1-3.4 .2-3.9-.4-3.9-1-2.1-.9-4.9-2.5-4.2-1.4-3.7-.8-3.2-.1-3.1 .2-3.8 .6-2.4 .6-2.4 .9-1.1 .6-2.8 2.3-.1 .5 .1 .4 .3 .4 .5 .1z", k: "clay" },
+    ],
+  },
+  // Portal-only: a plug pulled from its socket (connection trouble) and a server letting off smoke (boot failure).
+  unplugged: {
+    box: "0 0 120 90",
+    shapes: [
+      { d: "M6.4 71.2l3.8 .1 2.5 -.5 1.8 -.6 1.8 -.7 1.7 -.9 3 -2.3 2.3 -2.3 1.4 -2.1 2.7 -4.8 2 -4.3 1.3 -1.9 .1 -.2-.1-.4-.2-.1-.4 .1-3.8 4-4.6 6.9-1.4 1.8-1.6 1.5-2.2 1.7-3 1.5-6 2.1-1.4 .3-.3 .5 .1 .3z" },
+      { d: "M30.9 41.8l4 -.8 4.1 -.4 5.2 0 4.4 .4 .3 .3 .1 .4-.3 9.6 0 5.4-.1 .9-.3 .4-.5 .3-.9 .3-3.5 .4-2.3 .2-7.1-.3-3.7-.3-.3-.2-.3-8.2 0 -7.2 .2 -.6 .4 -.4 .2 -.2zM29.4 39.4l-.8 .4-.7 .6-.5 .8-.3 .9 .2 8.7-.1 6 .1 .7 .3 .8 .5 .7 2 1.5 .7 .3 3 .5 3.1 .2 5.5 -.1 4.3 -.3 2 -.3 .8 -.3 .8 -.5 .6 -.8 .3 -.9 .3 -6.3 0 -9 0 -.8-.3-.8-.5-.7-1.9-1.5-.7-.2-6.1-.8-3.1 0-3.7 .2-4.9 .6z" },
+      { d: "M50.8 46.2l1.8 .5 3.6 -.1 1.8 -.6 .7 -.1 .2 -.3-.1-.3-2.6-1-3.7 0-2.1 .8-.2 .2 .1 .7zM50.6 54.8l1.8 .5 3.5 .1 1.9 -.6 .7 -.1 .2 -.3-.1-.3-2.5-1-3.7-.1-2.1 .7-.3 .5 .1 .3z" },
+      { d: "M74.4 39.1l1.9 -.3 2.9 -.4 6.5 -.1 4.1 .2 3.8 .6 .3 .3 .2 .8-.3 7.3-.1 11.4-.1 .9-.5 .7-.6 .4-1 .2-7.7 .4-3.5-.1-6.8-.3-.5-.2-.2-.8 .4 -13.9-.1-5.4 .2 -.7 .6 -.6 1.3 -.6zM73.2 36.7l-.9 .3-.8 .5-.5 .8-.4 .8-.1 .9-.2 18.8 .2 1.4 .4 .8 .6 .6 1.9 1.4 2.5 .5 3.6 .3 6.1 .1 3.7 -.2 4.6 -.6 .8 -.4 .6 -.6 .6 -.7 .3 -.9 .1 -.8 .3 -12.1 0 -6.7-.1-.7-.3-.8-.5-.7-1.9-1.4-.7-.3-7.3-1-2.4-.1-3.1 0-7.1 .6z" },
+      { d: "M77.5 45.6a2.2 2.2 0 1 0 4.5 0a2.2 2.2 0 1 0 -4.5 0zM77.7 54.4a2.2 2.2 0 1 0 4.5 0a2.2 2.2 0 1 0 -4.5 0z" },
+      { d: "M95.6 51l1.1 .2 5 1.4 2 .9 1.5 .9 2 2 2.8 3.8 1.3 1.4 1.9 1.6 2.9 2.2 .3 -.1-.1-.3-1.3-1.1-1.2-1.4-3.8-5.2-1.2-1.5-1.7-1.7-2.5-2-2.8-1.5-1.8-.6-1.2-.3-3.5 .2-.3 .5 .1 .3z" },
+      { d: "M66 33.2l.7 -1.2 0 -3-.1-.6-.6-1.2-.1-.6-.3-.1-.3 .1-.1 .6-.7 1.2-.3 3.6 .6 1.5 .3 .3 .6 0zM70.3 36.1l1.3 -.4 2.1 -2 .4 -1.4 .4 -.7-.1-.4-.4-.1-.7 .3-1.4 .3-2.1 2.1-.6 1.6 0 .4 .4 .4zM61.3 35.1l-.5-1.1-1.9-2.3-1.6-.9-.3 0 0 .2 .6 1.8 2 2.2 1.3 .8 .4 -.1 .1 -.2z", k: "clay" },
+    ],
+  },
+  // The server without its sparkle (shape 4), plus smoke and a clay short-circuit spark.
+  fault: {
+    box: "0 -14 120 104",
+    parts: [["server", null, [4]]],
+    shapes: [
+      { d: "M74.9 6.1l-.2-.4-.1-1 .7 -1.3 .8 -2.1 .3 -1.5 0 -.7-.4-1.5-1.1-1.7-.1-.5 0 -1.3 .8 -2.5 .2 -2-.4-2-.6-1.1-.2-.2-.3 .3 .4 1.2-.1 1-1.6 3-.4 1.3-.1 .8 .2 1.5 1.1 1.8 .3 1-.2 1.2-1.2 3.2 0 1.6 .7 1.4 .9 1.1 .1 .1 .5 -.1 .1 -.1z", o: 0.5 },
+      { d: "M83.7 6.4l-.3-.5 0 -1 1.3 -3 .3 -1.4-.2-1.5-.9-1.8-.2-.4 .1 -.9 .7 -2.6 .1 -1.3-.2-1.4-.6-1.1-.2-.1-.2 .2 .2 .6 0 1.1-1.6 3-.3 1.5 .3 1.5 .8 1.2 .2 .9-.2 1.3-.9 2.8 .1 1.5 .3 .7 .8 1.1 .2 .1 .3 0 .1 -.2z", o: 0.36 },
+      { d: "M97.1 6.7l1.3 -.3 2.2 -2.1 .4 -.5 .3 -1.4 .3 -.5-.1-.4-.4-.1-.5 .3-1.4 .2-.6 .4-2.1 2.1-.6 1.6 0 .4 .2 .3 .3 .2 .4 0zM98.5 13l1.2 .4 3 -.3 .6 -.1 1.1 -.9 .6 -.2 .1 -.3-.2-.3-.6-.1-1.3-.6-.6 0-3 .5-1.4 .8-.2 .3 .1 .6zM91.9 3.5l.7 -1.2 .3 -3-.1-.6-.6-1.2-.1-.4-.3-.2-.3 .1-.1 .4-.8 1.1-.3 .6-.3 3 .6 1.6 .2 .3 .3 .1 .4 -.1 .3 -.2z", k: "clay" },
+    ],
+  },
 };
 
 const THEME_LABELS = { system: "跟随系统", light: "浅色", dark: "深色" };
 const THEME_ICONS = { system: "monitor", light: "sun", dark: "moon" };
+
+function greetingWord(date = new Date()) {
+  const hour = date.getHours();
+  if (hour < 5) return "夜深了";
+  if (hour < 11) return "早上好";
+  if (hour < 13) return "中午好";
+  if (hour < 18) return "下午好";
+  return "晚上好";
+}
+
+function overviewSummary(vms) {
+  const count = (state) => vms.filter((vm) => vm.state === state).length;
+  const parts = [`你有 ${vms.length} 台虚拟机`];
+  if (count("ready")) parts.push(`${count("ready")} 台正在运行`);
+  if (count("starting")) parts.push(`${count("starting")} 台正在开机`);
+  if (count("error")) parts.push(`${count("error")} 台启动失败`);
+  return `${parts.join("，")}。`;
+}
 
 export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.defaultView, theme = null } = {}) {
   let screen = null;
@@ -1196,25 +1378,45 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     return el;
   }
 
+  function svgNode(tag, attrs) {
+    const node = doc.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) {
+      if (value !== null && value !== undefined) node.setAttribute(key, String(value));
+    }
+    return node;
+  }
+
   function icon(name, className = "icon") {
-    const svg = doc.createElementNS(SVG_NS, "svg");
-    svg.setAttribute("viewBox", "0 0 24 24");
-    svg.setAttribute("aria-hidden", "true");
-    svg.setAttribute("focusable", "false");
-    svg.setAttribute("class", className);
-    for (const d of ICONS[name] || []) {
-      const path = doc.createElementNS(SVG_NS, "path");
-      path.setAttribute("d", d);
-      svg.append(path);
+    const svg = svgNode("svg", { viewBox: "0 0 24 24", "aria-hidden": "true", focusable: "false", class: className });
+    for (const part of ICONS[name] || []) {
+      if (typeof part === "string") svg.append(svgNode("path", { d: part }));
+      else if (part.c) svg.append(svgNode("circle", { cx: part.c[0], cy: part.c[1], r: part.c[2] }));
+      else if (part.r) svg.append(svgNode("rect", { x: part.r[0], y: part.r[1], width: part.r[2], height: part.r[3], rx: part.r[4] }));
     }
     return svg;
   }
 
-  function brand(compact = false) {
-    return h("div", { class: compact ? "brand brand-compact" : "brand" }, [
-      h("span", { class: "brand-mark" }, icon("logo", "icon brand-icon")),
-      h("span", { class: "brand-name" }, "Super Cage"),
-    ]);
+  function drawing(name, className) {
+    const spec = ART[name];
+    const svg = svgNode("svg", { viewBox: spec.box, fill: "currentColor", "aria-hidden": "true", focusable: "false", class: className });
+    const add = (shape, transform = null) =>
+      svg.append(svgNode("path", { d: shape.d, opacity: shape.o, transform, class: shape.k ? "k-clay" : null }));
+    for (const [part, transform, skip = []] of spec.parts || []) {
+      ART[part].shapes.forEach((shape, index) => skip.includes(index) || add(shape, transform));
+    }
+    spec.shapes.forEach((shape) => add(shape));
+    return svg;
+  }
+
+  // The brand mark is defined once as a symbol sprite in index.html; "full" from 40px, "small" for 16–32px.
+  function mark(kind = "small") {
+    const svg = svgNode("svg", { viewBox: "0 0 256 256", "aria-hidden": "true", focusable: "false", class: `mark mark-${kind}` });
+    svg.append(svgNode("use", { href: kind === "full" ? "#sc-mark" : "#sc-mark-small" }));
+    return svg;
+  }
+
+  function brand() {
+    return h("span", { class: "brand" }, [mark("small"), h("span", { class: "brand-name", text: "Super Cage" })]);
   }
 
   function themeButton() {
@@ -1235,6 +1437,10 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     return button;
   }
 
+  function pageHeader({ withBrand = true } = {}) {
+    return h("header", { class: "page-head" }, [withBrand ? brand() : h("span"), themeButton()]);
+  }
+
   // 忙碌时用 aria-disabled 而不是 disabled，避免键盘焦点掉到 <body>；重复点击由控制器忽略。
   function setBusy(button, busy) {
     button.setAttribute("aria-disabled", busy ? "true" : "false");
@@ -1244,6 +1450,31 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     el.textContent = message || "";
     el.hidden = !message;
     input.setAttribute("aria-invalid", message ? "true" : "false");
+  }
+
+  // A quiet one-line message with a leading icon; only the text part changes.
+  function note(className, iconName, role) {
+    const text = h("span");
+    const detailText = h("span", { class: "note-detail", hidden: true });
+    const el = h("div", { class: `note ${className}`, role, hidden: true }, [icon(iconName), h("span", { class: "note-body" }, [text, detailText])]);
+    return {
+      el,
+      // detail: the server's own words when they could not be translated, kept small for support.
+      set(message, detail = "") {
+        text.textContent = message || "";
+        detailText.textContent = detail || "";
+        detailText.hidden = !detail;
+        el.hidden = !message;
+      },
+    };
+  }
+
+  // Chinese text may break between any two characters, so a balanced line can still split a word ("工/作台").
+  // Each clause becomes an inline-block, so lines break between clauses and only split one that is too long.
+  function setProse(el, value, pattern = /[^，。；：！？]+[，。；：！？]*|[，。；：！？]+/g) {
+    const clauses = String(value || "").match(pattern) || [];
+    el.replaceChildren(...clauses.map((clause) => h("span", { class: "clause", text: clause })));
+    return el;
   }
 
   function focusByKey(container, key) {
@@ -1261,8 +1492,9 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
   function buildBooting() {
     const el = h("main", { class: "center-screen" }, [
       h("div", { class: "splash", role: "status" }, [
-        h("span", { class: "spinner", "aria-hidden": "true" }),
-        h("p", { text: "正在检查登录状态…" }),
+        mark("full"),
+        h("p", { class: "splash-name", text: "Super Cage" }),
+        h("p", { class: "splash-line" }, [h("span", { class: "live-dot", "aria-hidden": "true" }), "正在检查登录状态…"]),
       ]),
     ]);
     return { phase: "booting", el, update() {} };
@@ -1271,21 +1503,29 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
   /* ---- 会话检查失败（与未登录区分） ---- */
 
   function buildSessionError() {
-    const message = h("p", { class: "muted" });
-    const retry = h("button", { type: "button", class: "btn btn-primary", onclick: () => portal.boot() }, "重新连接");
-    const el = h("main", { class: "center-screen" }, [
-      h("section", { class: "card status-card", role: "alert", "aria-labelledby": "session-error-title" }, [
-        h("span", { class: "status-icon is-error" }, icon("alert")),
-        h("h1", { id: "session-error-title", text: "暂时无法连接门户服务" }),
-        message,
-        h("div", { class: "actions" }, [retry]),
+    const message = h("p", { class: "hero-text" });
+    const detail = h("p", { class: "hero-detail", hidden: true });
+    const retry = h("button", { type: "button", class: "btn btn-primary btn-lg", onclick: () => portal.boot() }, "重新连接");
+    const el = h("div", { class: "page" }, [
+      pageHeader(),
+      h("main", { class: "page-main" }, [
+        h("section", { class: "hero", role: "alert", "aria-labelledby": "session-error-title" }, [
+          drawing("unplugged", "art hero-art"),
+          h("h1", { id: "session-error-title", class: "hero-title", text: "暂时无法连接门户服务" }),
+          message,
+          detail,
+          setProse(h("p", { class: "hero-text" }), "这不代表你已退出登录。"),
+          h("div", { class: "actions" }, [retry]),
+        ]),
       ]),
     ]);
     return {
       phase: "session-error",
       el,
       update(state) {
-        message.textContent = `${state.bootError?.message || "请稍后重试。"} 这不代表你已退出登录。`;
+        setProse(message, state.bootError?.message || "请稍后重试。");
+        detail.textContent = state.bootError?.detail || "";
+        detail.hidden = !state.bootError?.detail;
       },
       focus: () => retry.focus(),
     };
@@ -1296,14 +1536,18 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
   function buildAuth() {
     const ids = {
       title: uid("auth-title"),
+      lead: uid("auth-lead"),
       user: uid("auth-user"),
+      userHint: uid("auth-user-hint"),
       userError: uid("auth-user-error"),
       pass: uid("auth-pass"),
+      passHint: uid("auth-pass-hint"),
       passError: uid("auth-pass-error"),
       confirm: uid("auth-confirm"),
       confirmError: uid("auth-confirm-error"),
     };
     const title = h("h1", { id: ids.title, class: "auth-title" });
+    const lead = h("p", { id: ids.lead, class: "auth-lead" });
     const loginTab = h("button", { type: "button", class: "seg", onclick: () => portal.setAuthMode("login") }, "登录");
     const registerTab = h("button", { type: "button", class: "seg", onclick: () => portal.setAuthMode("register") }, "注册");
     const userInput = h("input", {
@@ -1316,8 +1560,9 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       spellcheck: "false",
       maxlength: "64",
       required: true,
-      "aria-describedby": ids.userError,
+      "aria-describedby": `${ids.userHint} ${ids.userError}`,
     });
+    const userHint = h("p", { id: ids.userHint, class: "field-hint", text: "3–32 个字符：英文字母、数字和 . _ -", hidden: true });
     const userError = h("p", { id: ids.userError, class: "field-error", hidden: true });
     const passInput = h("input", {
       id: ids.pass,
@@ -1325,8 +1570,9 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       type: "password",
       autocomplete: "current-password",
       required: true,
-      "aria-describedby": ids.passError,
+      "aria-describedby": `${ids.passHint} ${ids.passError}`,
     });
+    const passHint = h("p", { id: ids.passHint, class: "field-hint", text: "至少 12 个字符。", hidden: true });
     const passError = h("p", { id: ids.passError, class: "field-error", hidden: true });
     const confirmInput = h("input", {
       id: ids.confirm,
@@ -1341,14 +1587,14 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       confirmInput,
       confirmError,
     ]);
-    const notice = h("p", { class: "auth-notice", role: "status", hidden: true });
-    const formError = h("p", { class: "form-error", role: "alert", hidden: true });
-    const submit = h("button", { type: "submit", class: "btn btn-primary btn-block" });
+    const notice = note("auth-notice", "check", "status");
+    const formError = note("form-error", "alert", "alert");
+    const submit = h("button", { type: "submit", class: "btn btn-primary btn-lg btn-block" });
     const form = h("form", { class: "auth-form", novalidate: true, "aria-labelledby": ids.title }, [
-      h("div", { class: "field" }, [h("label", { for: ids.user, text: "用户名" }), userInput, userError]),
-      h("div", { class: "field" }, [h("label", { for: ids.pass, text: "密码" }), passInput, passError]),
+      h("div", { class: "field" }, [h("label", { for: ids.user, text: "用户名" }), userInput, userHint, userError]),
+      h("div", { class: "field" }, [h("label", { for: ids.pass, text: "密码" }), passInput, passHint, passError]),
       confirmField,
-      formError,
+      formError.el,
       submit,
     ]);
     form.addEventListener("submit", (event) => {
@@ -1357,21 +1603,26 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       if (portal.getState().auth.mode === "register") portal.register(fields);
       else portal.login(fields);
     });
-    const backToLogin = h("button", { type: "button", class: "btn btn-primary btn-block", "data-focus-key": "back-to-login", onclick: () => portal.setAuthMode("login") }, "返回登录");
+    const backToLogin = h("button", { type: "button", class: "btn btn-primary btn-lg btn-block", "data-focus-key": "back-to-login", onclick: () => portal.setAuthMode("login") }, "返回登录");
     const closedPanel = h("section", { class: "closed-panel", role: "alert", hidden: true }, [
       h("h2", { class: "closed-title", text: "暂未开放自助注册" }),
-      h("p", { text: "请联系管理员。" }),
+      setProse(h("p"), "这个门户的账户由管理员开通，请联系管理员获取。"),
       backToLogin,
     ]);
-    const el = h("main", { class: "center-screen auth-screen" }, [
-      h("div", { class: "auth-corner" }, [themeButton()]),
-      h("section", { class: "card auth-card", "aria-labelledby": ids.title }, [
-        brand(),
-        title,
-        h("div", { class: "segmented", role: "group", "aria-label": "选择登录或注册" }, [loginTab, registerTab]),
-        notice,
-        closedPanel,
-        form,
+    const el = h("div", { class: "page auth-screen" }, [
+      pageHeader({ withBrand: false }),
+      h("main", { class: "page-main" }, [
+        h("section", { class: "auth-card", "aria-labelledby": ids.title, "aria-describedby": ids.lead }, [
+          mark("full"),
+          title,
+          lead,
+          h("div", { class: "auth-panel" }, [
+            h("div", { class: "segmented", role: "group", "aria-label": "选择登录或注册" }, [loginTab, registerTab]),
+            notice.el,
+            closedPanel,
+            form,
+          ]),
+        ]),
       ]),
     ]);
     let lastMode = null;
@@ -1392,11 +1643,15 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         if (!closed && lastClosed && (focusWasInPanel || doc.activeElement === doc.body)) userInput.focus();
         lastClosed = closed;
         title.textContent = register ? "创建门户账户" : "登录 Super Cage 门户";
+        setProse(lead, register ? "注册后就能创建自己的虚拟机。" : "打开你的虚拟机，工作台一直在服务器上运行。");
+        lead.hidden = closed;
         loginTab.setAttribute("aria-pressed", String(!register));
         registerTab.setAttribute("aria-pressed", String(register));
         setBusy(loginTab, busy);
         setBusy(registerTab, busy);
         passInput.setAttribute("autocomplete", register ? "new-password" : "current-password");
+        userHint.hidden = !register;
+        passHint.hidden = !register;
         confirmField.hidden = !register;
         confirmInput.disabled = !register;
         setBusy(submit, busy);
@@ -1405,11 +1660,8 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         setFieldError(userInput, userError, error?.field === "username" ? error.message : "");
         setFieldError(passInput, passError, error?.field === "password" ? error.message : "");
         setFieldError(confirmInput, confirmError, error?.field === "confirm" ? error.message : "");
-        const generalError = error && !error.field ? error.message : "";
-        formError.textContent = generalError;
-        formError.hidden = !generalError;
-        notice.textContent = note || "";
-        notice.hidden = !note;
+        formError.set(error && !error.field ? error.message : "");
+        notice.set(note);
         if (mode !== lastMode) {
           if (lastMode !== null) confirmInput.value = "";
           lastMode = mode;
@@ -1434,7 +1686,9 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     ]);
     const tablist = h("div", { class: "tabs", role: "tablist", "aria-label": "我的虚拟机" });
     const addButton = h("button", { type: "button", class: "icon-btn add-btn", "aria-label": "新建虚拟机", title: "新建虚拟机", onclick: () => portal.openCreate() }, icon("plus"));
-    const userLabel = h("span", { class: "user-label", title: "当前门户账户" });
+    const avatar = h("span", { class: "avatar", "aria-hidden": "true" });
+    const userLabel = h("span", { class: "user-label" });
+    const userChip = h("span", { class: "user-chip", title: "当前门户账户" }, [avatar, userLabel]);
     const logoutButton = h("button", { type: "button", class: "icon-btn logout-btn", onclick: () => portal.logout() }, [
       icon("logout"),
       h("span", { class: "btn-text", text: "退出" }),
@@ -1442,24 +1696,21 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     const skipToSwitcher = h("button", { type: "button", class: "skip-link" }, "跳到虚拟机切换");
     const skipToStage = h("button", { type: "button", class: "skip-link" }, "跳到工作台");
 
-    const ctxDot = h("span", { class: "status-dot", "aria-hidden": "true" });
-    const ctxName = h("strong", { class: "ctx-name" });
-    const ctxStatus = h("span", { class: "ctx-status" });
-    const ctxId = h("span", { class: "ctx-id mono" });
+    // The open VM's state sits in the bar itself, so the workbench below keeps all the height.
+    const ctxStatusText = h("span");
+    const ctxStatus = h("span", { class: "chip ctx-status" }, [h("span", { class: "status-dot", "aria-hidden": "true" }), ctxStatusText]);
     const ctxSystem = h("span", { class: "ctx-system" });
-    const ctxQuota = h("span", { class: "ctx-quota" });
-    const reconnectButton = h("button", { type: "button", class: "btn btn-ghost btn-sm", "data-focus-key": "reconnect", onclick: () => portal.reconnect() }, [
-      icon("refresh"),
-      h("span", { class: "btn-text", text: "重新连接" }),
-    ]);
-    reconnectButton.setAttribute("aria-label", "重新连接当前虚拟机");
-    const contextBar = h("div", { class: "contextbar", role: "region", "aria-label": "当前虚拟机" }, [
-      h("div", { class: "ctx-main" }, [ctxDot, h("span", { class: "ctx-label", text: "当前" }), ctxName, ctxStatus, ctxSystem, ctxId]),
-      h("div", { class: "ctx-side" }, [ctxQuota, reconnectButton]),
+    const ctxSep = h("span", { class: "ctx-sep", "aria-hidden": "true", text: "·" });
+    const ctxId = h("span", { class: "ctx-id mono" });
+    const reconnectButton = h("button", { type: "button", class: "icon-btn", "data-focus-key": "reconnect", "aria-label": "重新连接当前虚拟机", title: "重新连接", onclick: () => portal.reconnect() }, icon("refresh"));
+    const contextBar = h("div", { class: "contextbar", role: "region", "aria-label": "当前虚拟机", hidden: true }, [
+      ctxStatus,
+      h("span", { class: "ctx-meta" }, [ctxSystem, ctxSep, ctxId]),
+      reconnectButton,
     ]);
 
     const bannerText = h("span", { class: "banner-text" });
-    const bannerAction = h("button", { type: "button", class: "btn btn-sm btn-ghost" });
+    const bannerAction = h("button", { type: "button", class: "btn btn-sm" });
     const bannerClose = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭提示", onclick: () => portal.dismissBanner() }, icon("close"));
     const bannerIcon = h("span", { class: "banner-icon" }, icon("alert"));
     const banner = h("div", { class: "banner", role: "alert", hidden: true }, [bannerIcon, bannerText, bannerAction, bannerClose]);
@@ -1470,18 +1721,31 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     const live = h("p", { class: "sr-only", "aria-live": "polite" });
 
     const dialog = buildCreateDialog();
+    const barRule = h("span", { class: "bar-rule", "aria-hidden": "true" });
+    const switcher = h("nav", { class: "switcher", "aria-label": "虚拟机切换" }, [tablist, addButton]);
+
+    // While the portal steps back for a workspace on a phone, this strip of its own stays above the frame (which
+    // cannot draw outside its box) and brings the portal's bar back.
+    const stripName = h("span", { class: "portal-strip-name" });
+    const strip = h("button", { type: "button", class: "portal-strip", "aria-expanded": "false", "aria-label": "显示门户栏", onclick: () => setPortalBar(el.dataset.portalBar !== "open") }, [
+      mark("small"),
+      stripName,
+      icon("chevron", "icon portal-strip-chevron"),
+    ]);
+    const scrim = h("div", { class: "portal-scrim", "aria-hidden": "true", onclick: () => setPortalBar(false) });
 
     const el = h("div", { class: "shell" }, [
       skipToSwitcher,
       skipToStage,
+      strip,
       h("header", { class: "topbar" }, [
-        brand(true),
-        home,
-        h("nav", { class: "switcher", "aria-label": "虚拟机切换" }, [tablist]),
-        addButton,
-        h("div", { class: "account" }, [userLabel, themeButton(), logoutButton]),
+        h("div", { class: "bar-start" }, [brand(), home]),
+        barRule,
+        switcher,
+        contextBar,
+        h("div", { class: "account" }, [themeButton(), userChip, logoutButton]),
       ]),
-      contextBar,
+      scrim,
       banner,
       stage,
       live,
@@ -1513,6 +1777,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         void portal.refreshList();
         return;
       }
+      if (phoneMessage(frame, event.data || {})) return;
       if (type !== "cage:open-virtual-machine" || !isValidVmId(id)) return;
       const request = ++frameRequest;
       if (!current.vms.some((vm) => vm.id === id)) await portal.refreshList();
@@ -1537,6 +1802,38 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       tabs[next].focus();
       tabs[next].scrollIntoView?.({ block: "nearest", inline: "nearest" });
     });
+
+    // Fade an edge of the tab strip only while a tab actually reaches past it (measured on the tabs, not on
+    // scrollLeft, so the strip's own padding never leaves a fade over a fully visible selected tab).
+    function updateTabFade() {
+      const tabs = tablist.querySelectorAll("[role=tab]");
+      const strip = tablist.getBoundingClientRect();
+      const first = tabs[0]?.getBoundingClientRect();
+      const last = tabs[tabs.length - 1]?.getBoundingClientRect();
+      tablist.dataset.fadeStart = String(!!first && first.left < strip.left - 1);
+      tablist.dataset.fadeEnd = String(!!last && last.right > strip.right + 1);
+    }
+    tablist.addEventListener("scroll", updateTabFade, { passive: true });
+    win.addEventListener("resize", updateTabFade, { signal: shellListeners.signal });
+    // Keep the selected tab clear of the edge fade after the strip narrows (the context bar widens as a VM's
+    // status text changes), which can push a tab that was in view on selection back under the edge.
+    function revealSelectedTab() {
+      const tab = tablist.querySelector('[role=tab][aria-selected="true"]');
+      if (!tab) return;
+      const strip = tablist.getBoundingClientRect();
+      const box = tab.getBoundingClientRect();
+      const edge = 40;
+      if (box.right > strip.right - 4) tablist.scrollLeft += box.right - strip.right + edge;
+      else if (box.left < strip.left + 4) tablist.scrollLeft -= strip.left - box.left + edge;
+    }
+    // The strip also changes width when the context bar appears or the banner shows, without a window resize.
+    const tabResize = typeof win.ResizeObserver === "function"
+      ? new win.ResizeObserver(() => {
+          revealSelectedTab();
+          updateTabFade();
+        })
+      : null;
+    tabResize?.observe(tablist);
 
     function createTab(id) {
       const dot = h("span", { class: "status-dot", "aria-hidden": "true" });
@@ -1587,32 +1884,26 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
 
     function updateContext(state) {
       const target = state.target;
-      const vm = target ? state.vms.find((item) => item.id === target.vmId) : null;
-      const count = state.vms.length;
-      ctxQuota.textContent = state.limit !== null ? `已创建 ${count} / ${state.limit} 台` : `已创建 ${count} 台`;
+      home.setAttribute("aria-current", target ? "false" : "page");
       if (!target) {
+        contextBar.hidden = true;
         contextBar.dataset.status = "none";
-        ctxDot.dataset.state = "none";
-        ctxName.textContent = "未打开虚拟机";
-        ctxStatus.hidden = true;
-        ctxSystem.hidden = true;
-        ctxId.hidden = true;
-        reconnectButton.hidden = true;
         return;
       }
+      const vm = state.vms.find((item) => item.id === target.vmId);
+      contextBar.hidden = false;
       contextBar.dataset.status = target.status;
-      ctxDot.dataset.state = vm?.state || "unknown";
-      ctxName.textContent = displayName(vm);
-      ctxStatus.hidden = false;
       ctxStatus.dataset.status = target.status;
-      ctxStatus.textContent = targetStatusLabel(target);
+      ctxStatusText.textContent = targetStatusLabel(target);
+      // Connected is the normal case: the green dot on the tab says it, the chip only speaks up otherwise.
+      ctxStatus.hidden = target.status === "ready";
       ctxSystem.hidden = !vm?.system_label;
+      ctxSep.hidden = !vm?.system_label;
       ctxSystem.textContent = vm?.system_label || "";
       ctxSystem.setAttribute("title", vm?.system_id ? `系统：${vm.system_label}（${vm.system_id}）` : "系统");
-      ctxId.hidden = false;
       ctxId.textContent = `vm-${target.vmId.slice(0, 8)}`;
+      stripName.textContent = displayName(vm);
       ctxId.setAttribute("title", `虚拟机 ID：${target.vmId}`);
-      reconnectButton.hidden = false;
       setBusy(reconnectButton, target.status === "opening");
     }
 
@@ -1624,7 +1915,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       if (banner.dataset.kind !== kind) bannerIcon.replaceChildren(icon(kind === "info" ? "info" : "alert"));
       banner.dataset.kind = kind;
       banner.setAttribute("role", info.kind === "info" ? "status" : "alert");
-      bannerText.textContent = info.message;
+      setProse(bannerText, info.message);
       bannerAction.hidden = info.action !== "logout";
       if (info.action === "logout") {
         bannerAction.textContent = "重试退出";
@@ -1632,8 +1923,131 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       }
     }
 
+    // A workspace on a phone (its phone UI, see ui/src/mobile-cli/web-shell.mjs): the portal decides by itself
+    // (phoneDevice) when it mounts the frame and after each page the frame loads, and steps back so the
+    // workspace fills the screen, leaving its strip above it. A desktop workbench in the frame asks for the bar
+    // back (cage:desktop-ui, also its answer to cage:which-ui after each load); nothing from a frame hides it.
+    // Back (the system button or swipe) leaves the workspace for the list once the workspace has no screen of
+    // its own left to go back to.
+    function setPhoneUi(on) {
+      if (on) el.dataset.phoneUi = "true";
+      else delete el.dataset.phoneUi;
+      setPortalBar(false);
+    }
+    function setPortalBar(open) {
+      if (open && el.dataset.phoneUi) el.dataset.portalBar = "open";
+      else delete el.dataset.portalBar;
+      strip.setAttribute("aria-expanded", open && el.dataset.phoneUi ? "true" : "false");
+      strip.setAttribute("aria-label", open && el.dataset.phoneUi ? "收起门户栏" : "显示门户栏");
+    }
+    win.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && el.dataset.portalBar === "open") {
+        setPortalBar(false);
+        strip.focus({ preventScroll: true });
+      }
+    }, { signal: shellListeners.signal });
+    function frameLoadedPage(frame) {
+      if (mountedFrame !== frame || !phoneDevice(win)) return;
+      const load = ++frame.loads;
+      frame.el.contentWindow?.postMessage({ type: "cage:which-ui" }, frame.origin);
+      // A page that says nothing (the phone UI, an older workspace) gets the portal's own decision.
+      win.setTimeout(() => {
+        if (mountedFrame === frame && frame.loads === load && frame.desktopFor !== load && !el.dataset.phoneUi) setPhoneUi(true);
+      }, 500);
+    }
+    // The workspace frame for which the portal holds a history entry: Back past it returns to the list.
+    let backTo = null;
+    function holdBackEntry(frame) {
+      const state = win.history.state;
+      if (!state?.cagePortal || !Number.isInteger(state.cagePortalStart) || state.cagePortalStart > win.history.length) {
+        win.history.pushState({ ...state, cagePortal: "workspace" }, "");
+        win.history.replaceState({ ...win.history.state, cagePortalStart: win.history.length }, "");
+      }
+      backTo = frame;
+    }
+    // Straight to the list, past every entry since the portal's own, which it counts itself: mark the end
+    // (dropping any forward entries), go back to the entry before the workspace's, and the popstate below
+    // leaves it. Without the portal's entry, or where history.length stops counting, leave directly.
+    let leaving = 0;
+    function leaveWorkspace(frame) {
+      const start = win.history.state?.cagePortalStart;
+      if (backTo !== frame || !win.history.state?.cagePortal || !Number.isInteger(start) || start > win.history.length || win.history.length >= 49) {
+        portal.goHome();
+        return;
+      }
+      win.history.pushState({ ...win.history.state, cagePortal: "leaving" }, "");
+      const steps = win.history.length - start + 1;
+      win.clearTimeout(leaving);
+      leaving = win.setTimeout(() => {
+        if (mountedFrame === frame) portal.goHome();
+      }, 1000);
+      win.history.go(-steps);
+    }
+    const allowReentry = createReentryLimiter();
+    function phoneMessage(frame, { type, url }) {
+      if (type === "cage:phone-ui") return true; // older workspaces: the portal decides by itself
+      if (type === "cage:desktop-ui") {
+        frame.desktopFor = frame.loads;
+        if (el.dataset.phoneUi) setPhoneUi(false);
+        return true;
+      }
+      if (type === "cage:portal-home") {
+        leaveWorkspace(frame);
+        return true;
+      }
+      if (type === "cage:workspace-unauthenticated") {
+        // The workspace's sign-in lapsed. Check the portal's own; when it holds, enter the workspace again.
+        if (!allowReentry(frame.vmId)) return true;
+        void portal.checkSession().then(() => {
+          if (portal.getState().phase === "signed-in" && mountedFrame === frame) portal.reconnect();
+        });
+        return true;
+      }
+      if (type === "cage:open-link") {
+        // The portal never opens a tab for a frame: it shows the address and the person decides.
+        const link = externalLink(url);
+        if (link) showLinkNotice(link);
+        return true;
+      }
+      return false;
+    }
+    win.addEventListener("popstate", () => {
+      if (backTo && backTo === mountedFrame && !win.history.state?.cagePortal && portal.getState().target) portal.goHome();
+    }, { signal: shellListeners.signal });
+    // A link from the workspace: where it leads (the host in plain text, the whole address on request) and a
+    // button of the portal's own. A changed address cannot be opened in the first moments after it appears.
+    let linkNotice = null;
+    function showLinkNotice({ href, host }) {
+      if (!linkNotice) {
+        const hostText = h("strong", { class: "link-notice-host" });
+        const urlText = h("span", { class: "link-notice-url" });
+        const details = h("details", { class: "link-notice-details" }, [h("summary", { text: "完整地址" }), urlText]);
+        const anchor = h("a", { class: "btn btn-sm btn-primary", target: "_blank", rel: "noopener noreferrer" }, "打开");
+        const close = h("button", { type: "button", class: "icon-btn", "aria-label": "关闭" }, icon("close"));
+        const body = h("div", { class: "link-notice-body" }, [h("span", { class: "link-notice-text", text: "工作台中的链接将在新标签页打开：" }), hostText, details]);
+        linkNotice = { el: h("div", { class: "link-notice", role: "status" }, [body, anchor, close]), anchor, hostText, urlText, details, armedAt: 0 };
+        const hide = () => { linkNotice.el.hidden = true; };
+        anchor.addEventListener("click", (event) => {
+          if (Date.now() < linkNotice.armedAt) event.preventDefault();
+          else win.setTimeout(hide, 0);
+        });
+        close.addEventListener("click", hide);
+        el.append(linkNotice.el);
+      }
+      if (linkNotice.el.hidden || linkNotice.anchor.href !== href) linkNotice.armedAt = Date.now() + 600;
+      linkNotice.hostText.textContent = host;
+      linkNotice.urlText.textContent = href;
+      linkNotice.details.open = false;
+      linkNotice.anchor.href = href;
+      linkNotice.el.hidden = false;
+    }
+
     function unmountFrame() {
       if (!mountedFrame) return;
+      setPhoneUi(false);
+      // A link one workspace offered is not left over the list or another workspace.
+      if (linkNotice) linkNotice.el.hidden = true;
+      if (backTo === mountedFrame) backTo = null;
       mountedFrame.listeners.abort(); // 释放 load/error 回调
       mountedFrame.el.remove(); // 移除即销毁浏览上下文，断开其中的流和 WebSocket
       mountedFrame = null;
@@ -1664,136 +2078,188 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       iframe.className = "workspace-frame is-loading";
       const listeners = new AbortController();
       const key = frame.key;
-      iframe.addEventListener("load", () => portal.frameLoaded(key), { signal: listeners.signal });
+      const mounted = { key, el: iframe, listeners, origin: checked.origin, vmId: target.vmId, loads: 0, desktopFor: -1 };
+      iframe.addEventListener("load", () => {
+        portal.frameLoaded(key);
+        frameLoadedPage(mounted);
+      }, { signal: listeners.signal });
       iframe.addEventListener("error", () => portal.frameFailed(key), { signal: listeners.signal });
       iframe.setAttribute("src", checked.url);
-      mountedFrame = { key, el: iframe, listeners, origin: checked.origin };
+      mountedFrame = mounted;
+      if (phoneDevice(win)) {
+        setPhoneUi(true);
+        holdBackEntry(mounted);
+      }
       frameHost.append(iframe);
     }
 
     function overlaySignature(state) {
       const target = state.target;
       if (!target) {
-        const list = state.vms.map((vm) => `${vm.id}:${vm.state}:${vm.name}:${vm.system_label}:${vm.message || ""}`).join(",");
-        return `home|${state.listStatus}|${state.limit}|${state.listError?.message || ""}|${list}`;
+        const list = state.vms.map((vm) => `${vm.id}:${vm.state}:${vm.name}:${vm.system_label}:${vm.message || ""}:${vm.message_detail || ""}`).join(",");
+        return `home|${state.listStatus}|${state.limit}|${state.listError?.message || ""}|${state.listError?.detail || ""}|${state.user?.username || ""}|${list}`;
       }
       if (target.status === "ready") return `ready|${target.vmId}`;
       const vm = state.vms.find((item) => item.id === target.vmId);
-      return `t|${target.vmId}|${target.status}|${target.warm ? 1 : 0}|${target.frame?.slow ? 1 : 0}|${target.pollFailures}|${target.error?.code || ""}|${target.error?.message || ""}|${vm?.name || ""}`;
+      return `t|${target.vmId}|${target.status}|${target.warm ? 1 : 0}|${target.frame?.slow ? 1 : 0}|${target.pollFailures}|${target.error?.code || ""}|${target.error?.message || ""}|${target.error?.detail || ""}|${vm?.message_detail || ""}|${vm?.name || ""}|${vm?.system_label || ""}`;
     }
 
-    function panel(children, { role = null, tone = "" } = {}) {
-      return h("section", { class: `panel ${tone}`.trim(), role }, children);
+    function button(label, { kind = "", focusKey = null, autofocus = false, onclick, iconName = null } = {}) {
+      return h("button", {
+        type: "button",
+        class: `btn ${kind}`.trim(),
+        "data-focus-key": focusKey,
+        "data-autofocus": autofocus,
+        onclick,
+      }, [iconName ? icon(iconName) : null, label]);
     }
 
-    function spinnerPanel(heading, lines = [], extra = []) {
-      return panel(
-        [
-          h("span", { class: "spinner spinner-lg", "aria-hidden": "true" }),
-          h("h2", { text: heading }),
-          ...lines.map((line) => (typeof line === "string" ? h("p", { class: "muted", text: line }) : line)),
-          ...extra,
-        ],
-        { role: "status" },
-      );
+    // A pause moment: drawing, serif heading, a line or two, actions.
+    function hero({ art, title, lines = [], actions = [], role = null }) {
+      return h("section", { class: "hero", role }, [
+        drawing(art, "art hero-art"),
+        // Titles keep a quoted 「name」 together with what follows it rather than splitting the name.
+        setProse(h("h2", { class: "hero-title" }), title, /[^「]+|「[^」]*」[^「]*/g),
+        ...lines,
+        actions.length ? h("div", { class: "actions" }, actions) : null,
+      ]);
+    }
+
+    const text = (value, className = "hero-text") => setProse(h("p", { class: className }), value);
+    // The server's untranslated words, if any: small, muted, plain text.
+    const detailLine = (value) => (value ? h("p", { class: "hero-detail", text: value }) : null);
+
+    function steps(current, warm) {
+      const labels = ["连接", warm ? "确认" : "开机", "载入工作台"];
+      return h("ol", { class: "steps", "aria-hidden": "true" }, labels.map((label, index) =>
+        h("li", { "data-step": index < current ? "done" : index === current ? "current" : "todo", text: label }),
+      ));
     }
 
     function buildOverlay(state) {
       const target = state.target;
       if (!target) return buildHome(state);
       const vm = state.vms.find((item) => item.id === target.vmId);
-      const name = displayName(vm);
+      // Headings quote the name; a very long one is clipped there (the tab title and the list keep it whole).
+      const chars = Array.from(displayName(vm));
+      const name = chars.length > 16 ? `${chars.slice(0, 15).join("")}…` : chars.join("");
       if (target.status === "ready") return [];
-      if (target.status === "opening") return [spinnerPanel(`正在连接「${name}」`, ["正在向门户确认虚拟机状态…"])];
+      if (target.status === "opening") {
+        return [hero({ art: "terminal", title: `正在连接「${name}」`, role: "status", lines: [steps(0, target.warm), text("正在向门户确认虚拟机状态…")] })];
+      }
       if (target.status === "starting") {
-        const elapsed = h("p", { class: "elapsed mono", "data-since": String(target.since) });
-        const lines = target.warm
-          ? [elapsed, "这台虚拟机此前在运行，正在确认工作台已就绪，通常几秒内完成。"]
-          : [elapsed, `${vm?.system_label ? `系统：${vm.system_label}。` : ""}首次开机通常需要数十秒到几分钟。开机在服务器上持续进行，切换到其他虚拟机或离开页面都不会中断。`];
-        if (target.pollFailures) lines.push(h("p", { class: "warn-text", text: `网络不稳定，正在重试（${target.pollFailures}/${POLL_MAX_FAILURES}）…` }));
-        return [spinnerPanel(target.warm ? `正在恢复「${name}」的工作台` : `「${name}」正在开机`, lines)];
+        const lines = [
+          steps(1, target.warm),
+          ...(target.warm
+            ? [text("这台虚拟机此前在运行。"), text("正在确认工作台已就绪，通常几秒内完成。")]
+            : [text("首次开机通常需要数十秒到几分钟。"), text("开机在服务器上进行，切换虚拟机或离开页面都不会中断。")]),
+          h("p", { class: "hero-meta" }, [
+            vm?.system_label ? h("span", { text: vm.system_label }) : null,
+            vm?.system_label ? h("span", { class: "meta-sep", "aria-hidden": "true", text: "·" }) : null,
+            h("span", { class: "elapsed", "data-since": String(target.since) }),
+          ]),
+        ];
+        if (target.pollFailures) lines.push(text(`网络不稳定，正在重试（${target.pollFailures}/${POLL_MAX_FAILURES}）…`, "hero-text warn-text"));
+        return [hero({ art: "terminal", title: target.warm ? `正在恢复「${name}」的工作台` : `「${name}」正在开机`, role: "status", lines })];
       }
       if (target.status === "connecting") {
-        if (!target.frame?.slow) return [h("div", { class: "veil" }, spinnerPanel(`正在载入「${name}」的工作台`, []))];
+        if (!target.frame?.slow) {
+          return [h("div", { class: "veil" }, hero({ art: "terminal", title: `正在载入「${name}」的工作台`, role: "status", lines: [steps(2, target.warm), text("虚拟机已就绪，正在打开工作台。")] }))];
+        }
         return [
-          h("div", { class: "veil" }, panel([
-            h("span", { class: "status-icon is-warn" }, icon("alert")),
-            h("h2", { text: "工作台载入时间较长" }),
-            h("p", { class: "muted", text: "可继续等待或重新连接。" }),
-            h("div", { class: "actions" }, [
-              h("button", { type: "button", class: "btn btn-primary", "data-focus-key": "retry", "data-autofocus": "", onclick: () => portal.retry() }, "重新连接"),
-              h("button", { type: "button", class: "btn", "data-focus-key": "wait", onclick: () => portal.keepWaiting() }, "继续等待"),
-            ]),
-          ], { role: "alert" })),
+          h("div", { class: "veil" }, hero({
+            art: "terminal",
+            title: "工作台载入时间较长",
+            role: "alert",
+            lines: [text("可以继续等待，或重新连接。")],
+            actions: [
+              button("重新连接", { kind: "btn-primary", focusKey: "retry", autofocus: true, onclick: () => portal.retry() }),
+              button("继续等待", { focusKey: "wait", onclick: () => portal.keepWaiting() }),
+            ],
+          })),
         ];
       }
       const error = target.error || {};
-      const heading = error.code === "vm_error" || error.code === "vm_stopped" ? `「${name}」启动失败` : `无法打开「${name}」`;
+      const failedBoot = error.code === "vm_error" || error.code === "vm_stopped";
       return [
-        panel([
-          h("span", { class: "status-icon is-error" }, icon("alert")),
-          h("h2", { text: heading }),
-          h("p", { class: "error-text", text: error.message || "发生未知错误。" }),
-          h("div", { class: "actions" }, [
-            h("button", { type: "button", class: "btn btn-primary", "data-focus-key": "retry", "data-autofocus": "", onclick: () => portal.retry() }, "重试"),
-            h("button", { type: "button", class: "btn", "data-focus-key": "home", onclick: () => portal.goHome() }, "返回总览"),
-          ]),
-        ], { role: "alert", tone: "panel-error" }),
+        hero({
+          art: failedBoot ? "fault" : "unplugged",
+          title: failedBoot ? `「${name}」启动失败` : `无法打开「${name}」`,
+          role: "alert",
+          lines: [
+            text(error.message || "发生未知错误。", "hero-text error-text"),
+            detailLine(error.detail || (error.code === "vm_error" ? vm?.message_detail : "")),
+          ],
+          actions: [
+            button("重试", { kind: "btn-primary", focusKey: "retry", autofocus: true, onclick: () => portal.retry() }),
+            button("返回总览", { focusKey: "home", onclick: () => portal.goHome() }),
+          ],
+        }),
       ];
+    }
+
+    function vmRow(vm) {
+      const created = formatCreated(vm.created_at);
+      const meta = [];
+      if (vm.system_label) meta.push(vm.system_label);
+      meta.push(h("span", { class: "mono", text: `vm-${vm.id.slice(0, 8)}` }));
+      if (created) meta.push(`创建于 ${created}`);
+      const metaLine = h("span", { class: "vm-meta" });
+      meta.forEach((part, index) => metaLine.append(...(index ? [" · ", part] : [part])));
+      return h("li", {}, h("button", { type: "button", class: "vm-card", "data-state": vm.state, "data-focus-key": `card-${vm.id}`, onclick: () => portal.select(vm.id) }, [
+        h("span", { class: "vm-main" }, [
+          h("span", { class: "vm-name", text: displayName(vm) }),
+          metaLine,
+          vm.state === "error" && vm.message ? h("span", { class: "vm-error", text: vm.message }) : null,
+          vm.state === "error" && vm.message_detail ? h("span", { class: "vm-error-detail", text: vm.message_detail }) : null,
+        ]),
+        h("span", { class: "chip", "data-state": vm.state }, [
+          h("span", { class: "status-dot", "data-state": vm.state, "aria-hidden": "true" }),
+          VM_STATE_LABELS[vm.state],
+        ]),
+        h("span", { class: "vm-go" }, [h("span", { class: "vm-go-text", text: VM_ACTION_LABELS[vm.state] || "启动并打开" }), icon("chevron")]),
+      ]));
     }
 
     function buildHome(state) {
       if (state.listStatus === "loading" || state.listStatus === "idle") {
-        return [spinnerPanel("正在加载虚拟机列表", [])];
+        return [h("div", { class: "hero-quiet", role: "status" }, [h("span", { class: "live-dot", "aria-hidden": "true" }), h("h2", { text: "正在加载虚拟机列表" })])];
       }
       if (state.listStatus === "error") {
-        return [
-          panel([
-            h("span", { class: "status-icon is-error" }, icon("alert")),
-            h("h2", { text: "无法加载虚拟机列表" }),
-            h("p", { class: "error-text", text: state.listError?.message || "请稍后重试。" }),
-            h("div", { class: "actions" }, [
-              h("button", { type: "button", class: "btn btn-primary", "data-focus-key": "list-retry", "data-autofocus": "", onclick: () => portal.refreshList() }, "重试"),
-            ]),
-          ], { role: "alert", tone: "panel-error" }),
-        ];
+        return [hero({
+          art: "unplugged",
+          title: "无法加载虚拟机列表",
+          role: "alert",
+          lines: [text(state.listError?.message || "请稍后重试。", "hero-text error-text"), detailLine(state.listError?.detail)],
+          actions: [button("重试", { kind: "btn-primary", focusKey: "list-retry", autofocus: true, onclick: () => portal.refreshList() })],
+        })];
       }
+      const username = state.user?.username || "";
       if (!state.vms.length) {
-        return [
-          panel([
-            h("span", { class: "status-icon" }, icon("server")),
-            h("h2", { text: "创建你的第一台虚拟机" }),
-            h("div", { class: "actions" }, [
-              h("button", { type: "button", class: "btn btn-primary", "data-focus-key": "empty-create", "data-autofocus": "", onclick: () => portal.openCreate() }, [icon("plus"), "新建虚拟机"]),
-            ]),
-          ]),
-        ];
+        return [hero({
+          art: "server",
+          title: "创建你的第一台虚拟机",
+          lines: [text(`欢迎，${username}。每台虚拟机有独立的磁盘和工作台，创建后会自动开机并打开。`)],
+          actions: [button("新建虚拟机", { kind: "btn-clay btn-lg", focusKey: "empty-create", autofocus: true, iconName: "plus", onclick: () => portal.openCreate() })],
+        })];
       }
       const full = state.limit !== null && state.vms.length >= state.limit;
-      const cards = state.vms.map((vm) => {
-        const created = formatCreated(vm.created_at);
-        return h("li", {}, h("button", { type: "button", class: "vm-card", "data-state": vm.state, "data-focus-key": `card-${vm.id}`, onclick: () => portal.select(vm.id) }, [
-          h("span", { class: "vm-card-top" }, [
-            h("span", { class: "status-dot", "data-state": vm.state, "aria-hidden": "true" }),
-            h("span", { class: "vm-card-name", text: displayName(vm) }),
-          ]),
-          h("span", { class: "vm-card-meta" }, [
-            h("span", { class: "badge", "data-state": vm.state, text: VM_STATE_LABELS[vm.state] }),
-            vm.system_label ? h("span", { class: "vm-card-system", text: vm.system_label }) : null,
-            h("span", { class: "mono", text: `vm-${vm.id.slice(0, 8)}` }),
-          ]),
-          vm.state === "error" && vm.message ? h("span", { class: "vm-card-error", text: vm.message }) : null,
-          created ? h("span", { class: "vm-card-date", text: `创建于 ${created}` }) : null,
-          h("span", { class: "vm-card-open", text: vm.state === "ready" ? "打开工作台" : "启动并打开" }),
-        ]));
-      });
+      const hour = new Date().getHours();
+      const daytime = hour >= 5 && hour < 18;
       return [
         h("section", { class: "home", "aria-labelledby": "home-title" }, [
-          h("div", { class: "home-head" }, [
-            h("h2", { id: "home-title", text: "我的虚拟机" }),
-            h("button", { type: "button", class: "btn btn-primary", "data-focus-key": "home-create", onclick: () => portal.openCreate() }, [icon("plus"), full ? "已达上限" : "新建虚拟机"]),
+          h("header", { class: "home-hero" }, [
+            h("h1", { class: "greeting" }, [h("span", { text: `${greetingWord()}，${username}` }), drawing(daytime ? "sun" : "moon", "art greeting-art")]),
+            drawing("squiggle", "art greeting-underline"),
+            setProse(h("p", { class: "home-lead" }), overviewSummary(state.vms)),
           ]),
-          h("ul", { class: "vm-grid", role: "list" }, cards),
+          h("div", { class: "list-head" }, [
+            h("h2", { id: "home-title", text: "我的虚拟机" }),
+            h("span", { class: "home-quota", text: state.limit !== null ? `已创建 ${state.vms.length} / ${state.limit} 台` : `已创建 ${state.vms.length} 台` }),
+            button("新建虚拟机", { kind: full ? "btn-sm" : "btn-primary btn-sm", focusKey: "home-create", iconName: "plus", onclick: () => portal.openCreate() }),
+          ]),
+          h("ul", { class: "vm-list", role: "list" }, state.vms.map(vmRow)),
+          full ? h("p", { class: "list-foot" }, [icon("info"), `已达到每个账户 ${state.limit} 台的上限。需要更多时请联系管理员。`]) : null,
         ]),
       ];
     }
@@ -1841,27 +2307,36 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         return;
       }
       const name = displayName(state.vms.find((vm) => vm.id === target.vmId));
-      const text = {
+      const message = {
         opening: `正在连接${name}`,
         starting: target.warm ? `正在确认${name}的工作台` : `${name}正在开机`,
         connecting: target.frame?.slow ? `${name}的工作台载入时间较长` : `正在载入${name}的工作台`,
         ready: `${name}的工作台已打开`,
         error: `${name}：${target.error?.message || "无法打开"}`,
       }[target.status];
-      live.textContent = text || "";
+      live.textContent = message || "";
     }
 
     function update(state) {
       current = state;
-      userLabel.textContent = state.user?.username || "";
+      const username = state.user?.username || "";
+      userLabel.textContent = username;
+      avatar.textContent = Array.from(username)[0] || "";
+      userChip.setAttribute("title", `当前门户账户：${username}`);
       setBusy(logoutButton, state.logout.busy);
-      const logoutLabel = state.logout.busy ? "正在退出…" : `退出登录（${state.user?.username || ""}）`;
+      const logoutLabel = state.logout.busy ? "正在退出…" : `退出登录（${username}）`;
       logoutButton.setAttribute("aria-label", logoutLabel);
       logoutButton.setAttribute("title", logoutLabel);
       const full = state.limit !== null && state.vms.length >= state.limit;
       addButton.setAttribute("title", full ? `已达到 ${state.limit} 台上限` : "新建虚拟机");
+      // With no VMs yet the empty overview carries the create action; a lone "+" in the bar would only repeat it.
+      switcher.hidden = !state.vms.length;
+      barRule.hidden = !state.vms.length;
+      // On the overview the remembered VM keeps aria-selected for the tab pattern, but should not look open.
+      el.dataset.view = state.target ? "vm" : "home";
       updateTabs(state);
       updateContext(state);
+      updateTabFade();
       updateBanner(state);
       updateFrame(state);
       updateOverlay(state);
@@ -1899,6 +2374,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       },
       destroy() {
         shellListeners.abort();
+        tabResize?.disconnect();
         unmountFrame();
         if (ticker !== null) win.clearInterval(ticker);
         ticker = null;
@@ -1910,10 +2386,11 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
   function buildCreateDialog() {
     const ids = {
       title: uid("create-title"),
+      lead: uid("create-lead"),
       name: uid("create-name"),
       nameError: uid("create-name-error"),
     };
-    const heading = h("h2", { id: ids.title, text: "新建虚拟机" });
+    const heading = h("h2", { id: ids.title, class: "dialog-title", text: "新建虚拟机" });
     const input = h("input", {
       id: ids.name,
       name: "vm-name",
@@ -1924,26 +2401,28 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       "aria-describedby": ids.nameError,
     });
     const nameError = h("p", { id: ids.nameError, class: "field-error", hidden: true });
-    const formError = h("p", { class: "form-error", role: "alert", hidden: true });
-    const quota = h("p", { class: "muted quota" });
+    const formError = note("form-error", "alert", "alert");
+    const quota = h("p", { class: "quota" });
     const cancel = h("button", { type: "button", class: "btn", onclick: () => portal.closeCreate() }, "取消");
     const submit = h("button", { type: "submit", class: "btn btn-primary" }, "创建并打开");
     const form = h("form", { class: "dialog-form", novalidate: true }, [
-      heading,
+      h("div", { class: "dialog-head" }, [
+        heading,
+        setProse(h("p", { id: ids.lead, class: "dialog-lead" }), "创建后会自动开机并打开工作台，系统由管理员预设。"),
+      ]),
       h("div", { class: "field" }, [
         h("label", { for: ids.name, text: "名称" }),
         input,
         nameError,
       ]),
-      formError,
-      quota,
-      h("div", { class: "actions actions-end" }, [cancel, submit]),
+      formError.el,
+      h("div", { class: "dialog-actions" }, [quota, h("div", { class: "actions" }, [cancel, submit])]),
     ]);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       portal.createVm(input.value);
     });
-    const el = h("dialog", { class: "dialog", "aria-labelledby": ids.title }, [form]);
+    const el = h("dialog", { class: "dialog", "aria-labelledby": ids.title, "aria-describedby": ids.lead }, [form]);
     el.addEventListener("cancel", (event) => {
       event.preventDefault(); // 由状态驱动关闭，忙碌时保持打开
       portal.closeCreate();
@@ -1989,15 +2468,14 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         show(create.seq);
         const full = state.limit !== null && state.vms.length >= state.limit;
         quota.textContent = state.limit !== null ? `已创建 ${state.vms.length} / ${state.limit} 台${full ? "，已达上限" : ""}` : `已创建 ${state.vms.length} 台`;
+        quota.dataset.full = String(full);
         setBusy(submit, create.busy || full);
         setBusy(cancel, create.busy);
         input.readOnly = create.busy;
         submit.textContent = create.busy ? "正在创建…" : "创建并打开";
         const error = create.error;
         setFieldError(input, nameError, error?.field === "name" ? error.message : "");
-        const general = error && !error.field ? error.message : "";
-        formError.textContent = general;
-        formError.hidden = !general;
+        formError.set(error && !error.field ? error.message : "", error && !error.field ? error.detail : "");
         if (error?.field === "name" && error !== lastError) input.focus();
         lastError = error;
       },
@@ -2050,6 +2528,23 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
 /* 浏览器启动                                                          */
 /* ------------------------------------------------------------------ */
 
+// The visible area above an on-screen keyboard, for the full-screen workspace and bottom sheets on phones:
+// iOS pans the page instead of resizing it, so fixed layers follow the visual viewport.
+function trackViewport(doc, win) {
+  const viewport = win.visualViewport;
+  if (!viewport) return;
+  const style = doc.documentElement.style;
+  const update = () => {
+    if (Math.abs(viewport.scale - 1) > 0.01) return;
+    style.setProperty("--vv-top", `${Math.max(0, viewport.offsetTop)}px`);
+    style.setProperty("--vv-height", `${viewport.height}px`);
+    style.setProperty("--vv-bottom", `${Math.max(0, win.innerHeight - viewport.offsetTop - viewport.height)}px`);
+  };
+  viewport.addEventListener("resize", update);
+  viewport.addEventListener("scroll", update);
+  update();
+}
+
 export function start(doc = globalThis.document, win = globalThis) {
   const root = doc?.getElementById("app");
   if (!root || root.dataset.mounted === "1") return null;
@@ -2077,6 +2572,7 @@ export function start(doc = globalThis.document, win = globalThis) {
     isHidden: () => doc.visibilityState === "hidden",
     broadcast,
   });
+  trackViewport(doc, win);
   mountPortal(root, portal, { doc, win, theme });
   channel?.addEventListener("message", (event) => {
     if (event.data?.type === "session") void portal.checkSession();

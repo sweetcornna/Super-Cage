@@ -182,6 +182,23 @@ export class DownloadManager {
     });
   }
 
+  // Forgets finished records changed since a time, with their staging copies
+  // in the guest; saved files stay where they were saved. A download whose
+  // save failed keeps its record and its staging copy, the only copy of the
+  // file, so it can still be retried.
+  forget(since = 0) {
+    let removed = 0, kept = 0;
+    for (const [id, record] of this.records) {
+      if (!terminalStates.has(record.state) || !(Date.parse(record.updatedAt || 0) >= since)) continue;
+      if (record.state === "failed" && record.retryable && this.sourceExists(id)) { kept++; continue; }
+      this.records.delete(id);
+      try { unlinkSync(join(this.directory, "Downloads", id)); } catch {}
+      removed++;
+    }
+    if (removed) { this.persist(); this.changed(); }
+    return { removed, kept };
+  }
+
   snapshot() {
     return [...this.records.values()].reverse().map(({ sourceReady, ...record }) => record);
   }

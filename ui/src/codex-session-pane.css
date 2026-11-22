@@ -1,0 +1,173 @@
+/* The read-only pane of a Codex session (codex-session-pane.jsx): a quiet
+   header, the owner notice on --soft, the transcript in a reading column. */
+.codex-session-page .codex-session-header {
+  gap: 8px;
+  min-width: 0;
+}
+.codex-session-header h1 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.codex-session-header .codex-session-mark {
+  color: var(--muted);
+}
+.codex-session-header .codex-session-account {
+  flex: none;
+  max-width: 14rem;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+.codex-session-header .codex-session-state {
+  flex: none;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+.codex-session-header .codex-session-project {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: var(--fs-caption);
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Stays at the end of the header when the project is hidden (narrow). */
+.codex-session-header .codex-session-archive {
+  margin-left: auto;
+}
+.codex-session-page .codex-session-content {
+  padding: 24px 32px 0;
+}
+.codex-session-column {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+  min-height: 0;
+  max-width: var(--content-form);
+  margin-inline: auto;
+}
+.codex-session-notice {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border-radius: var(--r-md);
+  background: var(--soft);
+  font-size: var(--fs-secondary);
+  line-height: 1.55;
+}
+.codex-session-notice p {
+  margin: 0;
+}
+.codex-session-notice-text {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  color: var(--ink);
+}
+.codex-session-notice-text .live-dot {
+  transform: translateY(-1px);
+}
+.codex-session-notice-detail,
+.codex-session-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+.codex-session-notice-actions,
+.codex-session-continue {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.codex-session-notice-actions > button,
+.codex-session-continue > button {
+  min-height: var(--h-compact);
+  padding: 0 12px;
+  font-size: var(--fs-secondary);
+}
+.codex-session-notice-actions > button.primary,
+.codex-session-continue > button.primary {
+  margin-left: auto;
+}
+.codex-session-continue {
+  padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.codex-session-auto {
+  /* .check-line's form spacing would lift it above the buttons beside it. */
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.codex-session-error {
+  margin: 0;
+  color: var(--error);
+  font-size: var(--fs-secondary);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.codex-session-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.codex-transcript {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 4px 2px 32px;
+  overflow-y: auto;
+}
+.codex-message {
+  min-width: 0;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.codex-message.user {
+  align-self: flex-end;
+  max-width: 85%;
+  padding: 10px 14px;
+  border-radius: var(--r-lg);
+  background: var(--soft);
+}
+.codex-message .markdown pre,
+.codex-message .markdown code {
+  font-family: var(--font-mono);
+}
+.codex-message-working,
+.codex-message-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.codex-session-page .empty-state {
+  margin: auto 0;
+}
+@media (max-width: 1050px) {
+  .codex-session-page .codex-session-content {
+    padding: 16px 20px 0;
+  }
+  .codex-session-header .codex-session-project {
+    display: none;
+  }
+}

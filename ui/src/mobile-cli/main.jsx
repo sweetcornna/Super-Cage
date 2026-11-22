@@ -21,7 +21,14 @@ import { SessionAccount } from "../session-account";
 import "./mobile.css";
 import "./super.css";
 import { IconHints } from "../icon-hints.jsx";
+import { deviceMode, edgeSwipe, openExternal, overlayPop, useDocked, useWebTenant, webPhone, writeRoute } from "./web-shell.mjs";
+import { afterOutcome, HOLD_SECONDS, initialPoll, MIN_SPACING_MS, pollQuery, requestDeadline, requestDeadlineMs } from "../session-poll.mjs";
+import { keepSame } from "../poll-state.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
+
+// Whether the server holds session reads (its list answers carry
+// "revision"); a transcript read sends wait only then.
+const sessionHold = { supported: false };
 
 const labels = {
 	queued: "消息已送达",
@@ -30,7 +37,7 @@ const labels = {
 };
 const active = (status) => status === "running" || status === "stopping" || status === "queued";
 const nativePhone = navigator.userAgent.includes("CageMobile/1");
-const phoneWorkspace = nativePhone || location.pathname === "/";
+const phoneWorkspace = nativePhone || location.pathname === "/" || deviceMode;
 const dateFormat = new Intl.DateTimeFormat("zh-CN", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
 function displayTime(value) {
   if (!value) return "";
@@ -47,7 +54,7 @@ function route() {
     terminal, path: typeof value?.path === "string" ? value.path : ""};
 }
 function saveRoute(next, push) {
-  history[push ? "pushState" : "replaceState"]({ ...history.state, cageCLI: next }, "");
+  writeRoute(next, push);
 }
 
 function Status({ value, awaitingApproval }) {
@@ -102,12 +109,14 @@ function App() {
   // A virtual machine on a Super Cage server keeps its portal name. Its remote browser
   // and Claude Desktop need a paired computer, so links open on the phone.
   const device = devices.devices.find(d => d.id === devices.current);
-  const serverVM = device?.kind === "tenant";
+  const webTenant = useWebTenant();
+  const docked = useDocked();
+  const serverVM = device?.kind === "tenant" || webTenant;
   useEffect(() => {
     if (catalog?.host && devices.current && !serverVM) deviceCommand("name", { id: devices.current, name: catalog.host });
   }, [catalog?.host, devices.current, serverVM]);
   const openWeb = useCallback((url, tool) => {
-    if (serverVM) { if (!deviceCommand("open-url", { url })) window.open(url, "_blank", "noopener"); }
+    if (serverVM) { if (!deviceCommand("open-url", { url })) openExternal(url); }
     else tool(url);
   }, [serverVM]);
   const restricted = useCallback((error) => {
@@ -123,7 +132,7 @@ function App() {
     setGate(error.message); setCatalog(null); setError("");
   }, []);
   useEffect(() => {
-    const goBack = () => { openBrowserRequest.current = null; pageGeneration.current++; setCurrent(route()); setDrawer(false); setError(""); };
+    const goBack = () => { if (overlayPop()) return; openBrowserRequest.current = null; pageGeneration.current++; setCurrent(route()); setDrawer(false); setError(""); };
     const visibility = () => setVisible(!document.hidden);
     const viewport = window.visualViewport;
     const resize = () => {
@@ -144,23 +153,56 @@ function App() {
   useEffect(() => {
     if (!visible) return;
     const controller = new AbortController();
-    const options = { signal: controller.signal };
     const expectedAccess = accessGeneration.current;
     let timer;
+    // The session list is held by the server while it is unchanged
+    // (after=<revision>&wait=25, ../session-poll.mjs); an older server, or a
+    // link that refuses the held form, keeps the 5 s polling.
+    let poll = initialPoll();
+    // The projects keep their 5 s cadence: a held list can answer every
+    // second during a turn, or not for 25 s.
+    let projects = null, projectsAt = 0;
     const load = async () => {
       const expectedCatalog = catalogGeneration.current;
+      const { after, wait } = pollQuery(poll);
+      const started = Date.now();
+      // A list that never answers is dropped and asked again (with backoff).
+      const deadline = requestDeadline(controller.signal, requestDeadlineMs(wait));
+      const timed = { signal: deadline.signal };
+      let outcome;
       try {
-        const [info, list] = await Promise.all([request("/projects", options), request("/sessions", options)]);
+        const fresh = !projects || started - projectsAt >= 5000;
+        const [info, list] = await Promise.all([fresh ? request("/projects", timed) : projects,
+          request("/sessions" + (after ? "?after=" + encodeURIComponent(after) + (wait ? "&wait=" + wait : "") : ""), timed)]);
         if (controller.signal.aborted || expectedAccess !== accessGeneration.current || expectedCatalog !== catalogGeneration.current) return;
-        for (const session of list.sessions || []) archivedSessions.current.delete(session.id);
-        setCatalog({ ...info, sessions: (list.sessions || []).map(session => list.notice ? {...session, active:false} : session) }); setGate(""); setError(list.notice || "");
+        if (fresh) { projects = info; projectsAt = started; }
+        if (list) {
+          for (const session of list.sessions || []) archivedSessions.current.delete(session.id);
+          sessionHold.supported = Boolean(list.revision);
+          setCatalog({ ...info, sessions: (list.sessions || []).map(session => list.notice ? {...session, active:false} : session) }); setGate(""); setError(list.notice || "");
+          outcome = { status: 200, revision: list.revision };
+        } else {
+          // Unchanged: keep the rows; the projects may still have moved.
+          setCatalog(previous => previous ? keepSame(previous, { ...info, sessions: previous.sessions }) : previous); setGate("");
+          outcome = { status: 204 };
+        }
       } catch (error) {
         if (controller.signal.aborted) return;
         if (accessDenied(error)) { restricted(error); return; }
-        setError(error.message);
-        setCatalog(previous => previous && ({...previous, sessions:previous.sessions.map(session => ({...session, active:false}))}));
+        if (wait && (error.status === 400 || error.status === 404)) {
+          sessionHold.supported = false;
+          outcome = { status: error.status };
+        } else {
+          setError(deadline.expired() ? "会话列表暂时没有回应，正在重试" : error.message);
+          setCatalog(previous => previous && ({...previous, sessions:previous.sessions.map(session => ({...session, active:false}))}));
+          outcome = { error: true };
+        }
+      } finally {
+        deadline.done();
       }
-      if (!controller.signal.aborted && (drawer || current.tool !== "code" || !current.session)) timer = setTimeout(load, 5000);
+      const step = afterOutcome(poll, outcome, { started, ended: Date.now(), wait, interval: 5000 });
+      poll = step.poll;
+      if (!controller.signal.aborted && (drawer || current.tool !== "code" || !current.session)) timer = setTimeout(load, step.delay);
     };
     void load();
     return () => { clearTimeout(timer); controller.abort(); };
@@ -290,7 +332,7 @@ function App() {
     return () => window.removeEventListener("cage-open-archives", openArchives);
   }, [current.project]);
   const edge = useRef(null);
-  const swipe = phoneWorkspace && !drawer && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
+  const swipe = phoneWorkspace && edgeSwipe && !drawer && !docked && !current.displayID && !(current.tool === "terminal" && current.terminal) ? {
     onTouchStart: (event) => { const t = event.touches[0]; edge.current = t.clientX < 22 ? { x: t.clientX, y: t.clientY } : null; },
     onTouchMove: (event) => {
       const start = edge.current, t = event.touches[0];
@@ -299,7 +341,7 @@ function App() {
       if (t.clientX - start.x > 56) { edge.current = null; haptic("light"); setDrawer(true); }
     },
   } : {};
-  return <main {...swipe} className={["mobile-app", phoneWorkspace && "phone-workspace", nativePhone && "native-phone", current.tool === "terminal" && current.terminal && "immersive"].filter(Boolean).join(" ")}>
+  return <main {...swipe} className={["mobile-app", phoneWorkspace && "phone-workspace", nativePhone && "native-phone", webPhone && "web-phone", docked && "docked", current.tool === "terminal" && current.terminal && "immersive"].filter(Boolean).join(" ")}>
     <header className="topbar workspace-topbar">
       {phoneWorkspace
         ? <button type="button" className="icon-button menu-button" aria-haspopup="dialog" aria-expanded={drawer} aria-label="展开侧栏"
@@ -347,7 +389,7 @@ function App() {
           onSession={(path, id) => open(path, id, true)} onTool={chooseTool} environment={env.status}
           onEnvironment={() => goTool("environment")} serverVM={serverVM} formatTime={displayTime} />
         : <section className="page-scroll">{error && <Notice onRetry={refreshAll}>{error}</Notice>}{codeNavigation}</section>}
-    {phoneWorkspace && <WorkspaceDrawer open={drawer} active={current.tool === "code" && !session ? "home" : current.tool} name={serverVM ? device.name : catalog?.host || device?.name}
+    {phoneWorkspace && <WorkspaceDrawer open={drawer || docked} docked={docked} active={current.tool === "code" && !session ? "home" : current.tool} name={serverVM ? device?.name || catalog?.host : catalog?.host || device?.name}
       tools={serverVM ? [] : workspaceTools} coreTools={workspaceCoreTools} envTone={envTone} onHome={goHome}
       onClose={() => setDrawer(false)} onTool={chooseTool} onSettings={() => settingsPage("settings")} nativePhone={nativePhone} onExit={exitWorkspace}>
       {error && <Notice onRetry={refreshAll}>{error}</Notice>}
@@ -378,6 +420,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const [approvalFeedback, setApprovalFeedback] = useState(null);
   const checkApproval = useRef(null);
   const readFailures = useRef(0);
+  const holdRefused = useRef(false);
   const live = useRef(true);
   const latest = useRef(null);
   const submission = useRef(drafts.get(id)?.pending || null);
@@ -412,10 +455,17 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const fetchSession = useCallback(async (signal, incremental) => {
     const checking = checkApproval.current;
     const generation = latest.current?.generation;
-    const after = incremental && !checking && latest.current ? "?after=" + encodeURIComponent(latest.current.revision)
-      + (generation ? "&epoch=" + encodeURIComponent(generation) : "") : "";
+    const incrementalRead = incremental && !checking && latest.current;
+    // Held while unchanged (wait=25) on a server that holds reads; the
+    // 1 s / 4 s polling otherwise, and after a 400/404 to the held form.
+    const wait = incrementalRead && sessionHold.supported && !holdRefused.current ? HOLD_SECONDS : 0;
+    const after = incrementalRead ? "?after=" + encodeURIComponent(latest.current.revision)
+      + (generation ? "&epoch=" + encodeURIComponent(generation) : "") + (wait ? "&wait=" + wait : "") : "";
+    const started = Date.now();
+    // A read that never answers is dropped and retried like a lost connection.
+    const deadline = requestDeadline(signal, requestDeadlineMs(wait));
     try {
-      const snapshot = await request(sessionPath(id) + after, { signal });
+      const snapshot = await request(sessionPath(id) + after, { signal: deadline.signal });
       if (signal.aborted || !live.current) return;
       if (snapshot) accept(snapshot, generation);
       if (snapshot && checking && checkApproval.current === checking && latest.current?.turns?.at(-1)?.approval?.id === checking.id) {
@@ -424,9 +474,16 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       }
       setReadError("");
       readFailures.current = 0; setReadProgress("");
-      return active(latest.current?.turns?.at(-1)?.status) ? 1000 : 4000;
+      const interval = active(latest.current?.turns?.at(-1)?.status) ? 1000 : 4000;
+      if (!wait) return interval;
+      const elapsed = Date.now() - started;
+      // A 204 well before the wait elapsed was not held: the usual interval.
+      if (!snapshot && elapsed < wait * 1000 - MIN_SPACING_MS) return interval;
+      return Math.max(0, MIN_SPACING_MS - elapsed);
     } catch (error) {
       if (signal.aborted || !live.current) return;
+      // Refused (or the session is gone): ask again without the wait, which also tells the two apart.
+      if (wait && (error.status === 400 || error.status === 404)) { holdRefused.current = true; return Math.max(0, MIN_SPACING_MS - (Date.now() - started)); }
       if (accessDenied(error)) onDenied(error); else if (error.status === 404 || error.status === 410) onMissing();
       else if (retryableSessionError(error) && ++readFailures.current <= sessionRetryLimit) {
         setReadError(""); setReadProgress(`${sessionFailureMessage(error)} 正在自动重连（${readFailures.current}/${sessionRetryLimit}）…`);
@@ -436,6 +493,8 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
         setReadError(sessionFailureMessage(error) + (retryableSessionError(error) ? " 已自动重连5次，仍未恢复。可以稍后再次连接。" : ""));
       }
       return null;
+    } finally {
+      deadline.done();
     }
   }, [id, accept, onDenied, onMissing]);
   useEffect(() => {
@@ -669,4 +728,4 @@ function Approval({ approval, busy, feedback, onDecide }) {
   </section>;
 }
 
-createRoot(document.getElementById("root")).render(<><IconHints /><App /></>);
+createRoot(document.getElementById("root")).render(<><IconHints focusVisibleOnly={webPhone} /><App /></>);

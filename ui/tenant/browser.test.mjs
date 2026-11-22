@@ -257,7 +257,7 @@ test(
       const vmA = await selectedVm();
       assert.match(vmA, /^[0-9a-f]{32}$/);
       await waitFor(`document.querySelector(".overlay h2")?.textContent.includes("正在开机")`, "开机等待");
-      assert.equal(await evaluate(`document.querySelector(".ctx-name").textContent`), "开发环境");
+      assert.equal(await evaluate(`document.querySelector('.tab[aria-selected="true"] .tab-name').textContent`), "开发环境");
       assert.equal(await evaluate(`document.querySelector(".ctx-system").textContent`), "Debian 12");
       assert.match(await evaluate(`document.querySelector(".overlay .elapsed").textContent`), /^已等待 \d+:\d{2}$/);
       await shot("03-starting");
@@ -363,7 +363,8 @@ test(
       await shot("06-mobile-dark");
       await click(".add-btn");
       await waitFor(`document.querySelector("dialog").open`, "手机上的新建弹窗");
-      assert.ok(await evaluate(`document.querySelector("dialog").getBoundingClientRect().width <= innerWidth - 16`));
+      // On a phone the dialog is a bottom sheet: full width, resting on the bottom edge.
+      await waitFor(`(() => { const box = document.querySelector("dialog").getBoundingClientRect(); return box.width <= innerWidth && Math.abs(box.bottom - innerHeight) <= 1; })()`, "手机上的新建弹窗贴底", 3000);
       await shot("07-mobile-create");
       await press("Escape");
       await waitFor(`!document.querySelector("dialog").open`, "Esc 关闭弹窗");
@@ -400,7 +401,7 @@ test(
       await click(".home-btn");
       await waitFor(`document.querySelectorAll(".vm-card").length === 3`, "总览");
       assert.equal(await evaluate(`document.querySelectorAll("iframe").length`), 0);
-      assert.equal(await evaluate(`document.querySelector(".ctx-quota").textContent`), "已创建 3 / 5 台");
+      assert.equal(await evaluate(`document.querySelector(".home-quota").textContent`), "已创建 3 / 5 台");
       await shot("09-overview");
       await click(".vm-card", "测试环境");
       await waitFor(`(() => { const f = document.querySelector("iframe"); return !!f && new URL(f.src).origin === ${JSON.stringify(mock.vmOrigin(vmB))}; })()`, "从总览打开第二台", 10000);

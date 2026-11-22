@@ -40,7 +40,7 @@ func (c *controllerClient) localControl(ctx context.Context, action string, inpu
 	}
 	switch status {
 	case http.StatusOK:
-		if action == "status" && (reply.OwnerID != localControllerID(c.record.Token) || reply.Identity.PID != c.record.PID || reply.Identity.Protocol != controlProtocol || !reply.Identity.matches(c.record.Controller) || !remoteInstanceID.MatchString(reply.InstanceID)) {
+		if action == "status" && (reply.OwnerID != localControllerID(c.record.Token) || reply.Identity.PID != c.record.PID || reply.Identity.Protocol != controlProtocol || !reply.Identity.Matches(c.record.Controller) || !remoteInstanceID.MatchString(reply.InstanceID)) {
 			return reply, errors.New("无法确认本机控制服务身份")
 		}
 		return reply, nil
@@ -95,6 +95,9 @@ func (d *desktopLocal) Status(ctx context.Context) (DesktopLocalStatus, error) {
 	if errors.Is(err, errControllerUnavailable) {
 		return d.offlineStatus(ctx, available), nil
 	}
+	if errors.Is(err, errClientOutdated) {
+		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: err.Error()}, nil
+	}
 	if err != nil {
 		return DesktopLocalStatus{Available: available, Message: "本机后台记录无效，请检查本机配置"}, nil
 	}
@@ -104,7 +107,11 @@ func (d *desktopLocal) Status(ctx context.Context) (DesktopLocalStatus, error) {
 		if !processExists(c.record.PID) {
 			return d.offlineStatus(ctx, available), nil
 		}
-		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: "无法确认已有本机后台的状态或版本"}, nil
+		message := "无法确认已有本机后台的状态或版本"
+		if errors.Is(err, errControllerUnproven) {
+			message = errControllerUnproven.Error()
+		}
+		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: message}, nil
 	}
 	view.Available = available
 	return view.DesktopLocalStatus, nil
@@ -291,7 +298,7 @@ func (d *desktopLocal) releaseFailedLaunch(id string) {
 func (d *desktopLocal) localSession(life, bootstrap context.Context, c *controllerClient, view desktopLocalReply) (*remotehost.Session, error) {
 	var launch launchResponse
 	status, err := c.callContext(bootstrap, "POST", "/api/launch", map[string]string{"token": c.record.Token}, &launch)
-	if err != nil || status != http.StatusOK || launch.Controller != view.Identity {
+	if err != nil || status != http.StatusOK || !launch.Controller.SameController(view.Identity) {
 		return nil, errors.New("本机后台身份已变化，请重新选择")
 	}
 	u, err := url.Parse(launch.URL)
@@ -312,7 +319,7 @@ func (d *desktopLocal) localSession(life, bootstrap context.Context, c *controll
 		Name:  cookieName + "_" + u.Port() + "-desktop",
 		Value: trustedViewProof(c.record.Token), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode,
 	}})
-	return remotehost.LocalSession(life, c.origin, manifest, c.client.Jar)
+	return remotehost.LocalSessionDial(life, c.origin, manifest, c.client.Jar, c.dial)
 }
 
 func (d *desktopLocal) Release(ctx context.Context, expected DesktopLocalStatus, stop bool) error {

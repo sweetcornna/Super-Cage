@@ -184,6 +184,10 @@ func fixtureGuest(id string) http.Handler {
 			http.Error(w, "wrong fixture cookie", http.StatusUnauthorized)
 			return
 		}
+		if r.URL.RawQuery == "echo-entry" {
+			_, _ = io.WriteString(w, strings.Join(r.Header.Values("X-Cage-Entry"), ",")+"|"+r.Header.Get("User-Agent")+"|"+r.Header.Get("Cookie"))
+			return
+		}
 		switch r.URL.Path {
 		case "/api/client/about":
 			jsonReply(w, 200, map[string]string{"version": "fixture"})
@@ -790,12 +794,20 @@ func TestTenantTicketsAndProxyBoundaries(t *testing.T) {
 	}
 	entry := fixture.request("GET", vmOrigin(first.ID), "/_tenant/enter", "", nil)
 	wantStatus(t, entry, 200, "")
-	if !strings.Contains(entry.Body.String(), `src="/_tenant/enter.js"`) || !strings.Contains(entry.Header().Get("Content-Security-Policy"), "frame-ancestors "+portalOrigin) {
+	// The entry page keeps its exact CSP (no style-src): its look comes from a stylesheet enter.js adopts,
+	// never from inline <style> or style attributes. Its only way back is a link to the portal origin.
+	page := entry.Body.String()
+	if entry.Header().Get("Content-Security-Policy") != "default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors "+portalOrigin ||
+		!strings.Contains(page, `src="/_tenant/enter.js"`) || !strings.Contains(page, `lang="zh-CN"`) || !strings.Contains(page, `href="`+portalOrigin+`"`) ||
+		strings.Contains(page, "{{portal}}") || strings.Contains(page, "<style") || strings.Contains(page, "style=") {
 		t.Fatal("incorrect entry page")
 	}
 	entryJS := fixture.request("GET", vmOrigin(first.ID), "/_tenant/enter.js", "", nil)
 	if !strings.Contains(entryJS.Body.String(), "history.replaceState") {
 		t.Fatal("entry must remove the fragment")
+	}
+	if !strings.Contains(entryJS.Body.String(), "adoptedStyleSheets") || !strings.Contains(entryJS.Body.String(), "工作台入口已失效") || strings.ContainsAny(enterCSS, "\"\\\n`") {
+		t.Fatal("entry script must carry the page style and the Chinese expiry text")
 	}
 	token := fixture.ticket(alice, first.ID)
 	wantStatus(t, fixture.enter(second.ID, token), 401, "unauthenticated")
@@ -968,10 +980,13 @@ func TestTenantCatalogPinsAndLegacyState(t *testing.T) {
 }
 
 func TestTenantRechecksFailedWorkspaceWithoutReplayingWrites(t *testing.T) {
-	for _, failure := range []string{"connection lost", "controller session expired"} {
+	// A request that fails on a reused connection is confirmed with a probe, so a
+	// healthy controller keeps the workspace ready; proxy_fault_test.go covers
+	// the connection that was dialed for the request itself.
+	for _, failure := range []string{"connection lost", "connection lost and controller down", "controller session expired"} {
 		t.Run(failure, func(t *testing.T) {
 			fixture := newFixture(t, false)
-			var expired atomic.Bool
+			var expired, down atomic.Bool
 			var writes atomic.Int32
 			const changePath = "/api/fixture/save"
 			fixture.runtime.guestHandler = func(id string) http.Handler {
@@ -983,11 +998,17 @@ func TestTenantRechecksFailedWorkspaceWithoutReplayingWrites(t *testing.T) {
 					}
 					if r.URL.Path == "/api/launch" {
 						expired.Store(false)
+						down.Store(false)
+					}
+					if r.URL.Path == "/api/client/about" && down.Load() {
+						w.WriteHeader(http.StatusServiceUnavailable)
+						return
 					}
 					if r.URL.Path == changePath {
 						writes.Add(1)
 						_, _ = io.Copy(io.Discard, r.Body)
-						if failure == "connection lost" {
+						if strings.HasPrefix(failure, "connection lost") {
+							down.Store(failure == "connection lost and controller down")
 							panic(http.ErrAbortHandler)
 						}
 						expired.Store(true)
@@ -1006,20 +1027,31 @@ func TestTenantRechecksFailedWorkspaceWithoutReplayingWrites(t *testing.T) {
 			wantStatus(t, fixture.request("POST", vmOrigin(record.ID), "/api/fixture/login", `{"password":"not accepted"}`, cookie), 401, "")
 			wantStatus(t, fixture.request("POST", portalOrigin, openPath(record.ID), "{}", alice), 200, "")
 			response := fixture.request("POST", vmOrigin(record.ID), changePath, `{"name":"notes"}`, cookie)
-			if failure == "connection lost" {
+			if strings.HasPrefix(failure, "connection lost") {
 				wantStatus(t, response, 503, "runtime_unavailable")
 			} else {
 				wantStatus(t, response, 401, "")
 			}
-			wantStatus(t, fixture.enter(record.ID, unused), 401, "unauthenticated")
-			fixture.state(alice, record.ID, failed)
-			wantStatus(t, fixture.request("POST", portalOrigin, openPath(record.ID), "{}", alice), 202, "")
-			fixture.state(alice, record.ID, ready)
+			if failure == "connection lost" {
+				// The probe finds a healthy controller: nothing is invalidated.
+				fixture.server.mu.Lock()
+				workspace := fixture.server.workspaces[record.ID]
+				fixture.server.mu.Unlock()
+				waitFixture(t, func() bool { return !workspace.checkingSession.Load() })
+				fixture.state(alice, record.ID, ready)
+				wantStatus(t, fixture.enter(record.ID, unused), 204, "")
+			} else {
+				// The probe runs in the background; the workspace fails once it ends.
+				fixture.state(alice, record.ID, failed)
+				wantStatus(t, fixture.enter(record.ID, unused), 401, "unauthenticated")
+				wantStatus(t, fixture.request("POST", portalOrigin, openPath(record.ID), "{}", alice), 202, "")
+				fixture.state(alice, record.ID, ready)
+			}
 			fixture.connect(alice, record.ID)
 			fixture.runtime.mu.Lock()
 			calls := fixture.runtime.calls[record.ID]
 			fixture.runtime.mu.Unlock()
-			if writes.Load() != 1 || (failure == "controller session expired" && calls != 2) || (failure == "connection lost" && calls != 1) {
+			if writes.Load() != 1 || (failure != "connection lost" && calls != 2) || (failure == "connection lost" && calls != 1) {
 				t.Fatalf("unexpected write or handshake count: writes=%d prepares=%d", writes.Load(), calls)
 			}
 		})
@@ -1038,7 +1070,7 @@ func TestTenantRecheckKeepsBusyWorkspace(t *testing.T) {
 	workspace.checkedAt = s.now().Add(-readinessTTL)
 	s.mu.Unlock()
 	// Occupy the entire workbench pool with ordinary long-lived streams.
-	streams := make([]io.ReadCloser, 0, cap(workspace.slots))
+	streams := make([]io.ReadCloser, 0, workspace.transport.MaxConnsPerHost)
 	defer func() {
 		for _, stream := range streams {
 			stream.Close()
@@ -1046,7 +1078,7 @@ func TestTenantRecheckKeepsBusyWorkspace(t *testing.T) {
 	}()
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	for range cap(workspace.slots) {
+	for range workspace.transport.MaxConnsPerHost {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, workspace.origin.String()+"/stream", nil)
 		if err != nil {
 			t.Fatal(err)

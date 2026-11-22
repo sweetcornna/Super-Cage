@@ -237,7 +237,9 @@ func (s *Server) probeCodex(ctx context.Context, guestID string) (codexGuestSnap
 	if probe := s.codexAccounts.probe; probe != nil {
 		return probe(ctx, guestID)
 	}
-	return s.readCodexGuestReport(ctx, guestID, codexGuestReportCommand(guestID, ""))
+	// A snapshot only reads, and the accounts pages poll it, so it shares the
+	// guest's control connection.
+	return s.readCodexGuestReportVia(ctx, guestID, codexGuestReportCommand(guestID, ""), s.guestQuick)
 }
 
 func (s *Server) readCodexGuestUsage(ctx context.Context, id, subject string) (codexGuestSnapshot, error) {
@@ -248,6 +250,10 @@ func (s *Server) readCodexGuestUsage(ctx context.Context, id, subject string) (c
 }
 
 func (s *Server) readCodexGuestReport(ctx context.Context, id, command string) (codexGuestSnapshot, error) {
+	return s.readCodexGuestReportVia(ctx, id, command, s.guest)
+}
+
+func (s *Server) readCodexGuestReportVia(ctx context.Context, id, command string, run func(context.Context, string) ([]byte, error)) (codexGuestSnapshot, error) {
 	var snapshot codexGuestSnapshot
 	if !validClaudeGuestID(id) {
 		return snapshot, errors.New("Codex 账号 ID 无效")
@@ -255,7 +261,7 @@ func (s *Server) readCodexGuestReport(ctx context.Context, id, command string) (
 	if !s.codexGuestSupported() {
 		return snapshot, errCodexUnsupported
 	}
-	data, err := s.guest(ctx, command)
+	data, err := run(ctx, command)
 	if err != nil || json.Unmarshal(data, &snapshot) != nil {
 		return snapshot, errors.New("无法读取 Codex 账号状态，请确认环境已启动并同步环境组件")
 	}

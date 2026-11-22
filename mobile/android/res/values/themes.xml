@@ -1,13 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Ink of the hand-drawn logo and doodles; the light and dark themes set it. -->
+    <!-- Ink of the hand-drawn logo and doodles, and the glow behind the logo's ribs; the light and dark themes set them. -->
     <attr name="cageInk" format="color" />
+    <attr name="cageGlow" format="color" />
     <color name="cage_paper_light">#FFFAF9F5</color>
     <color name="cage_paper_dark">#FF1F1E1D</color>
-    <color name="cage_icon_background">#FFF5F0E6</color>
+    <color name="cage_icon_background">#FF1F1E1D</color>
 
     <style name="CageLight" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="cageInk">#FF1F1E1D</item>
+        <item name="cageGlow">#FFF6E5DC</item>
         <item name="android:colorAccent">#FFA4482A</item>
         <item name="android:colorPrimary">#FFFAF9F5</item>
         <item name="android:colorPrimaryDark">#FFFAF9F5</item>
@@ -18,6 +20,7 @@
     </style>
     <style name="CageDark" parent="@android:style/Theme.Material.NoActionBar">
         <item name="cageInk">#FFF3EFE5</item>
+        <item name="cageGlow">#FF4A3329</item>
         <item name="android:colorAccent">#FFE8936F</item>
         <item name="android:colorPrimary">#FF1F1E1D</item>
         <item name="android:colorPrimaryDark">#FF1F1E1D</item>

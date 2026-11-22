@@ -1,0 +1,7 @@
+/* The switch from the desktop workbench to the phone UI (entry-layout.mjs), on phone-sized touch screens only. */
+.layout-switch { position: fixed; z-index: 2147483000; right: max(12px, env(safe-area-inset-right)); bottom: max(12px, env(safe-area-inset-bottom));
+  min-width: 44px; min-height: 44px; padding: 0 16px; border: 1px solid var(--ink, #1f1e1d); border-radius: 999px;
+  background: var(--ink, #1f1e1d); color: var(--paper, #faf9f5); font: 600 15px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  box-shadow: 0 1px 2px #1f1e1d0a, 0 8px 28px #1f1e1d22; }
+@media not all and (pointer: coarse) { .layout-switch { display: none; } }
+@media (hover: hover), (min-width: 740px) and (min-height: 500px) { .layout-switch { display: none; } }

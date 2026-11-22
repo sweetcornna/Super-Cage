@@ -33,7 +33,8 @@ async function renewSession() {
   }
   return sessionRenewal;
 }
-export async function api(path, body, method, headers = {}, { signal } = {}) {
+// empty: a 204 answer (an unchanged held list or session) resolves null.
+export async function api(path, body, method, headers = {}, { signal, empty = false } = {}) {
   const connection = getClientContext().connection_id;
   const options = {
     method: method || (body === undefined ? "GET" : "POST"),
@@ -60,9 +61,11 @@ export async function api(path, body, method, headers = {}, { signal } = {}) {
   }
   if (response.status === 423 && !path.startsWith("/client/")) window.dispatchEvent(new Event("cage-account-locked"));
   if (!response.ok) throw await responseError(response, path, options.method);
-  let value;
-  try { value = await response.json(); }
-  catch (error) { reportDiagnostic("frontend", error); throw new Error(`${operationName(path, options.method)}失败：后台返回的结果格式无效。请重新连接；仍出现时在设置中导出诊断包。`, { cause: error }); }
+  let value = null;
+  if (!(empty && response.status === 204)) {
+    try { value = await response.json(); }
+    catch (error) { reportDiagnostic("frontend", error); throw new Error(`${operationName(path, options.method)}失败：后台返回的结果格式无效。请重新连接；仍出现时在设置中导出诊断包。`, { cause: error }); }
+  }
   if (path !== "/session" && !path.startsWith("/agent/native") && (!path.startsWith("/client/") || isProjectSharesPath(path))) assertConnection(connection);
   return value;
 }

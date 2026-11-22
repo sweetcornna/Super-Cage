@@ -562,6 +562,51 @@ export default class RFB extends EventTargetMixin {
         return this._display.toBlob(callback, type, quality);
     }
 
+    // Cage: a pane that is hidden keeps its stream but asks for no pixels.
+    // While paused no update request is sent and continuous updates are off;
+    // resuming asks for one full, non-incremental update.
+    cageSetUpdatesPaused(paused) {
+        paused = !!paused;
+        if (this._cageUpdatesPaused === paused) {
+            return;
+        }
+        this._cageUpdatesPaused = paused;
+        if (this._rfbConnectionState !== 'connected') {
+            return;
+        }
+        if (paused) {
+            if (this._enabledContinuousUpdates) {
+                RFB.messages.enableContinuousUpdates(this._sock, false, 0, 0,
+                                                     this._fbWidth, this._fbHeight);
+            }
+            return;
+        }
+        if (this._supportsContinuousUpdates) {
+            this._enabledContinuousUpdates = true;
+            this._updateContinuousUpdates();
+        }
+        RFB.messages.fbUpdateRequest(this._sock, false, 0, 0, this._fbWidth, this._fbHeight);
+    }
+
+    get cageUpdatesPaused() { return !!this._cageUpdatesPaused; }
+
+    // Cage: the WebSocket subprotocol the server selected, the close code of
+    // the stream once it closed, and display control messages in text frames.
+    get cageProtocol() {
+        return (this._sock && this._sock._websocket && this._sock._websocket.protocol) || "";
+    }
+
+    get cageCloseCode() { return this._cageCloseCode || 0; }
+
+    cageSendControl(message) {
+        const raw = this._sock && this._sock._websocket;
+        if (!raw || raw.readyState !== WebSocket.OPEN) {
+            return false;
+        }
+        raw.send(JSON.stringify(message));
+        return true;
+    }
+
     // ===== PRIVATE METHODS =====
 
     _connect() {
@@ -669,6 +714,7 @@ export default class RFB extends EventTargetMixin {
 
     _socketClose(e) {
         Log.Debug("WebSocket on-close event");
+        this._cageCloseCode = e.code || 0;
         let msg = "";
         if (e.code) {
             msg = "(code: " + e.code;
@@ -2673,7 +2719,7 @@ export default class RFB extends EventTargetMixin {
         switch (msgType) {
             case 0:  // FramebufferUpdate
                 ret = this._framebufferUpdate();
-                if (ret && !this._enabledContinuousUpdates) {
+                if (ret && !this._enabledContinuousUpdates && !this._cageUpdatesPaused) {
                     RFB.messages.fbUpdateRequest(this._sock, true, 0, 0,
                                                  this._fbWidth, this._fbHeight);
                 }
@@ -3098,7 +3144,7 @@ export default class RFB extends EventTargetMixin {
     }
 
     _updateContinuousUpdates() {
-        if (!this._enabledContinuousUpdates) { return; }
+        if (!this._enabledContinuousUpdates || this._cageUpdatesPaused) { return; }
 
         RFB.messages.enableContinuousUpdates(this._sock, true, 0, 0,
                                              this._fbWidth, this._fbHeight);
@@ -3111,7 +3157,7 @@ export default class RFB extends EventTargetMixin {
         this._fbHeight = height;
 
         this._display.resize(this._fbWidth, this._fbHeight);
-        if (sizeChanged && this._display instanceof CageBrowserDisplay && this._rfbConnectionState === 'connected') {
+        if (sizeChanged && this._display instanceof CageBrowserDisplay && this._rfbConnectionState === 'connected' && !this._cageUpdatesPaused) {
             // Refresh unchanged regions too, so the stretched preview is fully replaced.
             // The server answers a full request with its screen layout, which arrives
             // here again at the same size; asking once more would never stop.

@@ -8,12 +8,12 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
@@ -116,7 +116,7 @@ func AgentOperations() []AgentOperation {
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})
 	post("vault.browser", "Use the browser vault's existing save/fill/block actions", "/api/vault/browser", from(vaultBrowserInput{}))
 	get("mobile.get", "Inspect phone pairing", "/api/mobile-pair")
-	post("mobile.pair", "Generate the same phone pairing invitation", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
+	post("mobile.pair", "Window only: a device is added in the desktop window, which shows the code; returns open_desktop", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
 	add("mobile.remove", "Remove the same paired device", "DELETE", "/api/mobile-pair", object(nil))
 	get("tailscale.get", "Read guest private-network state", "/api/tailscale")
 	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key"} {
@@ -143,65 +143,27 @@ func AgentOperations() []AgentOperation {
 	for _, action := range []string{"candidate", "commit", "cancel", "disconnect", "local-stop"} {
 		post("client."+action, "Use the desktop chooser's same explicit connection/candidate protocol", "/api/client/"+action, from(switchRequest{}))
 	}
-	post("client.trusted-login", "Use create/resume/enable/disable/protect through the desktop's native trusted-login owner", "/api/client/trusted-login", object(map[string]string{"action": "string", "password": "string", "connection_id": "string"}))
 	post("native.submit", "Queue an existing native bridge action or clientPreferences request for the desktop window; use desktop scope", "/api/agent/native", object(map[string]string{"request": "object", "connection_id": "string"}))
 
 	get("diagnostics.status", "Read log collection status", "/api/diagnostics")
 	return ops
 }
 
-type AgentError struct {
-	Code       string `json:"code"`
-	Message    string `json:"message"`
-	NextAction string `json:"next_action"`
-	Retryable  bool   `json:"retryable"`
-	HTTPStatus int    `json:"http_status,omitempty"`
-}
+type AgentError = controlclient.AgentError
 
-func (e *AgentError) Error() string { return e.Message }
-
-func agentHTTPError(code int) *AgentError {
-	e := &AgentError{Code: "request_rejected", Message: "Super Cage rejected the operation. Check the input and run doctor.", NextAction: "doctor", HTTPStatus: code}
-	switch code {
-	case 401:
-		e.Code = "authentication_failed"
-		e.NextAction = "service.start"
-	case 423:
-		e.Code = "account_locked"
-		e.Message = "Unlock Super Cage before configuring the environment."
-		e.NextAction = "account.unlock"
-	case 403:
-		e.Code = "user_action_required"
-		e.Message = "This operation requires a local system or account action."
-		e.NextAction = "open_desktop"
-	case 409:
-		e.Code = "state_conflict"
-		e.Message = "The environment state does not permit this operation. Read status before retrying."
-		e.NextAction = "status"
-	case 410:
-		e.Code = "job_not_found"
-		e.Message = "The original job is no longer available. Inspect state before submitting again."
-		e.NextAction = "status"
-	case 404:
-		e.Code = "unsupported_operation"
-		e.Message = "This controller or guest does not support the operation."
-		e.NextAction = "capabilities"
-	case 429, 503:
-		e.Code = "service_busy"
-		e.NextAction = "status"
-		e.Retryable = true
-	}
-	return e
-}
+func agentHTTPError(code int) *AgentError { return controlclient.HTTPError(code) }
 
 // AgentStartService starts only an absent service. It never hands off, upgrades
 // or stops an existing controller as a side effect of an agent call.
 func AgentStartService(ctx context.Context, configPath string) error {
 	profile := filepath.Dir(configPath)
-	c, err := connectController(profile)
+	c, err := connectProvenController(profile)
 	if err == nil {
 		defer c.close()
 		return agentCheckController(c, configPath)
+	}
+	if controllerIdentityError(err) {
+		return &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
 	}
 	if !errors.Is(err, errControllerUnavailable) || !controllerLockFree(profile) {
 		return &AgentError{Code: "service_unavailable", Message: "The controller cannot be authenticated. Preserve its data and inspect diagnostics.", NextAction: "doctor"}
@@ -216,42 +178,34 @@ func AgentStartService(ctx context.Context, configPath string) error {
 		case <-ctx.Done():
 			return &AgentError{Code: "service_start_timeout", Message: "The controller has not become ready. It may still be starting.", NextAction: "doctor", Retryable: true}
 		case <-timer.C:
-			c, err := connectController(profile)
+			c, err := connectProvenController(profile)
 			if err == nil {
 				defer c.close()
 				return agentCheckController(c, configPath)
+			}
+			if controllerIdentityError(err) {
+				return &AgentError{Code: "controller_mismatch", Message: err.Error(), NextAction: "open_desktop"}
 			}
 		}
 	}
 }
 
 func agentCheckController(c *controllerClient, configPath string) error {
+	return controlclient.CheckLocal(c.launch, configPath, agentSameBuild(c.launch.Controller))
+}
+
+// agentSameBuild accepts only a controller built from this executable.
+func agentSameBuild(id ControllerIdentity) bool {
 	want, err := currentController()
-	if err != nil || !want.matches(c.launch.Controller) || c.launch.DesktopGateway || c.launch.ClientOnly {
-		return &AgentError{Code: "controller_mismatch", Message: "Use the CLI shipped with the running workload. No controller was replaced.", NextAction: "open_desktop"}
-	}
-	if filepath.Clean(c.launch.ConfigPath) != filepath.Clean(configPath) {
-		return &AgentError{Code: "config_path_mismatch", Message: "This directory's controller uses a different configuration filename. Use its original absolute config path.", NextAction: "doctor"}
-	}
-	return nil
+	return err == nil && want.Matches(id)
 }
 
 func agentConnect(ctx context.Context, configPath string) (*controllerClient, error) {
-	c, err := connectController(filepath.Dir(configPath))
+	c, err := controlclient.AgentConnect(ctx, configPath, agentSameBuild, connectProvenControllerConn)
 	if err != nil {
-		return nil, &AgentError{Code: "service_unavailable", Message: "The local Super Cage controller is unavailable. Run service.start or doctor.", NextAction: "service.start"}
+		return nil, err
 	}
-	fail := func(err error) (*controllerClient, error) { c.close(); return nil, err }
-	if err := agentCheckController(c, configPath); err != nil {
-		return fail(err)
-	}
-	u, _ := url.Parse(c.launch.URL)
-	code, err := c.callContext(ctx, "POST", "/api/session", map[string]string{"token": u.Fragment}, nil)
-	if err != nil || code != 200 {
-		return fail(agentHTTPError(401))
-	}
-	c.setTrustedViewCookie(u)
-	return c, nil
+	return c.(*controllerClient), nil
 }
 
 func AgentCall(ctx context.Context, configPath, operation string, input json.RawMessage) (json.RawMessage, error) {

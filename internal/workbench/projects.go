@@ -21,43 +21,63 @@ import (
 // lock. Consumers may reconnect an existing grant; only adding a project grants
 // access to a new host directory.
 func (s *Server) connectProject(path string, add bool) (string, error) {
+	path, connect, err := s.prepareProject(path, add)
+	if err != nil {
+		return "", err
+	}
+	if err = connect(); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+// prepareProject resolves the project path as connectProject does, from local
+// state only, and returns the step that reaches the guest. A caller that needs
+// the guest for something else too can run that step alongside it, which
+// matters for a terminal: opening the project's shares and choosing an account
+// both wait on guest reads. The step has the same lifecycle-lock requirements
+// as connectProject.
+func (s *Server) prepareProject(path string, add bool) (string, func() error, error) {
 	if path == "" {
 		path = s.workspace()
 	}
 	if isClientMountPath(path) {
-		return s.clientMountWorkspace(path)
+		resolved, err := s.clientMountWorkspace(path)
+		return resolved, func() error { return nil }, err
 	}
 	path, err := validateWorkspace(path, s.profile)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if !add {
 		if path, err = s.projectWorkspace(path); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
-	if err = s.ensureProjectShare(path); err != nil {
-		return "", err
+	return path, func() error { return s.shareProject(path, add) }, nil
+}
+
+func (s *Server) shareProject(path string, add bool) error {
+	if err := s.ensureProjectShare(path); err != nil {
+		return err
 	}
 	if !add {
 		folders, err := s.projectFolders(path)
 		if err != nil {
-			return "", err
+			return err
 		}
 		for _, folder := range folders {
 			if folder != path {
 				if err := s.ensureProjectShare(folder); err != nil {
-					return "", err
+					return err
 				}
 			}
 		}
 	}
 	if add {
-		if err = s.rememberSharedProject(path); err != nil {
-			return "", err
-		}
+		return s.rememberSharedProject(path)
 	}
-	return path, nil
+	return nil
 }
 
 func (s *Server) openProject(w http.ResponseWriter, r *http.Request) {
@@ -258,7 +278,7 @@ func (s *Server) ensureProjectShare(path string) (returned error) {
 		return err
 	}
 	for {
-		if _, err = s.guest(ctx, "mountpoint -q "+quoted+" && test \"$(cat "+shellescape.Quote(guestPath(probe.Name()))+")\" = "+shellescape.Quote(challenge)); err == nil {
+		if err = s.projectMountReady(ctx, quoted, guestPath(probe.Name()), challenge); err == nil {
 			break
 		}
 		select {
@@ -278,6 +298,15 @@ func (s *Server) ensureProjectShare(path string) (returned error) {
 	s.projectShares[path] = share
 	s.mu.Unlock()
 	return nil
+}
+
+// projectMountReady succeeds once the guest's mount shows the probe file this
+// host just wrote, which proves it is this host's share. It is polled until the
+// mount appears, so it shares the guest's control connection instead of
+// opening an SSH connection per attempt.
+func (s *Server) projectMountReady(ctx context.Context, quotedMount, probeGuestPath, challenge string) error {
+	_, err := s.guestQuick(ctx, "mountpoint -q "+quotedMount+" && test \"$(cat "+shellescape.Quote(probeGuestPath)+")\" = "+shellescape.Quote(challenge))
+	return err
 }
 
 // projectFileCacheSeconds is how long the guest may answer from what it

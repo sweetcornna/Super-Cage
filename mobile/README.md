@@ -30,7 +30,7 @@ bash mobile/build.sh ios
 open mobile/ios/CageMobile.xcodeproj
 ```
 
-命令会生成 `mobile/.build/ios/Cagemobile.xcframework` 和未签名的设备构建。Logo、涂鸦和应用图标由 `mobile/assets/brand` 的 SVG 生成，已提交在 `mobile/ios/CageMobile/Assets.xcassets` 与 `mobile/android/res`。修改 SVG 后运行 `node mobile/scripts/brand-assets.mjs`，重新渲染 iOS 图标的方法见脚本开头；构建脚本会检查这些文件与 SVG 一致。在 Xcode 选择 `CageMobile` scheme 和自己的开发团队，连接 iPhone，按系统提示启用开发者模式，再通过 Run 签名安装。需要导出开发 IPA 时运行以下命令，将 `TEAM_ID` 替换为自己的十位 Apple Team ID。
+命令会生成 `mobile/.build/ios/Cagemobile.xcframework` 和未签名的设备构建。涂鸦由 `mobile/assets/brand/doodles` 的 SVG 生成，已提交在 `mobile/ios/CageMobile/Assets.xcassets` 与 `mobile/android/res`；修改后运行 `node mobile/scripts/brand-assets.mjs`，构建脚本会检查这些文件与 SVG 一致。Logo 和应用图标（iOS AppIcon、Android 自适应图标）来自 `brand/` 目录的母版，由 `node brand/generate.mjs` 一并生成，见 `brand/README.md`。在 Xcode 选择 `CageMobile` scheme 和自己的开发团队，连接 iPhone，按系统提示启用开发者模式，再通过 Run 签名安装。需要导出开发 IPA 时运行以下命令，将 `TEAM_ID` 替换为自己的十位 Apple Team ID。
 
 ```sh
 bash mobile/build.sh ios-ipa TEAM_ID

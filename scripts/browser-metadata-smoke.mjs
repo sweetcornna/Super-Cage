@@ -161,7 +161,7 @@ try {
   await writeFile(join(directory, "browser-agent.mjs"), isolated);
   await writeFile(join(directory, "control.json"), JSON.stringify({ token, workspace: directory }));
   await writeFile(join(directory, "homepage.json"), JSON.stringify({ url: origin + "/red" }));
-  agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"] });
+  agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, BREAKPAD_DUMP_LOCATION: join(directory, "Crashpad") } });
   let output = "";
   agent.stdout.on("data", chunk => {
     output += chunk;

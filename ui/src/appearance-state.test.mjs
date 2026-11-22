@@ -27,7 +27,7 @@ test("element overrides stay independent, reset returns to derived colors, and t
   const vars = themeVariables(theme, "light");
   assert.equal(vars["--chrome"], "#123456");
   assert.equal(vars["--button-ink"], "#abcdef");
-  assert.equal(vars["--surface"], "#fafafa");
+  assert.equal(vars["--paper"], "#fafafa");
   assert.equal(vars["--border"], vars["--line"]);
   assert.notEqual(vars["--line"], before["--line"]);
   const terminal = terminalTheme(theme, "light");
@@ -116,7 +116,7 @@ test("invalid theme files are rejected before any mutation", () => {
   reject((data) => {
     data.mode = "dark";
   });
-  assert.equal(defaultAppearance.lightTheme.accent, "#339cff");
+  assert.equal(defaultAppearance.lightTheme.accent, "#d97757");
 });
 
 test("all built-in palettes produce valid, independently editable theme documents", async () => {
@@ -252,4 +252,112 @@ test("accessible presets keep text, state colors, focus, borders and all ANSI te
       );
       check(terminal.cursorAccent, terminal.cursor, threshold, "cursor text");
     }
+});
+
+
+// brand/design-language.md §1: the Super Cage theme, token by token.
+const designTokens = {
+  light: {
+    "--paper": "#faf9f5", "--chrome": "#f3f1ea", "--surface": "#ffffff", "--soft": "#f0eee6",
+    "--selected": "#ece8dd", "--line": "#e6e3d8", "--line-strong": "#d6d2c4", "--ink": "#1f1e1d",
+    "--muted": "#6b655b", "--faint": "#9a9488", "--clay": "#d97757", "--clay-ink": "#a4482a",
+    "--clay-soft": "#f6e5dc", "--green": "#2e7d4f", "--amber": "#9a6700", "--error": "#b3261e",
+  },
+  dark: {
+    "--paper": "#1f1e1d", "--chrome": "#1a1918", "--surface": "#2a2926", "--soft": "#34322e",
+    "--selected": "#3a3733", "--line": "#3d3a35", "--line-strong": "#4a4640", "--ink": "#f3efe5",
+    "--muted": "#aba597", "--faint": "#7e786c", "--clay": "#d97757", "--clay-ink": "#e8936f",
+    "--clay-soft": "#4a3329", "--green": "#7bc79a", "--amber": "#e3b341", "--error": "#f2b8b5",
+  },
+};
+
+test("Super Cage is the default and produces exactly the design tokens", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const css = await readFile(new URL("./tokens.css", import.meta.url), "utf8");
+  const block = (selector) => {
+    const start = css.indexOf(selector + " {");
+    assert.ok(start >= 0, selector);
+    const body = css.slice(start, css.indexOf("}", start));
+    return Object.fromEntries([...body.matchAll(/(--[a-z-]+):\s*(#[0-9a-f]{6});/g)].map((m) => [m[1], m[2]]));
+  };
+  const statics = { light: block(":root"), dark: block(':root[data-theme="dark"]') };
+  for (const variant of ["light", "dark"]) {
+    const theme = defaultAppearance[variant + "Theme"];
+    assert.equal(theme.preset, "super-cage");
+    assert.equal(theme.opaqueWindows, true);
+    const vars = themeVariables(theme, variant);
+    for (const [token, value] of Object.entries(designTokens[variant])) {
+      assert.equal(vars[token], value, `${variant} ${token} from the preset`);
+      assert.equal(statics[variant][token], value, `${variant} ${token} in tokens.css`);
+    }
+    const terminal = terminalTheme(theme, variant);
+    assert.equal(terminal.background, vars["--paper"]);
+    assert.equal(terminal.foreground, vars["--ink"]);
+  }
+});
+
+test("every preset fills the whole design token set", async () => {
+  const { themeCatalog, applyThemePreset } = await import("./appearance-presets.mjs");
+  for (const item of themeCatalog)
+    for (const variant of ["light", "dark"]) {
+      if (!item[variant]) continue;
+      const theme = applyThemePreset(defaultAppearance[variant + "Theme"], variant, item.id);
+      const vars = themeVariables(theme, variant);
+      for (const token of Object.keys(designTokens[variant]))
+        assert.match(vars[token], /^#[0-9a-f]{6}$/, `${item.id}/${variant} ${token}`);
+    }
+});
+
+test("Super Cage text, focus and terminal colours stay legible", () => {
+  for (const variant of ["light", "dark"]) {
+    const theme = defaultAppearance[variant + "Theme"];
+    const vars = themeVariables(theme, variant);
+    const terminal = terminalTheme(theme, variant);
+    const check = (fg, bg, minimum, name) =>
+      assert.ok(contrastRatio(fg, bg) >= minimum, `${variant}/${name}: ${contrastRatio(fg, bg).toFixed(2)} < ${minimum}`);
+    for (const key of ["--ink", "--muted", "--clay-ink", "--green", "--amber", "--error"])
+      for (const background of ["--paper", "--chrome", "--surface"])
+        // State colours are text on paper and cards; on chrome they only
+        // colour icons and dots (brand/design-language.md §1).
+        check(vars[key], vars[background], background === "--chrome" && ["--green", "--amber"].includes(key) ? 3 : 4.5, `${key} on ${background}`);
+    check(vars["--ink"], vars["--selected"], 4.5, "ink on selected");
+    check(vars["--button-ink"], vars["--button"], 4.5, "primary button");
+    for (const background of ["--paper", "--surface"])
+      check(vars["--focus"], vars[background], 3, "focus ring");
+    for (const group of terminalColorGroups)
+      for (const [key] of group.entries) {
+        if (["background", "selectionBackground", "cursorAccent", "cursor"].includes(key)) continue;
+        check(terminal[key], terminal.background, 4.5, "terminal " + key);
+      }
+    check(terminal.foreground, terminal.selectionBackground, 4.5, "terminal selection");
+    check(terminal.cursor, terminal.background, 3, "terminal cursor");
+  }
+});
+
+test("a saved theme keeps its own colour overrides", () => {
+  const saved = normalizeAppearance({
+    lightTheme: { preset: "codex", accent: "#339cff", surface: "#ffffff", ink: "#1a1c1f", contrast: 45, opaqueWindows: false, fonts: { ui: "", code: "" } },
+  });
+  assert.deepEqual(saved.lightTheme.colors, {});
+  assert.deepEqual(saved.lightTheme.terminal, {});
+  assert.equal(saved.darkTheme.preset, "super-cage");
+  assert.deepEqual(saved.darkTheme.colors, defaultAppearance.darkTheme.colors);
+});
+
+test("the Go default mirrors the Super Cage preset", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const go = await readFile(new URL("../../internal/workbench/appearance.go", import.meta.url), "utf8");
+  const body = go.slice(go.indexOf("func superCageTheme"), go.indexOf("func codexTheme"));
+  const [darkPart, lightPart] = body.split("\n\treturn AppearanceTheme{");
+  const parse = (part) => {
+    const map = (name) => Object.fromEntries([...part.slice(part.search(new RegExp(name + ":\\s+map"))).split("}")[0]
+      .matchAll(/"([A-Za-z]+)": "(#[0-9a-f]{6})"/g)].map((m) => [m[1], m[2]]));
+    const field = (name) => part.match(new RegExp(name + ': "(#[0-9a-f]{6})"'))[1];
+    return { accent: field("Accent"), surface: field("Surface"), ink: field("Ink"), colors: map("Colors"), terminal: map("Terminal") };
+  };
+  for (const [variant, part] of [["dark", darkPart], ["light", lightPart]]) {
+    const theme = defaultAppearance[variant + "Theme"];
+    const go = parse(part);
+    assert.deepEqual(go, { accent: theme.accent, surface: theme.surface, ink: theme.ink, colors: theme.colors, terminal: theme.terminal }, variant);
+  }
 });

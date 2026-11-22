@@ -171,6 +171,8 @@ func TestMobileTerminalReadWriteAndClose(t *testing.T) {
 }
 
 func TestMobileTerminalInputQueueFull(t *testing.T) {
+	// The queue is bounded by bytes; shrink the bound so the test stays small.
+	setTerminalInputBudget(t, 256<<10)
 	s := testServer(t)
 	t.Cleanup(s.terminals.close)
 	session, err := s.terminals.start(terminalChildCommand("blocked-input"), "/project", "shell")

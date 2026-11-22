@@ -1,19 +1,33 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { HASHED_ASSET, VARIANTS, listBuildFiles, precompressBuild, variantSource } from "./precompress.mjs";
 
 const defaultDirectory = fileURLToPath(new URL("../../internal/workbench/web/", import.meta.url));
-export async function verifyBuild(directory = defaultDirectory) {
+// precompress: write the .br/.gz copies the server prefers before checking.
+// Tests of the checks themselves turn it off to present a build as found.
+export async function verifyBuild(directory = defaultDirectory, { precompress = true } = {}) {
+  if (precompress) await precompressBuild(directory);
   const files = {};
-  async function inspect(relative = "") {
-    for (const entry of await readdir(join(directory, relative), { withFileTypes: true })) {
-      const name = [relative, entry.name].filter(Boolean).join("/");
-      if (entry.isDirectory()) { await inspect(name); continue; }
-      if (name === "README" || name === "build-integrity.json") continue;
-      const bytes = await readFile(join(directory, name));
-      if (bytes.length === 0) throw new Error(`Empty build resource: ${name}`);
+  const names = await listBuildFiles(directory);
+  const present = new Set(names);
+  for (const name of names) {
+    if (name === "README" || name === "build-integrity.json") continue;
+    const bytes = await readFile(join(directory, name));
+    if (bytes.length === 0) throw new Error(`Empty build resource: ${name}`);
+    const source = variantSource(name);
+    if (source !== null) {
+      // A compressed copy is served in place of its file, so it must decode to
+      // exactly that file; one without a file would never be asked for.
+      if (!present.has(source)) throw new Error(`Compressed copy without its file: ${name}`);
+      const variant = VARIANTS.find(({ suffix }) => name.endsWith(suffix));
+      let decoded;
+      try { decoded = variant.decode(bytes); } catch (error) { throw new Error(`Unreadable compressed copy: ${name}`, { cause: error }); }
+      if (!decoded.equals(await readFile(join(directory, source)))) throw new Error(`Compressed copy differs from its file: ${name}`);
+    } else {
+      if (name.startsWith("assets/") && !HASHED_ASSET.test(name)) throw new Error(`Build resource without a content hash in its name: ${name}`);
       if (/\.(?:js|css|html)$/.test(name)) {
         if (bytes.includes(0)) throw new Error(`NUL bytes in build resource: ${name}`);
         if (name.endsWith(".js")) {
@@ -22,10 +36,9 @@ export async function verifyBuild(directory = defaultDirectory) {
           if (parsed.status !== 0) throw new Error(`Invalid JavaScript build resource: ${name}\n${parsed.stderr}`);
         }
       }
-      files[name] = createHash("sha256").update(bytes).digest("hex");
     }
+    files[name] = createHash("sha256").update(bytes).digest("hex");
   }
-  await inspect();
   for (const entry of ["index.html", "mobile.html"]) {
     const html = await readFile(join(directory, entry), "utf8");
     const scripts = [...html.matchAll(/<script\b[^>]*\bsrc=["']([^"']+)["']/gi)];

@@ -51,6 +51,9 @@ Environment=HOME=/home/cage
 EnvironmentFile=/etc/claude-cage/environment
 ExecStart=/usr/local/bin/cage-log-run /usr/local/bin/cage-editor-start
 LogNamespace=cage
+# Under global memory pressure the editor goes after the browser and before
+# the sessions and the control plane.
+OOMScoreAdjust=100
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15
@@ -101,12 +104,29 @@ ExecStart=/usr/local/bin/cage-log-run /usr/bin/openbox --config-file /etc/claude
 LogNamespace=cage
 Restart=on-failure
 UNIT
+# The browser's own slice: the guest governor (cage-resource-governor) sets
+# its soft and hard memory limits; its CPU and I/O weights keep it from
+# starving the control plane and the sessions.
+sudo tee /etc/systemd/system/cage-browser.slice >/dev/null <<'UNIT'
+[Unit]
+Description=Claude Cage browser
+Before=slices.target
+[Slice]
+CPUWeight=50
+IOWeight=50
+UNIT
 sudo tee /etc/systemd/system/cage-browser.service >/dev/null <<'UNIT'
 [Unit]
 Description=Claude Cage persistent browser
 Requires=cage-display.service cage-window-manager.service
 After=cage-display.service cage-window-manager.service
 [Service]
+Slice=cage-browser.slice
+# A process of the browser killed at its memory limit, or first under global
+# memory pressure, is one renderer (Chromium raises its renderers' scores
+# above this one): the service keeps running.
+OOMScoreAdjust=200
+OOMPolicy=continue
 User=cage-browser
 Environment=DISPLAY=:77
 EnvironmentFile=/etc/claude-cage/environment

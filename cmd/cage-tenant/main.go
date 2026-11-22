@@ -52,6 +52,7 @@ func run() error {
 	flag.StringVar(&config.LegacyDebianImage, "legacy-debian-image", "", "verified original Debian VM fingerprint for migrating legacy state (not a catalog alias)")
 	flag.StringVar(&incus.ControlPath, "guest-control-path", "/home/cage/.claude-cage/control.json", "absolute control.json path inside every VM")
 	flag.StringVar(&instanceType, "incus-instance-type", "vm", "vm (needs KVM) or container (Incus system containers; no hardware virtualization needed)")
+	flag.BoolVar(&incus.Vsock, "incus-vsock", false, "VM mode only: reach each workbench through a vsock bridge (one long-lived \"cage vsock-relay\" per workspace, started through incus exec, authenticated per connection with a secret only this gateway process and that relay know) instead of one incus exec per connection; falls back to incus exec when the bridge cannot be used")
 	flag.DurationVar(&config.FreezeAfter, "freeze-after", 15*time.Minute, "freeze a workspace after this much idle time; its memory moves to swap and it resumes on the next request (0 disables idle cooling)")
 	flag.DurationVar(&config.StopAfter, "stop-after", 72*time.Hour, "shut a frozen workspace down after this much idle time, keeping its disk (0 keeps it frozen)")
 	flag.Float64Var(&busyPercent, "idle-cpu-percent", 5, "guest CPU use, in percent of one CPU, that counts as activity (0 ignores guest CPU)")

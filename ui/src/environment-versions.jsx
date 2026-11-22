@@ -42,7 +42,7 @@ export function EnvironmentVersions({ status, onConfirm }) {
       <div className="setting-summary-row"><span>环境组件</span><strong>{componentLabels[data?.components?.status] || (loading ? "正在读取…" : "暂时无法确认")}</strong></div>
       {data?.tools && <table className="environment-tool-table">
         <thead><tr><th>工具</th><th>当前版本</th><th>受管版本</th></tr></thead>
-        <tbody>{Object.entries(toolNames).filter(([key]) => data.tools[key]).map(([key, name]) => <tr key={key}><td>{name}</td><td>{data.tools[key]?.current || "—"}</td><td>{data.tools[key]?.required || "—"}</td></tr>)}</tbody>
+        <tbody>{Object.entries(toolNames).filter(([key]) => data.tools[key]).map(([key, name]) => <tr key={key} className={data.tools[key]?.required && data.tools[key]?.current !== data.tools[key]?.required ? "outdated" : undefined}><td>{name}</td><td>{data.tools[key]?.current || "—"}</td><td>{data.tools[key]?.required || "—"}</td></tr>)}</tbody>
       </table>}
       {(error || data?.error) && <p role="alert" className="error-message"><SafetyMessage message={error || data.error} /></p>}
       <div className="environment-version-actions">

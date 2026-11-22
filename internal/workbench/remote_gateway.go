@@ -11,10 +11,11 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
 
-const connectionHeader = "X-Cage-Connection"
+const connectionHeader = controlclient.ConnectionHeader
 
 type remoteGateway struct {
 	mu           sync.Mutex
@@ -113,8 +114,16 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 		s.localBrowserExtensions(w, r)
 		return
 	}
+	if path == "local-terminal" || strings.HasPrefix(path, "local-terminal/") {
+		s.localTerminalRequest(w, r, path)
+		return
+	}
 	if path == "project-shares" || strings.HasPrefix(path, "project-shares/") {
 		s.clientProjectShareRequest(w, r, path)
+		return
+	}
+	if path == "devices" || strings.HasPrefix(path, "devices/") {
+		s.clientDevicesRequest(w, r, path)
 		return
 	}
 	if path == "commit" || path == "disconnect" || path == "local" {
@@ -253,6 +262,7 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 		s.clientRequest(w, r)
 		return true
 	}
+	s.noteDeviceLock(r)
 	switch r.URL.Path {
 	case "/api/session", "/api/launch", "/api/handoff":
 		return false
@@ -288,6 +298,13 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 		http.NotFound(w, r)
 		return true
 	}
+	// Updating this machine's application is decided by the local workload.
+	// A cloud workspace never learns or answers it.
+	if remote && appUpdateRoute(r.URL.Path) {
+		// Plain Chinese text survives the UI's error mapping unchanged.
+		http.Error(w, appUpdateLocalRequired, http.StatusConflict)
+		return true
+	}
 	if remote && (r.URL.Path == "/api/environment/storage" || r.URL.Path == "/api/environment/storage/recover") {
 		http.Error(w, "请在虚拟机所在电脑上调整环境存储", http.StatusForbidden)
 		return true
@@ -309,6 +326,10 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 	}
 	if remote && (r.URL.Path == "/api/mobile-pair" || strings.HasPrefix(r.URL.Path, "/api/mobile-pair/")) {
 		http.Error(w, "请切换到这台电脑的本机环境，再管理手机配对", http.StatusForbidden)
+		return true
+	}
+	if remote && (r.URL.Path == "/api/devices" || strings.HasPrefix(r.URL.Path, "/api/devices/")) {
+		http.Error(w, "请切换到这台电脑的本机环境，再管理设备", http.StatusForbidden)
 		return true
 	}
 	if remote && r.Method == "GET" && r.URL.Path == "/api/browser/files/saved" {

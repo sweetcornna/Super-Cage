@@ -23,6 +23,9 @@ const (
 	DiagnosticAddress = "198.18.0.254:80"
 )
 
+// gateCheckLease bounds one full check, from BeginCheck to Grant.
+const gateCheckLease = 3 * time.Minute
+
 var ErrGateClosed = errors.New("Super Cage 外网未放行，请在工作台完成关键检查")
 
 type GateCounters struct {
@@ -53,7 +56,64 @@ type GateStatus struct {
 	Counters           GateCounters  `json:"counters"`
 	Connections        int           `json:"connections"`
 	Report             *SafetyReport `json:"report,omitempty"`
+	// LeaseRemainingMS is how long the current lease or check still runs,
+	// measured by the gate the way it decides itself (on its monotonic clock
+	// for a lease it armed) when it made this status. Absent while closed and
+	// from older host agents. A host that sleeps stops that clock while the
+	// wall clock goes on, so after a sleep Until lies in the past although
+	// the lease still runs: time the lease from this, not from Until.
+	LeaseRemainingMS *int64 `json:"lease_remaining_ms,omitempty"`
+	// deadline is the lease end on this process's monotonic clock: set by
+	// Status in the gate's own process and by GateClient from
+	// LeaseRemainingMS. It is never serialized.
+	deadline time.Time
 }
+
+// Deadline is when the lease or check ends, on this process's monotonic
+// clock when the status came from Status or a GateClient; otherwise Until.
+// Decisions about the lease's remaining time use it, so that neither a
+// sleeping host nor a wall-clock step can move them.
+func (s GateStatus) Deadline() time.Time {
+	if !s.deadline.IsZero() {
+		return s.deadline
+	}
+	return s.Until
+}
+
+// localDeadline places the lease end on this process's monotonic clock,
+// counting from sent, when the request left. The gate measured its
+// remaining time later than that, so the result is never after the gate's
+// own deadline.
+func (s GateStatus) localDeadline(sent time.Time) time.Time {
+	if s.Mode == GateClosed || s.Until.IsZero() {
+		return time.Time{}
+	}
+	if s.LeaseRemainingMS != nil {
+		return sent.Add(time.Duration(max(*s.LeaseRemainingMS, 0)) * time.Millisecond)
+	}
+	// An older host agent sends only its wall-clock end. Bound it by the
+	// longest lease that gate grants, which a wall clock stepped back would
+	// otherwise stretch. An end already past while the gate still reports
+	// itself open means the host slept and the lease kept its awake time:
+	// that time is unknown, so allow one monitoring round. The gate's own
+	// timer still decides; this only times the workbench's reads.
+	limit := GateLease
+	if s.Mode == GateChecking {
+		limit = gateCheckLease
+	}
+	remaining := s.Until.Sub(sent) // Wall clock: a decoded Until has no monotonic reading.
+	switch {
+	case remaining > limit:
+		remaining = limit
+	case remaining <= 0:
+		remaining = olderGateUnknownLease
+	}
+	return sent.Add(remaining)
+}
+
+// olderGateUnknownLease is the lease an older host agent's open gate is
+// assumed to have left when its wall-clock end has already passed.
+const olderGateUnknownLease = 30 * time.Second
 
 // EgressGate is owned by the hostagent, not by the guest or browser UI.
 // Checking permits only the bounded synthetic diagnostic service. Public TCP
@@ -69,6 +129,8 @@ type EgressGate struct {
 	timer                             *time.Timer
 	connections                       map[*gateConn]struct{}
 	probeRequests                     int
+	// lease replaces GateLease when shorter; see ShortenLeaseForTest.
+	lease time.Duration
 }
 
 func NewEgressGate(cfg Config) (*EgressGate, error) {
@@ -143,6 +205,7 @@ func (g *EgressGate) SyncProxyRevision(cfg Config) error {
 func (g *EgressGate) Status() GateStatus {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	now := time.Now()
 	s := g.state
 	s.Epoch = g.epoch
 	s.PolicyVerified = g.raw.Allows("tcp", netip.MustParseAddrPort("1.1.1.1:443")) &&
@@ -150,9 +213,16 @@ func (g *EgressGate) Status() GateStatus {
 		!g.raw.Allows("icmp", netip.MustParseAddrPort("1.1.1.1:1")) &&
 		!g.raw.Allows("tcp", netip.MustParseAddrPort("[2606:4700:4700::1111]:443")) &&
 		!g.raw.Allows("tcp", netip.MustParseAddrPort("127.0.0.1:17777"))
-	if s.Mode != GateClosed && !time.Now().Before(s.Until) {
-		s.Mode = GateClosed
-		s.Reason = "检查或监测授权已到期"
+	if s.Mode != GateClosed {
+		if !now.Before(s.Until) {
+			s.Mode = GateClosed
+			s.Reason = "检查或监测授权已到期"
+		} else {
+			// The comparison validLocked makes: monotonic for a lease armed
+			// here, wall clock for a report lifetime from its JSON.
+			remaining := s.Until.Sub(now).Milliseconds()
+			s.LeaseRemainingMS, s.deadline = &remaining, s.Until
+		}
 	}
 	s.Connections = len(g.connections)
 	if s.Report != nil {
@@ -235,7 +305,7 @@ func (g *EgressGate) BeginCheck() error {
 	g.state.IPv6LinkProbeCheck = ""
 	g.state.CheckStartedAt = time.Now()
 	g.probeRequests = 0
-	g.armLocked(3 * time.Minute)
+	g.armLocked(gateCheckLease)
 	g.mu.Unlock()
 	closeGateConnections(connections)
 	return nil
@@ -288,8 +358,23 @@ func (g *EgressGate) Renew(reportID string) error {
 	return nil
 }
 
+// ShortenLeaseForTest makes this gate's later grants and renewals last d
+// instead of GateLease, so tests of the workbench monitors can reach a lease
+// deadline. It only ever shortens a lease: d not below GateLease is ignored.
+func (g *EgressGate) ShortenLeaseForTest(d time.Duration) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if d > 0 && d < GateLease {
+		g.lease = d
+	}
+}
+
 func (g *EgressGate) armReportLeaseLocked(report SafetyReport) {
-	until := time.Now().Add(GateLease)
+	lease := GateLease
+	if g.lease > 0 && g.lease < GateLease {
+		lease = g.lease
+	}
+	until := time.Now().Add(lease)
 	if expiry := report.CreatedAt.Add(SafetyReportLifetime); expiry.Before(until) {
 		until = expiry
 	}

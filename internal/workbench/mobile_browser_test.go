@@ -31,12 +31,11 @@ func pairedHostRequest(s *Server, method, path, body string) *httptest.ResponseR
 // workbench. Guest HTTP responses and the X display effect use bounded fixtures.
 func testPairedBrowser(t *testing.T, ctx context.Context, s *Server, phone *mobilelink.Client, gate *cage.EgressGate) {
 	t.Helper()
-	s.phones.mu.Lock()
-	profile := s.phones.peerLocked()
-	s.phones.mu.Unlock()
+	profile := onlyDevice(t, s).guestProfile()
 	if len(profile) != 64 {
 		t.Fatal("missing enrollment profile")
 	}
+	testPairedFrameStream(t, ctx, s, phone)
 	const customHome = "https://example.com/start?source=desktop"
 	const blockedHome = "http://127.0.0.1/private"
 	openedURLs := make(chan string, 6)

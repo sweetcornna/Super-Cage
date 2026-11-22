@@ -1,8 +1,12 @@
 import React, { useLayoutEffect, useRef } from "react";
-import { Bot, TerminalSquare } from "lucide-react";
-import { AgentIcon } from "./agent-icon";
+import { ExternalLink, TerminalSquare } from "lucide-react";
+import { ProviderMark } from "./provider-mark";
 
-export function TerminalMenu({ choice, busy, codex = false, onClose, onSelect }) {
+// codexLabel: "Codex 会话" where the server makes Codex sessions from the menu,
+// "Codex 终端" (a plain Codex terminal) otherwise (codexMenuLabel).
+// local, when given, is "在本机终端中打开" ({label, enabled, reason,
+// onSelect}): the desktop app only. Its reason, when disabled, is its tooltip.
+export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", local = null, onClose, onSelect }) {
   const menu = useRef(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -56,10 +60,13 @@ export function TerminalMenu({ choice, busy, codex = false, onClose, onSelect })
         <TerminalSquare size={16} />普通终端
       </button>
       <button role="menuitem" disabled={busy} onClick={() => onSelect("claude")}>
-        <AgentIcon />Claude 终端
+        <ProviderMark provider="claude" decorative />Claude 终端
       </button>
       {codex && <button role="menuitem" disabled={busy} onClick={() => onSelect("codex")}>
-        <Bot size={16} />Codex 终端
+        <ProviderMark provider="codex" decorative />{codexLabel}
+      </button>}
+      {local && <button role="menuitem" className="local-terminal-item" disabled={busy || !local.enabled} title={local.reason || undefined} onClick={local.onSelect}>
+        <ExternalLink size={16} />{local.label}
       </button>}
     </div>
   );

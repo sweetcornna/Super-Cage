@@ -52,9 +52,11 @@ func TestMacOSResourceRequirementsUseRestoreMinimumAndHostShare(t *testing.T) {
 	if memory, cpus, err := requirements.Limits(cage.ResourceAllocation{Automatic: true}); err != nil || memory != 8 || cpus != 5 {
 		t.Fatalf("automatic=%d/%d %v", memory, cpus, err)
 	}
-	// Ballooned guests get more on a larger host; a macOS guest keeps its fixed cap.
+	// Ballooned guests follow the machine (a 64 GiB desktop keeps a quarter,
+	// within the 32 GiB cap); a macOS guest keeps its fixed cap.
 	host.MemGiB = func() int { return 64 }
-	if memory, _, err := (cage.ResourceAllocation{Automatic: true}).Limits(); err != nil || memory != 24 {
+	t.Setenv("CAGE_MACHINE_ROLE", "desktop")
+	if memory, _, err := (cage.ResourceAllocation{Automatic: true}).Limits(); err != nil || memory != 32 {
 		t.Fatalf("ballooned automatic on 64 GiB: %d %v", memory, err)
 	}
 	if memory, _, err := requirements.Limits(cage.ResourceAllocation{Automatic: true}); err != nil || memory != 8 {

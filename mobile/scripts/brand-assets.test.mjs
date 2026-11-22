@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { androidVector, iconFrame, INK, iosSvg, outputs, parseSvg } from "./brand-assets.mjs";
+import { androidVector, INK, iosSvg, outputs, parseSvg } from "./brand-assets.mjs";
 
 const sample = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 90" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
 <path d="M1 2c3 4 5 6 7 8" stroke-width="2.3" opacity=".6"/>
@@ -39,17 +39,18 @@ test("iOS variants differ only in ink", () => {
   assert.match(dark, /fill="#D97757" fill-opacity="0.9" stroke="#D97757"/);
 });
 
-test("the icon shows the logo at 62% of the visible adaptive icon", () => {
-  const [side, scale, dx, dy] = iconFrame({ width: 64, height: 64 });
-  assert.equal(side, 108);
-  assert.ok(Math.abs(64 * scale - 72 * 0.62) < 0.1);
-  assert.equal(dx, dy);
-  assert.ok(Math.abs(dx * 2 + 64 * scale - 108) < 0.01);
+test("Android vectors can map fixed paints to theme attributes and carry their own provenance note", () => {
+  const svg = parseSvg('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 8" fill="none"><path d="M0 0h8v8z" fill="#F6E5DC"/><path d="M1 1h2v2z" fill="#D97757"/></svg>');
+  const xml = androidVector(svg, { colors: { "#F6E5DC": "?attr/cageGlow" }, note: "made elsewhere" });
+  assert.match(xml, /<!-- made elsewhere -->/);
+  assert.match(xml, /android:fillColor="\?attr\/cageGlow"/);
+  assert.match(xml, /android:fillColor="#FFD97757"/);
 });
 
 test("checked-in native assets match the brand SVGs", () => {
   const files = outputs();
-  assert.ok([...files.keys()].some((path) => path.endsWith("Logo.imageset/Logo-dark.svg")));
+  assert.ok([...files.keys()].some((path) => path.endsWith("DoodleSun.imageset/DoodleSun-dark.svg")));
+  assert.ok(![...files.keys()].some((path) => /Logo|AppIcon|cage_logo|cage_icon_/.test(path)), "brand/generate.mjs owns the logo and icons");
   assert.ok(![...files.keys()].some((path) => path.endsWith("DoodleSquiggle-dark.svg")), "clay-only art needs no dark variant");
   for (const [path, text] of files) assert.equal(readFileSync(path, "utf8"), text, path + " is stale");
 });

@@ -1,0 +1,380 @@
+{
+  "schema": 1,
+  "entries": [
+    {
+      "id": "claude-code",
+      "name": "Claude Code",
+      "vendor": "Anthropic",
+      "summary_zh": "随环境提供。",
+      "with_environment": true,
+      "person_only": false,
+      "kind": "terminal",
+      "session": "existing:claude",
+      "status": "available",
+      "artifacts": {
+        "arm64": {
+          "format": "builtin"
+        },
+        "amd64": {
+          "format": "builtin"
+        }
+      },
+      "hosts": {
+        "install": [
+          "registry.npmjs.org",
+          "cdn.npmmirror.com"
+        ],
+        "signin": [
+          "claude.ai",
+          "claude.com",
+          "console.anthropic.com",
+          "platform.claude.com",
+          "platform.anthropic.com"
+        ],
+        "run": [
+          "api.anthropic.com"
+        ],
+        "telemetry": []
+      },
+      "project_files": [
+        ".claude/settings.json",
+        ".claude/settings.local.json",
+        ".mcp.json"
+      ],
+      "mark": {
+        "builtin": "claude"
+      },
+      "measured": null,
+      "review": {
+        "by": "agent-clients step 1.1",
+        "date": "2026-11-22",
+        "sources": [],
+        "notes": [
+          "Describes today's path only: setup --preinstall (cmd/cage/main.go), the cloud image (deploy/cloud/build-guest.sh), cage_install_tool claude in internal/cage/guest-tools.sh, and 更新环境工具. Nothing installs, updates or removes Claude Code through the catalog.",
+          "Install hosts read in internal/cage/guest-tools.sh (cage_cache_claude: registry.npmjs.org, cdn.npmmirror.com); sign-in hosts in internal/cage/browser-login.mjs. hosts.telemetry is left empty: its only source is unreviewed research notes."
+        ]
+      }
+    },
+    {
+      "id": "codex",
+      "name": "Codex",
+      "vendor": "OpenAI",
+      "summary_zh": "OpenAI 的终端编程客户端。",
+      "with_environment": false,
+      "person_only": false,
+      "kind": "terminal",
+      "session": "existing:codex",
+      "status": "hidden",
+      "version": "0.171.0",
+      "libc": "any",
+      "artifacts": {
+        "arm64": {
+          "format": "tar.gz",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-aarch64-unknown-linux-musl.tar.gz",
+          "sha256": "bcf50b836385e51bd2976ab2bbe92b1b08a1cbe37712eb8dbe378aa78d24871c",
+          "size": 124436451,
+          "unpacked": 309207448,
+          "entry": "codex-aarch64-unknown-linux-musl"
+        },
+        "amd64": {
+          "format": "tar.gz",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-x86_64-unknown-linux-musl.tar.gz",
+          "sha256": "01baa2e47809f8597be5b2f8abd4e4dfe3fb5bcb6e504c2fbaaad97056c15e8d",
+          "size": 122664925,
+          "unpacked": 315109048,
+          "entry": "codex-x86_64-unknown-linux-musl"
+        }
+      },
+      "requires": {
+        "packages": [
+          "bubblewrap"
+        ],
+        "userns": true,
+        "keyring": false,
+        "display": false
+      },
+      "settings": [
+        {
+          "file": "/etc/codex/config.toml",
+          "format": "toml",
+          "set": {
+            "check_for_update_on_startup": false,
+            "analytics.enabled": false,
+            "feedback.enabled": false
+          }
+        }
+      ],
+      "updater": {
+        "self_update": true,
+        "off_by": "setting",
+        "note_zh": "启动时的更新检查已关闭；安装目录归 root 所有，客户端无法自行替换。"
+      },
+      "telemetry": {
+        "default_off": true,
+        "how": "[analytics] enabled = false and [feedback] enabled = false in /etc/codex/config.toml",
+        "note_zh": "已默认关闭使用数据上报。"
+      },
+      "hosts": {
+        "install": [
+          "github.com",
+          "release-assets.githubusercontent.com",
+          "objects.githubusercontent.com"
+        ],
+        "signin": [
+          "chatgpt.com"
+        ],
+        "run": [
+          "chatgpt.com",
+          "api.openai.com"
+        ],
+        "telemetry": []
+      },
+      "signin": {
+        "methods": [
+          "device-code",
+          "api-key"
+        ],
+        "login_link_hosts": []
+      },
+      "data_dirs": [
+        {
+          "path": "~/.codex",
+          "shared": false
+        },
+        {
+          "path": "~/.local/share/cage/codex-accounts",
+          "shared": false
+        },
+        {
+          "path": "~/.local/share/cage/codex-sessions",
+          "shared": false
+        }
+      ],
+      "project_files": [
+        ".codex/config.toml",
+        ".codex/hooks.json"
+      ],
+      "launch": {
+        "command": "codex",
+        "argv": [
+          "/usr/local/bin/codex"
+        ],
+        "cwd": "project",
+        "title": "Codex"
+      },
+      "mark": {
+        "builtin": "codex"
+      },
+      "regions": {
+        "unavailable": [
+          "CN",
+          "HK"
+        ],
+        "note_zh": "OpenAI 暂不向中国大陆和香港提供服务；登录取决于所选代理的出口地区。"
+      },
+      "measured": null,
+      "review": {
+        "by": "agent-clients step 1.1",
+        "date": "2026-11-22",
+        "sources": [
+          {
+            "url": "https://api.github.com/repos/openai/codex/releases/latest",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://github.com/openai/codex/releases/download/rust-v0.171.0/codex-package_SHA256SUMS",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://developers.openai.com/api/docs/supported-countries",
+            "read": "2026-11-22"
+          }
+        ],
+        "notes": [
+          "Pin: release rust-v0.171.0 (published 2026-11-20, not a prerelease). Vendor checksum: the release API per-asset digest (sha256, computed by GitHub at upload), matched by the sha256 of each tarball downloaded on 2026-11-22 over one network. codex-package_SHA256SUMS does not list the plain CLI tarballs pinned here. The codex-<target>.sigstore bundles were not verified.",
+          "Each tarball holds one member, the static musl binary named after its target (mode 0755); the download URL redirects to release-assets.githubusercontent.com.",
+          "Regions checked 2026-11-22: the supported-countries list (platform.openai.com/docs/supported-countries redirects to the URL in sources) names Taiwan but not mainland China or Hong Kong.",
+          "Everything else (settings keys, the bubblewrap requirement, person_only, sign-in and run hosts, project files) comes from unreviewed research notes and Cage's own code (internal/cage/codex-account.py, internal/guard/guard.go); hosts.telemetry is empty because the vendor docs name no telemetry host.",
+          "Hidden until step 1.8 (real guest): that Codex reads /etc/codex/config.toml, uses the system bubblewrap, and its idle CPU, RSS and disk."
+        ]
+      }
+    },
+    {
+      "id": "antigravity-cli",
+      "name": "Antigravity CLI",
+      "vendor": "Google",
+      "summary_zh": "在终端中运行的 Google 智能体。",
+      "with_environment": false,
+      "person_only": true,
+      "kind": "terminal",
+      "session": "generic",
+      "status": "hidden",
+      "version": "1.5.14",
+      "libc": "glibc",
+      "artifacts": {
+        "arm64": {
+          "format": "tar.gz",
+          "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-arm/cli_linux_arm64.tar.gz",
+          "sha512": "c9b29bba475f63a1a80161ae93ba72b221c7a586d9851e4d0061546704bab66d6b2760b25d716d191724fc7564f3246456ee151e28aa37af48dbcd72bdc6c463",
+          "size": 92116379,
+          "unpacked": 256070320,
+          "entry": "antigravity"
+        },
+        "amd64": {
+          "format": "tar.gz",
+          "url": "https://storage.googleapis.com/antigravity-public/antigravity-cli/1.5.14-5302690847260672/linux-x64/cli_linux_x64.tar.gz",
+          "sha512": "83311d3f354567612dc16c1ae2ea9b503d6f6833aa4e138d39aa229da3f3bb99b0e4d7cca0bce4796b0060d6a51d8113eb7449ed5dc0e7900bf217107ea5bff9",
+          "size": 101195950,
+          "unpacked": 273240776,
+          "entry": "antigravity"
+        }
+      },
+      "requires": {
+        "packages": [],
+        "userns": true,
+        "keyring": true,
+        "display": false
+      },
+      "env": {
+        "AGY_CLI_DISABLE_AUTO_UPDATE": "true"
+      },
+      "settings": [
+        {
+          "file": "~/.gemini/antigravity-cli/settings.json",
+          "format": "json",
+          "set": {
+            "showFeedbackSurvey": false
+          }
+        }
+      ],
+      "updater": {
+        "self_update": true,
+        "off_by": "env",
+        "note_zh": "自动更新已通过环境变量关闭；安装目录归 root 所有，客户端无法自行替换。"
+      },
+      "telemetry": {
+        "default_off": false,
+        "how": "account-level toggle in Settings > Account or /config; no settings key or variable",
+        "note_zh": "这个客户端的遥测是账号级设置，Super Cage 无法预先关闭。可在登录后于设置 › 账号中关闭。"
+      },
+      "hosts": {
+        "install": [
+          "storage.googleapis.com"
+        ],
+        "signin": [
+          "accounts.google.com",
+          "oauth2.googleapis.com"
+        ],
+        "run": [
+          "cloudcode-pa.googleapis.com",
+          "businessaicode.googleapis.com",
+          "aiplatform.googleapis.com",
+          "discoveryengine.googleapis.com"
+        ],
+        "telemetry": [
+          "cloudcode-pa.googleapis.com"
+        ],
+        "note_zh": "登录与使用的网址来自厂商文档，个人账号的完整列表尚未核实。"
+      },
+      "signin": {
+        "methods": [
+          "browser-code",
+          "api-key",
+          "adc"
+        ],
+        "login_link_hosts": [
+          "accounts.google.com"
+        ]
+      },
+      "data_dirs": [
+        {
+          "path": "~/.gemini/antigravity-cli",
+          "shared": false
+        },
+        {
+          "path": "~/.gemini/config",
+          "shared": true
+        },
+        {
+          "path": "~/.cache/antigravity",
+          "shared": false
+        },
+        {
+          "path": "~/.local/share/agent-clients/antigravity-cli",
+          "shared": false
+        }
+      ],
+      "project_files": [
+        ".agents/hooks.json",
+        ".agents/mcp_config.json",
+        ".agents/plugins",
+        ".agents/skills",
+        ".gemini/config.json"
+      ],
+      "launch": {
+        "command": "agy",
+        "argv": [
+          "/usr/local/bin/agy"
+        ],
+        "cwd": "project",
+        "title": "Antigravity"
+      },
+      "mark": {
+        "monogram": "Ag"
+      },
+      "regions": {
+        "unavailable": [
+          "CN",
+          "HK",
+          "MO"
+        ],
+        "note_zh": "中国大陆、香港和澳门暂不提供服务；登录取决于所选代理的出口地区。"
+      },
+      "terms": {
+        "url": "https://antigravity.google/terms",
+        "note_zh": "不支持由其他程序代为运行；Super Cage 只在终端中交互运行。"
+      },
+      "measured": null,
+      "review": {
+        "by": "agent-clients step 1.1",
+        "date": "2026-11-22",
+        "sources": [
+          {
+            "url": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_arm64.json",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests/linux_amd64.json",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity.google/download",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity.google/cli/install.sh",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity.google/docs/cli/troubleshooting",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity.google/docs/enterprise",
+            "read": "2026-11-22"
+          },
+          {
+            "url": "https://antigravity.google/terms",
+            "read": "2026-11-22"
+          }
+        ],
+        "notes": [
+          "Pin: version, URL and sha512 copied from the per-platform manifests the vendor installer reads (read 2026-11-22). The sha512 of each tarball downloaded that day matched; so did the md5 in the storage object metadata. The manifest is the vendor's checksum, not a signature; Cage downloads the versioned URL and never reads the manifest at install.",
+          "Each tarball holds one member, antigravity (mode 0755); the launcher is agy. Unpacked: arm64 256070320, amd64 273240776 bytes. glibc builds pinned; the musl builds were not reviewed.",
+          "Hidden until the per-entry keyring (step 2.3) and the real-guest acceptance (step 2.4). Whether old build directories stay downloadable is unknown.",
+          "Sign-in, run and telemetry hosts, settings and terms come from the research pass (vendor docs read 2026-11-22), not re-read for this step."
+        ]
+      }
+    }
+  ]
+}

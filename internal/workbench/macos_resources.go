@@ -103,6 +103,17 @@ func (s *Server) readMacOSResources(ctx context.Context, memory uint64, cpus int
 	return observer.observation(sample, time.Now()), nil
 }
 
+// validateResourceAllocation checks an allocation being chosen now; a saved
+// one goes through resourceAllocationLimits, which never refuses a Linux
+// guest's value outside the range but brings it into it.
+func (s *Server) validateResourceAllocation(allocation cage.ResourceAllocation) error {
+	if s.macosGuest == nil {
+		return allocation.Validate()
+	}
+	_, _, err := s.resourceAllocationLimits(allocation)
+	return err
+}
+
 func (s *Server) resourceAllocationLimits(allocation cage.ResourceAllocation) (int, int, error) {
 	if s.macosGuest == nil {
 		return allocation.Limits()
@@ -125,7 +136,8 @@ func (s *Server) macOSResourceStatus(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	memory, cpus, allocationErr := allocation.Limits()
+	// macOS guests keep the sizing from before machine-following allocation.
+	memory, cpus, allocationErr := allocation.LegacyLimits()
 	if allocationErr == nil {
 		_, _, allocationErr = requirements.Limits(allocation)
 	} else {

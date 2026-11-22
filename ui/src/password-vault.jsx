@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { KeyRound, Plus, Search, ShieldCheck } from "lucide-react";
 import { api, writeClipboard } from "./api";
+import { EmptyState } from "./drawings";
 import "./password-vault.css";
 
 const emptyBrowser = { available: false, entries: [], candidates: [] };
@@ -128,8 +129,8 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
     <div className="vault-note"><ShieldCheck size={17} /><span>查看或复制密码需要再次验证 Super Cage 账户密码。填充后由你提交登录。</span></div>
     {error && <p className="account-error" role="alert">{error}</p>}
     {message && <p role="status">{message}</p>}
-    <div className="vault-toolbar"><label className="vault-search"><span><Search size={14} />搜索网站或账号</span>
-      <input type="search" value={search} onChange={event => setSearch(event.target.value)} /></label>
+    <div className="vault-toolbar"><label className="vault-search"><Search size={15} aria-hidden="true" /><span className="sr-only">搜索网站或账号</span>
+      <input type="search" placeholder="搜索网站或账号" value={search} onChange={event => setSearch(event.target.value)} /></label>
       <button disabled={busy || Boolean(draft) || loading || Boolean(error && !store.entries.length)} onClick={() => { setDraft(newEntry()); setVerify(null); setRevealed(null); }}><Plus size={15} />添加密码</button></div>
     {draft && <form className="vault-editor" onSubmit={event => { event.preventDefault(); void run({ action: "save", entry: draft }, "密码记录已保存"); }}>
       <h4>{draft.id ? "编辑密码" : "添加密码"}</h4>
@@ -146,7 +147,7 @@ export function PasswordVaultSettings({ onConfirm, onDirty }) {
       <div className="vault-actions"><button className="primary" disabled={busy} type="submit">验证并{verify.mode === "copy" ? "复制" : "查看"}</button>
         <button type="button" disabled={busy} onClick={() => { setVerify(null); setAccountPassword(""); }}>取消验证</button></div>
     </form>}
-    {loading ? <p>正在读取密码保险箱…</p> : !entries.length ? <div className="vault-empty"><KeyRound size={24} /><p>{search ? "没有找到匹配的账号" : "还没有保存密码"}</p><small>网页登录后可以确认保存，也可以手动添加。</small></div> :
+    {loading ? <p>正在读取密码保险箱…</p> : !entries.length ? <EmptyState className="vault-empty" drawing="key" title={search ? "没有找到匹配的账号" : "还没有保存密码"}>{search ? "换一个网站或账号的关键词试试。" : "网页登录后可以确认保存，也可以手动添加。"}</EmptyState> :
       <div className="vault-list">{entries.map(entry => <article className="vault-entry" key={entry.id}>
         <div><strong>{entry.origin}</strong><span>{entry.username || "未填写用户名"}</span></div>
         {revealed?.id === entry.id && <div className="vault-revealed"><output aria-label="已保存的网站密码">{revealed.password}</output><button onClick={() => setRevealed(null)}>隐藏密码</button></div>}

@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -69,7 +70,14 @@ func (s *Server) resourceStatus(w http.ResponseWriter, r *http.Request) {
 		allocationError = err.Error()
 		memory, cpus = a.MemoryGiB, a.CPUs
 	}
-	maxMemory, maxCPUs := cage.ResourceLimits()
+	// A saved value outside this machine's range starts clamped (the range
+	// follows the machine's role); the notice says what applies.
+	clampNotice := a.LimitsNotice()
+	// A Linux guest follows the machine (resource-allocation.md, level B);
+	// macOS guests answer above with the previous sizing.
+	maxMemory, maxCPUs := cage.ManualLimitRange()
+	automaticMemory, automaticCPUs := cage.AutomaticLimits()
+	origin, automatic := a.Origin(), a.Effective().Automatic
 	running := s.vmRunning()
 	var configured struct {
 		Memory string `yaml:"memory"`
@@ -84,16 +92,37 @@ func (s *Server) resourceStatus(w http.ResponseWriter, r *http.Request) {
 	if running && err == nil {
 		observation = &status
 	}
-	jsonReply(w, map[string]any{
-		"running": running, "automatic": a.Automatic,
+	restart := running && (maximum != int64(memory)<<30 || configured.CPUs != cpus || observation == nil)
+	reply := map[string]any{
+		"running": running, "automatic": automatic,
 		"memory_gib": memory, "cpus": cpus,
 		"max_memory_gib": maxMemory, "max_cpus": maxCPUs,
 		"resource_error":           allocationError,
-		"recommended_memory_bytes": uint64(cage.AutomaticMemoryGiB(maxMemory)) << 30, "recommended_cpus": maxCPUs,
+		"recommended_memory_bytes": uint64(automaticMemory) << 30, "recommended_cpus": automaticCPUs,
 		"configured_memory_bytes": maximum, "configured_cpus": configured.CPUs,
-		"restart_required": running && (maximum != int64(memory)<<30 || configured.CPUs != cpus || observation == nil),
+		"restart_required": restart,
 		"observation":      observation,
-	})
+		// Additive: where the allocation comes from and what automatic
+		// sizing gives on this machine.
+		"allocation_origin": origin, "automatic_memory_gib": automaticMemory, "automatic_cpus": automaticCPUs,
+		"possible_memory_bytes": uint64(max(automaticMemory, memory)) << 30,
+	}
+	switch {
+	case origin == cage.OriginLegacyDefault && !automatic && (automaticMemory > memory || automaticCPUs > cpus):
+		// Saved by an older version with its default values: offered, never
+		// imposed, since matching the old rule cannot prove nobody chose it.
+		reply["legacy_allocation"] = true
+		reply["notice"] = fmt.Sprintf("内存 %d GB、CPU %d 核与旧版本的默认设置相同。改为自动（推荐）后，这台机器可以给到 %d GB、%d 核，需要重启环境；如果这是你特意设的，可以保留。", memory, cpus, automaticMemory, automaticCPUs)
+		reply["offer"] = map[string]any{"automatic": true, "memory_gib": automaticMemory, "cpus": automaticCPUs, "restart_required": running}
+	case automatic && restart && observation != nil && maximum != int64(memory)<<30:
+		reply["notice"] = fmt.Sprintf("自动分配已按这台机器重新计算为内存 %d GB、CPU %d 核，重启环境后生效。", memory, cpus)
+	case clampNotice != "":
+		reply["notice"] = clampNotice
+	}
+	if observation != nil && observation.Advice != nil {
+		reply["advice"] = observation.Advice
+	}
+	jsonReply(w, reply)
 }
 
 func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
@@ -103,6 +132,9 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 	}
 	var input struct {
 		Allocation *cage.ResourceAllocation `json:"allocation"`
+		// Apply restarts a running environment right after saving, so moving
+		// to automatic sizing is one step. Older clients omit it.
+		Apply bool `json:"apply"`
 	}
 	if !readJSON(w, r, &input) {
 		return
@@ -112,7 +144,14 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if input.Allocation != nil {
-		if _, _, err := s.resourceAllocationLimits(*input.Allocation); err != nil {
+		allocation := *input.Allocation
+		// Saved through settings: an explicit allocation is the user's
+		// choice from now on, never mistaken for an old default.
+		allocation.Chosen = ""
+		if !allocation.Automatic {
+			allocation.Chosen = cage.OriginUser
+		}
+		if err := s.validateResourceAllocation(allocation); err != nil {
 			requestError(w, err)
 			return
 		}
@@ -120,14 +159,16 @@ func (s *Server) applyResources(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "另一个操作仍在进行，请稍候", http.StatusConflict)
 			return
 		}
-		err := writePrivate(cage.ResourceAllocationPath(s.configPath), input.Allocation)
+		err := writePrivate(cage.ResourceAllocationPath(s.configPath), allocation)
 		s.op.Unlock()
 		if err != nil {
 			requestError(w, err)
 			return
 		}
-		jsonReply(w, map[string]bool{"ok": true})
-		return
+		if !input.Apply || !s.vmRunning() {
+			jsonReply(w, map[string]bool{"ok": true})
+			return
+		}
 	}
 	s.launch(w, "resources", func() error {
 		allocation, err := cage.LoadResourceAllocation(s.configPath)

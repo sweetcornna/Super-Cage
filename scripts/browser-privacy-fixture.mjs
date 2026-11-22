@@ -91,7 +91,7 @@ export async function createPrivacyController({ preferences, headless = true } =
     await writeFile(join(directory, 'homepage.json'), JSON.stringify({ url: origin + '/home' }));
     const start = async () => {
       control = ''; stderr = '';
-      agent = spawn(process.execPath, [join(directory, 'browser-agent.mjs')], { stdio: ['ignore', 'pipe', 'pipe'] });
+      agent = spawn(process.execPath, [join(directory, 'browser-agent.mjs')], { stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, BREAKPAD_DUMP_LOCATION: join(directory, 'Crashpad') } });
       let output = '';
       agent.stdout.on('data', chunk => {
         output += chunk;

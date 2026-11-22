@@ -1,13 +1,16 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, Check, Pencil, Plus, RefreshCw, TerminalSquare } from "lucide-react";
+import { Check, Pencil, Plus, RefreshCw, TerminalSquare, Trash2 } from "lucide-react";
+import { EmptyState } from "./drawings";
+import { ProviderMark } from "./provider-mark";
 import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import { QuotaClock, QuotaWindow, UsageNote, useUsageCheck } from "./claude-accounts";
 import { codexAccountName, codexActiveCounts, codexQuotaView, codexWindowLabel } from "./codex-accounts-state.mjs";
 import "./claude-accounts.css";
 
-// Ordinary reads never start an upstream usage query.
-export function useCodexAccounts() {
+// Ordinary reads never start an upstream usage query. enabled is false where
+// Codex is absent (codexSurfaces): nothing is read then.
+export function useCodexAccounts(enabled = true) {
   const [registry, setRegistry] = useState(null);
   const [error, setError] = useState("");
   const generation = useRef(0);
@@ -34,7 +37,11 @@ export function useCodexAccounts() {
       else if (visiblePanel) polling.current = false;
     }
   }, []);
-  useEffect(() => { load(); return () => { generation.current++; }; }, [load]);
+  useEffect(() => {
+    if (!enabled) return;
+    load();
+    return () => { generation.current++; };
+  }, [load, enabled]);
   return { accounts: registry?.accounts ?? null, detected: registry?.detected,
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
@@ -57,18 +64,20 @@ function CodexUsage({ quota, state }) {
 function DefaultLogin({ profile }) {
   return <article className="claude-profile claude-detected" aria-label={profile.email}>
     <div className="claude-profile-heading">
-      <span className="claude-profile-avatar" aria-hidden="true"><Bot size={18} /></span>
+      <span className="claude-profile-avatar" aria-hidden="true"><ProviderMark provider="codex" size={16} decorative /></span>
       <div className="claude-profile-identity">
         <div className="claude-profile-name">
           <h4 title={profile.email}>{profile.email}</h4>
           {profile.plan && <span className="claude-profile-plan">{profile.plan}</span>}
         </div>
         <div className="claude-profile-meta">
-          <span className="claude-profile-status">环境默认登录（~/.codex）</span>
+          <span className="claude-profile-status" data-status="detected">环境默认登录（~/.codex）</span>
         </div>
       </div>
+      <div className="claude-profile-usage">
+        <CodexUsage quota={profile.quota} state={profile.quota ? "local" : "unknown"} />
+      </div>
     </div>
-    <CodexUsage quota={profile.quota} state={profile.quota ? "local" : "unknown"} />
     <p className="field-help">账号列表为空时，新建 Codex 终端使用此登录；列表中有账号后改为自动分配。额度来自此登录最近的本地会话记录。</p>
   </article>;
 }
@@ -82,7 +91,7 @@ function CodexProfileCard({ profile, environment, usageEnvironment, busy, active
   const usage = useUsageCheck(view, usageEnvironment, perform, change);
   return <article className="claude-profile" aria-label={displayName} data-enabled={profile.enabled}>
     <div className="claude-profile-heading">
-      <span className="claude-profile-avatar" aria-hidden="true"><Bot size={18} /></span>
+      <span className="claude-profile-avatar" aria-hidden="true"><ProviderMark provider="codex" size={16} decorative /></span>
       <div className="claude-profile-identity">
         {renaming ? <form className="claude-profile-rename" onSubmit={(e) => {
           e.preventDefault();
@@ -98,30 +107,36 @@ function CodexProfileCard({ profile, environment, usageEnvironment, busy, active
             onClick={() => { setLabel(profile.label === profile.email ? "" : profile.label || ""); setRenaming(true); }}><Pencil size={14} /></button>
         </div>}
         <div className="claude-profile-meta">
-          <span className="claude-profile-status" data-ready={profile.status === "ready"}>{statusLabels[profile.status] || "状态未知"}</span>
+          <span className="claude-profile-status" data-ready={profile.status === "ready"} data-status={profile.status}>{statusLabels[profile.status] || "状态未知"}</span>
           {profile.email && profile.email !== displayName && <span className="claude-profile-email" title={profile.email}>{profile.email}</span>}
         </div>
       </div>
-      <label className="check-line claude-participation">
-        <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
-          onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
-        <span className="claude-switch-track" aria-hidden="true" />
-        <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
-      </label>
+      <div className="claude-profile-usage">
+        <CodexUsage quota={profile.quota} state={usage.state} />
+        <UsageNote profile={view} state={usage.state} />
+      </div>
+      <div className="claude-profile-actions">
+        <label className="check-line claude-participation">
+          <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
+            onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
+          <span className="claude-switch-track" aria-hidden="true" />
+          <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
+        </label>
+        {profile.status === "ready"
+          ? <button className="quiet-button claude-icon-action" aria-label="重新登录" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
+            <TerminalSquare size={15} /></button>
+          : <button className="quiet-button" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
+            <TerminalSquare size={14} />打开登录终端</button>}
+        <button className="quiet-button claude-icon-action" aria-label="检查状态" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
+          <RefreshCw size={15} className={usage.state === "checking" ? "spin" : undefined} /></button>
+        <button className="quiet-button claude-icon-action claude-remove-action" aria-label="移除账号" disabled={busy || active > 0} onClick={() => perform(() => remove(profile))}>
+          <Trash2 size={15} /></button>
+      </div>
     </div>
-    <CodexUsage quota={profile.quota} state={usage.state} />
     {active > 0 && <p className="claude-profile-note">{active} 个终端仍在运行，关闭后可重新登录或移除</p>}
     {profile.status === "changed" && <p className="field-help">请用原账号重新登录。若要使用新的身份，请点击「登录新账号」。</p>}
     {profile.status === "signed_out" && <p className="field-help">此账号已退出登录，暂不参与分配。点击「重新登录」恢复。</p>}
     {profile.status === "duplicate" && <p className="field-help">同一订阅只参与一次分配。请在此位置登录另一个账号，或移除此记录。</p>}
-    <div className="claude-profile-actions">
-      <button className="quiet-button" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
-        <TerminalSquare size={14} />{profile.status === "ready" ? "重新登录" : "打开登录终端"}</button>
-      <button className="quiet-button" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
-        <RefreshCw size={14} />检查状态</button>
-      <button className="text-button" disabled={busy || active > 0} onClick={() => perform(() => remove(profile))}>移除账号</button>
-      <UsageNote profile={view} state={usage.state} />
-    </div>
   </article>;
 }
 
@@ -169,13 +184,17 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
     if (await onConfirm({ title: `移除「${codexAccountName(profile) || "未命名账号"}」？`,
       body: (last ? "这是列表中的最后一个账号。移除后，新建 Codex 终端会沿用环境的 ~/.codex 登录。" : "此账号不再参与 Codex 终端的自动分配。") +
         "虚拟机中的登录资料和会话记录会保留在原目录。",
-      confirm: "移除账号" })) {
+      confirm: "移除账号", danger: true })) {
       await load({ action: "remove", id: profile.id });
     }
   };
   return <section className="claude-profiles" aria-label="Codex 账号管理">
-    <div className="section-title">
+    <div className="section-title claude-profiles-intro">
       <p>单独登录多个 ChatGPT 账号使用 Codex，新建 Codex 终端时自动分配。每个账号使用独立的 CODEX_HOME，共用 ~/.codex 中的指令、提示词和技能。</p>
+      <div className="claude-add-profile">
+        <button className="primary" disabled={busy || environmentBusy || !!environment}
+          onClick={() => perform(() => login())}><Plus size={16} />登录新账号</button>
+      </div>
     </div>
     {!guestSupported && <p className="claude-profile-note" role="status">Codex 账号目前只支持 Linux 环境。macOS 和 Windows 环境请在普通终端中使用 Codex。</p>}
     <details className="claude-scheduling">
@@ -197,11 +216,7 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
           }}>上移</button></div>)}
       </div>}
     </details>
-    <div className="claude-add-profile">
-      <button className="primary" disabled={busy || environmentBusy || !!environment}
-        onClick={() => perform(() => login())}><Plus size={16} />登录新账号</button>
-    </div>
-    <p className="field-help">登录终端会显示 https://auth.openai.com/codex/device 和一次性验证码。在任意浏览器打开该页面、登录 ChatGPT 并输入验证码，完成后终端自动结束。</p>
+    <p className="field-help claude-login-help">登录终端会显示 https://auth.openai.com/codex/device 和一次性验证码。在任意浏览器打开该页面、登录 ChatGPT 并输入验证码，完成后终端自动结束。</p>
     {(actionError || error) && <p className="account-error" role="alert">{actionError || error}</p>}
     {loginNotice && <p className="claude-profile-note" role="status">{loginNotice}</p>}
     {loginPending && <p className="claude-profile-note" role="status">登录终端仍在等待授权。</p>}
@@ -217,9 +232,9 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
     </div>
     <div className="claude-profile-list" role="region" aria-label="Codex 账号列表" tabIndex={0}>
       {accounts === null && !error && <p role="status">正在读取账号…</p>}
-      {accounts?.length === 0 && <div className="claude-profile-empty">
-        <Bot size={28} aria-hidden="true" /><p>尚无已加入调度的 Codex 账号。</p><small>加入第一个账号前，新建 Codex 终端沿用环境的 ~/.codex 登录。</small>
-      </div>}
+      {accounts?.length === 0 && <EmptyState drawing="key" title="还没有 Codex 账号" className="claude-profile-empty">
+        <span>尚无已加入调度的 Codex 账号。</span>加入第一个账号前，新建 Codex 终端沿用环境的 ~/.codex 登录。
+      </EmptyState>}
       <QuotaClock accounts={clockAccounts}>
         {detected && <DefaultLogin key={detected.identity} profile={detected} />}
         {accounts?.map((profile) => <CodexProfileCard key={profile.id} profile={profile} environment={environment} usageEnvironment={usageEnvironment}

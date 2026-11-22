@@ -17,6 +17,8 @@ for (const system of ["debian-13", "macos"]) {
     beforeNavigate: async (page, state) => {
       state.account.guest_system = state.status.guest_system = system;
       state.status.ready = state.status.vm_running = true;
+      // Codex surfaces follow presence on a Linux guest: this environment has Codex.
+      if (linux) state.status.clients = ["codex"];
       await page.route("**/api/codex-accounts*", async (route) => {
         const body = route.request().postDataJSON();
         if (body) {

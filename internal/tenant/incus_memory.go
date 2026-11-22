@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -83,30 +84,85 @@ func (r *IncusRuntime) MemoryState(ctx context.Context) (MemoryState, error) {
 			slots <- struct{}{}
 			defer func() { <-slots }()
 			probe, cancel := context.WithTimeout(ctx, 5*time.Second)
-			total, available, err := r.guestMemory(probe, id)
+			reading, err := r.guestMemory(probe, id, time.Now())
 			cancel()
-			guests[index] = InstanceMemory{GuestTotal: total, GuestAvailable: available, GuestSilent: err != nil}
+			reading.GuestSilent = err != nil
+			guests[index] = reading
 		})
 	}
 	probes.Wait()
 	for index, id := range running {
 		entry := state.Instances[id]
-		entry.GuestTotal, entry.GuestAvailable, entry.GuestSilent = guests[index].GuestTotal, guests[index].GuestAvailable, guests[index].GuestSilent
+		reading := guests[index]
+		entry.GuestTotal, entry.GuestAvailable, entry.GuestSilent = reading.GuestTotal, reading.GuestAvailable, reading.GuestSilent
+		entry.GuestStall, entry.GuestSwapIns, entry.GuestSwapKnown, entry.NestedShort = reading.GuestStall, reading.GuestSwapIns, reading.GuestSwapKnown, reading.NestedShort
 		state.Instances[id] = entry
 	}
 	return state, nil
 }
 
-// guestMemory reads MemTotal and MemAvailable inside a running VM. The guest
-// reports them, so a tenant can at most claim more need and get its own
-// profile ceiling, or claim less and shrink only itself.
-func (r *IncusRuntime) guestMemory(ctx context.Context, id string) (total, available int64, err error) {
-	body, err := r.capture(ctx, 16384, "exec", "local:cage-"+id, "--mode=non-interactive", "--",
-		"/usr/bin/head", "-c", "16384", "--", "/proc/meminfo")
+// guestMemoryScript reads, in one exec, the guest's /proc/meminfo (required)
+// and what is optional: its memory pressure, its swap-in counter and what a
+// Cage guest nested in it wants (machine-memory.json next to the control
+// file, written by that guest's host agent). A missing optional file leaves
+// its section empty.
+const guestMemoryScript = "head -c 16384 /proc/meminfo; echo '#cage-psi'; head -c 1024 /proc/pressure/memory 2>/dev/null; " +
+	"echo '#cage-vmstat'; grep '^pswpin ' /proc/vmstat 2>/dev/null; echo '#cage-nested'; head -c 4096 \"$1\" 2>/dev/null; exit 0"
+
+// machineMemoryFile is the file a host agent writes next to its profile's
+// control.json for the gateway: what its guest wants and the machine cannot
+// back now. The guest writes it, so it can at most claim its own ceiling.
+const machineMemoryFile = "machine-memory.json"
+
+// nestedFresh is how old a nested demand may be, either way, before it is
+// ignored: it is written every few seconds while the guest is short.
+const nestedFresh = 45 * time.Second
+
+// guestMemory reads a running VM. The guest reports its figures, so a tenant
+// can at most claim more need and get its own profile ceiling, or claim less
+// and shrink only itself.
+func (r *IncusRuntime) guestMemory(ctx context.Context, id string, now time.Time) (InstanceMemory, error) {
+	body, err := r.capture(ctx, 24576, "exec", "local:cage-"+id, "--mode=non-interactive", "--",
+		"/bin/sh", "-c", guestMemoryScript, "sh", path.Join(path.Dir(r.cfg.ControlPath), machineMemoryFile))
 	if err != nil {
-		return 0, 0, err
+		return InstanceMemory{}, err
 	}
-	return parseMeminfo(body)
+	return parseGuestMemory(body, now)
+}
+
+// parseGuestMemory reads the sections of guestMemoryScript.
+func parseGuestMemory(body []byte, now time.Time) (InstanceMemory, error) {
+	var reading InstanceMemory
+	sections := map[string][]byte{}
+	name := "meminfo"
+	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
+		if marker, ok := bytes.CutPrefix(bytes.TrimSpace(line), []byte("#cage-")); ok && len(bytes.Fields(line)) == 1 {
+			name = string(marker)
+			continue
+		}
+		sections[name] = append(sections[name], line...)
+	}
+	var err error
+	if reading.GuestTotal, reading.GuestAvailable, err = parseMeminfo(sections["meminfo"]); err != nil {
+		return reading, err
+	}
+	reading.GuestStall = parseMemoryStall(sections["psi"])
+	if fields := strings.Fields(string(sections["vmstat"])); len(fields) == 2 && fields[0] == "pswpin" {
+		if count, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+			reading.GuestSwapIns, reading.GuestSwapKnown = count, true
+		}
+	}
+	var nested struct {
+		Version   int       `json:"version"`
+		UpdatedAt time.Time `json:"updated_at"`
+		Short     int64     `json:"short_bytes"`
+		Pressure  bool      `json:"pressure"`
+	}
+	if data := bytes.TrimSpace(sections["nested"]); len(data) > 0 && json.Unmarshal(data, &nested) == nil && nested.Version == 1 &&
+		nested.Short > 0 && nested.Short <= 1<<40 && now.Sub(nested.UpdatedAt).Abs() <= nestedFresh {
+		reading.NestedShort, reading.NestedPressure = nested.Short, nested.Pressure
+	}
+	return reading, nil
 }
 
 var errMemoryNotRunning = errors.New("Incus instance is not running")

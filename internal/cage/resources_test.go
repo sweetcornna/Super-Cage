@@ -2,6 +2,7 @@ package cage
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -59,7 +60,8 @@ func TestResourceFailuresKeepDiagnosticCausePrivate(t *testing.T) {
 		t.Fatalf("secret leaked or repeated failure flooded log: %s", log)
 	}
 	status, err := ReadResourceStatus(dir)
-	if err != nil || !strings.Contains(status.Error, "自动回收内存已暂停") || strings.Contains(status.Error, "Not a socket") || strings.Contains(status.Error, "private-probe-token") {
+	// A failed sample holds the allocation; it never pauses reclamation for good.
+	if err != nil || !strings.Contains(status.Error, "暂时保持当前内存分配") || status.Reason != "sample_failed_hold" || strings.Contains(status.Error, "Not a socket") || strings.Contains(status.Error, "private-probe-token") {
 		t.Fatalf("technical detail escaped to resource status: %+v %v", status, err)
 	}
 }
@@ -152,25 +154,83 @@ func TestResourceManagerCancellationAndFreshness(t *testing.T) {
 	}
 }
 
-func TestAutomaticAllocationIsCappedButManualKeepsHostShare(t *testing.T) {
+func TestAutomaticAllocationFollowsTheMachine(t *testing.T) {
 	oldMem, oldCPU := host.MemGiB, host.CPUs
 	t.Cleanup(func() { host.MemGiB, host.CPUs = oldMem, oldCPU })
 	t.Setenv("AGENT_VM_HOST_SHARE", "2")
-	host.CPUs = func() int { return 10 }
-	// A 10 GiB tenant VM reports 9 GiB: the nested guest keeps its 4 GiB share.
-	for _, tc := range []struct{ host, automatic, share int }{{128, 32, 64}, {64, 24, 32}, {32, 12, 16}, {24, 9, 12}, {16, 8, 8}, {9, 4, 4}, {8, 4, 4}, {4, 2, 2}} {
+	for _, tc := range []struct {
+		role                   string
+		host, cpus             int
+		memory, vcpus, legacyM int
+	}{
+		// The production workspace VM: 8 GiB reported as 7, 6 CPUs. The old
+		// sizing gave 3 GiB and 3 vCPUs.
+		{RoleDedicated, 7, 6, 6, 5, 3},
+		{RoleDedicated, 15, 8, 13, 7, 7},
+		{RoleDedicated, 4, 2, 3, 1, 2},
+		{RoleDedicated, 2, 1, 2, 1, 2},
+		{RoleDesktop, 16, 10, 12, 8, 8},
+		{RoleDesktop, 32, 10, 24, 8, 12},
+		{RoleDesktop, 64, 16, 32, 12, 24},
+		{RoleDesktop, 8, 8, 4, 6, 4},
+		{RoleDesktop, 4, 4, 2, 2, 2},
+	} {
+		t.Setenv("CAGE_MACHINE_ROLE", tc.role)
 		host.MemGiB = func() int { return tc.host }
-		memory, _, err := ResourceAllocation{Automatic: true}.Limits()
-		if err != nil || memory != tc.automatic {
-			t.Fatalf("automatic on %d GiB host: %d %v", tc.host, memory, err)
+		host.CPUs = func() int { return tc.cpus }
+		memory, cpus, err := ResourceAllocation{Automatic: true}.Limits()
+		if err != nil || memory != tc.memory || cpus != tc.vcpus {
+			t.Fatalf("%s %d GiB/%d CPUs: automatic %d/%d %v", tc.role, tc.host, tc.cpus, memory, cpus, err)
 		}
-		if share, _ := ResourceLimits(); share != tc.share {
-			t.Fatalf("share on %d GiB host: %d", tc.host, share)
+		if legacy, _, err := (ResourceAllocation{Automatic: true}).LegacyLimits(); err != nil || legacy != tc.legacyM {
+			t.Fatalf("legacy automatic on %d GiB: %d %v", tc.host, legacy, err)
 		}
-		memory, _, err = ResourceAllocation{MemoryGiB: tc.share, CPUs: 2}.Limits()
-		if err != nil || memory != tc.share {
-			t.Fatalf("manual allocation up to the host share rejected: %d %v", memory, err)
+		// An explicit allocation may use the automatic maximum or the host
+		// share, whichever is larger, and nothing above.
+		share, shareCPUs := ResourceLimits()
+		maxMemory, maxCPUs := max(share, tc.memory), max(shareCPUs, tc.vcpus)
+		if memory, _, err := (ResourceAllocation{MemoryGiB: maxMemory, CPUs: maxCPUs}).Limits(); err != nil || memory != maxMemory {
+			t.Fatalf("manual allocation at the range end rejected: %d %v", memory, err)
 		}
+		if err := (ResourceAllocation{MemoryGiB: maxMemory + 1, CPUs: 1}).Validate(); err == nil {
+			t.Fatal("manual allocation above the range accepted")
+		}
+	}
+}
+
+func TestLegacyDefaultIsOfferedNotImposed(t *testing.T) {
+	oldMem, oldCPU, oldAction := host.MemGiB, host.CPUs, LegacyDefaultAction
+	t.Cleanup(func() { host.MemGiB, host.CPUs, LegacyDefaultAction = oldMem, oldCPU, oldAction })
+	t.Setenv("AGENT_VM_HOST_SHARE", "2")
+	t.Setenv("CAGE_MACHINE_ROLE", RoleDedicated)
+	host.MemGiB = func() int { return 7 }
+	host.CPUs = func() int { return 6 }
+	old := ResourceAllocation{MemoryGiB: 3, CPUs: 3}
+	for _, tc := range []struct {
+		allocation ResourceAllocation
+		origin     string
+	}{
+		{ResourceAllocation{Automatic: true}, OriginAutomatic},
+		{old, OriginLegacyDefault},
+		{ResourceAllocation{MemoryGiB: 3, CPUs: 3, Chosen: OriginUser}, OriginUser},
+		{ResourceAllocation{MemoryGiB: 3, CPUs: 2}, OriginUser},
+		{ResourceAllocation{MemoryGiB: 4, CPUs: 3}, OriginUser},
+	} {
+		if got := tc.allocation.Origin(); got != tc.origin {
+			t.Fatalf("%+v: origin %s, want %s", tc.allocation, got, tc.origin)
+		}
+	}
+	// Offered by default: the saved values still apply.
+	if memory, cpus, err := old.Limits(); err != nil || memory != 3 || cpus != 3 {
+		t.Fatalf("legacy default changed without consent: %d/%d %v", memory, cpus, err)
+	}
+	LegacyDefaultAction = "apply"
+	if memory, cpus, err := old.Limits(); err != nil || memory != 6 || cpus != 5 {
+		t.Fatalf("applied legacy default: %d/%d %v", memory, cpus, err)
+	}
+	// A user's explicit choice is never moved.
+	if memory, _, _ := (ResourceAllocation{MemoryGiB: 3, CPUs: 3, Chosen: OriginUser}).Limits(); memory != 3 {
+		t.Fatal("explicit choice overridden")
 	}
 }
 
@@ -260,5 +320,81 @@ func TestMemoryPolicyHostPressureAndQuietGuestReclaimSooner(t *testing.T) {
 	}
 	if steps["short host"] >= steps["busy guest on a roomy host"] || steps["quiet guest"] >= steps["busy guest on a roomy host"] || steps["short host"] > 6 {
 		t.Fatalf("reclamation steps %v", steps)
+	}
+}
+
+func TestResourceManagerSendsLimitsAndTellsTheGateway(t *testing.T) {
+	profile := t.TempDir()
+	t.Setenv(ConfigEnv, filepath.Join(profile, "config.json"))
+	oldMachine, oldContext := readMachine, allocationContext
+	t.Cleanup(func() { readMachine, allocationContext = oldMachine, oldContext })
+	// A workspace VM with 512 MiB available: it cannot back the guest's demand.
+	readMachine = func() MachineMemory {
+		return MachineMemory{Total: 6 << 30, Boot: 6 << 30, Available: 512 << 20, Measured: true, Role: RoleDedicated}
+	}
+	allocationContext = func(string) (uint64, bool) { return 4 << 30, false }
+	sample := func(uptime float64) string {
+		return fmt.Sprintf("MemTotal: %d kB\nMemFree: 65536 kB\nMemAvailable: 131072 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\noom_kill 0\npswpin 0\nsome avg10=20.00 avg60=0 total=1\ncpu 10 0 5 20 2 0 0 0 0 0\nboot 12345678-1234-1234-1234-123456789012\nuptime %.1f 1.0\ngovernor 1 %.1f\nclass control 400000000 0 500000000 0 0\nclass sessions 900000000 12 1100000000 0 0\nclass browser 1500000000 30 0 1600000000 1800000000\n", (3<<30)>>10, uptime, uptime)
+	}
+	probes := make(chan string, 16)
+	uptime := 100.0
+	var targets []uint64
+	agentDir := t.TempDir()
+	stop := StartResourceManager(context.Background(), agentDir, 4<<30, 2, func(_ context.Context, command string) ([]byte, error) {
+		probes <- command
+		uptime += 2
+		return []byte(sample(uptime)), nil
+	}, func(_ context.Context, target uint64) error { targets = append(targets, target); return nil })
+	var commands []string
+	for len(commands) < 3 {
+		select {
+		case command := <-probes:
+			commands = append(commands, command)
+		case <-time.After(10 * time.Second):
+			t.Fatal("no probes")
+		}
+	}
+	stop()
+	if strings.Contains(commands[0], "/run/cage-resources/in/limits") || !strings.Contains(commands[1], "/run/cage-resources/in/limits") || !strings.Contains(commands[1], "browser_high ") {
+		t.Fatalf("class limits not sent with the next probe: %q", commands[:2])
+	}
+	data, err := os.ReadFile(filepath.Join(profile, "machine-memory.json"))
+	var report machineMemoryReport
+	if err != nil || json.Unmarshal(data, &report) != nil || report.Version != 1 || report.Short == 0 || time.Since(report.UpdatedAt) > time.Minute {
+		t.Fatalf("machine-memory.json %s %v", data, err)
+	}
+	// The probe reported a governor: the sessions' stall is the pressure, the
+	// machine limits the guest, and the status says so.
+	status, err := ReadResourceStatus(agentDir)
+	if err != nil || !status.Pressure || !status.BrowserPressure || len(status.Classes) != 3 || status.Machine == nil || status.Capacity == 0 || status.Summary == "" || status.NextAction == "" {
+		t.Fatalf("status %+v %v", status, err)
+	}
+	for _, target := range targets {
+		if target > 4<<30 {
+			t.Fatalf("target above the maximum %v", targets)
+		}
+	}
+}
+
+func TestAgentProfileFromTheInstanceLayout(t *testing.T) {
+	t.Setenv(ConfigEnv, "")
+	if got := agentProfile("/p/state/lima/cage-1"); got != "/p" {
+		t.Fatalf("profile %q", got)
+	}
+	if got := agentProfile("/elsewhere/cage-1"); got != "" {
+		t.Fatalf("profile %q", got)
+	}
+}
+
+func TestResourceStatusStaysWithinItsReadLimit(t *testing.T) {
+	sample := ResourceSample{Total: 6 << 30, Available: 1 << 30, Boot: strings.Repeat("b", 36)}
+	status := ResourceStatus{Version: 1, Maximum: 6 << 30, Target: 6 << 30, Guest: &sample, Machine: &MachineMemory{Total: 8 << 30, Boot: 8 << 30, Role: RoleDedicated},
+		Classes: []GuestClass{{Name: "control", Current: 1 << 30}, {Name: "sessions", Current: 1 << 30}, {Name: "browser", Current: 4 << 30, High: 4 << 30, Max: 5 << 30}},
+		Advice: &ResourceAdvice{Message: "环境内存已用满手动设置的 32 GB。改为自动（推荐）后可以调到 32 GB，需要重启环境。", MemoryBytes: 32 << 30, RestartRequired: true},
+		Summary: "主机和环境的内存都紧张，环境只增加到刚好够用的 32 GB。", NextAction: "关闭主机上暂时不用的程序，环境可以获得更多内存。",
+		Error: "读取资源用量失败：" + strings.Repeat("原因", 100) + "。暂时保持当前内存分配，恢复读取后自动继续；若持续出现，请在设置中导出诊断包。"}
+	data, err := json.Marshal(status)
+	if err != nil || len(data) > 8<<10 {
+		t.Fatalf("status is %d bytes: %v", len(data), err)
 	}
 }

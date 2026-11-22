@@ -27,7 +27,14 @@ type terminalRequest struct {
 	ClaudeAccountID string `json:"claude_account_id"`
 	CodexAccountID  string `json:"codex_account_id"`
 	sharedID        string
-	requestContext  context.Context
+	// codexSession: the client knows Codex sessions, so a Codex terminal from
+	// the menu becomes one.
+	codexSession bool
+	// codexProbed: the guest answered the Codex CLI probe completely just
+	// before the operation lock (warmCodexProbe), so the open's check under
+	// the lock may ask for it again: the guest answers from its cache.
+	codexProbed    bool
+	requestContext context.Context
 }
 
 // terminalManager owns host PTYs; subscriptions only borrow their output. The
@@ -39,6 +46,9 @@ type terminalManager struct {
 	sequence int
 	closed   bool
 	workers  sync.WaitGroup
+	// kept are the ssh terminals kept past their connection (entryKeep),
+	// which have their own cap instead of the shared limit.
+	kept map[string]bool
 }
 
 func (m *terminalManager) startSession(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func()) (*terminalSession, error) {
@@ -115,7 +125,7 @@ func (m *terminalManager) admissionErrorLocked() error {
 	if m.closed {
 		return errTerminalsClosed
 	}
-	if len(m.sessions) >= 12 {
+	if len(m.sessions)-len(m.kept) >= 12 {
 		return errTerminalLimit
 	}
 	return nil
@@ -162,6 +172,43 @@ func (m *terminalManager) get(id string) *terminalSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sessions[id]
+}
+
+// boundCodex is the live Codex terminal of this server bound to a session.
+// While it runs, the desktop owns the session's thread.
+func (m *terminalManager) boundCodex(id string) *terminalSession {
+	if id == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.sessions {
+		session.mu.Lock()
+		bound := session.kind == "codex" && session.sharedID == id && !session.closed
+		session.mu.Unlock()
+		if bound {
+			return session
+		}
+	}
+	return nil
+}
+
+// removeEndedCodex removes ended Codex terminals of a session before a new
+// one opens, so they do not count toward the terminal limit.
+func (m *terminalManager) removeEndedCodex(id string) {
+	m.mu.Lock()
+	var ended []string
+	for key, session := range m.sessions {
+		session.mu.Lock()
+		if session.kind == "codex" && session.sharedID == id && session.closed {
+			ended = append(ended, key)
+		}
+		session.mu.Unlock()
+	}
+	m.mu.Unlock()
+	for _, key := range ended {
+		m.remove(key)
+	}
 }
 
 func (m *terminalManager) forConversation(connection string) *terminalSession {
@@ -234,6 +281,7 @@ func (m *terminalManager) remove(id string) {
 		session.close()
 		m.mu.Lock()
 		delete(m.sessions, id)
+		delete(m.kept, id)
 		m.mu.Unlock()
 	}
 }
@@ -306,12 +354,15 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	s.mu.Lock()
-	closing := s.closing
+	closing, sealed := s.closing, s.appUpdateSealed
 	componentUpdate := s.guestUpdateRequired
 	command := claudeTerminalCommand(s.preferences)
 	s.mu.Unlock()
 	if closing {
 		return nil, errTerminalsClosed
+	}
+	if sealed {
+		return nil, errAppUpdateSealed
 	}
 	if sharedRecord != nil && (!sharedCLILauncher(command) || sharedRecord.Launcher != "" && sharedRecord.Launcher != command) {
 		return nil, errors.New("主机启动命令与原会话不一致，请恢复原配置后重试")
@@ -348,9 +399,21 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	// It always runs from the guest home, without loading project settings.
 	workspace := s.workspace()
 	var err error
+	var selection claudeSelection
+	selected := false // selection was made together with the project connection
 	if input.Kind != "claude-login" {
 		if s.macOSLegacyWorkspace(sharedRecord) != "" {
 			workspace, err = s.projectWorkspace(sharedRecord.Workspace)
+		} else if managed && (sharedRecord == nil || !sharedRecord.Terminal) {
+			// Opening the project's shares and choosing an account both wait on
+			// guest reads, and neither needs the other's result.
+			var connect func() error
+			if workspace, connect, err = s.prepareProject(input.Workspace, false); err == nil {
+				selection, err = connectAndSelect(connect, func() (claudeSelection, error) {
+					return s.selectTerminalClaudeAccount(command, input.ClaudeAccountID, false, workspace)
+				})
+				selected = true
+			}
 		} else {
 			workspace, err = s.connectProject(input.Workspace, false)
 		}
@@ -375,13 +438,12 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			script = "exec /usr/local/libexec/cage-macos-terminal " + shellescape.Quote(macOSProjectPath(s.macosGuest.User, workspace))
 		}
 	}
-	var selection claudeSelection
 	var finished func()
 	if managed {
 		login := input.Kind == "claude-login"
 		if sharedRecord != nil && sharedRecord.Terminal {
 			selection = sharedRecord.Account
-		} else {
+		} else if !selected {
 			selection, err = s.selectTerminalClaudeAccount(command, input.ClaudeAccountID, login, workspace)
 		}
 		if err != nil {
@@ -464,6 +526,20 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	return session, err
 }
 
+// connectAndSelect runs the project connection and the account selection at
+// the same time and returns when both are done, so the caller still holds the
+// environment lock until neither is running. A project error wins over a
+// selection error, as it did when they ran one after the other.
+func connectAndSelect(connect func() error, selectAccount func() (claudeSelection, error)) (claudeSelection, error) {
+	connected := make(chan error, 1)
+	go func() { connected <- connect() }()
+	selection, selectErr := selectAccount()
+	if err := <-connected; err != nil {
+		return claudeSelection{}, err
+	}
+	return selection, selectErr
+}
+
 func validClaudeGuestID(id string) bool { return id == "default" || validClaudeID(id) }
 
 func (s *Server) selectTerminalClaudeAccount(command, requested string, login bool, workspace string) (claudeSelection, error) {
@@ -481,7 +557,9 @@ func (s *Server) readClaudeGuestSnapshot(ctx context.Context, id string) (claude
 	if s.windowsGuest != nil {
 		return s.readWindowsClaudeAccount(ctx, "snapshot", id, "")
 	}
-	return s.readClaudeGuestReport(ctx, id, claudeSnapshotCommand(id))
+	// A snapshot only reads, and the accounts pages and every launch ask for
+	// it, so it shares the guest's control connection.
+	return s.readClaudeGuestReportVia(ctx, id, claudeSnapshotCommand(id), s.guestQuick)
 }
 
 func (s *Server) readClaudeGuestUsage(ctx context.Context, id, subject string) (claudeGuestSnapshot, error) {
@@ -494,12 +572,19 @@ func (s *Server) readClaudeGuestUsage(ctx context.Context, id, subject string) (
 	return s.readClaudeGuestReport(ctx, id, claudeGuestReportCommand(id, subject))
 }
 
+// readClaudeGuestReport runs command over a connection of its own. Usage and
+// login recovery use it: they can run long or change the account, which a
+// shared connection is not for.
 func (s *Server) readClaudeGuestReport(ctx context.Context, id, command string) (claudeGuestSnapshot, error) {
+	return s.readClaudeGuestReportVia(ctx, id, command, s.guest)
+}
+
+func (s *Server) readClaudeGuestReportVia(ctx context.Context, id, command string, run func(context.Context, string) ([]byte, error)) (claudeGuestSnapshot, error) {
 	var snapshot claudeGuestSnapshot
 	if !validClaudeGuestID(id) {
 		return snapshot, errors.New("Claude 账号 ID 无效")
 	}
-	data, err := s.guest(ctx, command)
+	data, err := run(ctx, command)
 	if err != nil || json.Unmarshal(data, &snapshot) != nil {
 		return snapshot, errors.New("无法读取账号状态，请确认环境已启动并同步环境组件")
 	}

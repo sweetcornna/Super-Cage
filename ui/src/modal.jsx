@@ -1,6 +1,6 @@
 import React, { useEffect, useLayoutEffect, useRef } from "react";
 
-export function Modal({ title, children, onClose, wide = false, footer, anchor }) {
+export function Modal({ title, children, onClose, wide = false, footer, anchor, align = "end" }) {
   const panel = useRef(),
     closeRef = useRef(onClose);
   closeRef.current = onClose;
@@ -15,7 +15,8 @@ export function Modal({ title, children, onClose, wide = false, footer, anchor }
       }
       const rect = anchor.getBoundingClientRect();
       const box = node.getBoundingClientRect();
-      const left = Math.max(8, Math.min(rect.right - box.width, window.innerWidth - box.width - 8));
+      // "end" lines the right edges up; "start" the left edges, for an anchor at the start of a row.
+      const left = Math.max(8, Math.min(align === "start" ? rect.left : rect.right - box.width, window.innerWidth - box.width - 8));
       const below = rect.bottom + 6;
       const top = below + box.height <= window.innerHeight - 8
         ? below : Math.max(8, rect.top - box.height - 6);

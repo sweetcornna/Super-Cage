@@ -52,7 +52,7 @@ try {
   await writeFile(join(dir,"browser-agent.mjs"),adapted);
   await writeFile(join(dir,"control.json"),JSON.stringify({token,workspace:dir}));
   await writeFile(join(dir,"homepage.json"),JSON.stringify({url:origin+"/login"}));
-  agent=spawn(process.execPath,[join(dir,"browser-agent.mjs")],{stdio:["ignore","pipe","pipe"]});
+  agent=spawn(process.execPath,[join(dir,"browser-agent.mjs")],{stdio:["ignore","pipe","pipe"],env:{...process.env,BREAKPAD_DUMP_LOCATION:join(dir,"Crashpad")}});
   agent.stdout.on("data",chunk=>{const match=chunk.toString().match(/PORT=(\d+)/);if(match)control="http://127.0.0.1:"+match[1];});
   agent.stderr.on("data",chunk=>{stderr=(stderr+chunk).slice(-3000);});
   await waitFor(()=>control,"listener");

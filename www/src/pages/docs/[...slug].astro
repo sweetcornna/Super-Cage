@@ -27,7 +27,7 @@ const canonical = new URL(guideURL(page.slug), Astro.site);
   <meta name="theme-color" content="#faf8f4" />
   <title>{page.title} · Cage 使用文档</title>
   <link rel="canonical" href={canonical} />
-  <link rel="icon" href={`${base}cage-icon.png`} />
+  <link rel="icon" href={`${base}favicon.ico`} sizes="48x48" /><link rel="icon" type="image/svg+xml" href={`${base}cage-icon.svg`} /><link rel="apple-touch-icon" href={`${base}apple-touch-icon.png`} />
 </head>
 <body class="guide-page">
   <a class="skip-link" href="#article">跳到正文</a>

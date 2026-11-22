@@ -12,6 +12,7 @@ import { copyGuestText } from "./shared-clipboard.mjs";
 import { useWindowVisibility } from "./window-visibility";
 import { createMacWindowConnection } from "./macos-window-connection.mjs";
 import { createMacFrameConnection } from "./macos-frame-connection.mjs";
+import { cagePerf } from "./display-perf.mjs";
 import "./macos-claude-window.css";
 
 const messages = {
@@ -39,6 +40,9 @@ async function windowRequest(base, action, fields = {}, connection) {
 
 // Fixed-size native sign-in sheets stay at their real text size. Extend a
 // uniform window background across the pane without scaling those pixels.
+// Frames of one window share a key; a new key mounts a new <img>.
+const frameKey = (frame) => `${frame.pid}:${frame.window}:${frame.geometry || ""}`;
+
 function matchWindowBackground(img, pane, canvasRef) {
   if (!pane) return;
   if (img.clientWidth >= pane.clientWidth - 1 && img.clientHeight >= pane.clientHeight - 1) return;
@@ -74,7 +78,11 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
   const [fileError, setFileError] = useState("");
   const [transferring, setTransferring] = useState(false);
   const [revision, refresh] = useState(0);
+  // image names the window shown (its first frame); later frames of the same
+  // window go straight to the <img> without a render (see receiveFrame).
   const [image, setImage] = useState(null);
+  const shown = useRef(null);
+  const perfRef = useRef(null);
   const frame = useRef(null);
   const surface = useRef(null);
   const controls = useRef(null);
@@ -111,15 +119,25 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     let timer;
     let current, nextStatus = 0, after = "", captureSize = "", checkFrame = true;
     const live = () => generation.current === epoch;
+    // __cagePerf: one entry per visible stretch of this window's frames.
+    const perf = cagePerf().display(browser ? "macos-browser" : "macos-claude", base);
+    perf.connected();
+    perfRef.current = perf;
     function receiveFrame(next) {
       if (!live()) return;
       if (frame.current?.window !== next.window || frame.current?.pid !== next.pid || frame.current?.geometry !== next.geometry) frame.current = null;
-      setImage({
+      const data = {
         src: next.src || `data:${next.mime === "image/jpeg" ? "image/jpeg" : "image/png"};base64,${next.image}`,
         window: next.window, pid: next.pid,
         geometry: next.geometry, width: next.contentWidth, height: next.contentHeight,
         acknowledge: next.acknowledge,
-      });
+      };
+      shown.current = data;
+      perf.received(next.imageLength || next.image?.length || 0);
+      // The <img> already on screen shows this window: swap its picture
+      // directly. A new window, process or geometry renders a new <img>.
+      if (surface.current?.dataset.frame === frameKey(data)) surface.current.src = data.src;
+      else setImage(data);
       setError("");
     }
     async function poll() {
@@ -187,6 +205,8 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     poll();
     return () => {
       generation.current++; clearTimeout(timer); frame.current = null;
+      perf.closed();
+      if (perfRef.current === perf) perfRef.current = null;
       connection.current?.close(); connection.current = null;
       setInputChannel(null);
       frameConnection.current?.close(); frameConnection.current = null;
@@ -249,7 +269,12 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       pasteContent: (content, prepared) => receive(content, prepared?.lease || { target: transport.target(), epoch: generation.current, transport }, prepared),
     });
     controls.current = { transport, input };
+    // Input-to-next-frame time for __cagePerf.
+    const element = pane.current;
+    const noteInput = () => perfRef.current?.input();
+    for (const type of ["pointerdown", "wheel", "keydown"]) element.addEventListener(type, noteInput, { capture: true, passive: true });
     return () => {
+      for (const type of ["pointerdown", "wheel", "keydown"]) element.removeEventListener(type, noteInput, { capture: true });
       input.dispose(); transport.dispose();
       if (controls.current?.transport === transport) controls.current = null;
     };
@@ -277,6 +302,15 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
       if (valid()) onStatus(value.text ? "已粘贴" : `附件已交给 ${appName}，请在应用中确认上传结果`);
     }).finally(() => { prepared?.dispose(); setTransferring(false); });
   }
+  // Hidden (settings or a management page in front): forget the picture.
+  // Its blob URL is released with the frame channel, so showing it again
+  // would fail to decode; the next frame arrives as soon as the view returns.
+  useEffect(() => {
+    if (visible) return;
+    shown.current = null;
+    frame.current = null;
+    setImage(null);
+  }, [visible]);
   const fileFailure = error => { setFileError(error.message); onStatus(error.message); };
   async function chooseFiles() {
     const lease = { target: frame.current, epoch: generation.current, transport: controls.current?.transport };
@@ -306,15 +340,19 @@ export function MacOSAppWindow({ browser = false, onOpenPage, visible, keyboard 
     {state?.running && state.screen && !state.input && <p>{messages.accessibility_permission}</p>}
     <div ref={pane} className="mac-claude-frame" style={{ "--desktop-zoom": zoom }}>
       {image && <img ref={surface} key={image.geometry || `${image.pid}-${image.window}`} alt={appName + " 客机窗口"} src={image.src} draggable={false}
+        data-frame={frameKey(image)}
         onLoad={e => {
           const img = e.currentTarget;
-          const width = image.width || img.naturalWidth;
-          const height = image.height || img.naturalHeight;
+          // The frame whose picture just decoded: the latest one given to this <img>.
+          const shownFrame = shown.current?.src === img.getAttribute("src") ? shown.current : image;
+          const width = shownFrame.width || img.naturalWidth;
+          const height = shownFrame.height || img.naturalHeight;
           img.style.setProperty("--frame-width", width + "px");
           img.style.setProperty("--frame-aspect", width / height);
-          frame.current = { window: image.window, pid: image.pid, geometry: image.geometry, surface: browser ? "browser" : undefined };
+          frame.current = { window: shownFrame.window, pid: shownFrame.pid, geometry: shownFrame.geometry, surface: browser ? "browser" : undefined };
           matchWindowBackground(img, pane.current, backgroundSample);
-          image.acknowledge?.();
+          perfRef.current?.painted();
+          shownFrame.acknowledge?.();
         }}
         onError={() => { frameConnection.current?.close(); frameConnection.current = null; frame.current = null; setImage(null); setError("窗口画面无法解码，请重新连接。"); }}
         />}

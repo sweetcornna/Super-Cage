@@ -131,7 +131,9 @@ func (f *fixture) startHost(t *testing.T, pin string) relay.Invitation {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- mobilelink.ServeHost(ctx, f.base, room.ID, room.HostToken, f.identity, pin, f.backend) }()
+	go func() {
+		done <- mobilelink.ServeHost(ctx, f.base, room.ID, room.HostToken, f.identity, pin, mobilelink.Opened(f.backend))
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {
@@ -429,7 +431,9 @@ func TestSavedNativeClientUsesNewRoomsAndChecksHostIdentity(t *testing.T) {
 		}
 		previous = inv.ID
 		done := make(chan error, 1)
-		go func() { done <- mobilelink.ServeHost(ctx, f.base, inv.ID, inv.HostToken, f.identity, pin, f.backend) }()
+		go func() {
+			done <- mobilelink.ServeHost(ctx, f.base, inv.ID, inv.HostToken, f.identity, pin, mobilelink.Opened(f.backend))
+		}()
 		for {
 			visible, err := mobilelink.LookupRoom(ctx, f.base, lookup)
 			if err == nil && visible.ID == inv.ID {
@@ -506,7 +510,7 @@ func TestSavedClientRecoversReadAfterHostDisconnect(t *testing.T) {
 		done := make(chan struct{})
 		go func() {
 			defer close(done)
-			_ = mobilelink.ServeHost(ctx, f.base, room.ID, room.HostToken, f.identity, pin, f.backend)
+			_ = mobilelink.ServeHost(ctx, f.base, room.ID, room.HostToken, f.identity, pin, mobilelink.Opened(f.backend))
 		}()
 		return func() { cancel(); <-done }
 	}
@@ -548,4 +552,73 @@ func TestSavedClientRecoversReadAfterHostDisconnect(t *testing.T) {
 	if got := f.upstream.Load() - calls; got != 2 {
 		t.Fatalf("expected only two recovered reads, got %d requests", got)
 	}
+}
+
+// The host opens its local workbench session only once a device has
+// authenticated: a paired device that is away, or a peer that fails the pin,
+// costs no session exchange.
+func TestServeHostOpensTheSessionOnlyForTheAuthenticatedDevice(t *testing.T) {
+	f := newFixture(t)
+	phone, err := remotelink.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stranger, err := remotelink.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened atomic.Int32
+	open := func() (*mobilelink.Workbench, error) {
+		opened.Add(1)
+		return f.backend, nil
+	}
+	serve := func() (relay.Invitation, context.CancelFunc, chan error) {
+		ctx, cancel := context.WithCancel(context.Background())
+		room, err := mobilelink.CreateRoom(ctx, f.base, strings.Repeat("t", 64))
+		if err != nil {
+			t.Fatal(err)
+		}
+		done := make(chan error, 1)
+		go func() {
+			done <- mobilelink.ServeHost(ctx, f.base, room.ID, room.HostToken, f.identity, phone.Pin, open)
+		}()
+		t.Cleanup(cancel)
+		return room, cancel, done
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	room, _, done := serve()
+	time.Sleep(200 * time.Millisecond)
+	if opened.Load() != 0 {
+		t.Fatal("the session opened while the room waited")
+	}
+	if c, err := mobilelink.ConnectClient(ctx, f.base, room.ID, room.ClientToken, stranger, f.identity.Pin); err == nil {
+		_, _ = c.Do(ctx, "GET", "/api/mobile/cli/projects", nil)
+		c.Close()
+	}
+	select {
+	case err := <-done:
+		if !mobilelink.Retryable(err) {
+			t.Fatalf("a refused peer ended the room with %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the host kept serving a peer with the wrong pin")
+	}
+	if opened.Load() != 0 {
+		t.Fatal("the session opened for a peer that failed authentication")
+	}
+
+	room, stop, done := serve()
+	client, err := mobilelink.ConnectClient(ctx, f.base, room.ID, room.ClientToken, phone, f.identity.Pin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	reply, err := client.Do(ctx, "GET", "/api/mobile/cli/projects", nil)
+	if err != nil || reply.Status != 200 || opened.Load() != 1 {
+		t.Fatalf("authenticated device: %+v %v, sessions %d", reply, err, opened.Load())
+	}
+	stop()
+	<-done
 }

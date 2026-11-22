@@ -18,12 +18,15 @@ const previousLocalWorkbench = "请用 cage desktop --existing 打开已有本�
 // process and workloads remain under its control throughout this exchange.
 func (d *desktopLocal) handoffOldLocal(ctx context.Context) (bool, error) {
 	c, err := connectController(d.profile)
+	if controllerIdentityError(err) {
+		return false, err
+	}
 	if err != nil {
 		return false, errors.New("无法认证已有本机后台。" + previousLocalWorkbench)
 	}
 	defer c.close()
 	id := c.launch.Controller
-	if c.launch.DesktopGateway || id.Protocol != controlProtocol || id.PID != c.record.PID || !id.matches(c.record.Controller) || !remoteInstanceID.MatchString(id.Build) {
+	if c.launch.DesktopGateway || id.Protocol != controlProtocol || id.PID != c.record.PID || !id.Matches(c.record.Controller) || !remoteInstanceID.MatchString(id.Build) {
 		return false, errors.New("已有本机后台身份或协议不兼容。" + previousLocalWorkbench)
 	}
 	u, _ := url.Parse(c.launch.URL) // connectController verified the origin and ticket.

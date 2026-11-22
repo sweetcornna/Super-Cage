@@ -1,0 +1,8 @@
+/* A terminal that is still being created, or whose creation failed
+   (views.jsx TerminalPending). The waiting line reuses .terminal-startup. */
+.terminal-pending-error {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}

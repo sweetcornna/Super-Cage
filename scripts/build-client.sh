@@ -46,8 +46,7 @@ if [[ "$platform" == macos ]]; then
   node scripts/bundle-cloud-kit.mjs "$bundle/Contents/Resources"
   cp "$stage/cage" "$bundle/Contents/Resources/cage"
   node scripts/collect-app-licenses.mjs "$bundle/Contents/Resources/licenses"
-  swift desktop/Icon.swift logo.png "$stage/Cage.iconset"
-  iconutil -c icns "$stage/Cage.iconset" -o "$bundle/Contents/Resources/Cage.icns"
+  iconutil -c icns packaging/macos/Cage.iconset -o "$bundle/Contents/Resources/Cage.icns"
   cat > "$bundle/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

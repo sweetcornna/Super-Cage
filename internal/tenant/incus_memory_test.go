@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeIncus writes an incus CLI that logs every call and answers from script,
@@ -17,7 +18,7 @@ func fakeIncus(t *testing.T, branches string) (*IncusRuntime, string) {
 	calls := filepath.Join(dir, "calls")
 	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '" + calls + "'\ncase \"$*\" in\n" + branches + "\n*) exit 7 ;;\nesac\n"
 	writeTestFile(t, filepath.Join(dir, "incus"), script, 0700)
-	return &IncusRuntime{cfg: IncusConfig{Executable: filepath.Join(dir, "incus"), Project: "cage-tenant", Profile: "default"}}, calls
+	return &IncusRuntime{cfg: IncusConfig{Executable: filepath.Join(dir, "incus"), Project: "cage-tenant", Profile: "default", ControlPath: "/home/cage/.claude-cage/control.json"}}, calls
 }
 
 func readCalls(t *testing.T, name string) []string {
@@ -51,8 +52,8 @@ func TestIncusMemoryStateReadsHostProfileAndGuests(t *testing.T) {
 	runtime, calls := fakeIncus(t, `"--force-local query local:/1.0/projects/cage-tenant") echo '{"name":"cage-tenant","config":{"features.profiles":"true"}}' ;;
 "--force-local query local:/1.0/profiles/default?project=cage-tenant") echo '{"name":"default","config":{"limits.cpu":"4","limits.memory":"10GiB"},"devices":{"root":{"type":"disk","path":"/","pool":"tenant-pool","size":"10GiB"}}}' ;;
 "--force-local query local:/1.0/instances?recursion=1&project=cage-tenant") cat '`+filepath.Join(dir, "inventory")+`' ;;
-"--force-local --project cage-tenant exec local:cage-`+running+` --mode=non-interactive -- /usr/bin/head -c 16384 -- /proc/meminfo") cat '`+filepath.Join(dir, "guest")+`' ;;
-"--force-local --project cage-tenant exec local:cage-`+silent+` --mode=non-interactive -- /usr/bin/head -c 16384 -- /proc/meminfo") echo 'MemTotal: 1 kB' ;;`)
+"--force-local --project cage-tenant exec local:cage-`+running+` --mode=non-interactive -- /bin/sh -c "*" sh /home/cage/.claude-cage/machine-memory.json") cat '`+filepath.Join(dir, "guest")+`' ;;
+"--force-local --project cage-tenant exec local:cage-`+silent+` --mode=non-interactive -- /bin/sh -c "*) echo 'MemTotal: 1 kB' ;;`)
 	state, err := runtime.MemoryState(context.Background())
 	if err != nil {
 		t.Fatal(err, readCalls(t, calls))
@@ -157,5 +158,31 @@ func TestMeminfoAndStallParsing(t *testing.T) {
 		if got := parseMemoryStall([]byte(text)); got != want {
 			t.Errorf("%q = %v, want %v", text, got, want)
 		}
+	}
+}
+
+func TestGuestMemoryReadingToleratesMissingOptionalFiles(t *testing.T) {
+	now := time.Unix(1e9, 0).UTC()
+	meminfo := "MemTotal:        8189952 kB\nMemAvailable:    1990000 kB\n"
+	// An old kernel without PSI and a machine without a nested guest: only
+	// meminfo is there, which is enough.
+	reading, err := parseGuestMemory([]byte(meminfo+"#cage-psi\n#cage-vmstat\n#cage-nested\n"), now)
+	if err != nil || reading.GuestTotal != 8189952<<10 || reading.GuestStall != 0 || reading.GuestSwapKnown || reading.NestedShort != 0 {
+		t.Fatalf("minimal reading %+v %v", reading, err)
+	}
+	nested := "{\"version\":1,\"updated_at\":\"" + now.Add(-10*time.Second).Format(time.RFC3339) + "\",\"short_bytes\":3221225472,\"pressure\":true}"
+	full := meminfo + "#cage-psi\nsome avg10=12.50 avg60=1.00 avg300=0.00 total=1\nfull avg10=1.00 avg60=0 avg300=0 total=1\n#cage-vmstat\npswpin 4242\n#cage-nested\n" + nested + "\n"
+	reading, err = parseGuestMemory([]byte(full), now)
+	if err != nil || reading.GuestStall != 12.5 || reading.GuestSwapIns != 4242 || !reading.GuestSwapKnown || reading.NestedShort != 3*testGiB || !reading.NestedPressure {
+		t.Fatalf("full reading %+v %v", reading, err)
+	}
+	// A stale or implausible nested demand is ignored; a broken meminfo is not a reading.
+	for _, nested := range []string{"{\"version\":1,\"updated_at\":\"2001-01-01T00:00:00Z\",\"short_bytes\":1073741824}", "{\"version\":2,\"short_bytes\":1}", "garbage"} {
+		if reading, err := parseGuestMemory([]byte(meminfo+"#cage-nested\n"+nested+"\n"), now); err != nil || reading.NestedShort != 0 {
+			t.Fatalf("nested %q: %+v %v", nested, reading, err)
+		}
+	}
+	if _, err := parseGuestMemory([]byte("#cage-psi\nsome avg10=1.00\n"), now); err == nil {
+		t.Fatal("a reading without meminfo was accepted")
 	}
 }

@@ -1,9 +1,9 @@
 import React from "react";
+import { BrandMark } from "../brand";
 
 // Hand-drawn Super Cage art. Ink strokes follow currentColor and the clay
 // accent follows --clay, so every piece works in light and dark themes.
 const art = {
-  logo: "<svg aria-hidden=\"true\" focusable=\"false\" xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\">\n  <path d=\"M30.1 9.6c-1.9-.9-2.3-3.4-.8-4.6 1.6-1.3 4.2-.6 4.6 1.4.3 1.5-.6 2.6-1.8 3\" stroke-width=\"2.1\"/>\n  <path d=\"M32.2 9.5c-.1 1.2 0 2.4-.1 3.7\" stroke-width=\"2.1\"/>\n  <path d=\"M12.9 34.6c-.9-12.5 7.4-21.4 19.1-21.5 11.9-.2 20.5 8.9 19.4 21.7\" stroke-width=\"2.4\"/>\n  <path d=\"M13 34.3c.3 5.9.1 11.6.5 17.4M51.3 34.5c-.4 5.7-.2 11.4-.6 17.1\" stroke-width=\"2.2\"/>\n  <path d=\"M22.9 16.9c-2.6 7.6-2.9 21.4-1.9 35M41.6 16.6c2.4 8 2.6 21.3 1.6 35.2\" stroke-width=\"1.9\"/>\n  <path d=\"M13.4 34.7c12.4-1.3 25.6-1.1 37.9.3\" stroke-width=\"1.7\" opacity=\".55\"/>\n  <path d=\"M9.4 52.1c15.1-1.2 30.2-1.1 45.4.3\" stroke-width=\"2.4\"/>\n  <path d=\"M11.6 57.2c13.5.8 27.6.6 41-.5\" stroke-width=\"2\"/>\n  <path d=\"M32.4 23.2c.8 4.9 2.6 7 7.4 7.8-4.8.9-6.6 2.9-7.4 7.9-.8-5-2.7-7-7.6-7.9 4.9-.8 6.8-2.9 7.6-7.8z\" fill=\"var(--clay, #D97757)\" stroke=\"var(--clay, #D97757)\" stroke-width=\"1.3\"/>\n  <path d=\"M43.6 41.4c.3 1.7.9 2.4 2.6 2.7-1.7.3-2.3 1-2.6 2.7-.3-1.7-1-2.4-2.7-2.7 1.7-.3 2.4-1 2.7-2.7z\" fill=\"var(--clay, #D97757)\" stroke=\"var(--clay, #D97757)\" stroke-width=\".9\"/>\n</svg>",
   laptop: "<svg aria-hidden=\"true\" focusable=\"false\" viewBox=\"0 0 120 90\" fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M24.6 13.8c20.1-1.3 49.6-1.5 71.4-.3 1.7.1 2.7 1.3 2.7 2.9l.5 41.9-77.9.3.3-42.3c0-1.4 1.2-2.4 3-2.5z\" stroke-width=\"2.3\"/><path d=\"M9.8 60.2c33.4-1.6 67.3-1.4 100.6.5-1.8 3.6-3.6 6.6-6.4 9.6-29.3 1.5-59.4 1.3-88.2-.4-2.6-3-4.4-6.1-6-9.7z\" stroke-width=\"2.3\"/><path d=\"M50.8 65.3c6.4.4 12.6.4 18.9-.1\" stroke-width=\"1.8\"/><path d=\"M33.4 30.2c8.6-.4 17.3-.4 25.6.1M33.6 38.6c13.2-.5 26.6-.3 39.3.3M33.8 47c6.9-.3 13.8-.2 20.3.2\" stroke-width=\"1.7\" opacity=\".6\"/><path d=\"M81.4 24.6c.6 3.6 1.9 5.1 5.4 5.7-3.5.6-4.8 2.1-5.4 5.8-.6-3.7-2-5.2-5.6-5.8 3.6-.6 5-2.1 5.6-5.7z\" fill=\"var(--clay, #D97757)\" stroke=\"var(--clay, #D97757)\" stroke-width=\"1.1\"/></svg>",
   server: "<svg aria-hidden=\"true\" focusable=\"false\" viewBox=\"0 0 120 90\" fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M30.4 10.6c19.8-.9 39.9-.8 59.6.3 1.6.1 2.6 1.3 2.5 2.8l-.3 13.4c0 1.4-1.1 2.4-2.6 2.4-19.7.6-39.6.6-59.3-.1-1.5 0-2.5-1.1-2.5-2.6l.2-13.6c0-1.4 1-2.5 2.4-2.6zM30.2 35.3c19.9-.7 40-.6 59.9.2 1.5.1 2.5 1.2 2.5 2.7l-.2 13.3c0 1.5-1.2 2.5-2.7 2.5-19.8.5-39.7.4-59.5-.2-1.4 0-2.5-1.1-2.4-2.6l.1-13.4c0-1.4 1-2.4 2.3-2.5z\" stroke-width=\"2.3\"/><path d=\"M38.2 20.1h.4M46 20.1h.4M38.3 44.8h.4M46.1 44.8h.4\" stroke-width=\"4\"/><path d=\"M62.4 20.4c7.1-.3 14.1-.2 20.8.2M62.6 44.9c7-.3 14-.2 20.6.2\" stroke-width=\"1.8\" opacity=\".6\"/><path d=\"M60.2 54.4c-.6 6.4 1.8 11.4-3.6 15.4-4.6 3.4-12.9 1.1-18.9 3.6\" stroke-width=\"2\"/><path d=\"M84.6 62.4c.7 4.1 2.2 5.9 6.2 6.5-4 .7-5.5 2.4-6.2 6.6-.7-4.2-2.3-5.9-6.4-6.6 4.1-.6 5.7-2.4 6.4-6.5z\" fill=\"var(--clay, #D97757)\" stroke=\"var(--clay, #D97757)\" stroke-width=\"1.1\"/></svg>",
   terminal: "<svg aria-hidden=\"true\" focusable=\"false\" viewBox=\"0 0 120 90\" fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M19.6 12.4c27.2-1.4 54.4-1.2 81.4.4 2.1.1 3.4 1.6 3.4 3.6l-.6 55.2c0 2-1.6 3.4-3.6 3.5-27 1.1-54.1 1-81.1-.3-2-.1-3.4-1.6-3.4-3.6l.4-55.3c0-1.9 1.5-3.4 3.5-3.5z\" stroke-width=\"2.3\"/><path d=\"M16.6 24.6c29.3-.9 58.5-.7 87.6.4\" stroke-width=\"1.8\"/><path d=\"M23.5 18.4h.3M30.2 18.3h.3M36.9 18.4h.3\" stroke-width=\"3.6\"/><path d=\"M30.4 39.2c4.6 3.1 8.6 6.1 12.4 9.4-3.9 3.4-8.1 6.6-12.7 9.7\" stroke-width=\"2.6\"/><path d=\"M50.4 59.1c8.1-.4 16.1-.3 23.9.3\" stroke-width=\"2.6\" stroke=\"var(--clay, #D97757)\"/></svg>",
@@ -15,7 +15,18 @@ const art = {
   arrow: "<svg aria-hidden=\"true\" focusable=\"false\" viewBox=\"0 0 80 80\" fill=\"none\" stroke=\"currentColor\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12.6 10.4c10.6 3.1 20.8 9.3 28.4 18.4 7.6 9.2 12.4 20.7 14.6 33.6\" stroke-width=\"2.2\"/><path d=\"M45.2 55.6c3.6 3.4 7.1 7 10.3 10.8 2.6-4.8 5.6-9.2 8.9-13.4\" stroke-width=\"2.2\"/></svg>",
 };
 
+// The Super Cage mark is not a doodle: BrandMark draws it from the masters in
+// brand/, so the desktop and the phone share one copy of the path data. The cut
+// follows the drawn size (small up to 32 px), so the widths that super.css and
+// mobile.css give these classes are repeated here.
+const logoSizes = { "home-logo": 64, "drawer-logo": 34, "title-logo": 22, "brand-mark": 28 };
+const logoSize = (className) => logoSizes[className.split(/\s+/).find((token) => logoSizes[token])] ?? 28;
+
 export function Doodle({ name, className = "", label }) {
+  if (name === "logo") {
+    return <span className={"doodle doodle-logo" + (className ? " " + className : "")}
+      role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}><BrandMark size={logoSize(className)} /></span>;
+  }
   return <span className={"doodle doodle-" + name + (className ? " " + className : "")}
     role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true}
     dangerouslySetInnerHTML={{ __html: art[name] || "" }} />;

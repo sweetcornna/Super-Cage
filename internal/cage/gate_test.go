@@ -328,3 +328,29 @@ func TestGateControlAuthenticationAndConfigInvalidation(t *testing.T) {
 		t.Fatal("changed configuration retained network authorization")
 	}
 }
+
+func TestShortenedLeaseCannotExtendAuthorization(t *testing.T) {
+	g := fixtureGate(t)
+	r := fixtureGrant(t, g)
+	g.ShortenLeaseForTest(2 * GateLease)
+	if err := g.Renew(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if limit := time.Now().Add(GateLease); g.Status().Until.After(limit) {
+		t.Fatal("a longer lease was accepted")
+	}
+	g.ShortenLeaseForTest(30 * time.Millisecond)
+	if err := g.Renew(r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if limit := time.Now().Add(30 * time.Millisecond); g.Status().Until.After(limit) {
+		t.Fatal("shortened lease not applied")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for g.Status().Mode != GateClosed && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if state := g.Status(); state.Mode != GateClosed || state.Reason != "检查或监测授权已到期" {
+		t.Fatalf("short lease did not close by its timer: %+v", state)
+	}
+}

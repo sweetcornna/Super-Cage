@@ -12,24 +12,27 @@ import { Terminal } from "../.generated/xterm.mjs";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
 import { FitAddon } from "@xterm/addon-fit";
-import RFB from "../.generated/novnc/core/rfb.js";
 import { api, writeClipboard, nativeAvailable } from "./api";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareClipboardPaste, sendImage } from "./image-transfer";
 import { terminalClipboardText } from "./terminal-clipboard.mjs";
 import {
   terminalConnectTimeoutMs, terminalHistoryPlan, terminalKeepaliveMessage, terminalKeepaliveMs, terminalLiveness,
-  terminalNoticeDelayMs, terminalProbeMs, terminalReconnectPlan, terminalStreamPath, terminalWatchdogMs,
+  terminalNoticeDelayMs, terminalProbeMs, terminalReconnectPlan, terminalStreamPath, terminalSuspendMs, terminalViewer, terminalWatchdogMs,
 } from "./terminal-reconnect.mjs";
 import { sendFiles, shellFilePaths } from "./file-transfer";
 import { installRemoteInput } from "./remote-input";
 import { useWindowVisibility } from "./window-visibility";
-import { displayGeometry, displaySizeSync, watchPixelRatio } from "./remote-display.mjs";
-import { installLocalCursorFallback } from "./remote-cursor.mjs";
-import { guestKeys } from "./guest-keys.mjs";
+import { displayGeometry, displayRatio, displaySizeSync, watchPixelRatio } from "./remote-display.mjs";
+import { displayRestoreAfterMs } from "./display-session.mjs";
+import { displayKey, displaySessions } from "./remote-session.js";
 import { RefreshCw, Clipboard, ArrowUpRight } from "lucide-react";
 import { SessionAccount } from "./session-account";
+import { codexLaunchRefused, createTerminalRenderer, terminalLastLine } from "./terminal-renderer.mjs";
+import { cagePerf } from "./display-perf.mjs";
+import { EmptyState } from "./drawings";
 import "@xterm/xterm/css/xterm.css";
+import "./terminal-pending.css";
 
 const terminalAccountRequest = (path, options) => api("/cli" + path, options.body);
 
@@ -46,7 +49,9 @@ export const RemoteView = forwardRef(function RemoteView(
     displayResize = useRef();
   current.current = { visible: screenVisible && focused, keyboard, guestPlatform, systemClipboard, tabId, onStatus, onFallback, zoom };
   const failures = useRef(0);
-  const [connection, setConnection] = useState("connecting"),
+  // A stream kept from the previous visit shows its picture at once.
+  const [connection, setConnection] = useState(() =>
+    displaySessions.get(displayKey(desktop))?.state === "connected" ? "connected" : "connecting"),
     [attempt, setAttempt] = useState(0),
     [sizeError, setSizeError] = useState(false);
   useEffect(() => { displayResize.current?.update(); }, [zoom]);
@@ -69,13 +74,13 @@ export const RemoteView = forwardRef(function RemoteView(
     const container = box.current;
     if (!container) return;
     let disposed = false,
-      client,
       resizeObserver,
       unwatchDensity,
-      sizeSync,
-      keys,
       reconnectTimer;
-    setConnection("connecting");
+    // The stream outlives this pane: hiding it (or switching to a terminal)
+    // keeps the stream when the server supports that, see display-session.mjs.
+    const session = displaySessions.acquire(displayKey(desktop), { desktop, guestPlatform });
+    if (session.state !== "connected") setConnection("connecting");
     setSizeError(false);
     const retry = () => {
       if (disposed) return;
@@ -86,189 +91,173 @@ export const RemoteView = forwardRef(function RemoteView(
         Math.min(1000 * 2 ** failures.current++, 5000),
       );
     };
-    const desktopPrefix = desktop ? "/claude-desktop" : "";
-    api(`${desktopPrefix}/vnc-credentials`)
-      .then(({ password, display_scale, dynamic_scale, pixel_wheel }) => {
-        if (disposed) return;
-        // Such a guest renders at the density of the screen showing it.
-        let followScreen = dynamic_scale === true;
-        client = new RFB(
-          container,
-          runtimeSocketURL(`${desktopPrefix}/vnc`),
-          {
-            credentials: { password }, cageBrowserDisplay: !desktop, cageCursorFallback: desktop && guestPlatform === "windows",
-            // The Linux browser scrolls its page by the distance of a trackpad
-            // gesture. A menu or a second pane declines it and gets wheel steps.
-            cageWheelSink: !desktop && pixel_wheel === true
-              ? wheel => api("/browser/wheel", wheel).then(reply => reply?.handled === true)
-              : undefined,
-          },
-        );
-        rfb.current = client;
-        if (!/^(windows|darwin|macos)/.test(guestPlatform || "")) {
-          // A Linux guest takes key events as sent; see guest-keys.mjs. The
-          // other systems arrive here as "macos" and "windows-11".
-          keys = guestKeys(client.sendKey.bind(client));
-          client.sendKey = keys.sendKey;
-        }
-        installLocalCursorFallback(client._cursor,
-          !desktop && ["darwin", "macos"].includes(guestPlatform));
-        client.scaleViewport = true;
-        client.resizeSession = false;
-        client.background = "#ffffff";
-        client.qualityLevel = 8;
-        client.compressionLevel = 2;
-        client.addEventListener("connect", () => {
-          if (disposed) return;
-          failures.current = 0;
-          setConnection("connected");
-          sizeSync = displaySizeSync(
-            async (size) => {
-              const reply = await api(desktop ? "/claude-desktop/resize" : "/browser/resize", size);
-              // The guest kept its own density: size the display for that one.
-              if (size.scale !== undefined && reply?.scale !== size.scale && followScreen) {
-                followScreen = false;
-                resize();
-              }
-            },
-            { onError: () => setSizeError(true), onSuccess: () => setSizeError(false) },
-          );
-          const resize = () => {
-            if (disposed) return;
-            sizeSync.update(displayGeometry(container.getBoundingClientRect(), {
-              desktop, zoom: current.current.zoom, density: display_scale,
-              pixelRatio: followScreen ? window.devicePixelRatio : undefined,
-            }));
-          };
-          displayResize.current = { update: resize, retry: () => sizeSync.retry() };
-          resizeObserver = new ResizeObserver(resize);
-          resizeObserver.observe(container);
-          unwatchDensity = watchPixelRatio(resize);
-          resize();
-          const preparePaste = () => {
-            const id = current.current.tabId;
-            return prepareClipboardPaste(desktop ? "desktop" : "browser", id, {
-              valid: () => !disposed && current.current.visible && current.current.tabId === id,
-            });
-          };
-          input.current = installRemoteInput({
-            events: client,
-            setKeyboardTarget: target => client.cageSetKeyboardTarget(target),
-            sendKey: (...key) => client.sendKey(...key),
-            focus: () => client.focus(),
-            pasteText: text => {
-              if (desktop || current.current.systemClipboard) return client.cagePasteText(text);
-              const prepared = preparePaste();
-              return client.cageRunInput(() => prepared.send({ text })).finally(() => prepared.dispose());
-            },
-            runKeyAction: action => client.cageRunInput(action),
-          }, container, {
-            guestPlatform: () => current.current.guestPlatform,
-            systemClipboard: () => current.current.systemClipboard,
-            copyText: !desktop
-              ? (_sendCopy, valid, { id, context, key }) => {
-                if (current.current.systemClipboard !== false) return undefined;
-                if (!valid()) throw new Error("复制位置已切换，请重新复制");
-                return api("/browser/" + (key === "x" ? "cut" : "copy"), { id, context });
-              }
-              : undefined,
-            setCopyContext: desktop ? undefined : (context, valid) => client.cageRunInput(async () => {
-              if (!valid()) return;
-              try { await api("/browser/copy-context", { id: current.current.tabId, context }); }
-              catch {
-                if (valid()) {
-                  input.current?.cancelCopy();
-                  current.current.onStatus("复制按钮同步暂未就绪，可使用复制快捷键或文本传递");
-                }
-                // A metadata failure must not cancel the user's queued click.
-              }
-            }),
-            preparePaste,
-            pasteContent: (content, prepared) => {
-              const id = current.current.tabId;
-              const valid = () => !disposed && current.current.visible && current.current.tabId === id;
-              return client.cagePasteContent(content,
-                (payload) => {
-                  if (!valid()) throw new Error("输入目标已切换，请重新粘贴图片");
-                  return payload.files || payload.fileSelection
-                    ? sendFiles(payload, desktop ? "desktop" : "browser", id, { valid })
-                    : sendImage(payload, desktop ? "desktop" : "browser", id, { prepared });
-                }, valid, !desktop && !current.current.systemClipboard ? text => prepared.send({ text }) : undefined);
-            },
-            insertText: (text) => {
-              if (desktop) {
-                if (!window.cageSharedClipboardActive) return client.cagePasteText(text);
-                return client.cageRunInput(async () => {
-                  const valid = () => !disposed && current.current.visible;
-                  const state = await api("/input", { target: "desktop", id: "desktop", mode: "status" });
-                  if (!state.available || !valid()) throw new Error("输入位置已失去焦点，请重新点击输入框");
-                  const session = crypto.randomUUID().replaceAll("-", "");
-                  const begun = await api("/input", { target: "desktop", id: "desktop", mode: "begin", context: state.context, session, sequence: 0 });
-                  if (!begun.available || !valid()) throw new Error("输入位置已失去焦点，请重新点击输入框");
-                  const result = await api("/input", { target: "desktop", id: "desktop", mode: "commit", session, sequence: 1, text });
-                  if (!result.available) throw new Error("文字输入未完成，请重新点击输入框");
-                });
-              }
-              const id = current.current.tabId;
-              return client.cageRunInput(() => {
-                if (disposed || !current.current.visible || current.current.tabId !== id)
-                  throw new Error("输入位置已切换，请重新输入");
-                return api("/browser/insert-text", { id, text });
-              });
-            },
-            insertComposition: (id, value) => client.cageRunInput(async () => {
-              if (value.mode !== "cancel" && (disposed || !current.current.visible ||
-                  (desktop ? "desktop" : current.current.tabId) !== id))
-                throw new Error("输入位置已切换，请重新输入");
-              const result = await api("/input", { target: desktop ? "desktop" : "browser", id, ...value });
-              if (value.mode !== "cancel" && !result.available)
-                throw new Error("输入位置已失去焦点，请重新输入");
-              return result;
-            }),
-            tabId: () => desktop ? "desktop" : current.current.tabId,
-            caretRect: async (session) => {
-              const id = desktop ? "desktop" : current.current.tabId;
-              const value = await api("/input", { target: desktop ? "desktop" : "browser", id, mode: "status", session });
-              return !disposed && current.current.visible &&
-                (desktop ? "desktop" : current.current.tabId) === id ? value : null;
-            },
-            mode: () => current.current.keyboard,
-            isActive: () => current.current.visible,
-            onStatus: (t) => current.current.onStatus(t),
-            onFallback: (...args) => current.current.onFallback(...args),
-          });
-          if (current.current.visible && !document.activeElement?.closest(".chrome")) client.focus();
-        });
-        client.addEventListener("disconnect", () => {
-          keys?.stop();
-          if (disposed) return;
-          input.current?.dispose();
-          input.current = null;
-          sizeSync?.dispose();
-          resizeObserver?.disconnect();
-          unwatchDensity?.();
-          displayResize.current = null;
-          retry();
-        });
-        client.addEventListener("securityfailure", () => {
-          retry();
-        });
-      })
-      .catch(() => {
-        retry();
-      });
-    return () => {
-      disposed = true;
-      sizeSync?.dispose();
-      displayResize.current = null;
-      clearTimeout(reconnectTimer);
-      resizeObserver?.disconnect();
-      unwatchDensity?.();
+    const release = () => {
       input.current?.dispose();
       input.current = null;
-      keys?.stop();
-      client?.disconnect();
+      resizeObserver?.disconnect();
+      resizeObserver = null;
+      unwatchDensity?.();
+      unwatchDensity = null;
+      session.info?.keys?.stop();
+      displayResize.current = null;
       rfb.current = null;
+    };
+    const view = {
+      connected(session, { resumed, hiddenFor }) {
+        if (disposed) return;
+        const client = session.client;
+        rfb.current = client;
+        failures.current = 0;
+        setConnection("connected");
+        const resize = () => {
+          if (disposed) return;
+          const rect = container.getBoundingClientRect();
+          const options = {
+            desktop, zoom: current.current.zoom, density: session.info.density,
+            pixelRatio: session.info.followScreen ? window.devicePixelRatio : undefined,
+          };
+          session.fitRatio = displayRatio(rect, options) ?? session.fitRatio;
+          session.refit();
+          session.sizeSync.update(displayGeometry(rect, options));
+        };
+        view.refresh = resize;
+        // One size request queue per stream, so a short visit does not ask
+        // the guest again for the size it already has.
+        session.sizeSync ??= displaySizeSync(
+          async (size) => {
+            const reply = await api(desktop ? "/claude-desktop/resize" : "/browser/resize", size);
+            // The guest kept its own density: size the display for that one.
+            if (size.scale !== undefined && reply?.scale !== size.scale && session.info.followScreen) {
+              session.info.followScreen = false;
+              session.view?.refresh?.();
+            }
+          },
+          { onError: () => session.view?.sizeError(true), onSuccess: () => session.view?.sizeError(false) },
+        );
+        displayResize.current = { update: resize, retry: () => session.sizeSync.retry() };
+        resizeObserver = new ResizeObserver(resize);
+        resizeObserver.observe(container);
+        unwatchDensity = watchPixelRatio(resize);
+        resize();
+        // Back after a long hide: the guest has lowered its refresh rate, and
+        // a request for the unchanged size restores it.
+        if (resumed && hiddenFor >= displayRestoreAfterMs) session.sizeSync.retry();
+        const preparePaste = () => {
+          const id = current.current.tabId;
+          return prepareClipboardPaste(desktop ? "desktop" : "browser", id, {
+            valid: () => !disposed && current.current.visible && current.current.tabId === id,
+          });
+        };
+        input.current = installRemoteInput({
+          events: client,
+          setKeyboardTarget: target => client.cageSetKeyboardTarget(target),
+          sendKey: (...key) => client.sendKey(...key),
+          focus: () => client.focus(),
+          pasteText: text => {
+            if (desktop || current.current.systemClipboard) return client.cagePasteText(text);
+            const prepared = preparePaste();
+            return client.cageRunInput(() => prepared.send({ text })).finally(() => prepared.dispose());
+          },
+          runKeyAction: action => client.cageRunInput(action),
+        }, container, {
+          guestPlatform: () => current.current.guestPlatform,
+          systemClipboard: () => current.current.systemClipboard,
+          copyText: !desktop
+            ? (_sendCopy, valid, { id, context, key }) => {
+              if (current.current.systemClipboard !== false) return undefined;
+              if (!valid()) throw new Error("复制位置已切换，请重新复制");
+              return api("/browser/" + (key === "x" ? "cut" : "copy"), { id, context });
+            }
+            : undefined,
+          setCopyContext: desktop ? undefined : (context, valid) => client.cageRunInput(async () => {
+            if (!valid()) return;
+            try { await api("/browser/copy-context", { id: current.current.tabId, context }); }
+            catch {
+              if (valid()) {
+                input.current?.cancelCopy();
+                current.current.onStatus("复制按钮同步暂未就绪，可使用复制快捷键或文本传递");
+              }
+              // A metadata failure must not cancel the user's queued click.
+            }
+          }),
+          preparePaste,
+          pasteContent: (content, prepared) => {
+            const id = current.current.tabId;
+            const valid = () => !disposed && current.current.visible && current.current.tabId === id;
+            return client.cagePasteContent(content,
+              (payload) => {
+                if (!valid()) throw new Error("输入目标已切换，请重新粘贴图片");
+                return payload.files || payload.fileSelection
+                  ? sendFiles(payload, desktop ? "desktop" : "browser", id, { valid })
+                  : sendImage(payload, desktop ? "desktop" : "browser", id, { prepared });
+              }, valid, !desktop && !current.current.systemClipboard ? text => prepared.send({ text }) : undefined);
+          },
+          insertText: (text) => {
+            if (desktop) {
+              if (!window.cageSharedClipboardActive) return client.cagePasteText(text);
+              return client.cageRunInput(async () => {
+                const valid = () => !disposed && current.current.visible;
+                const state = await api("/input", { target: "desktop", id: "desktop", mode: "status" });
+                if (!state.available || !valid()) throw new Error("输入位置已失去焦点，请重新点击输入框");
+                const session = crypto.randomUUID().replaceAll("-", "");
+                const begun = await api("/input", { target: "desktop", id: "desktop", mode: "begin", context: state.context, session, sequence: 0 });
+                if (!begun.available || !valid()) throw new Error("输入位置已失去焦点，请重新点击输入框");
+                const result = await api("/input", { target: "desktop", id: "desktop", mode: "commit", session, sequence: 1, text });
+                if (!result.available) throw new Error("文字输入未完成，请重新点击输入框");
+              });
+            }
+            const id = current.current.tabId;
+            return client.cageRunInput(() => {
+              if (disposed || !current.current.visible || current.current.tabId !== id)
+                throw new Error("输入位置已切换，请重新输入");
+              return api("/browser/insert-text", { id, text });
+            });
+          },
+          insertComposition: (id, value) => client.cageRunInput(async () => {
+            if (value.mode !== "cancel" && (disposed || !current.current.visible ||
+                (desktop ? "desktop" : current.current.tabId) !== id))
+              throw new Error("输入位置已切换，请重新输入");
+            const result = await api("/input", { target: desktop ? "desktop" : "browser", id, ...value });
+            if (value.mode !== "cancel" && !result.available)
+              throw new Error("输入位置已失去焦点，请重新输入");
+            return result;
+          }),
+          tabId: () => desktop ? "desktop" : current.current.tabId,
+          caretRect: async (session) => {
+            const id = desktop ? "desktop" : current.current.tabId;
+            const value = await api("/input", { target: desktop ? "desktop" : "browser", id, mode: "status", session });
+            return !disposed && current.current.visible &&
+              (desktop ? "desktop" : current.current.tabId) === id ? value : null;
+          },
+          mode: () => current.current.keyboard,
+          isActive: () => current.current.visible,
+          onStatus: (t) => current.current.onStatus(t),
+          onFallback: (...args) => current.current.onFallback(...args),
+        });
+        if (current.current.visible && !document.activeElement?.closest(".chrome")) client.focus();
+      },
+      lost() {
+        if (disposed) return;
+        release();
+        retry();
+      },
+      sizeError(value) { if (!disposed) setSizeError(value); },
+    };
+    // Counts input that should produce a frame: the time to the next painted
+    // frame is in window.__cagePerf.
+    const noteInput = () => session.perf?.input();
+    container.addEventListener("pointerdown", noteInput, true);
+    container.addEventListener("wheel", noteInput, { capture: true, passive: true });
+    container.addEventListener("keydown", noteInput, true);
+    const detach = session.attach(container, view);
+    return () => {
+      disposed = true;
+      clearTimeout(reconnectTimer);
+      container.removeEventListener("pointerdown", noteInput, true);
+      container.removeEventListener("wheel", noteInput, { capture: true, passive: true });
+      container.removeEventListener("keydown", noteInput, true);
+      release();
+      detach();
     };
   }, [attempt, screenVisible, desktop]);
   useEffect(() => {
@@ -307,12 +296,14 @@ export const RemoteView = forwardRef(function RemoteView(
   );
 });
 
-export function TerminalView({ session, visible, focused = true, onStatus, onControls, onAccountChanged, onLoginTab }) {
+export function TerminalView({ session, visible, focused = true, onStatus, onControls, onAccountChanged, onLoginTab, onOutput }) {
   const { appearance, theme, variant } = useAppearance();
   const box = useRef(),
     instance = useRef(),
     fit = useRef(),
-    socket = useRef();
+    socket = useRef(),
+    renderer = useRef(),
+    streamVisibility = useRef();
   // "connecting" until the first stream opens, then "open" or "retrying";
   // "stalled" after repeated quick failures and "ended" once the session exits.
   const [link, setLink] = useState("connecting"),
@@ -326,6 +317,9 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
   visibleRef.current = visible;
   const focusedRef = useRef(focused);
   focusedRef.current = focused;
+  // Told of every output frame (main.jsx: "正在打开 Codex…" until the first).
+  const outputRef = useRef(onOutput);
+  outputRef.current = onOutput;
   useEffect(() => {
     let disposed = false, emittingPaste = false, inputChain = Promise.resolve();
     const enqueue = (action) => {
@@ -369,6 +363,13 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     terminal.open(box.current);
     instance.current = terminal;
     fit.current = fitter;
+    // WebGL draws the grid off the main thread's layout work; the DOM
+    // renderer stays as the fallback. See terminal-renderer.mjs.
+    const perf = cagePerf().terminal(session.id);
+    // A renderer change can change the cell width: fit and tell the server.
+    const draw = createTerminalRenderer(terminal, { onChange: (kind) => { perf.renderer = kind; resize(); } });
+    renderer.current = draw;
+    if (visibleRef.current) draw.show();
     // One xterm lives as long as the view; streams come and go beneath it.
     let ws = null;
     const isOpen = () => ws?.readyState === WebSocket.OPEN;
@@ -417,6 +418,9 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     const stream = { offset: null, heartbeats: false, lastReceived: 0, lastPing: 0, probe: 0 };
     let failures = 0, openedAt = 0, ended = false;
     let retryTimer = null, noticeTimer = null, probeTimer = null, openTimer = null, watchdog = null;
+    // hiddenSince is when the view was last hidden (0 while shown); a view
+    // hidden for terminalSuspendMs is suspended: no stream until it is shown.
+    let hiddenSince = visibleRef.current ? 0 : Date.now(), suspended = false, suspendTimer = null;
     // Bytes still to come in the current replay, or one whole frame from a
     // server without offsets. Replayed output never writes the clipboard.
     let replayRemaining = 0, replayFrame = false, replaying = 0;
@@ -441,6 +445,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     };
     const receiveFrame = (event) => {
       stream.lastReceived = Date.now();
+      if (typeof event.data !== "string") perf.wrote(event.data.byteLength);
       stream.probe = 0;
       if (typeof event.data === "string") {
         let state;
@@ -460,6 +465,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         return;
       }
       const data = new Uint8Array(event.data);
+      if (data.byteLength) outputRef.current?.();
       const replay = replayFrame || replayRemaining > 0;
       replayFrame = false;
       replayRemaining = Math.max(0, replayRemaining - data.byteLength);
@@ -470,8 +476,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     };
     // lost handles the end of the current stream once, whether it closed or
     // the watchdog gave up on it, and schedules the next attempt.
-    const lost = (current) => {
-      if (ws !== current) return;
+    // detach forgets the current stream and its timers and closes it.
+    const detach = (current) => {
       ws = null;
       socket.current = null;
       clearInterval(watchdog);
@@ -481,6 +487,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       current.onopen = current.onmessage = current.onclose = null;
       // A dead path may never finish the closing handshake; do not wait for it.
       try { current.close(); } catch { /* already closed */ }
+    };
+    const lost = (current) => {
+      if (ws !== current) return;
+      detach(current);
       if (disposed) return;
       reveal();
       if (ended || closedRef.current) {
@@ -513,11 +523,48 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       if (action === "dead") lost(ws);
       else if (action !== "idle") keepalive(action === "probe");
     };
+    // Only a stream that can resume after its last byte (its server reports
+    // offsets) is given up; a server without offsets would replay everything.
+    const dormant = () => !visibleRef.current && hiddenSince > 0 && !closedRef.current &&
+      stream.offset !== null && Date.now() - hiddenSince >= terminalSuspendMs;
+    const suspendStream = () => {
+      suspended = true;
+      clearTimeout(retryTimer);
+      retryTimer = null;
+      if (ws) detach(ws);
+      clearNotice();
+      // A slow resume then shows the quiet reconnect note, as after a drop.
+      setLink((state) => (state === "open" ? "retrying" : state));
+      perf.stream("suspended");
+    };
+    // A stalled view (no stream, no retry pending) keeps waiting for its button.
+    const suspend = () => {
+      if (!suspended && !disposed && !ended && (ws || retryTimer) && dormant()) suspendStream();
+    };
+    streamVisibility.current = (shown) => {
+      clearTimeout(suspendTimer);
+      suspendTimer = null;
+      if (!shown) {
+        if (!hiddenSince) hiddenSince = Date.now();
+        suspendTimer = setTimeout(suspend, Math.max(0, hiddenSince + terminalSuspendMs - Date.now()));
+        return;
+      }
+      hiddenSince = 0;
+      if (!suspended) return;
+      suspended = false;
+      failures = 0;
+      perf.stream("resumed");
+      // Directly, not through resume(): a session that ended meanwhile still
+      // has its last output and exit to deliver.
+      connect();
+    };
     const connect = () => {
       clearTimeout(retryTimer);
       retryTimer = null;
-      if (disposed || ended || ws) return;
-      const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset)));
+      if (disposed || ended || ws || suspended) return;
+      // A retry or a wake-up of a view hidden long enough suspends it instead.
+      if (dormant()) return void suspendStream();
+      const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset, terminalViewer(session.id))));
       current.binaryType = "arraybuffer";
       ws = current;
       socket.current = current;
@@ -535,6 +582,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         openTimer = null;
         openedAt = stream.lastReceived = stream.lastPing = Date.now();
         stream.probe = 0;
+        perf.stream("opened");
         clearNotice();
         setLink("open");
         watchdog = setInterval(check, terminalWatchdogMs);
@@ -704,6 +752,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
           10,
           Math.min(26, terminal.options.fontSize + (key === "-" ? -1 : 1)),
         );
+        draw.align();
         resize();
         return false;
       }
@@ -716,6 +765,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     return () => {
       disposed = true;
       clearTimeout(startupTimer);
+      clearTimeout(suspendTimer);
+      streamVisibility.current = null;
       clearTimeout(retryTimer);
       clearTimeout(noticeTimer);
       clearTimeout(probeTimer);
@@ -733,6 +784,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       host.removeEventListener("drop", onDrop);
       onControls?.(null);
       observer.disconnect();
+      draw.dispose();
+      renderer.current = null;
       if (ws) {
         const current = ws;
         ws = null;
@@ -744,6 +797,11 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       instance.current = null;
     };
   }, [session.id]);
+  useEffect(() => {
+    if (visible) renderer.current?.show();
+    else renderer.current?.hide();
+    streamVisibility.current?.(visible);
+  }, [visible]);
   useEffect(() => {
     if (visible) {
       fit.current?.fit();
@@ -759,9 +817,12 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     instance.current.options.theme = terminalTheme(theme, variant);
     instance.current.options.fontFamily = theme.fonts.code || systemCodeFont;
     instance.current.options.fontSize = appearance.codeFontSize;
+    renderer.current?.align();
     if (visibleRef.current) fit.current?.fit();
   }, [theme, variant, appearance.codeFontSize]);
   const ended = session.closed || link === "ended";
+  // A refused Codex launch is not an ordinary close: the note says it did not open and quotes the
+  // reason, the last line the launch printed.
   return (
     <div className={`terminal-view ${visible ? "" : "concealed"}`}>
       {session.workspace_notice && <p className="connection-banner" role="status">{session.workspace_notice}</p>}
@@ -777,7 +838,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       {link !== "open" && (ended || link === "stalled" || notice) && (
         <div className={`terminal-note ${ended || link === "stalled" ? "" : "terminal-note-quiet"}`} role="status">
           {ended
-            ? "终端会话已结束。可点击项目右侧的终端图标新建终端。"
+            ? codexLaunchRefused(session) ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示") : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
             : link === "stalled" ? "终端连接已断开。" : link === "connecting" ? "正在连接终端…" : "正在重新连接…"}
           {!ended && link === "stalled" && (
             <button onClick={() => reconnectNow.current?.()}>
@@ -785,6 +846,28 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
               重新连接
             </button>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// A terminal whose tab is shown while the server creates it (main.jsx and
+// terminal-pending.mjs): a quiet line while the request runs, then the
+// server's error in its place, with a retry. The record replaces this view.
+export function TerminalPending({ error, onRetry }) {
+  return (
+    <div className="terminal-view">
+      {error ? (
+        <div className="terminal-pending-error" role="alert">
+          <EmptyState compact title="终端没有打开"
+            action={<button className="primary" onClick={onRetry}>重试</button>}>
+            {error}
+          </EmptyState>
+        </div>
+      ) : (
+        <div className="terminal-startup" role="status">
+          <span>正在准备终端…</span>
         </div>
       )}
     </div>

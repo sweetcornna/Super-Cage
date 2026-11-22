@@ -1,4 +1,4 @@
-import { browserRequest, desktopRequest } from "./transport.mjs";
+import { browserRequest, desktopRequest, browserFrameRequest, desktopFrameRequest } from "./transport.mjs";
 
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
 export function viewportSize(element) {
@@ -20,18 +20,65 @@ export function framePoint(rect, frame, x, y) {
   return px >= 0 && px < width && py >= 0 && py < height ? {x: px, y: py, scale} : null;
 }
 
+const frameTagPattern = /^[a-f0-9]{32}$/;
+// How long one negotiated read may be held by the host. The host never holds
+// longer than 15 s; the link answers a request after 40 s at the latest.
+const holdMs = 12000;
+
+// The frame metadata of a binary reply is unpadded base64url JSON.
+export function frameMeta(header) {
+  if (typeof header !== "string" || !/^[A-Za-z0-9_-]+$/.test(header)) throw new Error("主机返回的画面无效。");
+  const binary = atob(header.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((header.length + 3) % 4));
+  const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
+  let meta;
+  try { meta = JSON.parse(new TextDecoder("utf-8", {fatal: true}).decode(bytes)); }
+  catch { throw new Error("主机返回的画面无效。"); }
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) throw new Error("主机返回的画面无效。");
+  return meta;
+}
+
+function jpegBlob(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], {type: "image/jpeg"});
+}
+
 // Only frame reads repeat. One input or resize is followed by a fresh frame
 // before the next input is accepted. A failed write is never replayed.
+//
+// A host that announces it (the X-Cage-Frame-Stream header on a frame reply)
+// also answers "next frame after this tag" reads: the JPEG as the body, held
+// until the picture changes. Everything else, and any refusal of such a read
+// by an older host or link, keeps the original polling below.
 export function connectDisplay(stage, update, id, start, tool, initialURL) {
   const desktop = tool === "desktop";
   const request = desktop ? desktopRequest : browserRequest;
+  const frameRequest = desktop ? desktopFrameRequest : browserFrameRequest;
+  const hidden = () => typeof document !== "undefined" && document.hidden === true;
   const toolName = desktop ? "Claude Desktop" : "远程浏览器";
   let waitingSince = 0, homeNotice = "";
   const base = "/" + id;
-  let alive = true, visible = true, opened = false, opening = true, writing = false;
+  let alive = true, visible = !hidden(), opened = false, opening = true, writing = false;
   let frame = null, read, timer, paused = false, mayExist = false;
   let generation = 0, actionFrame = false, quietReads = 0, writeType = "";
   let pixelRatioSupported = false;
+  // "unknown" until a frame reply says whether the host answers negotiated reads;
+  // "off" after one was refused. Held reads that return at once are not holds.
+  let stream = "unknown", streamProven = false, holdBroken = false, quickReturns = 0;
+  // Requests are numbered as they start. A frame that finishes after a newer
+  // one was applied is dropped, as is one the host captured earlier than the
+  // last one shown.
+  let issued = 0, applied = 0, lastSeq = 0, lastJsonImage = "";
+  // Object URLs of the frames in use, oldest first. The newest is on screen and
+  // the one before may still be while the page swaps pictures; nothing older is needed.
+  const urls = [];
+  const retain = url => {
+    if (urls.includes(url)) return;
+    urls.push(url);
+    while (urls.length > 2) URL.revokeObjectURL(urls.shift());
+  };
+  const revokeAll = () => { while (urls.length) URL.revokeObjectURL(urls.shift()); };
   const displaySize = () => ({...viewportSize(stage),
     ...(pixelRatioSupported ? {pixel_ratio:clamp(window.devicePixelRatio || 1, 1, 8)} : {})});
   const needsResize = size => frame && (frame.width !== size.width || frame.height !== size.height ||
@@ -56,7 +103,7 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
   const cancelRead = () => { clearTimeout(timer); read?.abort(); read = null; };
   function failure(error, operation) {
     discardAddress(); cancelScroll();
-    frame = null;
+    frame = null; revokeAll();
     paused = true;
     if (!desktop && operation === "frame" && error.status === 503) opened = mayExist = false;
     const reopen = !opened || [401, 404, 410, 423].includes(error.status) || (error.status === 403 && operation !== "action");
@@ -86,27 +133,48 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
     if (queuedScroll) { flushScroll(); return; }
     quietReads = changed || fromAction ? 0 : Math.min(5, quietReads + 1);
     // The first follow-up catches delayed paint after an input. Stable pages
-    // use conditional reads and progressively return to the idle cadence.
-    const delay = desktop ? 450 : [90, 180, 380, 800, 1500, 2500][quietReads];
+    // use conditional reads and progressively return to the idle cadence. A
+    // host that holds reads is the pacing itself: ask again at once.
+    const holding = stream === "on" && !holdBroken && frameTagPattern.test(frame?.frame_tag || "");
+    const delay = holding ? 0 : desktop ? 450 : [90, 180, 380, 800, 1500, 2500][quietReads];
     timer = setTimeout(readFrame, delay);
   }
-  async function decodeFrame(next, valid) {
-    if (next?.id !== id || typeof next.image !== "string" || !next.image ||
+  // Returns whether the frame differs from the one shown, or null when the
+  // request ended or the frame came too late to be shown.
+  async function decodeFrame(next, valid, ticket, blob) {
+    if (next?.id !== id || !(blob ? blob.size > 0 : typeof next.image === "string" && next.image) ||
         typeof next.document !== "string" || !Number.isInteger(next.width) || next.width <= 0 ||
         !Number.isInteger(next.height) || next.height <= 0) throw new Error("主机返回的画面无效。");
     if ((next.content_width !== undefined || next.content_height !== undefined) &&
         (!Number.isFinite(next.content_width) || next.content_width <= 0 ||
          !Number.isFinite(next.content_height) || next.content_height <= 0)) throw new Error("主机返回的画面尺寸无效。");
-    const src = "data:image/jpeg;base64," + next.image;
-    const changed = frame?.image !== src || !sameSurface(frame, next) || frame.focus !== next.focus ||
+    const tagged = frameTagPattern.test(next.frame_tag || "");
+    const samePicture = !!frame && (tagged ? frame.frame_tag === next.frame_tag : !blob && next.image === lastJsonImage);
+    const changed = !samePicture || !sameSurface(frame, next) || frame.focus !== next.focus ||
       frame.url !== next.url || frame.title !== next.title || frame.password !== next.password || frame.window !== next.window || frame.shared !== next.shared ||
       frame.login_supported !== next.login_supported || frame.content_width !== next.content_width || frame.content_height !== next.content_height;
-    if (frame?.image !== src) {
-      const image = new Image();
-      image.src = src;
-      await image.decode();
+    let src = frame?.image;
+    if (!samePicture) {
+      // A blob URL keeps the JPEG as bytes: no base64 string in the page, in
+      // React state or in a data: URL the engine would parse again.
+      src = URL.createObjectURL(blob || jpegBlob(next.image));
+      try {
+        const image = new Image();
+        image.src = src;
+        await image.decode();
+      } catch (error) {
+        URL.revokeObjectURL(src);
+        throw error;
+      }
     }
-    if (!valid()) return null;
+    const late = ticket < applied || (Number.isSafeInteger(next.frame_seq) && next.frame_seq < lastSeq);
+    if (!valid() || late) {
+      if (!samePicture) URL.revokeObjectURL(src);
+      return valid() ? undefined : null;
+    }
+    applied = Math.max(applied, ticket);
+    if (Number.isSafeInteger(next.frame_seq)) lastSeq = next.frame_seq;
+    if (!samePicture) { retain(src); lastJsonImage = blob ? "" : next.image; }
     if (next.url && next.url !== "about:blank") homeNotice = "";
     if (!desktop && next.action_frame === true) actionFrame = true;
     pixelRatioSupported = desktop && next.pixel_ratio_supported === true;
@@ -114,28 +182,50 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
     frame = {...next, image:src};
     return changed;
   }
+  // A frame that arrived out of order was dropped; the next read goes on from
+  // the newer one that is already shown.
+  const droppedLate = changed => changed === undefined;
   async function readFrame() {
-    if (!alive || !visible || !opened || paused || writing || read) return;
+    if (!alive || !visible || !opened || paused || writing || read || hidden()) return;
     const controller = new AbortController();
     read = controller;
     const valid = () => read === controller && !controller.signal.aborted && alive && visible && !paused;
+    const ticket = ++issued;
     const known = frame;
-    const tag = actionFrame && /^[a-f0-9]{32}$/.test(known?.frame_tag || "") ? known.frame_tag : "";
+    const negotiated = stream === "on";
+    const tag = (negotiated || actionFrame) && frameTagPattern.test(known?.frame_tag || "") ? known.frame_tag : "";
+    const holds = negotiated && tag !== "" && !holdBroken;
+    const query = negotiated ? "?" + (tag ? "after=" + tag + (holds ? "&wait=" + holdMs : "") + "&" : "") + "fmt=jpeg" :
+      tag ? "?after=" + tag : "";
+    const startedAt = Date.now();
     try {
-      const next = await request(base + "/frame" + (tag ? "?after=" + tag : ""), {signal:controller.signal});
+      const reply = await frameRequest(base + "/frame" + query, {signal:controller.signal});
       if (!valid()) return;
+      if (reply.stream && stream === "unknown") stream = "on";
+      const next = reply.blob ? frameMeta(reply.meta) : reply.json;
       let changed = false;
       if (next?.unchanged === true) {
         if (!tag || frame !== known || next.id !== id || next.frame_tag !== tag) throw new Error("远程画面的版本不匹配，请重新读取。");
+        // A host that answers a held read at once is not holding it: go back
+        // to timed reads rather than asking in a tight loop.
+        if (holds) quickReturns = Date.now() - startedAt < 250 ? quickReturns + 1 : 0;
+        if (quickReturns >= 2) holdBroken = true;
       } else {
-        changed = await decodeFrame(next, valid);
+        changed = await decodeFrame(next, valid, ticket, reply.blob);
         if (changed === null) return;
+        if (droppedLate(changed)) changed = false;
       }
+      if (negotiated) streamProven = true;
       read = null;
       finishFrame(changed);
     } catch (error) {
       if (valid()) {
-        if (error.status === 425 && (!waitingSince || Date.now() - waitingSince < 90000)) {
+        if (negotiated && !streamProven && [400, 404, 415].includes(error.status)) {
+          // An older host, or an older link in front of it, refused the
+          // negotiated read. This session goes on with the original polling.
+          stream = "off";
+          timer = setTimeout(readFrame, 0);
+        } else if (error.status === 425 && (!waitingSince || Date.now() - waitingSince < 90000)) {
           waitingSince ||= Date.now();
           frame = null;
           publish({waiting:true});
@@ -158,6 +248,7 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
     if (["navigate","back","forward","reload"].includes(payload.type)) homeNotice = "";
     if (payload.type !== "scroll") cancelScroll();
     cancelRead();
+    const ticket = ++issued;
     const current = generation;
     const valid = () => alive && visible && !paused && current === generation;
     writing = true; writeType = payload.type;
@@ -170,7 +261,7 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
       const result = await request(base + "/action", {body, signal:lifetime.signal});
       if (!valid()) return false;
       if (actionFrame && result?.image) {
-        feedback = await decodeFrame(result, valid) !== null;
+        feedback = (await decodeFrame(result, valid, ticket)) !== null;
       } else {
         if (result?.id !== id) throw new Error("主机未确认这次操作，请重新读取画面。");
         frame = null;
@@ -250,7 +341,10 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
     opened = true; opening = false; mayExist = true;
     void readFrame();
   }
-  return {
+  // The page tells the same thing; either way a hidden page stops reading.
+  const onVisibility = () => display.visibility(!hidden());
+  if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibility);
+  const display = {
     send, canSend, scroll, cancelScroll,
     async navigate(url) {
       if (!alive || !visible || !opened || paused) throw new Error("请先恢复远程画面，再前往网址。");
@@ -275,8 +369,9 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
       if (active === visible) return;
       visible = active;
       if (!visible) {
+        // A hidden page holds no read open and starts none.
         generation++; cancelScroll(); discardAddress();
-        cancelRead(); clearTimeout(resizeTimer); frame = null;
+        cancelRead(); clearTimeout(resizeTimer); frame = null; revokeAll();
         if (alive) update({});
       } else if (alive) {
         if (!opened && !opening) publish({error: "远程画面未连接。", reopen: true});
@@ -289,11 +384,13 @@ export function connectDisplay(stage, update, id, start, tool, initialURL) {
       alive = false; generation++; cancelScroll();
       discardAddress();
       cancelRead(); clearTimeout(resizeTimer); observer.disconnect();
-      frame = null;
+      if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onVisibility);
+      frame = null; revokeAll();
       lifetime.abort();
       // If opening is still in flight, its finally sends close after the
       // server has processed open. An early close could miss the new session.
       if (!opening) void closeRemote();
     },
   };
+  return display;
 }

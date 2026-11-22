@@ -3,8 +3,6 @@ package workbench
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,7 +12,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 )
 
@@ -37,6 +34,8 @@ type phoneSurfaceState struct {
 	session       *phoneSurfaceSession        // guarded by op
 	nativeBrowser *windowsBrowserClient       // Native guest phone browser, guarded by op
 	nativeDesktop *windowsPhoneDesktopSession // Windows shared app window, guarded by op
+	network       phoneGateCache              // short-lived gate verdict for frame reads
+	hold          phoneHolder                 // the one held frame read of this surface
 }
 
 func (p *mobilePairing) surface(kind phoneSurface) *phoneSurfaceState {
@@ -44,10 +43,6 @@ func (p *mobilePairing) surface(kind phoneSurface) *phoneSurfaceState {
 		return &p.desktop
 	}
 	return &p.browser
-}
-
-func (p *mobilePairing) pairedRequestLocked(r *http.Request) bool {
-	return p.roomCtx != nil && p.roomCtx.Err() == nil && p.roomProof != "" && equalSecret(p.roomProof, r.Header.Get(mobilelink.PhoneRoomHeader))
 }
 
 func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
@@ -63,24 +58,17 @@ func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
 	}
 }
 
-// Keep the private guest profile stable across reconnects to the same enrollment.
-func (p *mobilePairing) peerLocked() string {
-	if p.record == nil {
-		return ""
-	}
-	digest := sha256.Sum256(p.record.Seed)
-	return hex.EncodeToString(digest[:])
-}
-
 type phoneSurfaceSession struct {
 	releaseDisplay func()
 	id, token      string
+	holder         string // the id of the paired device that opened it
 	ctx            context.Context
 	cancel         context.CancelFunc
 	stopEpoch      func() bool
 	startJob       string
 	openInput      phoneSurfaceInput
 	readyUntil     time.Time
+	seq            uint64 // frames captured so far, guarded by the surface lock
 }
 
 type phoneSurfaceInput struct {
@@ -155,25 +143,10 @@ func (in phoneSurfaceInput) valid(surface phoneSurface, op string) bool {
 	return false
 }
 
-func (s *Server) phoneSurfaceNetwork(ctx context.Context) bool {
-	s.mu.Lock()
-	blocked := !s.ready || s.closing || s.networkPaused || s.proxyNetworkLost
-	s.mu.Unlock()
-	if blocked {
-		return false
-	}
-	cfg, err := loadConfig(s.configPath)
-	if err != nil {
-		return false
-	}
-	client, err := s.gateClient()
-	if err != nil {
-		return false
-	}
-	gate, err := client.Status(ctx)
-	now := time.Now()
-	return err == nil && gate.Configuration == cfg.Fingerprint() && gate.Mode == cage.GateOpen && gate.PolicyVerified &&
-		!gate.Fault && gate.Until.After(now) && gate.Report != nil && gate.Report.Authorizes(gate.RunID, gate.Configuration, now) == nil
+// phoneSurfaceNetwork reads the configuration and the gate afresh. Actions and
+// every check that guards pixels leaving the host use it.
+func (s *Server) phoneSurfaceNetwork(ctx context.Context, state *phoneSurfaceState) bool {
+	return s.phoneNetwork(ctx, &state.network, false)
 }
 
 // Caller holds this surface’s operation lock. Closing only this ID lets later opens safely use a
@@ -259,10 +232,14 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 	p := &s.phones
 	p.mu.Lock()
 	state := p.surface(surface)
-	room, profile := p.roomCtx, p.peerLocked()
-	allowed := p.pairedRequestLocked(r)
+	device := p.deviceForRequestLocked(r)
+	var room context.Context
+	var profile string
+	if device != nil {
+		room, profile = device.roomCtx, device.guestProfile()
+	}
 	p.mu.Unlock()
-	if !allowed {
+	if device == nil {
 		http.Error(w, "请通过电脑 Super Cage 的二维码或配对码连接这台主机，再打开"+surface.label()+"。", 403)
 		return
 	}
@@ -281,13 +258,19 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		http.Error(w, "图形会话请求无效", 400)
 		return
 	}
+	var frame mobilelink.FrameQuery
 	if r.URL.RawQuery != "" {
-		after, ok := mobilelink.FrameAfter(r.URL.RawQuery)
-		if !ok || surface != phoneBrowser || op != "frame" {
+		var ok bool
+		frame, ok = mobilelink.ParseFrameQuery(r.URL.RawQuery)
+		// The bare conditional read only ever existed for the browser. Reads
+		// that negotiate a binary body or a hold are new and may be used by both.
+		if !ok || op != "frame" || (!frame.Stream && surface != phoneBrowser) {
 			http.Error(w, "画面请求无效", 400)
 			return
 		}
-		input.After = after
+		if surface == phoneBrowser {
+			input.After = frame.After
+		}
 	}
 	if op != "open" {
 		input.ID = r.PathValue("id")
@@ -309,6 +292,18 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 			s.mu.Unlock()
 		}
 	}
+	call := &phoneCall{surface: surface, op: op, input: input, room: room, epoch: epoch, state: state, defaultHome: defaultHome, frame: frame, device: device.ID}
+	if !frame.Stream {
+		s.phoneSurfaceExecute(call, w, r)
+		return
+	}
+	s.phoneFrameStream(call, w, r)
+}
+
+// phoneSurfaceExecute runs one validated request against the guest and writes
+// its reply. A held frame read calls it once per look at the guest.
+func (s *Server) phoneSurfaceExecute(call *phoneCall, w http.ResponseWriter, r *http.Request) {
+	surface, op, input, room, epoch, state, defaultHome := call.surface, call.op, call.input, call.room, call.epoch, call.state, call.defaultHome
 	// Serialize frames, geometry and user actions on one phone, without
 	// blocking account locking, link revocation or desktop window operations.
 	state.op.Lock()
@@ -317,10 +312,16 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		http.Error(w, surface.label()+"授权已结束", 403)
 		return
 	}
+	// One guest window per surface for all devices: an open from another
+	// device takes it over, and the device that held it is told so.
 	b := state.session
-	if b != nil && (b.ctx.Err() != nil || op == "open" && b.id != input.ID) {
+	if b != nil && (b.ctx.Err() != nil || op == "open" && (b.id != input.ID || b.holder != call.device)) {
 		s.retirePhoneSurface(surface, b)
 		b = nil
+	}
+	if op != "open" && b != nil && b.holder != call.device {
+		http.Error(w, surface.label()+"已在另一台设备打开", http.StatusGone)
+		return
 	}
 	if op != "open" && (b == nil || b.id != input.ID) {
 		http.Error(w, surface.label()+"会话已结束，请重新打开", 410)
@@ -331,7 +332,11 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		jsonReply(w, map[string]string{"id": input.ID})
 		return
 	}
-	if !s.phoneSurfaceNetwork(r.Context()) {
+	// A frame read may rely on a verdict up to a second old: what it guards is
+	// starting a capture. Pixels are only released after a fresh check below.
+	// A read that first has to send the guest its deferred open acts on the
+	// guest, so it gets the fresh check like an action.
+	if !s.phoneNetwork(r.Context(), &state.network, op == "frame" && b.startJob == "" && b.openInput.ID == "") {
 		s.retirePhoneSurface(surface, b)
 		http.Error(w, "请在电脑启动 Super Cage，并确保网络检查已放行。", 409)
 		return
@@ -348,7 +353,7 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		if surface == phoneDesktop && (s.macosGuest != nil || s.windowsGuest != nil) {
 			token = randomToken()
 		}
-		b = &phoneSurfaceSession{id: input.ID, token: token, ctx: sessionCtx, cancel: cancel, stopEpoch: context.AfterFunc(epoch, cancel)}
+		b = &phoneSurfaceSession{id: input.ID, token: token, holder: call.device, ctx: sessionCtx, cancel: cancel, stopEpoch: context.AfterFunc(epoch, cancel)}
 		if surface == phoneBrowser && s.windowsGuest != nil {
 			state.nativeBrowser = newWindowsBrowserClient(s.lifetimeContext(), s.profile)
 		}
@@ -370,6 +375,7 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		}
 		context.AfterFunc(sessionCtx, func() { state.op.Lock(); defer state.op.Unlock(); s.retirePhoneSurface(surface, b) })
 	}
+	call.session = b
 	ctx, cancel := context.WithCancel(r.Context())
 	stop := context.AfterFunc(b.ctx, cancel)
 	defer func() { stop(); cancel() }()
@@ -441,7 +447,8 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 			return
 		}
 	}
-	if (op == "frame" || input.ReturnFrame) && status == 200 && !s.phoneSurfaceNetwork(ctx) {
+	// A held read releases pixels itself, after its own fresh check.
+	if (op == "frame" || input.ReturnFrame) && status == 200 && !call.deferGate && !s.phoneSurfaceNetwork(ctx, state) {
 		s.retirePhoneSurface(surface, b)
 		http.Error(w, "电脑上的 Super Cage 网络检查已暂停", 409)
 		return
@@ -510,6 +517,10 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 	if surface == phoneDesktop && op == "frame" {
 		b.readyUntil = time.Time{}
 	}
+	if op == "frame" {
+		b.seq++
+		call.seq = b.seq
+	}
 	if homeUnavailable {
 		jsonReply(w, map[string]any{"id": input.ID, "action_frame": true, "home_notice": "电脑的新标签页暂时无法在手机上打开。可以输入公网网址或打开收藏夹。"})
 		return
@@ -543,6 +554,10 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if op == "frame" {
+		// Tells a new phone that this host also answers negotiated reads.
+		w.Header().Set(mobilelink.FrameStreamHeader, "1")
+	}
 	_, _ = w.Write(out)
 }
 

@@ -24,6 +24,14 @@ const { page, browser, errors } = await createWorkbench({
       context.fillStyle = "#f7f5f1"; context.fillRect(0, 0, 800, 600);
       return canvas.toDataURL().split(",")[1];
     }), "base64");
+    // Counts React commits: frames of one window must not render the view.
+    await page.addInitScript(() => {
+      window.reactCommits = 0;
+      window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+        supportsFiber: true, renderers: new Map(), inject: () => 1, checkDCE() {},
+        onCommitFiberRoot() { window.reactCommits++; }, onCommitFiberUnmount() {}, onPostCommitFiberRoot() {},
+      };
+    });
     await page.addInitScript(() => {
       const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
       window.frameURLs = new Set();
@@ -76,6 +84,18 @@ try {
   frame("changed", 1);
   await until(() => acknowledgements.includes("changed"));
   assert.equal(await page.evaluate(() => window.frameURLs.size), 1, "replaced frames must release their blob URLs");
+  // Twenty frames of the same window go straight to the <img>: no render each.
+  const commits = await page.evaluate(() => window.reactCommits);
+  const painted = () => page.evaluate(() => window.__cagePerf.summary().displays.filter(entry => entry.kind === "macos-claude").at(-1).framesPainted);
+  const paintedBefore = await painted();
+  for (let i = 1; i <= 20; i++) {
+    frame(`burst-${i}`, 1);
+    await until(() => acknowledgements.includes(`burst-${i}`));
+  }
+  assert.equal(await painted() - paintedBefore, 20, "every frame must be painted");
+  const rendered = await page.evaluate(() => window.reactCommits) - commits;
+  assert.ok(rendered <= 3, `frames of one window rendered the view ${rendered} times`);
+  assert.equal(await page.evaluate(() => window.frameURLs.size), 1, "burst frames must release their blob URLs");
   await page.setViewportSize({ width: 1380, height: 900 });
   await until(() => subscriptions.at(-1).revision > 1);
   const revision = subscriptions.at(-1).revision;
@@ -93,6 +113,21 @@ try {
   await page.evaluate(() => { window.cageWindowVisible = true; window.dispatchEvent(new Event("cage-window-visibility")); });
   await until(() => subscriptions.length > hiddenSubscriptions);
   await page.waitForFunction(() => document.querySelector(".mac-claude-frame img")?.naturalWidth === 800);
+  // Settings in front and back again: the released picture is not shown
+  // again (it cannot decode), and one new frame channel brings the next one.
+  await page.evaluate(() => {
+    window.alerts = [];
+    new MutationObserver(() => {
+      for (const node of document.querySelectorAll(".mac-claude [role=alert]")) window.alerts.push(node.textContent);
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  const beforeSettings = subscriptions.length;
+  await page.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "返回工作台" }).click();
+  await page.waitForFunction(() => document.querySelector(".mac-claude-frame img")?.naturalWidth === 800);
+  await new Promise(resolve => setTimeout(resolve, 300));
+  assert.deepEqual(await page.evaluate(() => window.alerts), [], "returning from settings must not flash a decode error");
+  assert.equal(subscriptions.length, beforeSettings + 1, "returning from settings opens one frame channel");
   assert.deepEqual(errors, []);
-  console.log("Binary push, decode acknowledgements, independent input, resize, blob cleanup, hide and resume passed.");
+  console.log("Binary push, decode acknowledgements, no render per frame, independent input, resize, blob cleanup, hide and resume, settings round trip passed.");
 } finally { await browser.close(); }

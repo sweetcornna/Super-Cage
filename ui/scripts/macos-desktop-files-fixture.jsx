@@ -2,7 +2,7 @@ import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import { MacOSAppWindow } from "../src/macos-claude-window";
 import { useDesktopFiles } from "../src/browser-downloads";
-import "../src/style.css";
+import "../src/desktop-styles.js";
 
 function Fixture() {
   const [notice, setNotice] = useState("");

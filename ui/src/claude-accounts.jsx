@@ -1,7 +1,8 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Pencil, Plus, RefreshCw, TerminalSquare, Timer } from "lucide-react";
+import { Check, ChevronDown, Pencil, Plus, RefreshCw, TerminalSquare, Timer } from "lucide-react";
 import { api } from "./api";
 import { InlineSelect } from "./inline-select";
+import { EmptyState } from "./drawings";
 import crabIcon from "./claude-account-crab.svg";
 import "./claude-accounts.css";
 
@@ -198,17 +199,19 @@ function DetectedProfile({ profile, usageEnvironment, busy, join, perform, chang
           {profile.plan && <span className="claude-profile-plan">{profile.plan}</span>}
         </div>
         <div className="claude-profile-meta">
-          <span className="claude-profile-status">普通终端 · 已发现，未加入</span>
+          <span className="claude-profile-status" data-status="detected">普通终端 · 已发现，未加入</span>
           {profile.organization && <span className="claude-profile-email" title={profile.organization}>{profile.organization}</span>}
         </div>
       </div>
-    </div>
-    <ProfileUsage quota={profile.quota} state={usage.state} />
-    <div className="claude-profile-actions">
-      <button className="quiet-button" disabled={busy} onClick={join}><Plus size={14} />加入调度</button>
-      <button className="quiet-button" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
-        <RefreshCw size={14} />检查状态</button>
-      <UsageNote profile={profile} state={usage.state} />
+      <div className="claude-profile-usage">
+        <ProfileUsage quota={profile.quota} state={usage.state} />
+        <UsageNote profile={profile} state={usage.state} />
+      </div>
+      <div className="claude-profile-actions">
+        <button className="quiet-button" disabled={busy} onClick={join}><Plus size={14} />加入调度</button>
+        <button className="quiet-button claude-icon-action" aria-label="检查状态" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
+          <RefreshCw size={15} className={usage.state === "checking" ? "spin" : undefined} /></button>
+      </div>
     </div>
   </article>;
 }
@@ -221,7 +224,10 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
   const fromTerminal = profile.source === "default";
   const savedLabel = label.trim() || profile.email;
   const usage = useUsageCheck(profile, usageEnvironment, perform, change);
-  return <article className="claude-profile" aria-label={displayName} data-enabled={profile.enabled}>
+  // The 接续分组 form is the row's detail; everything else stays on the row.
+  const [open, setOpen] = useState(false);
+  const draft = !fromTerminal && !profile.email && !active && ["pending", "signed_out", "duplicate"].includes(profile.status);
+  return <article className="claude-profile" aria-label={displayName} data-enabled={profile.enabled} data-open={open || undefined}>
     <div className="claude-profile-heading">
       <span className="claude-profile-avatar" aria-hidden="true"><img src={crabIcon} alt="" /></span>
       <div className="claude-profile-identity">
@@ -239,24 +245,40 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
             onClick={() => { setLabel(profile.label === profile.email ? "" : profile.label || ""); setRenaming(true); }}><Pencil size={14} /></button>
         </div>}
         <div className="claude-profile-meta">
-          <span className="claude-profile-status" data-ready={profile.status === "ready"}>{statusLabels[profile.status] || "状态未知"}</span>
+          <span className="claude-profile-status" data-ready={profile.status === "ready"} data-status={profile.status}>{statusLabels[profile.status] || "状态未知"}</span>
           {profile.email && <span className="claude-profile-email" title={[profile.email, profile.organization].filter(Boolean).join(" · ")}>
             {[profile.email !== displayName && profile.email, profile.organization].filter(Boolean).join(" · ")}
           </span>}
+          {profile.handoff_group && <span className="claude-profile-group" title="接续分组">分组 {profile.handoff_group}</span>}
         </div>
       </div>
-      <label className="check-line claude-participation">
-        <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
-          onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
-        <span className="claude-switch-track" aria-hidden="true" />
-        <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
-      </label>
+      <div className="claude-profile-usage">
+        <ProfileUsage quota={profile.quota} state={usage.state} />
+        <UsageNote profile={profile} state={usage.state} />
+      </div>
+      <div className="claude-profile-actions">
+        <label className="check-line claude-participation">
+          <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
+            onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
+          <span className="claude-switch-track" aria-hidden="true" />
+          <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
+        </label>
+        {fromTerminal ? <span className="claude-profile-source">普通终端账号</span> : profile.status === "ready"
+          ? <button className="quiet-button claude-icon-action" aria-label="重新登录" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
+            <TerminalSquare size={15} /></button>
+          : <button className="quiet-button" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
+            <TerminalSquare size={14} />打开登录终端</button>}
+        <button className="quiet-button claude-icon-action" aria-label="检查状态" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
+          <RefreshCw size={15} className={usage.state === "checking" ? "spin" : undefined} /></button>
+        {draft && <button className="text-button" disabled={busy} onClick={() => perform(() => cancelDraft(profile))}>撤销添加</button>}
+        <button type="button" className="quiet-button claude-icon-action claude-profile-toggle" aria-expanded={open}
+          aria-label={open ? "收起接续分组" : "设置接续分组"} onClick={() => setOpen((value) => !value)}><ChevronDown size={15} /></button>
+      </div>
     </div>
-    <ProfileUsage quota={profile.quota} state={usage.state} />
-    <form className="claude-handoff-group" onSubmit={event => { event.preventDefault(); perform(() => change({action:"update",id:profile.id,handoff_group:group})); }}>
+    {open && <form className="claude-handoff-group" onSubmit={event => { event.preventDefault(); perform(() => change({action:"update",id:profile.id,handoff_group:group})); }}>
       <label>接续分组<input aria-label={`${displayName} 的接续分组`} value={group} maxLength={32} placeholder="未分组，不跨账号接续" onChange={event => setGroup(event.target.value)} /></label>
       <button disabled={busy || group === (profile.handoff_group || "")}>保存分组</button>
-    </form>
+    </form>}
     {active > 0 && <p className="claude-profile-note">{active} 个终端仍在运行{!fromTerminal && "，关闭后可重新登录"}</p>}
     {!fromTerminal && defaultActive > 0 && <p className="field-help">
       其中 {defaultActive} 个工作终端仍使用普通终端的登录。若普通终端已换号，请重新打开这些会话确认身份。
@@ -267,16 +289,6 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
     </p>}
     {!fromTerminal && profile.status === "changed" && <p className="field-help">请用原账号重新登录。若要使用新的身份，请点击「登录新账号」。</p>}
     {profile.status === "duplicate" && <p className="field-help">同一订阅只参与一次分配。请在此位置登录另一个账号。</p>}
-    <div className="claude-profile-actions">
-      {fromTerminal ? <span className="claude-profile-source">普通终端账号</span> :
-        <button className="quiet-button" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
-          <TerminalSquare size={14} />{profile.status === "ready" ? "重新登录" : "打开登录终端"}</button>}
-      <button className="quiet-button" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
-        <RefreshCw size={14} />检查状态</button>
-      {!fromTerminal && !profile.email && !active && ["pending", "signed_out", "duplicate"].includes(profile.status) &&
-        <button className="text-button" disabled={busy} onClick={() => perform(() => cancelDraft(profile))}>撤销添加</button>}
-      <UsageNote profile={profile} state={usage.state} />
-    </div>
   </article>;
 }
 
@@ -347,8 +359,12 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
     }
   };
   return <section className="claude-profiles" aria-label="Claude 账号管理">
-    <div className="section-title">
+    <div className="section-title claude-profiles-intro">
       <p>将普通终端已登录的订阅加入调度，或单独登录一个新账号。新建 Claude 终端时自动分配。</p>
+      <div className="claude-add-profile">
+        <button className="primary" disabled={busy || environmentBusy || !!environment}
+          onClick={() => perform(() => login())}><Plus size={16} />登录新账号</button>
+      </div>
     </div>
     <details className="claude-scheduling">
       <summary>调度设置 · {store.scheduling.mode === "sequential" ? "顺序优先" : "均衡分配"}</summary>
@@ -369,10 +385,6 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
           }}>上移</button></div>)}
       </div>}
     </details>
-    <div className="claude-add-profile">
-      <button className="primary" disabled={busy || environmentBusy || !!environment}
-        onClick={() => perform(() => login())}><Plus size={16} />登录新账号</button>
-    </div>
     {(actionError || error) && <p className="account-error" role="alert">{actionError || error}</p>}
     {loginNotice && <p className="claude-profile-note" role="status">{loginNotice}</p>}
     {detectionError && <p className="account-error" role="alert">{detectionError}</p>}
@@ -387,9 +399,9 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
     </div>
     <div className="claude-profile-list" role="region" aria-label="账号列表" tabIndex={0}>
       {accounts === null && !error && <p role="status">正在读取账号…</p>}
-      {accounts?.length === 0 && !detected && <div className="claude-profile-empty">
-        <img src={crabIcon} alt="" /><p>尚无已加入调度的账号。</p><small>加入第一个账号前，新终端沿用环境原有的登录。</small>
-      </div>}
+      {accounts?.length === 0 && !detected && <EmptyState drawing="key" title="账号列表还是空的" className="claude-profile-empty">
+        尚无已加入调度的账号。加入第一个账号前，新终端沿用环境原有的登录。
+      </EmptyState>}
       <QuotaClock accounts={visibleProfiles}>
         {detected && <DetectedProfile key={detected.identity} profile={detected} usageEnvironment={usageEnvironment} busy={busy || environmentBusy || !!environment}
           perform={perform} change={load}

@@ -36,6 +36,9 @@ type IncusConfig struct {
 	ControlPath string
 	// InstanceType is InstanceVM (the default) or InstanceContainer.
 	InstanceType string
+	// Vsock, for virtual machines only, reaches each workbench through a vsock
+	// bridge (see incus_direct.go) instead of one incus exec per connection.
+	Vsock bool
 }
 
 type IncusRuntime struct {
@@ -43,6 +46,12 @@ type IncusRuntime struct {
 	// locks holds one *sync.Mutex per workspace ID. It orders the gateway's
 	// memory changes on an instance with its boot, see lockInstance.
 	locks sync.Map
+	// directSkip holds, per instance name, the time before which the vsock path
+	// is not tried again after it failed.
+	directSkip sync.Map
+	// vsockDial and execDial replace the real dials in tests.
+	vsockDial vsockStream
+	execDial  func(ctx context.Context, instance string, port int) (net.Conn, error)
 }
 
 func NewIncus(cfg IncusConfig) (*IncusRuntime, error) {
@@ -58,6 +67,9 @@ func NewIncus(cfg IncusConfig) (*IncusRuntime, error) {
 	case InstanceVM, InstanceContainer:
 	default:
 		return nil, errors.New("Incus instance type must be virtual-machine or container")
+	}
+	if cfg.Vsock && cfg.InstanceType != InstanceVM {
+		return nil, errors.New("vsock needs virtual machines: containers share the host's vsock namespace")
 	}
 	if !filepath.IsAbs(cfg.Executable) || !path.IsAbs(cfg.ControlPath) || path.Clean(cfg.ControlPath) != cfg.ControlPath || path.Base(cfg.ControlPath) != "control.json" || strings.ContainsAny(cfg.ControlPath, "\x00\r\n") {
 		return nil, errors.New("configure an absolute Incus executable and an absolute guest control.json path")
@@ -316,10 +328,31 @@ func (r *IncusRuntime) connect(ctx context.Context, instance string) (*Workspace
 	if json.Unmarshal(body, &control) != nil || control.Port < 1 || control.Port > 65535 || !secretPattern.MatchString(control.Token) {
 		return nil, errController
 	}
-	workspace := newWorkspace(control.Port, func(ctx context.Context) (net.Conn, error) {
-		return r.dial(ctx, instance, control.Port)
-	})
-	if err := workspace.bootstrap(ctx, control.Token); err != nil {
+	dialer := &guestDialer{runtime: r, instance: instance, port: control.Port}
+	workspace := newWorkspace(control.Port, dialer.dial)
+	if r.directAllowed(instance) {
+		if path, err := r.openDirect(ctx, workspace, instance, control.Port); err != nil {
+			if errors.Is(err, errDirectUnsupported) {
+				r.skipDirect(instance)
+			}
+			log.Printf("cage-tenant: workspace %s uses incus exec for now; the vsock path is unavailable: %v", instance, err)
+		} else {
+			dialer.direct.Store(path)
+			log.Printf("cage-tenant: workspace %s dials its workbench through vsock (CID %d, port %d)", instance, path.cid, path.port)
+		}
+	}
+	err = workspace.bootstrap(ctx, control.Token)
+	if path := dialer.direct.Load(); err != nil && path != nil {
+		// The handshake failed over vsock. The launcher token can be used again,
+		// so repeat it over exec: only if that works was it the path.
+		dialer.direct.Store(nil)
+		workspace.control.CloseIdleConnections()
+		if err = workspace.bootstrap(ctx, control.Token); err == nil {
+			r.skipDirect(instance)
+			path.fail(errors.New("the workspace handshake worked over exec but not over vsock"))
+		}
+	}
+	if err != nil {
 		workspace.close()
 		return nil, err
 	}

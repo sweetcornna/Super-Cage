@@ -1,6 +1,8 @@
 // Isolated browser fixture. No request from this page reaches the running Cage service.
 import { createRequire } from "node:module";
 import { defaultAppearance, presets } from "../src/appearance-state.mjs";
+import { claudeScienceRoute } from "./claude-science-fixture.mjs";
+import { codexMenuTerminal, codexSessionsRoute, codexTerminalRoute, seedCodexSessions } from "./codex-session-fixture.mjs";
 const require = createRequire(import.meta.url);
 export async function createWorkbench({
   viewport = { width: 1280, height: 850 },
@@ -15,16 +17,22 @@ export async function createWorkbench({
   cliRequest,
   beforeNavigate,
   launchOptions = {},
+  // Extra browser-context options (a touch tablet: hasTouch, isMobile).
+  contextOptions = {},
   startupFailure = false,
   waitForReady = true,
   initialization = { required: false },
+  // A name from claude-science-fixtures.json: what GET /api/claude-science returns.
+  claudeScience = "not-installed",
+  // Serve Codex sessions (one per owner state) from codex-session-fixture.mjs.
+  codexSessions = false,
   clientContext = { mode: "local", connection_id: "local", client_platform: "darwin", server_platform: "darwin", connection: { state: "disconnected" } },
 } = {}) {
   const engines = require(
     process.env.CAGE_PLAYWRIGHT_MODULE || "playwright",
   );
   const browser = await engines[process.env.CAGE_TEST_BROWSER || "chromium"].launch({ headless: true, executablePath: process.env.CAGE_TEST_BROWSER_PATH, ...launchOptions });
-  const context = await browser.newContext({ viewport, recordVideo, deviceScaleFactor });
+  const context = await browser.newContext({ viewport, recordVideo, deviceScaleFactor, ...contextOptions });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -80,9 +88,17 @@ export async function createWorkbench({
     },
     tabs: [],
     terminals: [],
+    claudeScience,
     active: "",
     sequence: 0,
   };
+  if (codexSessions) seedCodexSessions(state);
+  // Terminals draw with the DOM renderer unless CAGE_TERMINAL_RENDERER says
+  // otherwise (auto, webgl or dom): smokes read the text from .xterm-rows,
+  // which only the DOM renderer has. terminal-webgl-smoke covers WebGL.
+  await page.addInitScript((renderer) => {
+    try { localStorage.setItem("cage-terminal-renderer", renderer); } catch { /* storage may be off */ }
+  }, process.env.CAGE_TERMINAL_RENDERER || "dom");
   await page.exposeFunction("chooseTestFolder", () => state.chosenFolder);
   await page.exposeFunction("requestNativeForTest", async (body) => nativeRequest ? nativeRequest(body) : null);
   await page.addInitScript(() => {
@@ -102,11 +118,10 @@ export async function createWorkbench({
   if (mockWebSockets) await page.routeWebSocket("**/api/**", (socket) => {
     if (socket.url().includes("/terminals/")) {
       state.terminalConnections++;
-      socket.send(
-        Buffer.from(
-          "\r\n\u001b[1mCage\u001b[0m  ·  Linux terminal\r\n\r\n~/Projects/design-lab  $ ",
-        ),
-      );
+      const banner = Buffer.from("\r\n\u001b[1mCage\u001b[0m  ·  Linux terminal\r\n\r\n~/Projects/design-lab  $ ");
+      // A program that takes a while to draw its first screen (state.terminalDrawMs).
+      if (state.terminalDrawMs) setTimeout(() => { try { socket.send(banner); } catch { /* closed meanwhile */ } }, state.terminalDrawMs);
+      else socket.send(banner);
     } else socket.close();
   });
   await page.route("**/api/**", async (route) => {
@@ -156,12 +171,15 @@ export async function createWorkbench({
     }
     if (!state.account.unlocked && !["/session", "/launch", "/appearance"].includes(path)) return route.fulfill({ status: 423, body: "Super Cage 已锁定，请先登录" });
     if (browserRequest && path.startsWith("/browser/") && path !== "/browser/events") return browserRequest(route, path, body);
+    if (path === "/claude-science" || path.startsWith("/claude-science/")) return claudeScienceRoute(route, request, path, body, state);
     if (path.startsWith("/cli/")) {
       if (cliRequest) return cliRequest(route, path, body);
+      if (codexSessions) return codexSessionsRoute(route, request, new URL(request.url()), body, state);
       const account = path.match(/^\/cli\/sessions\/([^/]+)\/account$/);
       if (account) return route.fulfill({ json: { session: { id: account[1] }, supported: false, candidates: [] } });
       return route.fulfill({ json: { sessions: [], notice: "" } });
     }
+    if (codexSessions && path.startsWith("/terminals/") && await codexTerminalRoute(route, request, path, body, state) !== false) return;
     if (startupFailure && path === "/status") return route.fulfill({ status: 503, body: "测试：控制服务暂不可用" });
     let result = {};
     if (path === "/favorites") {
@@ -325,6 +343,9 @@ export async function createWorkbench({
           status: 400,
           body: "请先通过打开项目添加该文件夹",
         });
+      // A menu Codex terminal becomes a session where the client asks for it.
+      if (codexSessions && body?.kind === "codex" && new URL(request.url()).searchParams.get("providers") && !state.codexOlderServer)
+        return route.fulfill({ json: codexMenuTerminal(state, body) });
       const tab = {
         id: "term-" + ++state.sequence,
         title: "终端 " + (state.terminals.length + 1),

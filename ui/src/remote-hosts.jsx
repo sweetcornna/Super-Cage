@@ -19,7 +19,7 @@ import { api, native, nativeAvailable } from "./api";
 import { setClientContext } from "./client-context.mjs";
 import { Modal } from "./modal";
 import { HostForm } from "./remote-host-form";
-import logo from "./logo.png";
+import { BrandMark } from "./brand";
 import "./remote-hosts.css";
 
 const Navigation = createContext(null);
@@ -505,7 +505,7 @@ function Environment({ context, refresh, children }) {
         ) : remote ? (
           <Server size={16} />
         ) : (
-          <img className="brand-logo" src={logo} alt="" />
+          <BrandMark size={22} className="brand-logo" />
         )}
         <strong>{ready ? hostName : "Super Cage"}</strong>
         {ready && (
@@ -761,7 +761,7 @@ function Environment({ context, refresh, children }) {
         ) : (
           <main className="environment-picker">
             <div>
-              <img className="environment-logo" src={logo} alt="" />
+              <BrandMark size={40} className="environment-logo" />
               <h1>
                 {localLost
                   ? "重新连接本机工作台"

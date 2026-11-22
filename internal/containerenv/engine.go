@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 type State struct {
@@ -78,6 +80,9 @@ type engineContainer struct {
 }
 
 func (r *Runtime) command(ctx context.Context, args ...string) *exec.Cmd {
+	if !readOnlyEngineCommand(args) {
+		invalidateState(r)
+	}
 	if r.config.Engine == "docker" {
 		// Docker's normal client config can inject the user's proxy URLs and
 		// credentials into new containers. Use a profile-private empty config.
@@ -100,10 +105,159 @@ func (r *Runtime) output(ctx context.Context, args ...string) ([]byte, error) {
 	var output, diagnostic bytes.Buffer
 	command.Stdout = &limitedWriter{writer: &output, left: 1 << 20}
 	command.Stderr = &limitedWriter{writer: &diagnostic, left: 4096}
-	if err := command.Run(); err != nil {
+	err := command.Run()
+	if !readOnlyEngineCommand(args) {
+		// Also after the change: a read that began meanwhile is not kept.
+		invalidateState(r)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("容器引擎操作失败: %w: %s", err, strings.TrimSpace(diagnostic.String()))
 	}
 	return output.Bytes(), nil
+}
+
+func readOnlyEngineCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	if args[0] == "info" {
+		return true
+	}
+	return len(args) > 1 && (args[0] == "container" || args[0] == "image") && (args[1] == "ls" || args[1] == "inspect")
+}
+
+// Status polls, VNC and browser connections and the monitors read the
+// container state every few seconds; each read runs at least two engine CLI
+// processes plus a gate request. State shares one read between concurrent
+// callers and reuses it briefly. Cage's own start and stop write or remove
+// the runtime records, which ends a reused state at once, and so does any
+// engine change made from this process; the TTL bounds changes made outside
+// Cage, such as a container stopped with the engine CLI.
+const (
+	stateReuse       = 3 * time.Second
+	storagePathReuse = 30 * time.Second
+)
+
+type stateRead struct {
+	records    string
+	generation uint64
+	done       chan struct{} // closed when the read finishes
+	state      State
+	err        error
+	finished   time.Time
+}
+
+var stateCache struct {
+	sync.Mutex
+	reads       map[string]*stateRead
+	generations map[string]uint64
+	storage     map[string]storagePathRead
+}
+
+type storagePathRead struct {
+	path string
+	read time.Time
+}
+
+func (r *Runtime) cacheKey() string {
+	return strings.Join([]string{r.profile, r.identity, r.config.Engine, r.config.Executable, r.config.Socket}, "\x00")
+}
+
+func invalidateState(r *Runtime) {
+	stateCache.Lock()
+	defer stateCache.Unlock()
+	if stateCache.generations == nil {
+		stateCache.generations = map[string]uint64{}
+	}
+	stateCache.generations[r.cacheKey()]++
+}
+
+// recordStamp identifies the runtime records that start and stop replace.
+func (r *Runtime) recordStamp() string {
+	var stamp strings.Builder
+	for _, name := range []string{"network.json", "cage-running.json"} {
+		info, err := os.Stat(filepath.Join(r.InstanceDir(), name))
+		if err != nil {
+			stamp.WriteString("-;")
+			continue
+		}
+		fmt.Fprintf(&stamp, "%d:%d;", info.Size(), info.ModTime().UnixNano())
+	}
+	return stamp.String()
+}
+
+// State reports the container state, reusing a read that is at most
+// stateReuse old and still matches the runtime records. Decisions that
+// change the environment use FreshState.
+func (r *Runtime) State(ctx context.Context) (State, error) {
+	key := r.cacheKey()
+	for {
+		records := r.recordStamp()
+		stateCache.Lock()
+		read := stateCache.reads[key]
+		if read != nil && read.records == records && read.generation == stateCache.generations[key] {
+			if done := read.done; done != nil {
+				stateCache.Unlock()
+				select {
+				case <-done:
+				case <-ctx.Done():
+					return State{}, ctx.Err()
+				}
+				// Use the shared result, or read again if it was not kept.
+				continue
+			}
+			if time.Since(read.finished) < stateReuse {
+				state := read.state
+				stateCache.Unlock()
+				return state, nil
+			}
+		}
+		// Published before unlocking, so concurrent callers join this read.
+		read = beginStateReadLocked(key, records, true)
+		stateCache.Unlock()
+		return r.finishStateRead(ctx, key, read)
+	}
+}
+
+// FreshState always asks the engine. Its result also replaces the reused one.
+func (r *Runtime) FreshState(ctx context.Context) (State, error) {
+	key, records := r.cacheKey(), r.recordStamp()
+	stateCache.Lock()
+	read := beginStateReadLocked(key, records, false)
+	stateCache.Unlock()
+	return r.finishStateRead(ctx, key, read)
+}
+
+func beginStateReadLocked(key, records string, shared bool) *stateRead {
+	if stateCache.reads == nil {
+		stateCache.reads = map[string]*stateRead{}
+	}
+	read := &stateRead{records: records, generation: stateCache.generations[key], done: make(chan struct{})}
+	if shared {
+		stateCache.reads[key] = read
+	}
+	return read
+}
+
+func (r *Runtime) finishStateRead(ctx context.Context, key string, read *stateRead) (State, error) {
+	state, err := r.inspectState(ctx)
+	unchanged := r.recordStamp() == read.records
+	stateCache.Lock()
+	defer stateCache.Unlock()
+	read.state, read.err, read.finished = state, err, time.Now()
+	close(read.done)
+	read.done = nil
+	// Keep only a successful read during which nothing changed, and never
+	// replace a newer one.
+	keep := err == nil && unchanged && read.generation == stateCache.generations[key]
+	current := stateCache.reads[key]
+	switch {
+	case keep && (current == nil || current == read || current.done == nil && !current.finished.After(read.finished)):
+		stateCache.reads[key] = read
+	case current == read:
+		delete(stateCache.reads, key)
+	}
+	return state, err
 }
 
 type limitedWriter struct {
@@ -145,7 +299,7 @@ func (r *Runtime) inspectContainer(ctx context.Context) (*engineContainer, error
 	return &found[0], nil
 }
 
-func (r *Runtime) State(ctx context.Context) (State, error) {
+func (r *Runtime) inspectState(ctx context.Context) (State, error) {
 	container, err := r.inspectContainer(ctx)
 	if err != nil {
 		return State{}, err
@@ -193,6 +347,26 @@ func (r *Runtime) State(ctx context.Context) (State, error) {
 // explicitly supplied rootless engine may already store data outside the
 // profile; this path is never treated as disposable or removed by Cage.
 func (r *Runtime) StoragePath(ctx context.Context) (string, error) {
+	key := r.cacheKey()
+	stateCache.Lock()
+	cached, ok := stateCache.storage[key]
+	stateCache.Unlock()
+	if ok && time.Since(cached.read) < storagePathReuse {
+		return cached.path, nil
+	}
+	path, err := r.readStoragePath(ctx)
+	if err == nil {
+		stateCache.Lock()
+		if stateCache.storage == nil {
+			stateCache.storage = map[string]storagePathRead{}
+		}
+		stateCache.storage[key] = storagePathRead{path: path, read: time.Now()}
+		stateCache.Unlock()
+	}
+	return path, err
+}
+
+func (r *Runtime) readStoragePath(ctx context.Context) (string, error) {
 	format := "{{.DockerRootDir}}"
 	if r.config.Engine == "podman" {
 		format = "{{.Store.GraphRoot}}"

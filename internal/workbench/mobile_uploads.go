@@ -190,6 +190,13 @@ func (s *Server) mobileUploadStart(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) beginUpload(project string, parts []string, name, rel string, size int64, overwrite bool) (string, error) {
+	s.mu.Lock()
+	sealed := s.appUpdateSealed
+	s.mu.Unlock()
+	if sealed {
+		return "", errAppUpdateSealed
+	}
+	s.noteAppUpdateActivity()
 	root, err := s.mobileProjectRoot(project)
 	if err != nil {
 		return "", err

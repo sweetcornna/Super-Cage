@@ -1,0 +1,21 @@
+/* 手机与远程: the pairing card and relay settings (moved from style.css;
+   tokens only). Loads right after style.css (desktop-styles.js). */
+.settings-content.settings-content--remote {
+  padding: 40px clamp(16px, 4vw, 64px);
+}
+.remote-link-settings { max-width: 960px; margin-inline: auto; }
+.settings-content .remote-link-settings .section-title { margin-bottom: 32px; }
+.settings-content .remote-link-settings .section-title h3 { font-size: 2rem; }
+.settings-content .remote-link-settings .section-title p { font-size: var(--fs-body); line-height: 1.7; }
+.remote-relay-settings { margin-top: 32px; }
+.remote-relay-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 24px; }
+.settings-content .remote-relay-settings h4 { margin: 0 0 8px; font-size: var(--fs-lead); }
+.remote-relay-settings .field-help { margin: 0; }
+.remote-relay-options { display: flex; flex-wrap: wrap; gap: 8px; }
+.remote-relay-options button { min-height: 40px; }
+.remote-relay-settings label { margin-top: 24px; }
+.remote-relay-settings > small { display: block; margin-top: 16px; }
+.remote-link-settings button[aria-pressed="true"] {
+  background: var(--selected);
+  border-color: var(--ink);
+}

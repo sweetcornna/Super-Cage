@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -31,7 +32,11 @@ var maintenanceOrigins = map[string]bool{
 }
 
 type maintenanceProxy struct {
-	token       string
+	token string
+	// hosts are one job's own download hosts beyond the shared list
+	// (CONNECT 443 only, for this proxy instance only): a 其他客户端 entry's
+	// reviewed extra install hosts (design 4.2).
+	hosts       []string
 	ctx         context.Context
 	dial        func(context.Context, string, string) (net.Conn, error)
 	transport   *http.Transport
@@ -53,11 +58,20 @@ func maintenanceDestination(address string, connect bool) bool {
 	}
 	host = strings.ToLower(host)
 	switch host {
-	case "mirrors.nju.edu.cn", "mirrors.ustc.edu.cn", "cdn.npmmirror.com", "api.snapcraft.io", "storage.snapcraftcontent.com", "canonical-lgw01.cdn.snapcraftcontent.com", "canonical-lcy01.cdn.snapcraftcontent.com", "canonical-lcy02.cdn.snapcraftcontent.com", "canonical-bos01.cdn.snapcraftcontent.com", "cloudfront.cdn.snapcraftcontent.com", "codeload.github.com":
+	case "mirrors.nju.edu.cn", "mirrors.ustc.edu.cn", "cdn.npmmirror.com", "api.snapcraft.io", "storage.snapcraftcontent.com", "canonical-lgw01.cdn.snapcraftcontent.com", "canonical-lcy01.cdn.snapcraftcontent.com", "canonical-lcy02.cdn.snapcraftcontent.com", "canonical-bos01.cdn.snapcraftcontent.com", "cloudfront.cdn.snapcraftcontent.com", "codeload.github.com",
+		// Claude Science's Linux build; the installer checks its pinned sha256.
+		"storage.googleapis.com":
 		return connect
 	}
 	return maintenanceOrigins[host]
 }
+
+// jobHost reports whether address is one of this job's own hosts, on 443.
+func (p *maintenanceProxy) jobHost(address string) bool {
+	host, port, err := net.SplitHostPort(address)
+	return err == nil && port == "443" && slices.Contains(p.hosts, strings.ToLower(host))
+}
+
 func (p *maintenanceProxy) track(conn net.Conn) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -85,7 +99,7 @@ func (p *maintenanceProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodConnect {
-		if !maintenanceDestination(r.Host, true) {
+		if !maintenanceDestination(r.Host, true) && !p.jobHost(r.Host) {
 			http.Error(w, "Not a Cage software source", 403)
 			return
 		}
@@ -213,7 +227,21 @@ func RunMaintenanceScript(ctx context.Context, configPath, script string, stdout
 	return runMaintenanceScript(ctx, configPath, cfg, cfg.GuestProfile.Linux(script), stdout, stderr)
 }
 
+// RunMaintenanceScriptWithHosts is RunMaintenanceScript whose channel also
+// reaches hosts (CONNECT 443 only) for this job alone.
+func RunMaintenanceScriptWithHosts(ctx context.Context, configPath, script string, hosts []string, stdout, stderr io.Writer) error {
+	cfg, err := cage.Load(configPath)
+	if err != nil {
+		return err
+	}
+	return runMaintenanceScriptHosts(ctx, configPath, cfg, cfg.GuestProfile.Linux(script), hosts, stdout, stderr)
+}
+
 func runMaintenanceScript(ctx context.Context, configPath string, cfg cage.Config, script string, stdout, stderr io.Writer) error {
+	return runMaintenanceScriptHosts(ctx, configPath, cfg, script, nil, stdout, stderr)
+}
+
+func runMaintenanceScriptHosts(ctx context.Context, configPath string, cfg cage.Config, script string, hosts []string, stdout, stderr io.Writer) error {
 	profile := filepath.Dir(configPath)
 	if err := cfg.RequireManagedProxy(profile); err != nil {
 		return err
@@ -230,7 +258,7 @@ func runMaintenanceScript(ctx context.Context, configPath string, cfg cage.Confi
 	if err != nil {
 		return err
 	}
-	proxy := &maintenanceProxy{token: randomToken(), ctx: ctx, dial: egress.DialContext, connections: make(map[net.Conn]bool)}
+	proxy := &maintenanceProxy{token: randomToken(), ctx: ctx, dial: egress.DialContext, connections: make(map[net.Conn]bool), hosts: hosts}
 	proxy.transport = &http.Transport{Proxy: nil, DialContext: egress.DialContext, DisableKeepAlives: true}
 	server := &http.Server{Handler: proxy, ReadHeaderTimeout: 10 * time.Second}
 	go func() { _ = server.Serve(listener) }()

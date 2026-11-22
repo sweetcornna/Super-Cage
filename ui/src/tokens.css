@@ -1,0 +1,162 @@
+/* Super Cage design tokens — brand/design-language.md §1–3.
+ *
+ * At runtime the appearance provider writes the active theme's colours onto
+ * :root (appearance-state.mjs themeVariables), for every preset. The values
+ * below are the Super Cage preset itself: they paint the window before the
+ * provider runs and are checked against the preset by appearance-state.test.mjs.
+ * Legacy names (--accent, --strong, --hover…) are aliases kept for older
+ * component styles; new styles use the design names only.
+ *
+ * Cascade: base → components → shell are layers (base.css, components.css,
+ * shell.css). Feature stylesheets stay unlayered so their own rules always
+ * win over the shared look. */
+@layer base, components, shell;
+
+:root {
+  color-scheme: light;
+  --paper: #faf9f5;
+  --chrome: #f3f1ea;
+  --surface: #ffffff;
+  --soft: #f0eee6;
+  --selected: #ece8dd;
+  --line: #e6e3d8;
+  --line-strong: #d6d2c4;
+  --ink: #1f1e1d;
+  --muted: #6b655b;
+  --faint: #9a9488;
+  --clay: #d97757;
+  --clay-ink: #a4482a;
+  --clay-soft: #f6e5dc;
+  --green: #2e7d4f;
+  --amber: #9a6700;
+  --error: #b3261e;
+  --selection: #f0d5c7;
+  --button: #1f1e1d;
+  --button-ink: #faf9f5;
+  --accent-ink: #ffffff;
+  --sidebar: var(--chrome);
+  --sidebar-ink: var(--ink);
+  --toolbar: var(--paper);
+  --toolbar-ink: var(--ink);
+  --chrome-dark: var(--soft);
+
+  /* Legacy aliases. */
+  --accent: var(--clay);
+  --link: var(--clay-ink);
+  --focus: var(--clay-ink);
+  --strong: var(--ink);
+  --hover: var(--soft);
+  --input: var(--surface);
+  --border: var(--line);
+  --success: var(--green);
+  --warning: var(--amber);
+  --danger: var(--error);
+  --inactive: var(--faint);
+  --accent-soft: var(--clay-soft);
+
+  /* Shadows are for floating layers only (menus, dialogs, toasts). */
+  --shadow-float: 0 1px 2px #1f1e1d0a, 0 8px 28px #1f1e1d10;
+  --scrim: #1f1e1d38;
+
+  /* Type. Sizes are rem so the UI font size setting (html font-size) scales
+     the whole scale: 12 caption, 13 secondary, 14 body, 16 lead, 20 section,
+     26 page title, 34 hero at the default 14px. */
+  --font-sans: var(--ui-font-family, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif);
+  --font-serif: "New York", ui-serif, "Iowan Old Style", "Songti SC", "Noto Serif CJK SC", "Source Han Serif SC", Georgia, "Microsoft YaHei UI", "Noto Sans CJK SC", serif;
+  --font-mono: var(--code-font-family, ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace);
+  --fs-caption: 0.8571rem;
+  --fs-secondary: 0.9286rem;
+  --fs-nav: 0.9643rem;
+  --fs-body: 1rem;
+  --fs-lead: 1.1429rem;
+  --fs-section: 1.4286rem;
+  --fs-title: 1.8571rem;
+  --fs-hero: 2.4286rem;
+  --lh-body: 1.5;
+  --lh-title: 1.25;
+  --track-cjk: 0.015em;
+
+  /* Space (4 px grid) and shape. */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-6: 24px;
+  --sp-8: 32px;
+  --sp-12: 48px;
+  --r-sm: 8px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-pill: 999px;
+  --h-compact: 2.2857rem;
+  --h-control: 2.5714rem;
+  --h-hero: 3.1429rem;
+  --h-row: 2.2857rem;
+  --content-form: 760px;
+  --content-list: 1080px;
+
+  /* Motion. */
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 160ms;
+
+  /* Shell metrics. */
+  /* In rem so the frame grows with the UI font size setting (264 / 44 / 28 px at 14 px). */
+  --sidebar-width: 18.8571rem;
+  --workbench-header-height: 3.1429rem;
+  --status-height: 2rem;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #1f1e1d;
+  --chrome: #1a1918;
+  --surface: #2a2926;
+  --soft: #34322e;
+  --selected: #3a3733;
+  --line: #3d3a35;
+  --line-strong: #4a4640;
+  --ink: #f3efe5;
+  --muted: #aba597;
+  --faint: #7e786c;
+  --clay: #d97757;
+  --clay-ink: #e8936f;
+  --clay-soft: #4a3329;
+  --green: #7bc79a;
+  --amber: #e3b341;
+  --error: #f2b8b5;
+  --selection: #5c3d30;
+  --button: #f3efe5;
+  --button-ink: #1f1e1d;
+  --accent-ink: #ffffff;
+  --shadow-float: 0 1px 2px #0000002e, 0 10px 30px #00000059;
+  --scrim: #0000006b;
+}
+
+/* Before the provider has chosen a variant, follow the system. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    color-scheme: dark;
+    --paper: #1f1e1d;
+    --chrome: #1a1918;
+    --surface: #2a2926;
+    --soft: #34322e;
+    --selected: #3a3733;
+    --line: #3d3a35;
+    --line-strong: #4a4640;
+    --ink: #f3efe5;
+    --muted: #aba597;
+    --faint: #7e786c;
+    --clay-ink: #e8936f;
+    --clay-soft: #4a3329;
+    --green: #7bc79a;
+    --amber: #e3b341;
+    --error: #f2b8b5;
+    --selection: #5c3d30;
+    --button: #f3efe5;
+    --button-ink: #1f1e1d;
+    --shadow-float: 0 1px 2px #0000002e, 0 10px 30px #00000059;
+    --scrim: #0000006b;
+  }
+}

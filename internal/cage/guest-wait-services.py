@@ -14,6 +14,10 @@ def wait(config_path='/etc/claude-cage/browser-control.json', endpoints=None, ti
     )
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
+    # The services usually answer within a second or two of starting. Poll
+    # quickly at first, so the start does not wait up to a further second
+    # after they are ready.
+    delay = 0.1
     while time.monotonic() < deadline:
         try:
             for address, browser in endpoints:
@@ -24,7 +28,8 @@ def wait(config_path='/etc/claude-cage/browser-control.json', endpoints=None, ti
                         raise ValueError('Browser is starting')
             return
         except (OSError, ValueError, urllib.error.URLError):
-            time.sleep(1)
+            time.sleep(delay)
+            delay = min(delay * 2, 1)
     raise SystemExit('Cage browser, editor or display service did not become ready. Inspect the guest service logs and retry.')
 
 

@@ -1,6 +1,9 @@
+// Font stacks from brand/design-language.md §2 (no web fonts). Windows CJK
+// falls through to Microsoft YaHei UI, never to SimSun.
 export const systemUIFont =
-  '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif';
-export const systemCodeFont = '"SF Mono", Menlo, Consolas, monospace';
+  '-apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Noto Sans CJK SC", sans-serif';
+export const systemCodeFont =
+  'ui-monospace, "SF Mono", Menlo, "Cascadia Mono", Consolas, monospace';
 import { presets } from "./appearance-presets.mjs";
 export {
   presets,
@@ -10,19 +13,18 @@ export {
   themeCatalog,
   applyThemePreset,
 } from "./appearance-presets.mjs";
+export const defaultPreset = "super-cage";
 export const defaultAppearance = {
   customThemes: [],
   mode: "system",
   lightTheme: {
-    ...presets.light.codex,
-    preset: "codex",
-    opaqueWindows: false,
+    ...structuredClone(presets.light[defaultPreset]),
+    preset: defaultPreset,
     fonts: { ui: "", code: "" },
   },
   darkTheme: {
-    ...presets.dark.codex,
-    preset: "codex",
-    opaqueWindows: false,
+    ...structuredClone(presets.dark[defaultPreset]),
+    preset: defaultPreset,
     fonts: { ui: "", code: "" },
   },
   uiFontSize: 14,
@@ -33,30 +35,25 @@ export const defaultAppearance = {
 };
 export function normalizeAppearance(value = {}) {
   value = value && typeof value === "object" ? value : {};
+  // A saved theme owns its colour overrides; the default's overrides only fill
+  // a theme that is missing altogether.
+  const variant = (key) => {
+    const saved = value[key];
+    const fallback = defaultAppearance[key];
+    return {
+      ...fallback,
+      ...saved,
+      colors: { ...(saved ? saved.colors : fallback.colors) },
+      terminal: { ...(saved ? saved.terminal : fallback.terminal) },
+      fonts: { ...fallback.fonts, ...saved?.fonts },
+    };
+  };
   return {
     ...defaultAppearance,
     ...value,
     customThemes: Array.isArray(value.customThemes) ? value.customThemes : [],
-    lightTheme: {
-      ...defaultAppearance.lightTheme,
-      ...value.lightTheme,
-      colors: { ...value.lightTheme?.colors },
-      terminal: { ...value.lightTheme?.terminal },
-      fonts: {
-        ...defaultAppearance.lightTheme.fonts,
-        ...value.lightTheme?.fonts,
-      },
-    },
-    darkTheme: {
-      ...defaultAppearance.darkTheme,
-      ...value.darkTheme,
-      colors: { ...value.darkTheme?.colors },
-      terminal: { ...value.darkTheme?.terminal },
-      fonts: {
-        ...defaultAppearance.darkTheme.fonts,
-        ...value.darkTheme?.fonts,
-      },
-    },
+    lightTheme: variant("lightTheme"),
+    darkTheme: variant("darkTheme"),
   };
 }
 export function mix(a, b, weight) {
@@ -81,6 +78,10 @@ function luminance(hex) {
     .map((v) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4));
   return r * 0.2126 + g * 0.7152 + b * 0.0722;
 }
+// Returns every CSS custom property the UI reads. The design tokens
+// (--paper … --error, brand/design-language.md §1) are derived from the
+// legacy names below so that every preset, built-in or saved, fills the same
+// token set; overrides in theme.colors win over derived values.
 export function themeVariables(theme, variant) {
   const { surface, ink, accent, contrast } = theme;
   const chrome = mix(surface, ink, 0.025 + contrast * 0.00055);
@@ -113,13 +114,31 @@ export function themeVariables(theme, variant) {
   for (const [key, value] of Object.entries(theme.colors || {})) {
     if (colorTokens[key]) variables[colorTokens[key]] = value;
   }
-  variables["--sidebar"] = theme.colors?.sidebar || variables["--chrome"];
-  variables["--sidebar-ink"] = theme.colors?.sidebarInk || ink;
-  variables["--toolbar"] = theme.colors?.toolbar || surface;
-  variables["--toolbar-ink"] = theme.colors?.toolbarInk || ink;
-  // Shared components also use these aliases.
+  const colors = theme.colors || {};
+  const dark = variant === "dark";
+  variables["--sidebar"] = colors.sidebar || variables["--chrome"];
+  variables["--sidebar-ink"] = colors.sidebarInk || ink;
+  variables["--toolbar"] = colors.toolbar || surface;
+  variables["--toolbar-ink"] = colors.toolbarInk || ink;
+  // Design tokens. --surface is the card/input/menu/dialog layer, one step
+  // lighter than paper in light themes and one step up in dark themes.
+  variables["--surface"] =
+    colors.input || mix(surface, dark ? ink : "#ffffff", dark ? 0.05 : 0.7);
+  variables["--input"] = variables["--surface"];
+  variables["--soft"] = variables["--hover"];
+  variables["--line-strong"] =
+    colors.lineStrong || mix(variables["--line"], ink, 0.12);
+  variables["--faint"] = colors.faint || mix(ink, surface, 0.5);
+  variables["--clay"] = accent;
+  variables["--clay-ink"] = variables["--link"];
+  variables["--clay-soft"] =
+    colors.accentSoft || mix(surface, accent, dark ? 0.22 : 0.14);
+  variables["--green"] = variables["--success"];
+  variables["--amber"] = variables["--warning"];
+  variables["--error"] = variables["--danger"];
+  // Older component styles read these aliases.
   variables["--border"] = variables["--line"];
-  variables["--surface"] = variables["--paper"];
+  variables["--accent-soft"] = variables["--clay-soft"];
   return variables;
 }
 export function terminalTheme(theme, variant) {
@@ -163,8 +182,10 @@ export const colorGroups = [
       ["chromeDark", "次级背景"],
       ["strong", "标题文字"],
       ["muted", "辅助文字"],
+      ["faint", "占位与停用文字"],
       ["line", "边框与分隔线"],
-      ["input", "输入框背景"],
+      ["lineStrong", "输入框边框"],
+      ["input", "卡片与输入框背景"],
     ],
   },
   {
@@ -173,6 +194,7 @@ export const colorGroups = [
       ["button", "主按钮背景"],
       ["buttonInk", "主按钮文字"],
       ["accentInk", "强调色上的文字"],
+      ["accentSoft", "强调色浅底"],
       ["link", "链接"],
       ["focus", "焦点边框"],
       ["hover", "悬停背景"],

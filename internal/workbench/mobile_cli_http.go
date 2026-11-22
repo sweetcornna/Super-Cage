@@ -1,12 +1,19 @@
 package workbench
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -21,6 +28,8 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/cli/sessions/{id}/archive", s.mobileArchiveSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/restore", s.mobileRestoreSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/purge", s.mobilePurgeSession)
+	// The desktop stops a Codex turn it can only watch (a phone turn) here.
+	mux.HandleFunc("POST /api/cli/sessions/{id}/stop", s.mobileStop)
 	mux.HandleFunc("GET /api/mobile/cli/projects", s.mobileProjects)
 	mux.HandleFunc("GET /api/mobile/cli/sessions", s.mobileSessions)
 	mux.HandleFunc("POST /api/mobile/cli/sessions", s.mobileNewSession)
@@ -47,12 +56,14 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mobileConnectMu.Lock()
 	defer s.mobileConnectMu.Unlock()
-	view, ok := s.authorizedMobileSession(w, r)
-	if !ok {
+	if view, _, ok := s.authorizedMobileSessionRecord(w, r); !ok {
+		return
+	} else if view.Provider == codexProvider {
+		s.openCodexSession(w, r, view)
 		return
 	}
-	if view.Provider == codexProvider {
-		http.Error(w, "Codex 会话请在手机上继续，暂不支持从手机打开电脑终端", 409)
+	view, ok := s.authorizedMobileSession(w, r)
+	if !ok {
 		return
 	}
 	if !s.isTerminalConversation(view.ID) {
@@ -146,6 +157,43 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 	jsonReply(w, view)
 }
 
+// openCodexSession opens a Codex session in its desktop terminal. Shipped
+// phones call /open on their own for Claude sessions only, and older desktop
+// UIs never list Codex rows; the phone route keeps refusing.
+func (s *Server) openCodexSession(w http.ResponseWriter, r *http.Request, view mobileSession) {
+	if view.Archived {
+		http.Error(w, "此会话已归档，请先在设置中的已归档会话撤销归档", http.StatusGone)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/api/mobile/") {
+		http.Error(w, "Codex 会话请在手机上继续，暂不支持从手机打开电脑终端", 409)
+		return
+	}
+	probed := s.warmCodexProbe(r.Context())
+	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "codex", sharedID: view.ID, codexProbed: probed, requestContext: r.Context()})
+	if err != nil {
+		switch {
+		case errors.Is(err, errMobileLocked):
+			http.Error(w, err.Error(), http.StatusLocked)
+		case errors.Is(err, errTerminalsClosed):
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		case errors.Is(err, errTerminalStart):
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		default:
+			http.Error(w, err.Error(), http.StatusConflict)
+		}
+		return
+	}
+	s.mobileCLI.mu.Lock()
+	record, err := s.mobileCLI.record(s.profile, view.ID)
+	if err == nil {
+		view = record.snapshot()
+	}
+	s.mobileCLI.mu.Unlock()
+	view.DesktopTerminalID, view.Owner, view.Running = terminal.id, "desktop", true
+	jsonReply(w, view)
+}
+
 func (s *Server) mobileApprovalResponse(w http.ResponseWriter, r *http.Request) {
 	view, ok := s.authorizedMobileSession(w, r)
 	if !ok {
@@ -225,10 +273,45 @@ func (s *Server) mobileProjects(w http.ResponseWriter, r *http.Request) {
 		available := s.windowsCapabilitiesLocked()["available"].(map[string]bool)
 		shared = shared && available["cli"] && available["terminal"] && available["projects"]
 	}
+	codex := s.codexOfferedLocked()
 	s.mu.Unlock()
 	name, _ := os.Hostname()
-	jsonReply(w, map[string]any{"projects": projects, "ready": ready, "host": name, "shared_sessions": shared, "codex": s.codexGuestSupported()})
+	jsonReply(w, map[string]any{"projects": projects, "ready": ready, "host": name, "shared_sessions": shared, "codex": codex})
 }
+
+// Session list protocol (GET /api/cli/sessions, GET /api/mobile/cli/sessions):
+//
+//   - Every answer carries "revision", an opaque string that changes whenever
+//     anything else in the answer changes ("sessions" or "notice"). It is a
+//     content hash; after a host restart every session's "generation"
+//     changes, so the first answer is always a full list.
+//   - ?after=<revision> answers 204 No Content while the list still equals
+//     that revision, and 200 with the full list otherwise.
+//   - ?after=<revision>&wait=<1..25> holds the request for up to that many
+//     seconds while the list is unchanged and answers as soon as it changes
+//     (200) or the time is up (204). Larger values are treated as 25. The
+//     server may answer earlier. A client issues its next request at once
+//     after an answer, but never sooner than 1 s after the previous request
+//     started. It keeps its usual 5 s polling when an answer has no
+//     "revision" (an older server), when a request with these parameters
+//     fails with 400 or 404 (an older server or an older phone link filter),
+//     and treats a 204 that arrives more than 1 s before its wait elapsed as
+//     "not held" (wait its usual interval before the next request).
+//   - A client that sends neither parameter gets today's behaviour: a fresh
+//     guest observation and the full list on every request.
+//
+// "archived=true" combines with both parameters.
+//
+// Freshness: host changes (create, archive, restore, purge, rename, pin) are
+// in every answer at once and reach a held request within 250 ms. Every new
+// request starts from a guest observation made after it arrived, so a held
+// answer is never older than its wait (at most 25 s); a guest too slow to
+// answer within the request's time leaves it the newest finished observation
+// (session_hold.go). On Linux guests the
+// resident helper wakes it about 1 s after a guest change. The running flags
+// may reuse the guest's claude agents --json listing for up to 30 s when the
+// CLI's session registry shows no change. "updated_at" is part of the list,
+// so during a running turn a held list answers about once a second.
 func (s *Server) mobileSessions(w http.ResponseWriter, r *http.Request) {
 	paths, err := s.projectPaths()
 	if err != nil {
@@ -239,31 +322,244 @@ func (s *Server) mobileSessions(w http.ResponseWriter, r *http.Request) {
 	for _, path := range paths {
 		granted[path] = true
 	}
-	archived := r.URL.Query().Get("archived") == "true"
-	sessions, err := s.mobileCLI.summaries(s.profile, granted, archived)
+	query := r.URL.Query()
+	archived := query.Get("archived") == "true"
+	after, wait, ok := sessionListConditions(query.Get("after"), query.Get("wait"))
+	if !ok {
+		http.Error(w, "会话列表版本无效", 400)
+		return
+	}
+	// The desktop lists Codex sessions only when it asks with
+	// ?providers=claude,codex: an older desktop UI would open them as Claude
+	// Code terminals. The phone lists both, as it always has.
+	list, ok := s.sessionListKinds(strings.HasPrefix(r.URL.Path, "/api/mobile/"), query["providers"])
+	if !ok {
+		http.Error(w, "会话类型无效", 400)
+		return
+	}
+	// The catalog must be loaded before discovery matches guest sessions to it.
+	if _, err := s.mobileCLI.summaries(s.profile, granted, archived); err != nil {
+		http.Error(w, "无法读取主机上的 CLI 会话记录", 500)
+		return
+	}
+	arrival := time.Now()
+	// The guest is looked at for no longer than the request may take; see
+	// session_hold.go.
+	limit := arrival.Add(sessionLookLimit)
+	if wait > 0 {
+		limit = arrival.Add(wait)
+	}
+	look, cancel := holdContext(r.Context(), limit)
+	defer cancel()
+	claudeErr, codexErr := s.observeSessions(look, paths, list, arrival)
+	if r.Context().Err() != nil {
+		return
+	}
+	answer, err := s.sessionListAnswer(granted, archived, list, claudeErr, codexErr)
 	if err != nil {
 		http.Error(w, "无法读取主机上的 CLI 会话记录", 500)
 		return
 	}
-	var notices []string
-	claudeErr := s.discoverTerminalConversations(r.Context(), paths)
-	// Codex sessions continue only from the phone; the desktop sidebar opens
-	// sessions as Claude Code terminals and would offer rows it cannot open.
-	phone := strings.HasPrefix(r.URL.Path, "/api/mobile/")
-	var codexErr error
-	if phone {
-		codexErr = s.discoverCodexConversations(r.Context(), paths)
-	}
-	for _, err := range []error{claudeErr, codexErr} {
-		if err != nil && !slices.Contains(notices, err.Error()) {
-			notices = append(notices, err.Error())
+	if wait > 0 && answer.Revision == after {
+		answer, err = s.awaitSessionList(r.Context(), arrival, arrival.Add(wait), after, paths, archived, list, claudeErr, codexErr)
+		if r.Context().Err() != nil {
+			return
 		}
-	}
-	if claudeErr == nil || codexErr == nil {
-		sessions, err = s.mobileCLI.summaries(s.profile, granted, archived)
 		if err != nil {
 			http.Error(w, "无法读取主机上的 CLI 会话记录", 500)
 			return
+		}
+	}
+	if after != "" && answer.Revision == after {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	jsonReply(w, answer)
+}
+
+// awaitSessionList holds a list request while its answer equals after. The
+// host catalog is checked every 250 ms; the guest is watched by the resident
+// helper, or looked at every 5 s (the clients' own polling pace) when it
+// cannot be; Codex sessions, when listed, are looked at every 5 s. observed is
+// when the request's first look began.
+func (s *Server) awaitSessionList(ctx context.Context, observed, deadline time.Time, after string, paths []string, archived bool, list sessionListKinds, claudeErr, codexErr error) (sessionListAnswer, error) {
+	// Each look ends at the deadline; share then gives the newest finished
+	// observation, and the answer follows at once.
+	look, cancel := holdContext(ctx, deadline)
+	defer cancel()
+	changes, stop := s.subscribeGuestChanges()
+	defer stop()
+	host := time.NewTicker(250 * time.Millisecond)
+	defer host.Stop()
+	slow := time.NewTicker(5 * time.Second)
+	defer slow.Stop()
+	end := time.NewTimer(time.Until(deadline))
+	defer end.Stop()
+	looks := 0
+	key := strings.Join(slices.Sorted(slices.Values(paths)), "\x00")
+	run := func() (context.Context, context.CancelFunc) { return s.discoveryContext(look) }
+	granted := func() map[string]bool {
+		set := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			set[path] = true
+		}
+		return set
+	}
+	// The watch replaces the channel it closes, so a change it saw while this
+	// request was inside a discovery shows only in its time.
+	seen, now := observed, make(chan struct{})
+	close(now)
+	for {
+		changed, changedAt, watching := changes()
+		claude, codex := false, false
+		arrival := time.Now()
+		if changedAt.After(seen) {
+			changed = now
+		}
+		select {
+		case <-ctx.Done():
+			return sessionListAnswer{}, ctx.Err()
+		case <-end.C:
+			return s.sessionListAnswer(granted(), archived, list, claudeErr, codexErr)
+		case <-changed:
+			_, changedAt, _ = changes() // the change that closed it
+			claude, arrival, seen = list.claude, changedAt, changedAt
+		case <-slow.C:
+			claude, codex = list.claude && !watching, list.codex
+		case <-host.C:
+			// A project change needs a new observation. Locking the account
+			// or closing the server ends the request context instead.
+			if looks++; looks%4 == 0 {
+				if current, err := s.projectPaths(); err == nil && strings.Join(slices.Sorted(slices.Values(current)), "\x00") != key {
+					paths, key = current, strings.Join(slices.Sorted(slices.Values(current)), "\x00")
+					claude, codex = list.claude, list.codex
+				}
+			}
+		}
+		if claude {
+			claudeErr = s.cliDiscovery.share(look, "claude\x00"+key, arrival, run, func(ctx context.Context) error { return s.discoverTerminalConversations(ctx, paths) })
+		}
+		if codex {
+			codexErr = s.cliDiscovery.share(look, "codex\x00"+key, arrival, run, func(ctx context.Context) error { return s.discoverCodexConversations(ctx, paths) })
+		}
+		if ctx.Err() != nil {
+			return sessionListAnswer{}, ctx.Err()
+		}
+		answer, err := s.sessionListAnswer(granted(), archived, list, claudeErr, codexErr)
+		if err != nil || answer.Revision != after {
+			return answer, err
+		}
+	}
+}
+
+type sessionListAnswer struct {
+	Sessions []mobileSummary `json:"sessions"`
+	Notice   string          `json:"notice"`
+	// Capabilities is sent only to a desktop that lists Codex sessions.
+	Capabilities *sessionCapabilities `json:"capabilities,omitempty"`
+	Revision     string               `json:"revision"`
+}
+
+type sessionCapabilities struct {
+	// CodexSessions: the menu's Codex entry creates a session, and Codex rows
+	// open as bound terminals (a Linux guest with the plain "codex" command).
+	CodexSessions bool `json:"codex_sessions"`
+	// CodexCLI is the guest CLI's last reported support, when known.
+	CodexCLI *codexCLICaps `json:"codex_cli,omitempty"`
+}
+
+// sessionListKinds is what a list request asks for.
+type sessionListKinds struct{ phone, claude, codex bool }
+
+// sessionListKinds is sessionListFilter with the phone's Codex rows following
+// presence, as its Codex kind does: unknown and present list both, absent
+// lists Claude only. The desktop names its providers itself.
+func (s *Server) sessionListKinds(phone bool, values []string) (sessionListKinds, bool) {
+	kinds, ok := sessionListFilter(phone, values)
+	if ok && phone {
+		s.mu.Lock()
+		kinds.codex = s.codexOfferedLocked()
+		s.mu.Unlock()
+	}
+	return kinds, ok
+}
+
+func sessionListFilter(phone bool, values []string) (sessionListKinds, bool) {
+	if phone || values == nil {
+		return sessionListKinds{phone: phone, claude: true, codex: phone}, true
+	}
+	var kinds sessionListKinds
+	if len(values) != 1 {
+		return kinds, false
+	}
+	for _, name := range strings.Split(values[0], ",") {
+		switch name {
+		case "claude":
+			kinds.claude = true
+		case codexProvider:
+			kinds.codex = true
+		default:
+			return kinds, false
+		}
+	}
+	return kinds, true
+}
+
+const sessionListWaitLimit = 25 * time.Second
+
+func sessionListConditions(after, wait string) (string, time.Duration, bool) {
+	if after != "" && (len(after) != 32 || strings.Trim(after, "0123456789abcdef") != "") {
+		return "", 0, false
+	}
+	held, ok := sessionWait(wait)
+	if !ok || held > 0 && after == "" {
+		return "", 0, false
+	}
+	return after, held, true
+}
+
+// sessionWait reads a wait parameter in whole seconds; at most 25 are used.
+func sessionWait(value string) (time.Duration, bool) {
+	if value == "" {
+		return 0, true
+	}
+	seconds, err := strconv.ParseUint(value, 10, 32)
+	if err != nil {
+		return 0, false
+	}
+	return min(time.Duration(seconds)*time.Second, sessionListWaitLimit), true
+}
+
+// observeSessions refreshes the guest's view of the sessions a list shows,
+// sharing runs with concurrent list requests; the desktop and the phone share
+// one Codex discovery.
+func (s *Server) observeSessions(ctx context.Context, paths []string, list sessionListKinds, arrival time.Time) (claudeErr, codexErr error) {
+	key := strings.Join(slices.Sorted(slices.Values(paths)), "\x00")
+	run := func() (context.Context, context.CancelFunc) { return s.discoveryContext(ctx) }
+	var wg sync.WaitGroup
+	if list.codex {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			codexErr = s.cliDiscovery.share(ctx, "codex\x00"+key, arrival, run, func(ctx context.Context) error { return s.discoverCodexConversations(ctx, paths) })
+		}()
+	}
+	if list.claude {
+		claudeErr = s.cliDiscovery.share(ctx, "claude\x00"+key, arrival, run, func(ctx context.Context) error { return s.discoverTerminalConversations(ctx, paths) })
+	}
+	wg.Wait()
+	return claudeErr, codexErr
+}
+
+func (s *Server) sessionListAnswer(granted map[string]bool, archived bool, list sessionListKinds, claudeErr, codexErr error) (sessionListAnswer, error) {
+	sessions, err := s.mobileCLI.summaries(s.profile, granted, archived)
+	if err != nil {
+		return sessionListAnswer{}, err
+	}
+	var notices []string
+	for _, err := range []error{claudeErr, codexErr} {
+		if err != nil && !slices.Contains(notices, err.Error()) {
+			notices = append(notices, err.Error())
 		}
 	}
 	s.mu.Lock()
@@ -278,10 +574,37 @@ func (s *Server) mobileSessions(w http.ResponseWriter, r *http.Request) {
 			sessions[i].Active = false
 		}
 	}
-	if !phone {
-		sessions = slices.DeleteFunc(sessions, func(item mobileSummary) bool { return item.Provider == codexProvider })
+	s.codexRows(sessions)
+	sessions = slices.DeleteFunc(sessions, func(item mobileSummary) bool {
+		if item.Provider != codexProvider {
+			return !list.claude
+		}
+		// A session whose Codex closed before it made a thread has nothing to
+		// resume: the desktop hides it, and the phone keeps only its own.
+		return !list.codex || item.placeholder && item.Owner == "" && (!list.phone || item.menuPlaceholder)
+	})
+	// Equal pins and times keep a fixed order, so equal lists hash equally.
+	sort.SliceStable(sessions, func(i, j int) bool {
+		a, b := sessions[i], sessions[j]
+		if a.Pinned != b.Pinned {
+			return a.Pinned
+		}
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			return a.UpdatedAt.After(b.UpdatedAt)
+		}
+		return a.ID < b.ID
+	})
+	answer := sessionListAnswer{Sessions: sessions, Notice: strings.Join(notices, "\n")}
+	if list.codex && !list.phone {
+		answer.Capabilities = &sessionCapabilities{CodexSessions: s.codexSessionsPossible(), CodexCLI: s.mobileCLI.codexCLICaps()}
 	}
-	jsonReply(w, map[string]any{"sessions": sessions, "notice": strings.Join(notices, "\n")})
+	data, err := json.Marshal(answer)
+	if err != nil {
+		return sessionListAnswer{}, err
+	}
+	sum := sha256.Sum256(data)
+	answer.Revision = hex.EncodeToString(sum[:16])
+	return answer, nil
 }
 func (s *Server) mobileNewSession(w http.ResponseWriter, r *http.Request) {
 	var input struct {
@@ -403,9 +726,35 @@ func (s *Server) authorizedMobileSessionRecord(w http.ResponseWriter, r *http.Re
 	}
 	return view, record.Terminal, true
 }
+
+// Session read protocol (GET /api/[mobile/]cli/sessions/{id}):
+//
+//   - ?after=<revision>[&epoch=<generation>] answers 204 while the session's
+//     revision and generation are unchanged (as before).
+//   - Adding &wait=<1..25> holds the request while it is unchanged and
+//     answers as soon as it changes (200) or the time is up (204). An older
+//     server ignores wait and answers 204 at once, so a client sends wait
+//     only to a server whose session list answers carry "revision", and the
+//     session list's pacing and fallback rules apply: at most one request
+//     per second, and on 400, 404 or an early 204 it keeps its 1 s / 4 s
+//     polling. The 1 s floor stays because each read re-parses the whole
+//     transcript and each answer carries the whole session (up to 448 KiB
+//     of turns); while a reply streams, its state changes with every hook,
+//     so reads still arrive about once a second. What waiting adds is the
+//     first change after a quiet period within about 250 ms, and no polling
+//     while nothing happens.
 func (s *Server) mobileSessionView(w http.ResponseWriter, r *http.Request) {
-	view, ok := s.authorizedMobileSession(w, r)
-	if !ok {
+	arrival := time.Now()
+	// A held read answers by its time whatever the guest does; its first look
+	// gets at least heldReadFirstLook (session_hold.go).
+	var view mobileSession
+	ok, reached := false, true
+	if held, valid := sessionWait(r.URL.Query().Get("wait")); valid && held > 0 && r.URL.Query().Get("after") != "" {
+		view, ok, reached = s.readSessionBy(w, r, arrival.Add(max(held, heldReadFirstLook)))
+	} else {
+		view, ok = s.authorizedMobileSession(w, r)
+	}
+	if r.Context().Err() != nil || !ok && reached {
 		return
 	}
 	if value := r.URL.Query().Get("after"); value != "" {
@@ -419,7 +768,36 @@ func (s *Server) mobileSessionView(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "服务标识无效", 400)
 			return
 		}
-		if revision == view.Revision && (epoch == "" || epoch == view.Generation) {
+		wait, ok := sessionWait(r.URL.Query().Get("wait"))
+		if !ok {
+			http.Error(w, "等待时间无效", 400)
+			return
+		}
+		if !reached {
+			// The first look did not finish in time: nothing is known to
+			// have changed.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		unchanged := func() bool { return revision == view.Revision && (epoch == "" || epoch == view.Generation) }
+		// Hold the request while the session is unchanged; no lock is held
+		// while waiting, and every look is a full authorized read that ends
+		// at the deadline. The request context ends with the server, the
+		// account lock and the phone link, which ends a held read too.
+		for deadline := arrival.Add(wait); unchanged() && s.awaitSessionView(r.Context(), view, deadline); {
+			next, ok, reached := s.readSessionBy(w, r, deadline)
+			if !reached {
+				break
+			}
+			if !ok {
+				return
+			}
+			view = next
+		}
+		if r.Context().Err() != nil {
+			return
+		}
+		if unchanged() {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

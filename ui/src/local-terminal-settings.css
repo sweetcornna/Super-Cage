@@ -1,0 +1,64 @@
+/* Settings → 本机终端, its first part. The line about the application and the
+   switches reuse the settings page's help and toggle rows; only what is new to
+   this section is styled here. */
+.local-terminal-settings {
+  position: relative;
+}
+.local-terminal-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 24px;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+/* The group heading of the two switches, as the settings page's own groups;
+   the entry's devices and kept terminals use it too. */
+:is(.local-terminal-settings, .local-entry) .local-terminal-subtitle {
+  margin: 44px 0 8px;
+  font-size: var(--s-lg, 1.15rem);
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--strong);
+}
+/* The switches follow one short line, not a list. */
+.local-terminal-opener + .local-terminal-subtitle {
+  margin-top: 28px;
+}
+.local-terminal-savebar {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--paper) 92%, transparent);
+  backdrop-filter: blur(8px);
+  animation: appear var(--dur) var(--ease-out);
+}
+/* In the settings page the scroller keeps 72 px of padding below the column;
+   the bar sits on the window's bottom edge instead of floating above it. */
+.settings-page .settings-content .local-terminal-savebar {
+  bottom: -72px;
+}
+.local-terminal-savebar .save-note {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: var(--fs-secondary);
+}
+.local-terminal-savebar button.primary {
+  font-weight: 550;
+}
+.local-terminal-saved {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: var(--fs-caption);
+}
+@media (prefers-reduced-motion: reduce) {
+  .local-terminal-savebar {
+    animation: none;
+  }
+}

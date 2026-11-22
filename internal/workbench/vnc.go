@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"encoding/json"
 	"github.com/gorilla/websocket"
 	"io"
 	"net"
@@ -13,6 +14,10 @@ import (
 	"github.com/sylvinus/agent-vm/internal/containerenv"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
+
+// browserVNCAddress is where the guest's browser display listens, seen from
+// the host. A variable so that tests never touch a real guest's port.
+var browserVNCAddress = "127.0.0.1:15900"
 
 func (s *Server) vnc(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
@@ -26,13 +31,11 @@ func (s *Server) vnc(w http.ResponseWriter, r *http.Request) {
 		s.nativeBrowserVNC(w, r)
 		return
 	}
-	release, err := s.browserViews.acquire(s.changeBrowserVisibility)
-	if err != nil {
-		requestError(w, err)
-		return
-	}
-	defer release()
-	address := "127.0.0.1:15900"
+	// The guest's window state follows in the background. The picture never
+	// waits for it, and a failed change never refuses the picture.
+	viewer := s.joinBrowserView()
+	defer viewer.close()
+	address := browserVNCAddress
 	if containerenv.Configured(s.profile) {
 		environment, err := containerenv.Load(s.profile)
 		if err != nil {
@@ -52,14 +55,61 @@ func (s *Server) vnc(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer remote.Close()
-	s.streamVNC(w, r, remote, remote, func() { _ = remote.Close() })
+	s.streamDisplay(w, r, remote, remote, func() { _ = remote.Close() }, viewer)
 }
 
 func (s *Server) streamVNC(w http.ResponseWriter, r *http.Request, reader io.Reader, writer io.Writer, closeTransport func()) {
+	s.streamDisplay(w, r, reader, writer, closeTransport, nil)
+}
+
+// A display stream that has a viewer accepts display control messages in
+// WebSocket text frames, next to the RFB bytes in binary frames:
+//
+//	{"type":"visibility","visible":false}   the pane is hidden; keep the stream
+//	{"type":"visibility","visible":true}    the pane is shown again
+//
+// The client may send them when the server selected the WebSocket subprotocol
+// displayControlProtocol; a server that did not select it ignores text frames,
+// so the client must then close the stream when its pane is hidden, as before.
+// A stream is born shown. While it is hidden it demands nothing from the
+// guest, which can then pause the window. A stream hidden for longer than
+// displayHeldGrace is closed with displayHeldCloseCode, and the client
+// connects again when its pane is next shown. The server sends no text frame.
+const (
+	displayControlProtocol = "cage-display.v1"
+	displayHeldCloseCode   = 4001
+)
+
+var displayHeldGrace = 60 * time.Second
+
+// displayStreamProtocol is the plain RFB stream, which every display path
+// serves; clients offer it next to displayControlProtocol.
+const displayStreamProtocol = "binary"
+
+// upgradeDisplay selects a subprotocol whenever the client offers one it
+// knows: Chrome fails a handshake that offered subprotocols and got none
+// back. A stream with a viewer prefers displayControlProtocol (it holds a
+// hidden stream); every stream takes displayStreamProtocol otherwise, the
+// native macOS and Windows displays included.
+func (s *Server) upgradeDisplay(w http.ResponseWriter, r *http.Request, control bool) (*websocket.Conn, error) {
+	protocols := []string{displayStreamProtocol}
+	if control {
+		protocols = []string{displayControlProtocol, displayStreamProtocol}
+	}
+	// The same origin rule and buffers as upgrade, plus the subprotocols.
+	up := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return r.Header.Get("Origin") == s.origin }, ReadBufferSize: 16384, WriteBufferSize: 16384, Subprotocols: protocols}
+	ws, err := up.Upgrade(w, r, nil)
+	if err == nil {
+		context.AfterFunc(r.Context(), func() { _ = ws.Close() })
+	}
+	return ws, err
+}
+
+func (s *Server) streamDisplay(w http.ResponseWriter, r *http.Request, reader io.Reader, writer io.Writer, closeTransport func(), viewer *displayViewer) {
 	var once sync.Once
 	closeRemote := func() { once.Do(closeTransport) }
 	defer closeRemote()
-	ws, e := s.upgrade(w, r)
+	ws, e := s.upgradeDisplay(w, r, viewer != nil)
 	if e != nil {
 		return
 	}
@@ -111,10 +161,38 @@ func (s *Server) streamVNC(w http.ResponseWriter, r *http.Request, reader io.Rea
 			}
 		}
 	}()
+	var hidden *time.Timer
+	defer func() {
+		if hidden != nil {
+			hidden.Stop()
+		}
+	}()
 	for {
 		kind, b, e := ws.ReadMessage()
 		if e != nil {
 			return
+		}
+		if kind == websocket.TextMessage && viewer != nil && len(b) <= 256 {
+			var control struct {
+				Type    string `json:"type"`
+				Visible *bool  `json:"visible"`
+			}
+			if json.Unmarshal(b, &control) != nil || control.Type != "visibility" || control.Visible == nil {
+				continue
+			}
+			viewer.setVisible(*control.Visible)
+			if *control.Visible && hidden != nil {
+				hidden.Stop()
+				hidden = nil
+			}
+			// The grace runs from the first hide message, not from a repeat.
+			if !*control.Visible && hidden == nil {
+				hidden = time.AfterFunc(displayHeldGrace, func() {
+					_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(displayHeldCloseCode, "hidden-timeout"), time.Now().Add(time.Second))
+					closeStreams()
+				})
+			}
+			continue
 		}
 		if kind == websocket.BinaryMessage {
 			if queuedBytes.Add(int64(len(b))) > 8<<20 {

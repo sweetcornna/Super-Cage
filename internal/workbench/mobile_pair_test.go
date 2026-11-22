@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/keepawake"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 	"github.com/sylvinus/agent-vm/internal/relay"
 	"github.com/sylvinus/agent-vm/internal/remotelink"
@@ -54,11 +55,17 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	origin := relayHTTP.URL
 	s, networkGate := grantedToolUpdateServer(t)
 	serve := func(s *Server) {
+		// No real power request in tests (on macOS that would start caffeinate).
+		s.keepAwake = func(ctx context.Context, report func(keepawake.State)) {
+			report(keepawake.State{Active: true})
+			<-ctx.Done()
+			report(keepawake.State{})
+		}
 		server := httptest.NewUnstartedServer(s.handler())
 		s.origin = "http://" + server.Listener.Addr().String()
 		server.Start()
 		t.Cleanup(server.Close)
-		t.Cleanup(s.stopPhone)
+		t.Cleanup(s.stopDevices)
 	}
 	manage := func(s *Server, method string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, s.origin+"/api/mobile-pair", strings.NewReader("{}"))
@@ -155,19 +162,32 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	read(client, 423)
 	client.Close()
 	s.phones.mu.Lock()
-	powerCtx, powerDone := s.phones.powerCtx, s.phones.powerDone
+	powerDone := s.phones.power.done
 	s.phones.mu.Unlock()
-	if powerCtx == nil || powerCtx.Err() != nil {
+	select {
+	case <-powerDone:
 		t.Fatal("phone disconnect stopped standby power request")
+	default:
+		if powerDone == nil {
+			t.Fatal("paired phone holds no standby power request")
+		}
 	}
-	s.stopPhone()
+	s.stopDevices()
 	select {
 	case <-powerDone:
 	default:
 		t.Fatal("host shutdown left power request running")
 	}
-	// Restore an old enrollment whose Desktop and browser switches were off.
-	saved, err := os.ReadFile(s.phoneFile())
+	// Restore an old enrollment, in the phone file of earlier versions, whose
+	// Desktop and browser switches were off: the migration keeps the pairing.
+	if _, err := os.Stat(s.phoneFile()); !os.IsNotExist(err) {
+		t.Fatal("a device added by this version was written to the phone file of earlier versions")
+	}
+	list, err := readDevicesFile(s.devicesFile())
+	if err != nil || list == nil || len(list.Devices) != 1 || list.Devices[0].Legacy {
+		t.Fatalf("paired device list: %+v, %v", list, err)
+	}
+	saved, err := json.Marshal(list.Devices[0].phoneRecord())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +206,7 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	}
 	resumeRememberedPhoneHost(t, newHost)
 	serve(newHost)
-	if err := newHost.restorePhone(); err != nil {
+	if err := newHost.restoreDevices(); err != nil {
 		t.Fatal(err)
 	}
 	if w := manage(newHost, "GET"); w.Code != 200 || !strings.Contains(w.Body.String(), `"model":"Google Pixel 9 Pro"`) {
@@ -194,9 +214,7 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	}
 	client = connect()
 	read(client, 200)
-	newHost.phones.mu.Lock()
-	proof := newHost.phones.roomProof
-	newHost.phones.mu.Unlock()
+	proof := liveProof(t, newHost)
 	for _, denied := range []struct{ path, proof string }{
 		{"/api/mobile/cli/projects", ""},
 		{"/api/mobile/cli/projects", "old-room"},
@@ -224,12 +242,12 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	if err != nil || reply.Status != http.StatusConflict {
 		t.Fatalf("network change must withhold attached frame: %+v, %v", reply, err)
 	}
+	newHost.phones.mu.Lock()
+	removedPowerDone := newHost.phones.power.done
+	newHost.phones.mu.Unlock()
 	if w := manage(newHost, "DELETE"); w.Code != 200 {
 		t.Fatalf("revoke: HTTP %d", w.Code)
 	}
-	newHost.phones.mu.Lock()
-	removedPowerDone := newHost.phones.powerDone
-	newHost.phones.mu.Unlock()
 	select {
 	case <-removedPowerDone:
 	case <-time.After(3 * time.Second):
@@ -237,6 +255,9 @@ func TestDesktopPhonePairingLifecycle(t *testing.T) {
 	}
 	if _, err := os.Stat(newHost.phoneFile()); !os.IsNotExist(err) {
 		t.Fatal("revoked credentials still on disk")
+	}
+	if list, err := readDevicesFile(newHost.devicesFile()); err != nil || list == nil || len(list.Devices) != 0 {
+		t.Fatalf("revoked device still listed: %+v, %v", list, err)
 	}
 	if w := manage(newHost, "GET"); !strings.Contains(w.Body.String(), `"device":null`) || strings.Contains(w.Body.String(), "Pixel") {
 		t.Fatal("removed phone model remains in pairing status")

@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <WindowsNativeInputTests Condition="'$(WindowsNativeInputTests)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">true</WindowsNativeInputTests>
   </PropertyGroup>
+  <!-- The window's host-rendering gate, as Cage.Windows.csproj sets it. -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(ScienceHostVerified)' == 'true'">$(DefineConstants);SCIENCE_HOST_VERIFIED</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(WindowsNativeInputTests)' == 'true'">
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
@@ -20,6 +24,12 @@
     <Compile Include="../windows/UpdateInstaller.cs" Link="UpdateInstaller.cs" />
     <Compile Include="../windows/Authenticode.cs" Link="Authenticode.cs" />
     <Compile Include="../windows/WindowLayout.cs" Link="WindowLayout.cs" />
+    <Compile Include="../windows/ScienceFrame.cs" Link="ScienceFrame.cs" />
+    <Compile Include="../windows/CrashReports.cs" Link="CrashReports.cs" />
+    <Compile Include="../windows/WebGeneration.cs" Link="WebGeneration.cs" />
+    <Compile Include="../windows/LaunchQueue.cs" Link="LaunchQueue.cs" />
+    <Compile Include="../windows/ScienceSmoke.cs" Link="ScienceSmoke.cs" />
+    <EmbeddedResource Include="../../internal/workbench/testdata/science-cdp.json" LogicalName="Cage.ScienceCDP.json" />
   </ItemGroup>
   <ItemGroup Condition="'$(WindowsNativeInputTests)' == 'true'">
     <Compile Include="../windows/NativeInput.cs" Link="NativeInput.cs" />

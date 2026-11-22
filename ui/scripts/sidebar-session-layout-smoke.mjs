@@ -15,7 +15,8 @@ const sessions = titles.map((title, index) => ({
 }));
 const evidence = [];
 try {
-  await page.route("**/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
+  // The desktop list asks with ?providers=claude,codex (and later after/wait): match the path.
+  await page.route(url => url.pathname === "/api/cli/sessions", route => route.fulfill({ json: { sessions } }));
   state.status.ready = state.status.vm_running = true;
   state.terminals = [{ id: "layout-live", workspace, title: "已打开的会话" }];
   const project = page.getByRole("region", { name: "项目 .claude-cage-workspace", exact: true });
@@ -42,7 +43,8 @@ try {
       assert.ok(row.iconX !== undefined, `missing session icon: ${row.title}`);
       assert.ok(Math.abs(row.iconX - layout[0].iconX) < 1, `session icons misaligned: ${JSON.stringify(layout)}`);
       assert.ok(Math.abs(row.textX - layout[0].textX) < 1, `session titles misaligned: ${JSON.stringify(layout)}`);
-      assert.ok(row.height >= 40, `session row too short: ${row.title}`);
+      // brand/design-language.md §3: sidebar rows are 32–34 px high.
+      assert.ok(row.height >= 32, `session row too short: ${row.title}`);
       assert.ok(row.titleRight <= row.right, `title overflow: ${row.title}`);
     }
     assert.ok(layout.find(row => row.title.startsWith("这是一段")).clipped, "long session title was not truncated");

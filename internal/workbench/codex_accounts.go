@@ -91,6 +91,10 @@ type codexAccountManager struct {
 	// unrecorded is a pending login directory last seen holding a sign-in
 	// that cannot become an account, such as an API key login.
 	unrecorded string
+	// labels caches codexAccountLabels for the accounts file labelsFile
+	// described: lists poll every 250 ms.
+	labels     map[string]string
+	labelsFile os.FileInfo
 }
 
 func (s *Server) loadCodexAccounts() (codexAccountList, error) {
@@ -342,7 +346,7 @@ func (s *Server) readCodexGuestQuotas(ctx context.Context, ids []string) (map[st
 	}
 	readings := make(map[string]codexGuestQuota)
 	for chunk := range slices.Chunk(ids, 96) {
-		data, err := s.guest(ctx, "exec /usr/local/bin/cage-codex-account quotas "+strings.Join(chunk, " "))
+		data, err := s.guestQuick(ctx, "exec /usr/local/bin/cage-codex-account quotas "+strings.Join(chunk, " "))
 		if err != nil {
 			return readings, err
 		}
@@ -373,6 +377,8 @@ func (s *Server) allocateCodexAccount(previous codexAccountList, workspace strin
 		readings, _ = read(ctx, ids) // Retain the last snapshot when SSH is unavailable.
 		cancel()
 	}
+	// A phone turn of a Codex session uses its account as a terminal would.
+	phone := s.mobileCLI.codexPhoneLoad()
 	m := &s.codexAccounts
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -409,6 +415,9 @@ func (s *Server) allocateCodexAccount(previous codexAccountList, workspace strin
 		} else {
 			active[id]++
 		}
+	}
+	for id, count := range phone {
+		active[id] += count
 	}
 	preferred := ""
 	if recent := m.recent[workspace]; now.Sub(recent.at) < claudeProjectAffinity {
@@ -463,6 +472,35 @@ func pickCodexAccount(list codexAccountList, active map[string]int, logins map[s
 		}
 	}
 	return best
+}
+
+// pinnedCodexSelection is the account a Codex session started with; it never
+// changes. Opening the session on the desktop and sending from the phone
+// accept and refuse the same accounts.
+func (s *Server) pinnedCodexSelection(record *mobileRecord) (codexSelection, error) {
+	if record.CodexAccount == "" {
+		return codexSelection{}, nil
+	}
+	s.mu.Lock()
+	update := s.guestUpdateRequired
+	s.mu.Unlock()
+	if update {
+		return codexSelection{}, errGuestUpdateRequired
+	}
+	s.codexAccounts.mu.Lock()
+	list, err := s.loadCodexAccounts()
+	s.codexAccounts.mu.Unlock()
+	if err != nil {
+		return codexSelection{}, err
+	}
+	a := list.find(record.CodexAccount)
+	if a == nil {
+		return codexSelection{}, errors.New("这段会话所用的 Codex 账号已移除，无法继续")
+	}
+	if a.Email == "" {
+		return codexSelection{}, errors.New("这段会话所用的 Codex 账号尚未登录，请在 Codex 账号管理中检查")
+	}
+	return codexSelection{ID: a.ID, GuestID: a.ID, Subject: a.subject()}, nil
 }
 
 func (s *Server) noteCodexSelection(id, workspace string) {

@@ -20,6 +20,9 @@ type SetupProgress struct {
 // continues through the existing redacted operation log.
 func parseSetupProgress(line string) *SetupProgress {
 	line = strings.TrimSpace(line)
+	if strings.HasPrefix(line, "CAGE_AGENT_") {
+		return parseAgentProgress(line)
+	}
 	if strings.HasPrefix(line, "CAGE_HOST_RETRY ") {
 		fields := strings.Fields(line)
 		if len(fields) != 3 || (fields[2] != "2" && fields[2] != "3") {

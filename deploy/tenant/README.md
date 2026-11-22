@@ -117,6 +117,7 @@ map $http_upgrade $cage_connection {
 
 server {
     listen 443 ssl;
+    http2 on;
     server_name cage.example.org *.cage.example.org;
     ssl_certificate     /etc/nginx/tls/cage-fullchain.pem;
     ssl_certificate_key /etc/nginx/tls/cage-key.pem;
@@ -137,6 +138,21 @@ server {
         proxy_cache off;
     }
 
+    location ^~ /assets/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_request_buffering off;
+        proxy_buffering off;
+        proxy_cache off;
+        gzip on;
+        gzip_vary on;
+        gzip_min_length 1k;
+        gzip_comp_level 5;
+        gzip_types text/css text/javascript application/javascript image/svg+xml;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -153,6 +169,10 @@ server {
     }
 }
 ```
+
+**HTTP/2。** 示例里的 `http2 on;` 需要 nginx 1.25.1 或更新；更早的版本把它写进监听行：`listen 443 ssl http2;`（新版本里这种写法已弃用）。HTTP/1.1 下浏览器对每个主机只开 6 条连接，工作台的浏览器事件流（EventSource）会一直占着其中一条，其余请求在剩下的 5 条上排队；HTTP/2 把它们放进同一条连接的多个流。WebSocket（终端、画面）仍用 HTTP/1.1：nginx 不提供 RFC 8441 的 HTTP/2 WebSocket，浏览器会为它们另开 HTTP/1.1 连接。到网关的上游仍是 HTTP/1.1。验证：DevTools 的 Network 面板打开 Protocol 列，工作台请求应显示 `h2`；`curl -sI --http2 https://cage.example.org/ | head -1` 应以 `HTTP/2` 开头。
+
+**静态资源。** 对 `/api/` 之外的 GET 和 HEAD，状态为 200、206 或 304 的响应，网关转发工作台自己的缓存头：`Cache-Control`、`ETag`、`Last-Modified`、`Vary`，`Content-Encoding`、`Accept-Ranges` 和 `Content-Range` 本来就转发。网关预先设置的 `no-store` 会先去掉，否则两个值都会发出，`no-store` 仍然生效。带哈希的资源因此可以被浏览器缓存一年，HTML 用 `ETag` 校验、未变时只花一个 `304`。`public` 被改成 `private`：门户用 Cookie 鉴权，共享缓存不认识它，不能存这些响应。生存期最多一年，不认识的指令和 `no-store` 一律保持 `no-store`；API、错误和网关自己的页面始终是 `no-store`。旧版工作台只发 `no-store`，此时行为不变，缓存要等工作台给资源发缓存头才生效。浏览器的 `Accept-Encoding` 原样传给工作台，所以工作台预压缩的 br 或 gzip 资源按原字节传到浏览器；浏览器没发 `Accept-Encoding` 时网关向工作台要不压缩的内容。工作台自己不压缩时，由上面 `/assets/` 位置的 nginx `gzip` 压缩；该位置只压缩样式、脚本和 SVG，已带 `Content-Encoding` 的响应 nginx 不再处理，其余头（`Cache-Control`、`ETag`、`Vary`、`Accept-Ranges`）nginx 默认原样转发，对压缩后的响应它把强 `ETag` 改成弱 `ETag`，浏览器的校验仍然有效。
 
 终端、浏览器画面和事件流是长连接。工作台每 20 秒在终端连接上发送心跳，并在客户端 90 秒无应答后释放连接；客户端在约 50 秒收不到任何数据时自行重连并从断点续传。沿途每一跳的空闲期限都应明显长于心跳间隔，上面三个 1 小时的超时即为此设置；省略时 nginx 默认 60 秒，网络稍有阻塞就会断开写入中的连接。
 
@@ -203,7 +223,9 @@ ps -C qemu-system-x86_64 -o pid,rss,%cpu,comm
 ps -C incus -o comm= | wc -l
 ```
 
-每台 VM 独立复用一个 Super Cage 会话和 HTTP 连接池，最多保留 16 条空闲 guest-agent 连接，空闲 90 秒后关闭。同一 VM 的 HTTP、流和 WebSocket 共享 64 条同时请求的上限，另保留两条连接用于握手和健康检查。长连接由正常的读写回压控制，登录撤销会关闭该会话正在使用的流和 WebSocket。
+每台 VM 独立复用一个 Super Cage 会话和 HTTP 连接池，最多保留 16 条空闲 guest-agent 连接，空闲 45 秒后关闭。工作台自己在连接空闲 60 秒后关闭它，网关先放手，被复用的连接就很少恰好是来宾正在关闭的那一条。即便如此，复用的空闲连接上的请求失败时，网关先用健康检查确认控制器，检查通过就保持就绪；新建连接上的失败仍立即清除就绪状态。
+
+同一 VM 的普通 HTTP 请求最多 64 条同时进行；WebSocket 升级请求和 `Accept: text/event-stream` 的事件流另有 128 条的预算，因此打开很多终端、画面和事件流不会占满普通请求的名额，状态轮询和点击不会因此得到 `429`。任一预算用尽时，只有同类的新请求收到 `429`。另保留两条连接用于握手和健康检查。每条流在宿主上占一个 `incus exec` 与 `socat` 进程，所以 128 是一台 VM 的宿主进程上限，不是推荐值。长连接由正常的读写回压控制，登录撤销会关闭该会话正在使用的流和 WebSocket。
 
 ## 7. 空闲冷却
 
@@ -325,7 +347,7 @@ VM 模式下，profile 的 `limits.memory` 是每台 VM 的内存上限，不是
 - **需要量**：工作集加余量（1 GiB 与工作集四分之一中的较大者），再加来宾内核占用，向上取整到 256 MiB，且不低于 `-memory-min`。
 - **立即增长**：VM 少于需要量时，下一轮直接增长到需要量，宿主紧张时也一样，因为来宾内 OOM 比宿主换页更糟。增长不超过 profile 上限，也不超过「宿主内存 − 预留」。
 - **宿主紧张时回收**：宿主 `MemAvailable` 低于预留的两倍，或 PSI `some avg10` 达到 10% 时，每台 VM 每轮最多缩小 512 MiB，直到需要量为止。回收的主要是来宾页缓存。
-- **公平份额**：份额 = (宿主内存 − 预留 − 冻结及本轮不调整的 VM 内存) / 可调整的运行中 VM 数。超过份额的 VM 每轮最多缩小 512 MiB，但不低于需要量。例如第二台 VM 启动后，两台会逐步让出内存。
+- **公平份额**：份额 = (宿主内存 − 预留 − 冻结及本轮不调整的 VM 内存) / 可调整的运行中 VM 数。超过份额的 VM 每轮最多缩小 512 MiB，但不低于需要量。最近 1 分钟内有使用的工作区（经网关的请求和流数据、门户「打开」，以及开着空闲冷却时来宾 CPU 超过 `-idle-cpu-percent`）在宿主不紧张时不参与公平份额缩小，只有空闲的 VM 让出；宿主紧张时（上一条）所有 VM 照常缩小。例如第二台 VM 启动后，空闲的那台逐步让出内存；两台都在使用时，要等宿主可用内存低于预留的两倍才开始缩小。「在使用」按第 7 节的活动判断：工作台页面开着时会定期轮询，所以开着页面的 VM 都算在使用，公平份额缩小实际只作用于没有页面开着、也没有来宾 CPU 活动的 VM；来宾 CPU 活动由空闲冷却的扫描记录，最长每分钟更新一次，与 1 分钟的窗口相当，边缘上可能差一轮。这样更安全：宿主一旦紧张，所有 VM 仍照常缩小，工作集和余量不受影响，被回收的只是页缓存。
 - **其余情况保持不变**：宿主有空闲内存本身不会让 VM 增长，所以缩小后不会自己弹回。差距不到 512 MiB 时不调整。
 - **不调整的 VM**：冻结、停机、正在准备或正在冷却的 VM 不调整；网关调整某台 VM 时，空闲冷却先等它完成。
 - **来宾不应答**：读取来宾 `/proc/meminfo` 失败的 VM 本轮不调整。连续两轮失败时，它可能正因内存不足而卡顿，网关把它恢复到上限（宿主紧张时每轮增长 512 MiB）。
@@ -356,3 +378,38 @@ incus --force-local --project cage-tenant profile set default \
 `restricted.virtual-machines.lowlevel=allow` 会让该项目接受所有低级 VM 配置，例如 `raw.qemu` 和 `raw.apparmor`。网关仍拒绝这条以外的全部 `raw.*`，但 Incus 本身不再拦截，项目里的这类限制只剩网关校验一道。只在只有网关能访问 Incus socket 时这样设置。设置后，VM 下次启动时生效。在 VM 内执行 `cut -c6 /sys/bus/virtio/drivers/virtio_balloon/virtio*/features`，输出 `1` 表示来宾已协商该特性（第 6 个字符对应特性位 5，即 `VIRTIO_BALLOON_F_REPORTING`）。这项设置本轮没有在 KVM 宿主上实测。
 
 VM 内嵌套运行的 Super Cage 客机（QEMU 5.1 及以上；仅 Linux 宿主上的 QEMU）默认开启同一特性，嵌套客机释放的内存会先回到租户 VM，再由上面的设置或网关的 balloon 回到宿主。
+
+## 10. 经 vsock 直连工作台（VM 模式，可选）
+
+默认每条到工作台的连接都启动一个 `incus exec … socat`，字节经 incusd 和 guest agent 转发。网关每开一个 WebSocket 或一条新的池内连接，都要先付一次 exec 启动的时间，画面流量也经过 incusd 的 exec 中继。加 `-incus-vsock` 后，网关改为每个工作区经同一条 exec 启动一个常驻的中继 `/usr/local/bin/cage vsock-relay`，让它在 VM 的一个随机 vsock 端口上监听并转发到工作台的回环端口；之后网关直接连 VM 的 vsock 地址，新连接只是一次套接字连接加一次握手。该选项默认关闭，只用于虚拟机：容器与宿主共用内核和 vsock 命名空间，容器里的 vsock 监听会被其他容器连上，所以容器永远走 exec，`-incus-instance-type container` 加 `-incus-vsock` 会被拒绝启动。模板里的 `/usr/local/bin/cage` 必须是带 `vsock-relay` 的版本（本版及以后）；旧模板的 `cage` 不认这个子命令、立刻退出，网关就回到 exec。
+
+**认证。** vsock 本身没有文件权限层，宿主上任何本地进程都能向 VM 的 vsock 端口发起连接，VM 里的进程也能在 vsock 上监听。所以网关每启动一个中继，就生成一个只属于这个中继的随机密钥，经 exec 的标准输入交给它（不进命令行、不进环境变量），标准输入在中继运行期间一直开着，网关退出或工作区关闭时中继随之退出。每条连接（包括池内复用的）在任何 HTTP 字节之前都要双向证明知道这个密钥：中继先发随机数，网关回自己的随机数和 HMAC，中继核对后才连工作台，再回自己的 HMAC，网关核对后才发请求。因此：
+
+- 网关只向自己在本进程里启动并核对过的中继发请求和启动令牌；端口上别的监听（VM 里抢先占端口的进程、上一个网关进程留下的监听）拿不到任何请求字节，网关把该实例退回 exec 5 分钟并记日志。
+- 中继只为证明了密钥的一方转发；在 Linux 上它还丢弃对端 CID 不是宿主（2）的连接，所以 VM 里的进程、它的内层沙箱和嵌套客机都到不了握手。宿主上的其他本地进程同样是 CID 2，挡住它们的是密钥。
+- 两个方向的 HMAC 用不同标签、两端随机数都是新的，证明既不能反射也不能重放。
+
+第 1 节「控制端口只监听回环」对 TCP 端口仍然成立；中继的 vsock 监听不经过任何网络。
+
+**回退。** 直连只是优化，失败时用回今天的路径：
+
+- 中继监听起来后，网关先经已认证的 vsock 连接发一个普通 HTTP 请求，确认到达工作台的 HTTP 服务；随后工作区握手（`/api/launch`、`/api/session`、`/api/client/about`）也走 vsock。
+- 来宾侧的监听早于工作台启动。中继已在监听、但连不上工作台时，它用单独的标签回答「未就绪」，这次配备用 exec，不记为 vsock 的失败；中继随之结束，下一个工作区再试 vsock。
+- 握手经 vsock 失败时，网关用同一个启动令牌改经 exec 再握手一次；只有 exec 成功、vsock 不成功，才认定是 vsock 的问题，该实例 5 分钟内不再尝试 vsock。
+- 某次 vsock 连接失败时，在同一次拨号里改用 exec，请求和流看不到失败；单次失败不影响后面的连接（中继的监听队列是 128，同时在握手的连接最多 32 条）。连续 3 次失败后该工作区不再试 vsock，该实例 5 分钟内不再尝试。对方回应了却不是中继（问候不对，或证明不了密钥）时立刻放弃该路径；对方不出声或在握手中挂断（中继忙或慢时也会这样）只算一次普通的失败。
+- 来宾的 `cage` 没有 `vsock-relay`（中继进程立刻退出）、监听 5 秒内没有出现、`volatile.vsock_id` 缺失，该实例 5 分钟内不再尝试。网关进程的 systemd 限制了 `AF_VSOCK` 时，每次拨号失败并改用 exec，连续 3 次后放弃。以上都只是回退，不影响工作区可用。
+
+日志每个工作区一行：`dials its workbench through vsock (CID …, port …)` 表示在用直连；`uses incus exec; the vsock path is unavailable: …` 给出回退原因（`is not the bridge` 表示端口上的监听回应了却证明不了密钥，`nothing answered as the bridge` 表示 5 秒内没有监听完成握手）；`the vsock path ended (…)` 表示运行中退回 exec。回退不会让工作区报错，所以要靠这些日志确认直连真的在用。
+
+**在 KVM 宿主上逐项验证**（这一轮没有在真实宿主上跑过）：
+
+1. `incus --force-local --project cage-tenant config get cage-<id> volatile.vsock_id` 有数字（≥ 3）。
+2. 模板的 `cage` 带中继：`echo bad | incus --force-local --project cage-tenant exec cage-<id> -- /usr/local/bin/cage vsock-relay; echo $?` 打印 `cage vsock-relay: invalid configuration on stdin` 并以 2 退出（旧版本打印读不到配置并以 1 退出）。
+3. 加 `-incus-vsock` 重启网关，打开一个工作区，日志出现 `dials its workbench through vsock`。宿主上 `ps -eo args | grep -c 'exec .* vsock-relay'` 对每个工作区为 1；`ps -eo args | grep vsock-relay` 里看不到任何十六进制密钥，`sudo cat /proc/<incus exec 的 pid>/environ | tr '\0' '\n' | grep -ci secret` 为 0。
+4. 反复打开和关闭终端标签、刷新页面：`ps -eo args | grep -c 'socat STDIO'` 保持不变。默认路径下每个新连接都会让它加 1。
+5. 延迟：浏览器 Network 面板里，WebSocket 升级的「等待服务器响应」时间应比默认路径少约一次 `time incus --force-local --project cage-tenant exec cage-<id> -- true` 的耗时。再对比宿主 incusd 的 CPU：浏览器画面流动时应下降。
+6. 宿主上的其他进程用不了中继：在宿主上以普通用户执行 `python3 -c 'import socket; s=socket.socket(socket.AF_VSOCK); s.connect((<CID>, <端口>)); print(s.recv(64)); s.send(b"0"*98); print(s.recv(65))'`（端口取日志里那一行），第一行打印问候 `CAGE-VSOCK 1 …`，随后连接被关闭（第二个 `recv` 为空），VM 里 `ss -tnp | grep <工作台端口>` 不出现新的连接。再只连接、不发送：`python3 -c 'import socket,time; s=socket.socket(socket.AF_VSOCK); s.connect((<CID>, <端口>)); s.recv(64); t=time.time(); print(s.recv(1), round(time.time()-t,1))'` 约 3 秒后打印 `b'' 3.0`（中继在 vsock 套接字上的握手超时生效）。
+7. VM 里的进程用不了中继：在 VM 内（以及工作区的内层沙箱里，如果它能建 AF_VSOCK 套接字）执行 `python3 -c 'import socket; s=socket.socket(socket.AF_VSOCK); s.connect((1, <端口>)); print(s.recv(64))'` 和把 1 换成 VM 自己的 CID，都应当立刻被关闭（打印 `b''`）或连接失败，得不到问候。另一台租户 VM 连目标 VM 的 CID 和端口必须失败。
+8. 中继退出后不会冒充：在 VM 里让中继退出（`pkill -f 'cage vsock-relay'`），网关日志马上出现 `the vsock path ended (the bridge process ended)`；再用 `python3 -c 'import socket; s=socket.socket(socket.AF_VSOCK); s.bind((socket.VMADDR_CID_ANY, <端口>)); s.listen(); s.settimeout(60); c,_=s.accept(); print(c.recv(4096))'` 占住同一端口，在网关侧打开新终端并刷新页面：python 在 60 秒后以 `socket.timeout` 结束（网关不再连这个端口，更不会发任何字节），工作台照常经 exec 可用。关闭再打开该工作区时，网关启动一个新端口、新密钥的中继。
+9. 冻结和解冻：让工作区空闲到冻结（第 7 节），再打开工作台；网关恢复实例后新连接仍走 vsock（`ps` 里中继还在），已有的流在冻结时由网关断开、浏览器自动重连，这是已有行为。
+10. 网关重启：重启（包括 `kill -9`）后旧中继随标准输入关闭而退出（VM 里 `pgrep -fc 'cage vsock-relay'` 回到每个工作区 1 个），新网关用新的端口和密钥启动自己的中继；VM 关机时中继随之消失。

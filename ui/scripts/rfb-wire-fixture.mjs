@@ -3,14 +3,24 @@ import { createHash } from "node:crypto";
 
 // A bounded RFB display over real browser WebSockets. Playwright's WebSocket
 // replacement lacks the prototype properties checked by the shipped noVNC.
-export async function startDisplay(upstream, { frameInterval = 50, sharedClipboard = false } = {}) {
-  const stats = { connections: 0, closed: 0, frames: 0, clipboardConnections: 0, clipboardUpdates: [], keys: [] };
+// displayControl: the server of a held display stream. It selects the
+// cage-display.v1 subprotocol when offered, reads visibility messages from
+// text frames (stats.control), sends frames only when asked (stats.requests),
+// shows an empty desktop for emptyFor ms after the pane is shown again, and
+// closes a stream hidden for holdFor ms with code 4001.
+// echoBinary: answer a client that offers the "binary" subprotocol with it,
+// as websockify does. Off, the server selects none, as Cage servers before
+// cage-display.v1 do; a browser then refuses a client that offered one.
+export async function startDisplay(upstream, { frameInterval = 50, sharedClipboard = false, displayControl = false, holdFor = 60_000, emptyFor = 0, frame: frameSource, echoBinary = false, size = { width: 640, height: 480 } } = {}) {
+  const stats = { connections: 0, closed: 0, frames: 0, clipboardConnections: 0, clipboardUpdates: [], keys: [], control: [], requests: [], protocols: [], closeCodes: [], pointers: [] };
   const sockets = new Set();
   const displays = new Set();
   const clipboardWriters = new Set();
   const sharedWriters = new Set(), sharedSockets = new Set();
   const terminalWriters = new Set();
-  let width = 640, height = 480, framesPaused = false;
+  let width = size.width, height = size.height, framesPaused = false;
+  // replay: whole FramebufferUpdate messages sent in turn, one per request.
+  let replay = null, replayIndex = 0;
   const server = http.createServer((req, res) => {
     if (req.url.startsWith("/api/")) {
       res.writeHead(503); res.end("Unmocked fixture request"); return;
@@ -29,7 +39,13 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
     sockets.add(socket);
     stats.connections++;
     const key = createHash("sha1").update(req.headers["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest("base64");
-    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${key}\r\n\r\n`);
+    const offered = String(req.headers["sec-websocket-protocol"] || "").split(",").map(value => value.trim()).filter(Boolean);
+    const control = displayControl && !shared && !terminal && offered.includes("cage-display.v1");
+    const selected = control ? "cage-display.v1" : echoBinary && offered.includes("binary") ? "binary" : "";
+    stats.protocols.push(offered);
+    const path = new URL(req.url, upstream).pathname;
+    (stats.paths ||= {})[path] = (stats.paths[path] || 0) + 1;
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${key}\r\n${selected ? `Sec-WebSocket-Protocol: ${selected}\r\n` : ""}\r\n`);
     const send = (payload, opcode = 2) => {
       if (socket.destroyed) return;
       const length = payload.length;
@@ -55,9 +71,31 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
       send(message);
     };
     let wire = Buffer.alloc(0), rfb = Buffer.alloc(0), phase = 0, timer, frame;
+    // Held-stream state: outstanding update requests, the hide timer and the
+    // moment the guest window is back after a show.
+    let asked = 0, hidden = false, holdTimer, emptyUntil = 0;
     const makeFrame = () => {
       frame = Buffer.alloc(16 + width * height * 4);
       frame.writeUInt16BE(1, 2); frame.writeUInt16BE(width, 8); frame.writeUInt16BE(height, 10);
+    };
+    // A guest window: two halves of different colours. An empty desktop: one colour.
+    const paint = (count) => {
+      if (frameSource) return frameSource(frame, { width, height, count, empty: Date.now() < emptyUntil });
+      if (!control) return void frame.fill(count % 255, 16);
+      const empty = Date.now() < emptyUntil;
+      for (let y = 0; y < height; y++) {
+        const row = 16 + y * width * 4;
+        frame.fill(empty ? 0 : 40 + count % 200, row, row + width * 2);
+        frame.fill(empty ? 0 : 230, row + width * 2, row + width * 4);
+      }
+    };
+    const closeHeld = () => {
+      stats.closeCodes.push(4001);
+      const payload = Buffer.alloc(2 + 14);
+      payload.writeUInt16BE(4001, 0);
+      payload.write("hidden-timeout", 2);
+      send(payload, 8);
+      socket.end();
     };
     const resize = () => {
       const update = Buffer.alloc(16);
@@ -89,7 +127,15 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
         clipboardWriters.add(clipboard);
         timer = setInterval(() => {
           if (framesPaused || socket.writableLength > frame.length * 2) return;
-          frame.fill(stats.frames % 255, 16);
+          // A held stream's server answers requests; the legacy one pushes.
+          if (control || replay) { if (!asked) return; asked--; }
+          if (replay) {
+            const message = replay[replayIndex++ % replay.length];
+            stats.replayBytes = (stats.replayBytes || 0) + message.length;
+            send(message); stats.frames++;
+            return;
+          }
+          paint(stats.frames);
           send(frame); stats.frames++;
         }, frameInterval);
       }
@@ -108,7 +154,8 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
         }
         if (!length) { socket.destroy(); return; }
         if (rfb.length < length) return;
-        if (type === 5) stats.pointer = { x: rfb.readUInt16BE(2), y: rfb.readUInt16BE(4) };
+        if (type === 5) { stats.pointer = { x: rfb.readUInt16BE(2), y: rfb.readUInt16BE(4) }; stats.pointers.push({ ...stats.pointer, at: Date.now() }); }
+        if (type === 3) { stats.requests.push({ incremental: Boolean(rfb[1]), at: Date.now() }); if (control || replay) asked = 1; }
         if (type === 4) stats.keys.push({ down: Boolean(rfb[1]), symbol: rfb.readUInt32BE(4) });
         if (type === 248 && (rfb.readUInt32BE(4) & 0x80000000)) {
           const response = Buffer.from(rfb.subarray(0, length));
@@ -133,7 +180,18 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
         wire = wire.subarray(offset + maskBytes + length);
         if (opcode === 8) { send(payload, 8); socket.end(); return; }
         if (opcode === 9) send(payload, 10);
-        if (shared && opcode === 1) {
+        if (control && opcode === 1) {
+          const value = JSON.parse(payload.toString());
+          stats.control.push({ ...value, path: new URL(req.url, upstream).pathname, at: Date.now() });
+          if (value.type === "visibility" && value.visible === false && !hidden) {
+            hidden = true;
+            holdTimer = setTimeout(closeHeld, holdFor);
+          } else if (value.type === "visibility" && value.visible === true) {
+            hidden = false;
+            clearTimeout(holdTimer);
+            emptyUntil = Date.now() + emptyFor;
+          }
+        } else if (shared && opcode === 1) {
           const value = JSON.parse(payload.toString());
           stats.clipboardUpdates.push(value);
           sharedWrite({ ack: value.serial });
@@ -141,7 +199,7 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
       }
     });
     socket.on("error", () => {});
-    socket.on("close", () => { clearInterval(timer); displays.delete(resize); clipboardWriters.delete(clipboard); sharedWriters.delete(sharedWrite); terminalWriters.delete(terminalWrite); sharedSockets.delete(socket); sockets.delete(socket); stats.closed++; });
+    socket.on("close", () => { clearInterval(timer); clearTimeout(holdTimer); displays.delete(resize); clipboardWriters.delete(clipboard); sharedWriters.delete(sharedWrite); terminalWriters.delete(terminalWrite); sharedSockets.delete(socket); sockets.delete(socket); stats.closed++; });
     if (terminal) terminalWrite("Terminal clipboard ready\r\n$ ");
     else if (!shared) send(Buffer.from("RFB 003.008\n"));
   });
@@ -150,6 +208,9 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
     url: `http://127.0.0.1:${server.address().port}`,
     stats,
     pauseFrames(paused) { framesPaused = paused; },
+    // Recorded-style updates for a measurement: an array of FramebufferUpdate
+    // messages (see tightJpegUpdate). Requests are answered from it in turn.
+    replay(messages) { replay = messages; replayIndex = 0; },
     clipboard(text) { for (const write of clipboardWriters) write(text); },
     sharedClipboard(value) { for (const write of sharedWriters) write(value); },
     terminalOutput(text) { for (const write of terminalWriters) write(text); },
@@ -161,4 +222,20 @@ export async function startDisplay(upstream, { frameInterval = 50, sharedClipboa
       await new Promise((resolve) => server.close(resolve));
     },
   };
+}
+
+// One FramebufferUpdate with a Tight JPEG rectangle, as Xtigervnc sends a
+// scrolled page at quality 8.
+export function tightJpegUpdate(jpeg, { x = 0, y = 0, width, height }) {
+  const length = jpeg.length;
+  const compact = length < 128 ? [length] : length < 16384 ? [(length & 127) | 128, length >> 7]
+    : [(length & 127) | 128, ((length >> 7) & 127) | 128, length >> 14];
+  const header = Buffer.alloc(4 + 12 + 1 + compact.length);
+  header.writeUInt16BE(1, 2); // one rectangle
+  header.writeUInt16BE(x, 4); header.writeUInt16BE(y, 6);
+  header.writeUInt16BE(width, 8); header.writeUInt16BE(height, 10);
+  header.writeInt32BE(7, 12); // Tight
+  header[16] = 0x90; // JPEG
+  Buffer.from(compact).copy(header, 17);
+  return Buffer.concat([header, jpeg]);
 }

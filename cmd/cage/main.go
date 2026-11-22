@@ -25,6 +25,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/hostproxy"
 	"github.com/sylvinus/agent-vm/internal/limaembed"
 	"github.com/sylvinus/agent-vm/internal/managedproxy"
+	"github.com/sylvinus/agent-vm/internal/vsockrelay"
 	"github.com/sylvinus/agent-vm/internal/workbench"
 	"io"
 	"os/signal"
@@ -37,6 +38,8 @@ const help = `Super Cage — local isolated Claude development
 
 cage desktop       Open the unified Super Cage workbench (desktop launcher)
 cage agent         Discover and use the versioned, JSON-only external Agent interface
+cage entry         本机终端: on|off|status|devices|revoke|rename|include|proxy
+cage ssh ENV       ssh into an environment through its local SSH entry
 cage serve         Run its private localhost control service
 cage server-entry --json  Issue a private SSH remote connection entry
 cage container-configure --json  Configure a Linux container from JSON stdin
@@ -114,6 +117,17 @@ func run() int {
 	}
 	if args[0] == "agent" {
 		return runAgent(args[1:], os.Stdin, os.Stdout)
+	}
+	if args[0] == "entry" || args[0] == "ssh" {
+		return runEntry(args)
+	}
+	if args[0] == "attach" {
+		return runAttach(args[1:])
+	}
+	// The guest half of cage-tenant -incus-vsock, started through incus exec;
+	// its configuration and secret arrive on stdin and it ends with stdin.
+	if args[0] == "vsock-relay" && len(args) == 1 {
+		return vsockrelay.Main(os.Stdin, os.Stderr)
 	}
 	if args[0] == "verify-web-assets" {
 		if len(args) != 1 {
@@ -318,6 +332,12 @@ func run() int {
 		}
 		return relay(path, args[1])
 	}
+	if args[0] == "app-update" && len(args) == 2 && args[1] == "silent-available" {
+		// The native shell's question before it acts on a silent request.
+		reason := workbench.SilentUpdateUnavailable()
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"available": reason == "", "reason": reason})
+		return 0
+	}
 	if args[0] == "app-update" {
 		return appupdate.Run(path, args[1:], os.Stdout)
 	}
@@ -447,15 +467,60 @@ func run() int {
 	}
 	if args[0] == "prepare-update" {
 		stop, returnJSON := false, false
-		for _, argument := range args[1:] {
+		var update workbench.AppUpdateOptions
+		for i := 1; i < len(args); i++ {
+			argument := args[i]
 			switch argument {
 			case "--stop":
 				stop = true
 			case "--json":
 				returnJSON = true
+			case "--app-update", "--trigger", "--confirmed", "--request":
+				if i+1 >= len(args) {
+					return fail(fmt.Errorf("prepare-update option %s needs a value", argument))
+				}
+				i++
+				switch argument {
+				case "--app-update":
+					update.Version = args[i]
+				case "--trigger":
+					update.Trigger = args[i]
+				case "--confirmed":
+					for _, id := range strings.Split(args[i], ",") {
+						if id = strings.TrimSpace(id); id != "" {
+							update.Confirmed = append(update.Confirmed, id)
+						}
+					}
+				case "--request":
+					update.Request = args[i]
+				}
 			default:
 				return fail(fmt.Errorf("unknown prepare-update option: %s", argument))
 			}
+		}
+		if update.Version != "" {
+			// The native shell's decision path: the workload answers under its
+			// operation lock and stops the environment in the same operation.
+			if !stop || !returnJSON {
+				return fail(errors.New("prepare-update --app-update requires --stop --json"))
+			}
+			// One JSON line per event: "stopped" with the attempt as soon as
+			// the workload has stopped the environment, then the outcome.
+			update.Stopped = func(attempt string) {
+				_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "stopped", "attempt": attempt})
+			}
+			result, err := workbench.PrepareAppUpdate(path, update)
+			if err != nil {
+				diagnostics.Log("error", "command", err.Error())
+				if result.Status == "abandoned" {
+					_ = json.NewEncoder(os.Stdout).Encode(result)
+				} else {
+					_ = json.NewEncoder(os.Stdout).Encode(map[string]string{"status": "error", "message": err.Error()})
+				}
+				return 1
+			}
+			_ = json.NewEncoder(os.Stdout).Encode(result)
+			return 0
 		}
 		result, err := workbench.PrepareDesktopUpdate(path, stop)
 		if err != nil {
@@ -636,6 +701,9 @@ func run() int {
 		memory, cpus, resourceErr := cage.ConfiguredResourceLimits(path)
 		if resourceErr != nil {
 			return fail(resourceErr)
+		}
+		if allocation, err := cage.LoadResourceAllocation(path); err == nil && allocation.LimitsNotice() != "" {
+			fmt.Fprintln(os.Stderr, allocation.LimitsNotice())
 		}
 		args = append([]string{"setup", "--memory", fmt.Sprint(memory), "--cpus", fmt.Sprint(cpus), "--disk", "24", "--preinstall=node,python,chromium,gh,claude,code-server"}, args[1:]...)
 	}

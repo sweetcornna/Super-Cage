@@ -36,7 +36,7 @@ if ($signed) {
     }
     if ($Release) { Invoke-BuildTool $sevenZip @('t', '-bso0', '-bsp0', $QemuSourceArchive) }
     $signTool = Get-SigningTool
-    foreach ($file in @('Cage.exe', 'resources/cage.exe', 'resources/mihomo.exe')) {
+    foreach ($file in @('Cage.exe', 'resources/cage.exe', 'resources/cage-attach.exe', 'resources/mihomo.exe')) {
         Assert-CageReleaseSignature (Join-Path $AppDirectory $file)
     }
     $identity = Get-Content -LiteralPath (Join-Path $qemuRuntime 'cage-build.json') -Raw | ConvertFrom-Json

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   terminalHiddenKeepaliveMs, terminalHistoryPlan, terminalKeepaliveMessage, terminalKeepaliveMs, terminalLiveness,
-  terminalProbeMs, terminalReconnectLimit, terminalReconnectPlan, terminalSilenceMs, terminalStreamPath,
+  terminalProbeMs, terminalReconnectLimit, terminalReconnectPlan, terminalSilenceMs, terminalStreamPath, terminalViewer,
 } from "./terminal-reconnect.mjs";
 
 test("a stream dropped after being open reconnects at once and resets the count", () => {
@@ -29,6 +29,9 @@ test("the keepalive is the ping the terminal stream answers", () => {
 test("the stream resumes after the last received byte", () => {
   assert.equal(terminalStreamPath("0123456789abcdef", null), "/terminals/0123456789abcdef/stream?after=0");
   assert.equal(terminalStreamPath("0123456789abcdef", 1234), "/terminals/0123456789abcdef/stream?after=1234");
+  assert.equal(terminalStreamPath("0123456789abcdef", 7, "web-0123456789ab"), "/terminals/0123456789abcdef/stream?after=7&viewer=web-0123456789ab");
+  for (const viewer of ["short", "has space 12345", "a".repeat(65), 42])
+    assert.equal(terminalStreamPath("0123456789abcdef", 7, viewer), "/terminals/0123456789abcdef/stream?after=7");
   for (const invalid of [-1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 2, "12", undefined])
     assert.equal(terminalStreamPath("a", invalid), "/terminals/a/stream?after=0");
 });
@@ -72,4 +75,12 @@ test("a server that never sent a heartbeat is not judged silent", () => {
   const now = 1_000_000;
   const quiet = { now, lastReceived: 0, lastPing: now, probe: now - 60_000, visible: true, heartbeats: false };
   assert.equal(terminalLiveness(quiet), "idle");
+});
+
+test("a page names itself once per terminal, across reconnects", () => {
+  const first = terminalViewer("0123456789abcdef");
+  assert.match(first, /^web-[0-9a-f]{24}$/);
+  assert.equal(terminalViewer("0123456789abcdef"), first);
+  assert.notEqual(terminalViewer("fedcba9876543210"), first);
+  assert.ok(terminalStreamPath("0123456789abcdef", 5, first).endsWith("?after=5&viewer=" + first));
 });

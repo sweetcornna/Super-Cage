@@ -21,7 +21,7 @@ var guestOpen string
 var browserLogin string
 
 func guestOpenScript() string {
-	return "sudo tee /usr/local/lib/browser-login.mjs >/dev/null <<'CAGE_BROWSER_LOGIN'\n" + browserLogin + "\nCAGE_BROWSER_LOGIN\n" +
+	return browserScienceScript() + "sudo tee /usr/local/lib/browser-login.mjs >/dev/null <<'CAGE_BROWSER_LOGIN'\n" + browserLogin + "\nCAGE_BROWSER_LOGIN\n" +
 		"sudo tee /usr/local/bin/cage-open >/dev/null <<'CAGE_OPEN_URL'\n" + guestOpen + "\nCAGE_OPEN_URL\nsudo chmod 0755 /usr/local/bin/cage-open\nsudo ln -sf /usr/local/bin/cage-open /usr/local/bin/xdg-open\n"
 }
 

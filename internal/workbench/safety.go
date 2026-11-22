@@ -34,12 +34,65 @@ type safetyState struct {
 	MacOSExitCandidate *macOSExitCandidate `json:"macos_exit_candidate,omitempty"`
 	pauseVersion       uint64
 	monitorError       string
-	Gate               *cage.GateStatus   `json:"gate,omitempty"`
-	Report             *cage.SafetyReport `json:"report,omitempty"`
-	Error              string             `json:"error,omitempty"`
-	ExitIP             string             `json:"exit_ip,omitempty"`
-	VerifiedAt         time.Time          `json:"verified_at,omitempty"`
+	// deferral is the current lease's monitoring round that could not be
+	// confirmed; memory is the latest reading of the guest's memory.
+	deferral   monitorDeferral
+	memory     memorySnapshot
+	Gate       *cage.GateStatus   `json:"gate,omitempty"`
+	Report     *cage.SafetyReport `json:"report,omitempty"`
+	Error      string             `json:"error,omitempty"`
+	ExitIP     string             `json:"exit_ip,omitempty"`
+	VerifiedAt time.Time          `json:"verified_at,omitempty"`
+	// Explanation says why networking is closed or at risk and what happens
+	// next. Refreshed on every transition; absent while nothing is pending.
+	Explanation *networkExplanation `json:"explanation,omitempty"`
 }
+
+// monitorDeferral records monitoring rounds that could not confirm the guest
+// within one lease. It never extends the lease: Until is the gate's deadline,
+// after which the gate's own timer closes it. Until (the gate's wall-clock
+// reading) names the lease; Deadline is the same end on this process's
+// monotonic clock, and every wait and countdown is timed from it.
+type monitorDeferral struct {
+	RunID    string
+	Epoch    uint64
+	Until    time.Time
+	Deadline time.Time
+	Since    time.Time
+	RetryAt  time.Time
+	Stage    string
+	Attempts int
+}
+
+// The monitor's guest reads. Tests replace them; production reads the guest.
+var (
+	monitorGuestSettings = func(s *Server, ctx context.Context, input map[string]any) (guestObservation, error) {
+		return s.guestObservation(ctx, input)
+	}
+	monitorBrowserSettings = func(s *Server, ctx context.Context, cfg cage.Config) (browserObservation, error) {
+		return s.browserObservation(ctx, cfg, false)
+	}
+	monitorMacOSBrowserRecheck = func(s *Server, ctx context.Context, cfg cage.Config) error {
+		return s.recheckMacOSBrowserSettings(ctx, cfg)
+	}
+)
+
+// Timing of the monitor's guest reads within a lease. A read keeps the
+// monitor's own budget (its 45 s context, as before) but ends
+// monitorRenewMargin before the lease does, so a confirmed round can still
+// renew. After a round that could not confirm, the next starts
+// monitorRetrySpacing later, and a last one starts monitorLastAttempt before
+// the lease ends.
+var (
+	monitorReadLimit    = 45 * time.Second
+	monitorRenewMargin  = 3 * time.Second
+	monitorReadMinimum  = 2 * time.Second
+	monitorRetrySpacing = 15 * time.Second
+	monitorLastAttempt  = 15 * time.Second
+)
+
+// errMonitorNoTime is an unconfirmed read: too little lease was left to start it.
+var errMonitorNoTime = noAnswer(errors.New("monitoring lease too short for another guest read"))
 
 type networkObservation struct {
 	Status int    `json:"status"`
@@ -107,6 +160,21 @@ type browserObservation struct {
 	Network          networkObservation `json:"network"`
 }
 
+// safetyViewLocked is the safety state as clients read it. They compare the
+// gate's until with their own wall clock, so it is the lease's end as the
+// gate times it (Deadline) placed on the current wall clock: after the host
+// slept, the gate's own wall-clock reading lies in the past while the lease
+// still runs. Called with s.mu held.
+func (s *Server) safetyViewLocked(now time.Time) safetyState {
+	view := s.safety
+	if gate := view.Gate; gate != nil && gate.Mode != cage.GateClosed && !gate.Until.IsZero() {
+		shown := *gate
+		shown.Until = now.Add(gate.Deadline().Sub(now)).Round(0)
+		view.Gate = &shown
+	}
+	return view
+}
+
 func (s *Server) gateClient() (*cage.GateClient, error) {
 	return cage.OpenGateClient(s.instanceDir())
 }
@@ -126,15 +194,28 @@ func (s *Server) publishGate(state cage.GateStatus) {
 			s.safety.Error = ""
 			s.safety.monitorError = ""
 			s.exitProbeError = ""
+			s.safety.deferral = monitorDeferral{}
 		}
 	}
+	s.refreshNetworkExplanationLocked(time.Now())
 }
 
 // A gate grant resolves a monitoring failure. Independent diagnostics, such
 // as a location lookup failure, are cleared by the operation that owns them.
 func (s *Server) currentNetworkErrorLocked() string {
+	now := time.Now()
 	reason := s.networkErrorLocked()
-	if recovery := s.networkRecoveryMessageLocked(time.Now()); recovery != "" {
+	if d := s.activeDeferralLocked(now); d != nil {
+		// No countdown here: this text is read on every status poll and must
+		// say the same thing until the situation changes (the explanation's
+		// deadline_ms carries the time).
+		notice := "联网许可到期前仍无法确认时，外网会自动暂停并安排完整重检"
+		if reason == "" {
+			return notice
+		}
+		return reason + "；" + notice
+	}
+	if recovery := s.networkRecoveryMessageLocked(now); recovery != "" {
 		if reason == "" {
 			return recovery
 		}
@@ -325,15 +406,16 @@ func (s *Server) guestObservation(ctx context.Context, input map[string]any) (gu
 	var observation guestObservation
 	data, err := json.Marshal(input)
 	if err != nil {
-		return observation, err
+		return observation, noAnswer(err)
 	}
 	command := "python3 -c " + shellescape.Quote(guestSafetyProbe) + " " + shellescape.Quote(base64.StdEncoding.EncodeToString(data))
 	output, err := s.guestControl(ctx, "exec bash -lc "+shellescape.Quote(command), "safety-probe")
 	if err != nil {
-		return observation, fmt.Errorf("客机检测未返回完整结果: %w", err)
+		return observation, noAnswer(fmt.Errorf("客机检测未返回完整结果: %w", err))
 	}
 	if err = json.Unmarshal(output, &observation); err != nil {
-		return observation, errors.New("客机检测返回格式无效")
+		// A probe killed while writing leaves part of its reply.
+		return observation, noAnswer(errors.New("客机检测返回格式无效"))
 	}
 	return observation, nil
 }
@@ -349,7 +431,8 @@ func (s *Server) browserObservation(ctx context.Context, cfg cage.Config, networ
 	body, _ := json.Marshal(map[string]any{"network": network, "timezone": cfg.Timezone})
 	data, err := s.guestAPI(ctx, token, "POST", "/audit", body)
 	if err != nil || json.Unmarshal(data, &observation) != nil {
-		return observation, errors.New("浏览器检测未返回完整结果，请更新或重启环境")
+		// The audit reports the values it reads; it fails only without them.
+		return observation, noAnswer(errors.New("浏览器检测未返回完整结果，请更新或重启环境"))
 	}
 	return observation, nil
 }
@@ -570,7 +653,9 @@ func (s *Server) inspectVMLayout() (bool, bool) {
 }
 
 func (s *Server) managementRequiresSession(ctx context.Context) bool {
-	client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
+	control, _ := url.Parse(s.origin)
+	port, _ := strconv.Atoi(control.Port())
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: controllerDial(controlFile{Port: port})}, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
 	defer client.CloseIdleConnections()
 	req, _ := http.NewRequestWithContext(ctx, "GET", s.origin+"/api/settings", nil)
 	response, err := client.Do(req)
@@ -1089,9 +1174,12 @@ func (s *Server) runSafetyCheck() (returned error) {
 
 // Monitoring renews a short host-owned lease without replaying the disruptive
 // failure drill. Lost supervision eventually closes existing guest connections.
+// Jobs that leave the network path alone (installs, a browser data clear,
+// which talks only to the browser controller) let the lease renew meanwhile.
 func (s *Server) networkMonitorBlockedLocked() bool {
 	job := s.jobs.snapshot()
-	return s.closing || s.networkPaused || (job.Running && job.Kind != "environment-tools" && job.Kind != "claude-desktop-install")
+	return s.closing || s.networkPaused || (job.Running && job.Kind != "environment-tools" && job.Kind != "claude-desktop-install" &&
+		job.Kind != "claude-science-install" && job.Kind != "claude-science-update" && job.Kind != "browser-clear" && !agentJobRenewsLease(job.Kind))
 }
 
 func (s *Server) monitorSafety() {
@@ -1107,7 +1195,7 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 	defer s.recordMonitorTiming("safety", timing)
 	s.mu.Lock()
 	ready, busy, last := s.ready, s.networkMonitorBlockedLocked(), s.safety.VerifiedAt
-	paused, closing := s.networkPaused, s.closing
+	paused, closing, retry := s.networkPaused, s.closing, s.safety.deferral.RetryAt
 	s.mu.Unlock()
 	switch {
 	case closing:
@@ -1124,6 +1212,10 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		return
 	case time.Since(last) < 30*time.Second:
 		timing.result = "not_due"
+		return
+	case time.Now().Before(retry):
+		// The last round could not confirm the guest; space the retries.
+		timing.result = "retry_not_due"
 		return
 	}
 	client, err := s.gateClient()
@@ -1151,15 +1243,16 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		s.mu.Unlock()
 		return
 	}
-	timing.until = state.Until
+	timing.until = state.Deadline()
 	s.publishGate(state)
 	if state.Mode != cage.GateOpen || state.Report == nil {
 		timing.result = "gate_not_open"
 		// A packet helper can reconnect before the next GUI status tick. Its
 		// gate stays closed until a fresh check, even though the helper never
 		// exited and the new receipt is already available.
-		recheckClosed := state.Reason == "检查或监测授权已到期" || s.windowsGuest != nil && state.Reason == windowsPacketDisconnectedReason
+		recheckClosed := state.Reason == gateLeaseExpired || s.windowsGuest != nil && state.Reason == windowsPacketDisconnectedReason
 		if state.Mode == cage.GateClosed && recheckClosed && state.Report != nil {
+			s.noteExpiredDeferral(state)
 			s.mu.Lock()
 			pending := s.recovery.RunID != ""
 			s.mu.Unlock()
@@ -1169,7 +1262,9 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		}
 		return
 	}
-	var issue string
+	// issue is a confirmed failure and closes at once; unconfirmed names a
+	// guest read that returned no answer, which is retried within the lease.
+	var issue, unconfirmed string
 	var recoverable bool
 	cfg, err := loadConfig(s.configPath)
 	if err != nil || cfg.Fingerprint() != state.Configuration {
@@ -1186,7 +1281,7 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 		ip, err = probe(ctx, cfg)
 		timing.stage("exit_ip")
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && s.deferTimedOutExitProbe(ctx, client, state) {
+			if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && s.deferUnconfirmedObservation(client, state, "exit_ip") {
 				timing.result = "exit_timeout_retry"
 				return
 			}
@@ -1201,29 +1296,83 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 			}
 		}
 	}
+	// Each guest read ends early enough for a confirmed round to renew, and
+	// none starts when too little of the lease is left. The lease is timed
+	// as the gate times it (Deadline): after the host slept, its wall-clock
+	// end has passed although the lease still runs.
+	readContext := func() (context.Context, context.CancelFunc) {
+		deadline := time.Now().Add(monitorReadLimit)
+		if last := state.Deadline().Add(-monitorRenewMargin); last.Before(deadline) {
+			deadline = last
+		}
+		if time.Until(deadline) < monitorReadMinimum {
+			return nil, nil
+		}
+		return context.WithDeadline(ctx, deadline)
+	}
 	if issue == "" {
-		guest, e := s.guestObservation(ctx, map[string]any{"stage": "environment", "timezone": cfg.Timezone})
+		guest, e := guestObservation{}, errMonitorNoTime
+		if readCtx, cancelRead := readContext(); readCtx != nil {
+			guest, e = monitorGuestSettings(s, readCtx, map[string]any{"stage": "environment", "timezone": cfg.Timezone})
+			cancelRead()
+		}
 		timing.stage("guest_settings")
-		if e != nil || !s.guestSettingsOK(guest, cfg) {
-			issue = "系统时区或语言的运行状态无法确认，请重新检测"
-			recoverable = e != nil
+		// An answer is a confirmation either way; only no answer is retried.
+		// Values the probe leaves out (UTC offsets) come from files and zone
+		// data, not from a slow guest, so they count as a wrong answer. A
+		// read that answered wrongly (guest_reads.go) closes at once and is
+		// rechecked automatically, as every failed read was before.
+		if e != nil && unanswered(e) {
+			unconfirmed = "guest_settings"
+		} else if e != nil {
+			issue, recoverable = diagnostics.Redact(e.Error()), true
+		} else if !s.guestSettingsOK(guest, cfg) {
+			issue = "系统时区或语言与已应用配置不一致，外网已暂停；请重新应用设置并重新检测"
+			if s.windowsGuest == nil && s.macosGuest == nil {
+				if detail := linuxGuestSettingsMismatch(guest, cfg); detail != "" {
+					issue = "系统时区或语言与已应用配置不一致（" + detail + "），外网已暂停；请重新应用设置并重新检测"
+				}
+			}
 		}
 	}
-	if issue == "" && s.macosGuest != nil {
+	if issue == "" && unconfirmed == "" && s.macosGuest != nil {
+		e := errMonitorNoTime
+		if readCtx, cancelRead := readContext(); readCtx != nil {
+			e = monitorMacOSBrowserRecheck(s, readCtx, cfg)
+			cancelRead()
+		}
 		timing.stage("browser_settings_inputs")
-		if !s.recheckMacOSBrowserSettings(ctx, cfg) {
+		switch {
+		case e == nil:
+		case unanswered(e):
+			unconfirmed = "browser_settings"
+		default:
 			issue = "未能确认 Chrome 仍在使用检测过的进程和资料设置，请打开 Chrome 后重新检测"
 			recoverable = false
 		}
-	} else if issue == "" {
-		browser, e := s.browserObservation(ctx, cfg, false)
+	} else if issue == "" && unconfirmed == "" {
+		browser, e := browserObservation{}, errMonitorNoTime
+		if readCtx, cancelRead := readContext(); readCtx != nil {
+			browser, e = monitorBrowserSettings(s, readCtx, cfg)
+			cancelRead()
+		}
 		timing.stage("browser_settings")
-		if e != nil {
-			issue = "浏览器时区或语言的运行状态无法确认，请重新检测"
-			recoverable = true
+		if e != nil && unanswered(e) {
+			unconfirmed = "browser_settings"
+		} else if e != nil {
+			issue, recoverable = "浏览器配置检查未通过："+diagnostics.Redact(e.Error()), true
 		} else if mismatch := s.browserSettingsIssue(browser, cfg); mismatch != "" {
 			issue = "浏览器配置检查未通过：" + mismatch
 		}
+	}
+	if issue == "" && unconfirmed != "" {
+		if s.deferUnconfirmedObservation(client, state, unconfirmed) {
+			timing.result = "observation_unconfirmed"
+			return
+		}
+		// Only a changed configuration refuses the deferral; the renewal
+		// step below rechecks it and closes the gate for that reason.
+		issue = "运行配置已变化，请重新应用设置"
 	}
 	if issue != "" {
 		timing.result = "observation_failed"
@@ -1232,32 +1381,129 @@ func (s *Server) monitorSafetyWithProbe(probe func(context.Context, cage.Config)
 	timing.stage("finish_observation")
 }
 
-// Keep the already granted lease unchanged while retrying a timed-out exit
-// query. The gate's own timer still closes all connections at its deadline.
-func (s *Server) deferTimedOutExitProbe(ctx context.Context, client *cage.GateClient, observed cage.GateStatus) bool {
+// gateLeaseExpired is the reason the gate's own timer closes it with.
+const gateLeaseExpired = "检查或监测授权已到期"
+
+// deferUnconfirmedObservation keeps the already granted lease unchanged after
+// a monitoring read that returned no answer: a timed-out exit query, or a
+// guest read that timed out, lost its connection, was killed or replied with
+// something unreadable. Nothing is renewed, so the gate's own timer still
+// closes every connection at the lease deadline unless a later complete round
+// confirms the guest first. It reports false only when the configuration
+// changed, which the caller turns into an immediate closure.
+func (s *Server) deferUnconfirmedObservation(client *cage.GateClient, observed cage.GateStatus, stage string) bool {
+	var memory memorySnapshot
+	if stage != "exit_ip" {
+		memory = s.readMemorySnapshot()
+	}
 	s.safetyOp.Lock()
 	defer s.safetyOp.Unlock()
 	s.mu.Lock()
 	blocked := s.networkMonitorBlockedLocked()
 	s.mu.Unlock()
-	if blocked || ctx.Err() != nil {
-		return true
+	if blocked {
+		return true // A user operation cancelled this monitor; it owns the next transition.
 	}
 	cfg, err := loadConfig(s.configPath)
 	if err != nil || cfg.Fingerprint() != observed.Configuration {
 		return false
 	}
+	// The monitor's own context may have run out on a slow guest.
+	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 5*time.Second)
 	current, err := client.Status(ctx)
+	cancel()
 	if err != nil {
 		return true // The existing gate expires independently if it is unreachable.
 	}
 	if current.RunID != observed.RunID || current.Epoch != observed.Epoch || current.Mode != cage.GateOpen {
 		return true // A newer transition owns this gate.
 	}
+	now := time.Now()
 	s.mu.Lock()
-	s.safety.monitorError = "出口检测暂时超时，正在重试；现有联网许可未延长"
+	d := s.safety.deferral
+	if d.RunID != current.RunID || d.Epoch != current.Epoch || !d.Until.Equal(current.Until) {
+		d = monitorDeferral{RunID: current.RunID, Epoch: current.Epoch, Until: current.Until, Since: now}
+	}
+	d.Deadline = current.Deadline()
+	d.Stage = stage
+	d.Attempts++
+	d.RetryAt = nextMonitorAttempt(now, d.Deadline)
+	s.safety.deferral = d
+	// monitorError keeps the raw cause; the explanation adds the memory reason.
+	if stage == "exit_ip" {
+		s.safety.monitorError = "出口检测暂时超时，正在重试；现有联网许可未延长"
+	} else {
+		s.safety.memory = memory
+		s.safety.monitorError = "暂时" + unconfirmedStage(stage) + "，正在重试；现有联网许可未延长"
+	}
+	s.refreshNetworkExplanationLocked(now)
 	s.mu.Unlock()
+	diagnostics.Log("warn", "network", fmt.Sprintf("monitoring could not confirm stage=%s attempt=%d lease_remaining_ms=%d next_attempt_ms=%d memory_short=%t; lease not extended",
+		stage, d.Attempts, d.Deadline.Sub(now).Milliseconds(), d.RetryAt.Sub(now).Milliseconds(), memory.Short))
 	return true
+}
+
+// nextMonitorAttempt spaces the rounds after one that could not confirm the
+// guest, keeping a last attempt before the lease ends. After that attempt
+// the lease decides: nothing more is tried, and the gate's timer closes it.
+// until is the lease's Deadline, so every time returned carries a monotonic
+// reading and no wall-clock step can hold a retry back.
+func nextMonitorAttempt(now, until time.Time) time.Time {
+	last := until.Add(-monitorLastAttempt)
+	if !now.Before(last) {
+		return until
+	}
+	if next := now.Add(monitorRetrySpacing); next.Before(last) {
+		return next
+	}
+	return last
+}
+
+// activeDeferralLocked is the deferral of the gate's current lease, or nil.
+func (s *Server) activeDeferralLocked(now time.Time) *monitorDeferral {
+	d, gate := s.safety.deferral, s.safety.Gate
+	if d.RunID == "" || gate == nil || gate.Mode != cage.GateOpen || gate.RunID != d.RunID || gate.Epoch != d.Epoch ||
+		!gate.Until.Equal(d.Until) || !now.Before(d.Deadline) || s.networkPaused || s.closing {
+		return nil
+	}
+	return &d
+}
+
+// noteExpiredDeferral explains a lease that ran out while the monitor could
+// not confirm the guest: the gate's timer closed it, not a wrong value. The
+// gate says so itself (its run, the lease's epoch or the timer's transition
+// right after it, and the expiry reason); no clock is compared here.
+func (s *Server) noteExpiredDeferral(state cage.GateStatus) {
+	s.mu.Lock()
+	d := s.safety.deferral
+	s.mu.Unlock()
+	if d.RunID == "" || d.RunID != state.RunID || state.Reason != gateLeaseExpired || state.Mode != cage.GateClosed ||
+		(state.Epoch != d.Epoch && state.Epoch != d.Epoch+1) {
+		return
+	}
+	memory := s.readMemorySnapshot()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.safety.deferral != d {
+		return
+	}
+	s.safety.deferral = monitorDeferral{}
+	s.safety.memory = memory
+	s.safety.monitorError = "联网许可到期前仍" + unconfirmedStage(d.Stage) + "，外网已暂停"
+	s.refreshNetworkExplanationLocked(time.Now())
+	diagnostics.Log("warn", "network", fmt.Sprintf("monitoring lease ran out unconfirmed stage=%s attempts=%d memory_short=%t", d.Stage, d.Attempts, memory.Short))
+}
+
+// unconfirmedStage names what a monitoring round could not read.
+func unconfirmedStage(stage string) string {
+	switch stage {
+	case "exit_ip":
+		return "无法确认出口"
+	case "browser_settings":
+		return "无法读取浏览器时区和语言"
+	default:
+		return "无法读取系统时区和语言"
+	}
 }
 
 // Recheck the user operation and configuration at the actual lease write.
@@ -1267,7 +1513,7 @@ func (s *Server) finishSafetyMonitor(ctx context.Context, client *cage.GateClien
 
 func (s *Server) finishSafetyObservation(ctx context.Context, client *cage.GateClient, state cage.GateStatus, ip, issue string, recoverable bool) {
 	timing := s.startMonitorTiming()
-	timing.until = state.Until
+	timing.until = state.Deadline()
 	defer s.recordMonitorTiming("renewal", timing)
 	s.safetyOp.Lock()
 	defer s.safetyOp.Unlock()
@@ -1299,6 +1545,8 @@ func (s *Server) finishSafetyObservation(ctx context.Context, client *cage.GateC
 		s.safety.Error = issue
 		s.safety.ExitIP = ip
 		s.safety.monitorError = issue
+		s.safety.deferral = monitorDeferral{}
+		s.refreshNetworkExplanationLocked(time.Now())
 		s.mu.Unlock()
 		return
 	}
@@ -1325,5 +1573,7 @@ func (s *Server) finishSafetyObservation(ctx context.Context, client *cage.GateC
 	s.safety.monitorError = ""
 	s.exitProbeError = ""
 	s.safety.ExitIP = ip
+	s.safety.deferral = monitorDeferral{}
+	s.refreshNetworkExplanationLocked(time.Now())
 	s.mu.Unlock()
 }

@@ -155,7 +155,9 @@ func (s *Server) attach() error {
 		if err != nil {
 			return err
 		}
-		state, err := environment.State(ctx)
+		// A reused state could still show the mounts of a start in progress,
+		// and this decides whether to close the gate.
+		state, err := environment.FreshState(ctx)
 		if err != nil {
 			return err
 		}
@@ -179,11 +181,14 @@ func (s *Server) attach() error {
 	} else if !s.vmRunning() {
 		return errors.New("环境尚未启动")
 	}
-	b, err := s.guest(ctx, guestConnectionSnapshot)
+	// The shared control connection saves an SSH login per attach; it falls
+	// back to a connection of its own when none can be opened.
+	b, err := s.guestQuick(ctx, guestConnectionSnapshot)
 	if err != nil {
 		return errors.New("环境尚未准备好")
 	}
-	credentials, manifest, err := parseGuestConnection(b)
+	credentials, manifest, presence, err := parseGuestConnection(b)
+	s.recordClientPresence(presence)
 	s.mu.Lock()
 	s.guestManifest = manifest
 	s.guestUpdateRequired = errors.Is(err, errGuestUpdateRequired)
@@ -199,12 +204,11 @@ func (s *Server) attach() error {
 		}
 		return err
 	}
-	if _, err = s.guestAPI(ctx, credentials.Token, "GET", "/health", nil); err != nil {
-		return err
-	}
 	s.mu.Lock()
 	home := browserHomeURL(s.preferences)
 	s.mu.Unlock()
+	// An accepted homepage proves what a separate /health request would: the
+	// browser agent answers with these credentials. One round trip fewer.
 	if err = s.setBrowserHome(ctx, credentials.Token, home); err != nil {
 		return err
 	}
@@ -219,55 +223,199 @@ func (s *Server) attach() error {
 	s.mu.Unlock()
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
+	// A browser controller that restarted since (a crash, or a reset the host
+	// stopped following) starts with its window shown: tell it again.
+	s.browserViews.reset()
 	s.browserViews.background(s.changeBrowserVisibility)
 	return nil
 }
+
+// environmentMonitor carries the environment monitor's state between rounds.
+type environmentMonitor struct {
+	skipped int
+	// failures counts consecutive failed health probes of a ready Linux
+	// guest. One failure is tolerated: a single slow or lost reply would
+	// otherwise unmount the browser until a full attach rebuilds it. The
+	// count restarts when a job ran or the guest credentials changed, so two
+	// failures always belong to the same connection.
+	failures   int
+	job, token string
+}
+
 func (s *Server) monitor(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	skipped := 0
+	var state environmentMonitor
 	for ctx.Err() == nil {
-		timing := s.startMonitorTiming()
-		if s.op.TryLock() {
-			skipped = 0
-			if !s.busy() {
-				s.mu.Lock()
-				ready := s.ready
-				token := s.credentials.Token
-				s.mu.Unlock()
-				if !ready || s.macosGuest != nil || s.windowsGuest != nil {
-					_ = s.attach()
-				} else {
-					ctx, cancel := s.controlContext()
-					_, err := s.guestAPI(ctx, token, "GET", "/health", nil)
-					cancel()
-					if err != nil {
-						s.mu.Lock()
-						s.ready = false
-						s.mu.Unlock()
-					}
-				}
-				timing.stage("environment_health")
-				if s.macosGuest != nil {
-					s.monitorNetworkTick()
-					timing.stage("network_tick")
-				}
-			} else {
-				timing.result = "job_running"
-			}
-			s.op.Unlock()
-		} else {
-			skipped++
-			timing.result = "operation_lock_busy"
-		}
-		timing.stages = append(timing.stages, fmt.Sprintf("consecutive_lock_skips=%d", skipped))
-		s.recordMonitorTiming("environment", timing)
+		s.monitorEnvironmentRound(&state)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+// monitorEnvironmentRound runs one round of the environment monitor.
+//
+// The health probe of a ready guest is read-only and runs without the
+// operation lock: user actions take that lock with TryLock and are refused
+// while it is held, so holding it across guest round trips every five
+// seconds refused clicks. The lock is still taken to change the environment:
+// to attach, and for the instant it takes to mark the environment not ready.
+func (s *Server) monitorEnvironmentRound(m *environmentMonitor) {
+	timing := s.startMonitorTiming()
+	defer func() {
+		timing.stages = append(timing.stages, fmt.Sprintf("consecutive_lock_skips=%d", m.skipped))
+		s.recordMonitorTiming("environment", timing)
+	}()
+	if s.busy() {
+		// A job owns the lifecycle and reattaches itself when it is done.
+		m.skipped, m.failures = 0, 0
+		timing.result = "job_running"
+		return
+	}
+	s.mu.Lock()
+	ready, token := s.ready, s.credentials.Token
+	s.mu.Unlock()
+	switch {
+	case s.windowsGuest != nil:
+		if ready {
+			observed := s.observeWindowsGuest(s.lifetimeContext())
+			timing.stage("environment_health")
+			if observed == observedSteady {
+				m.skipped = 0
+				return
+			}
+		}
+		s.lockedEnvironmentRound(m, timing, true, false)
+	case s.macosGuest != nil:
+		s.monitorMacOSRound(m, timing, ready)
+	case ready:
+		s.monitorLinuxHealth(m, timing, token)
+	default:
+		m.failures = 0
+		s.lockedEnvironmentRound(m, timing, true, false)
+	}
+}
+
+// lockedEnvironmentRound attaches and/or runs the network tick under the
+// operation lock. It reports whether it ran.
+func (s *Server) lockedEnvironmentRound(m *environmentMonitor, timing *monitorTiming, attach, network bool) bool {
+	if !s.op.TryLock() {
+		m.skipped++
+		timing.result = "operation_lock_busy"
+		return false
+	}
+	defer s.op.Unlock()
+	m.skipped = 0
+	if s.busy() {
+		timing.result = "job_running"
+		return false
+	}
+	if attach {
+		_ = s.attach()
+		timing.stage("environment_health")
+	}
+	if network {
+		s.monitorNetworkTick()
+		timing.stage("network_tick")
+	}
+	return true
+}
+
+// monitorMacOSRound looks at a ready virtual Mac and its network inputs
+// without the operation lock, and takes the lock only when attach or the
+// network tick has something to do. A failed guest probe is tolerated once;
+// the second attaches under the lock, which marks the guest not ready if
+// its own probe fails too. Gate and VM changes attach at once.
+func (s *Server) monitorMacOSRound(m *environmentMonitor, timing *monitorTiming, ready bool) {
+	attach := !ready
+	if ready {
+		if job := s.jobs.snapshot().ID; job != m.job {
+			m.failures, m.job = 0, job
+		}
+		ctx, cancel := s.controlContext()
+		observed := s.observeMacOSGuest(ctx)
+		cancel()
+		timing.stage("environment_health")
+		switch observed {
+		case observedSteady:
+			m.failures = 0
+		case observedUnreachable:
+			m.failures++
+			attach = m.failures >= 2
+			if !attach {
+				timing.result = "health_failed_once"
+			}
+		default:
+			attach = true
+		}
+	} else {
+		m.failures = 0
+	}
+	networkTiming := s.startMonitorTiming()
+	network := s.networkRoundWanted(networkTiming)
+	if !network {
+		s.recordMonitorTiming("network", networkTiming)
+	}
+	if !attach && !network {
+		m.skipped = 0
+		return
+	}
+	if s.lockedEnvironmentRound(m, timing, attach, network) && attach {
+		m.failures = 0
+	}
+}
+
+// monitorLinuxHealth probes a ready Linux guest without the operation lock.
+// The second consecutive failure marks the environment not ready; the next
+// round then reattaches under the lock as before.
+func (s *Server) monitorLinuxHealth(m *environmentMonitor, timing *monitorTiming, token string) {
+	// Lifecycle changes that make the guest ready again are jobs (start,
+	// restart, settings, safety and component updates all attach inside a job)
+	// or this monitor's own attach. A job submitted while the probe was in
+	// flight has a new ID, so its outcome is never overwritten by a stale
+	// failure.
+	job := s.jobs.snapshot().ID
+	if job != m.job || token != m.token {
+		m.failures, m.job, m.token = 0, job, token
+	}
+	ctx, cancel := s.controlContext()
+	_, err := s.guestAPI(ctx, token, "GET", "/health", nil)
+	cancel()
+	timing.stage("environment_health")
+	if err == nil {
+		m.failures, m.skipped = 0, 0
+		return
+	}
+	m.failures++
+	if m.failures < 2 {
+		m.skipped = 0
+		timing.result = "health_failed_once"
+		return
+	}
+	if !s.op.TryLock() {
+		// Keep the count: the next failed probe tries again.
+		m.skipped++
+		timing.result = "operation_lock_busy"
+		return
+	}
+	defer s.op.Unlock()
+	m.skipped = 0
+	current := s.jobs.snapshot()
+	s.mu.Lock()
+	stale := current.Running || current.ID != job || !s.ready || s.credentials.Token != token
+	if !stale {
+		s.ready = false
+	}
+	s.mu.Unlock()
+	m.failures = 0
+	if stale {
+		timing.result = "health_failed_superseded"
+		return
+	}
+	timing.result = "health_failed"
 }
 
 func (s *Server) runCage(args ...string) error {
@@ -327,11 +475,28 @@ func (s *Server) runCage(args ...string) error {
 	}
 	return nil
 }
-func (s *Server) startEnvironment(syncTimezone bool) error {
-	s.desktopViews.reset()
-	s.browserViews.reset()
+
+// closeGuestSessions ends the long-lived connections to the guest, which a
+// start, stop or restart leaves pointing at a guest that is gone, and the
+// resident helper's back-off with them: the next guest is tried afresh. The
+// last Claude Science state read goes too: it described the old guest.
+// Without it a connection whose packets are lost stays up until ssh gives up
+// (30 s), and requests on it time out and back the helper off for a minute.
+func (s *Server) closeGuestSessions() {
 	s.controlSession.close()
 	s.nativeControl.close()
+	s.cliDiscovery.mu.Lock()
+	s.cliDiscovery.retryAt = time.Time{}
+	s.cliDiscovery.mu.Unlock()
+	s.cliDiscovery.resident.close()
+	s.scienceLast.set(nil)
+}
+
+func (s *Server) startEnvironment(syncTimezone bool) error {
+	s.entryGuestStarting()
+	s.desktopViews.reset()
+	s.browserViews.reset()
+	s.closeGuestSessions()
 	s.desktopStatus.invalidate()
 	defer s.desktopStatus.invalidate()
 	if err := s.requireStorageReady(); err != nil {
@@ -368,7 +533,7 @@ func (s *Server) startEnvironment(syncTimezone bool) error {
 		if err != nil {
 			return err
 		}
-		state, err := environment.State(s.operationContext())
+		state, err := environment.FreshState(s.operationContext())
 		if err != nil {
 			return err
 		}
@@ -495,20 +660,47 @@ func (s *Server) startEnvironment(syncTimezone bool) error {
 	if err = s.runCage("up"); err != nil {
 		return err
 	}
-	for i := 0; i < 8; i++ {
-		if s.operationContext().Err() != nil {
-			return s.operationContext().Err()
+	if err = retryAttach(s.operationContext(), s.attach); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return err
 		}
-		if err = s.attach(); err == nil {
-			return s.checkNetworkIfWanted()
-		}
-		time.Sleep(time.Second)
+		return errors.New("环境已启动，但浏览器连接尚未就绪。请重试连接或查看操作详情。")
 	}
-	return errors.New("环境已启动，但浏览器连接尚未就绪。请重试连接或查看操作详情。")
+	return s.checkNetworkIfWanted()
+}
+
+// attachRetryBudget is the total wait between attach attempts after cage up,
+// as with the former eight one-second pauses.
+const attachRetryBudget = 8 * time.Second
+
+// retryAttach retries attach after cage up. cage up has already waited for
+// the guest services, so a retry usually succeeds at once: start at 100 ms
+// and double to 1 s, instead of pausing a full second every time.
+func retryAttach(ctx context.Context, attach func() error) error {
+	delay, waited := 100*time.Millisecond, time.Duration(0)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		err := attach()
+		if err == nil || waited >= attachRetryBudget {
+			return err
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		waited += delay
+		delay = min(2*delay, time.Second)
+	}
 }
 func (s *Server) stopEnvironment() (returned error) {
 	s.desktopStatus.invalidate()
 	defer s.desktopStatus.invalidate()
+	s.closeGuestSessions()
 	explicitStop := s.jobs.snapshot().Kind == "stop"
 	defer func() {
 		if explicitStop && returned == nil {
@@ -520,6 +712,9 @@ func (s *Server) stopEnvironment() (returned error) {
 	}
 	if s.macosGuest != nil {
 		return s.stopMacOSGuest()
+	}
+	if explicitStop {
+		s.browserDataAutoClean("stop")
 	}
 	s.setMessage("正在停止 Super Cage 环境…")
 	if (explicitStop || s.jobs.snapshot().Kind == "storage") && cage.InstanceJobID(filepath.Join(s.profile, "state"), "base-building") != "" {
@@ -541,6 +736,7 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.guestUpdateError = ""
 	s.safety.Error = ""
 	s.mu.Unlock()
+	s.entryEnvironmentStopped()
 	s.terminals.closeAll()
 	s.mobileCLI.stopAll()
 	s.closeProjectShares()
@@ -665,6 +861,8 @@ func (s *Server) apply(v savedProfile, validate bool) error {
 
 // Interface recovery uses the ordinary cancellable job queue. Location changes
 // remain governed by the saved exit policy and never replace its baseline.
+// Runs with the operation lock held. A step added here that can act must
+// also make networkRoundWanted report true.
 func (s *Server) monitorNetworkTick() {
 	timing := s.startMonitorTiming()
 	defer s.recordMonitorTiming("network", timing)
@@ -689,51 +887,127 @@ func (s *Server) monitorNetworkTick() {
 }
 
 func (s *Server) monitorNetwork(ctx context.Context) {
-	s.runNetworkMonitor(ctx, s.monitorNetworkTick)
+	s.runNetworkMonitorWith(ctx, s.networkRoundWanted, s.monitorNetworkTick)
 }
 
 // Keep scheduling and lock ownership independent of the network probes so
 // concurrency tests can exercise the real loop without external I/O.
 func (s *Server) runNetworkMonitor(ctx context.Context, tick func()) {
+	s.runNetworkMonitorWith(ctx, nil, tick)
+}
+
+// runNetworkMonitorWith runs a round every 5 s. wanted, when set, first
+// reads the round's inputs without the operation lock and reports whether
+// the locked tick could act; a steady round then leaves the lock to user
+// actions, which are refused while it is held.
+func (s *Server) runNetworkMonitorWith(ctx context.Context, wanted func(*monitorTiming) bool, tick func()) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	skipped := 0
 	for ctx.Err() == nil {
-		s.mu.Lock()
-		// Publish ownership with acquisition and give project requests
-		// waiting on this round a chance before the next tick takes the lock.
-		yielded := s.projectOperationWaiters > 0
-		acquired := !yielded && s.op.TryLock()
-		if acquired {
-			s.networkMonitorDone = make(chan struct{})
-		}
-		s.mu.Unlock()
-		if acquired {
-			skipped = 0
-			tick()
-			s.mu.Lock()
-			s.op.Unlock()
-			close(s.networkMonitorDone)
-			s.networkMonitorDone = nil
-			s.mu.Unlock()
-		} else if yielded {
-			skipped = 0
-			timing := s.startMonitorTiming()
-			timing.result = "project_operations_waiting"
-			s.recordMonitorTiming("network", timing)
-		} else {
-			skipped++
-			timing := s.startMonitorTiming()
-			timing.result = "operation_lock_busy"
-			timing.stages = append(timing.stages, fmt.Sprintf("consecutive_lock_skips=%d", skipped))
-			s.recordMonitorTiming("network", timing)
-		}
+		s.networkMonitorRound(&skipped, wanted, tick)
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
 		}
 	}
+}
+
+func (s *Server) networkMonitorRound(skipped *int, wanted func(*monitorTiming) bool, tick func()) {
+	if wanted != nil {
+		timing := s.startMonitorTiming()
+		if !wanted(timing) {
+			*skipped = 0
+			s.recordMonitorTiming("network", timing)
+			return
+		}
+	}
+	s.mu.Lock()
+	// Publish ownership with acquisition and give project requests
+	// waiting on this round a chance before the next tick takes the lock.
+	yielded := s.projectOperationWaiters > 0
+	acquired := !yielded && s.op.TryLock()
+	if acquired {
+		s.networkMonitorDone = make(chan struct{})
+	}
+	s.mu.Unlock()
+	if acquired {
+		*skipped = 0
+		tick()
+		s.mu.Lock()
+		s.op.Unlock()
+		close(s.networkMonitorDone)
+		s.networkMonitorDone = nil
+		s.mu.Unlock()
+	} else if yielded {
+		*skipped = 0
+		timing := s.startMonitorTiming()
+		timing.result = "project_operations_waiting"
+		s.recordMonitorTiming("network", timing)
+	} else {
+		*skipped++
+		timing := s.startMonitorTiming()
+		timing.result = "operation_lock_busy"
+		timing.stages = append(timing.stages, fmt.Sprintf("consecutive_lock_skips=%d", *skipped))
+		s.recordMonitorTiming("network", timing)
+	}
+}
+
+// proxyCoreRunning is managedproxy.Running; tests replace it.
+var proxyCoreRunning = managedproxy.Running
+
+// networkRoundWanted reports whether the locked network round could act:
+// close the gate, mark the proxy network lost or submit a job. It reads the
+// same inputs as monitorNetworkTick without the operation lock, and any
+// error, unknown or change answers true so that the locked round decides on
+// its own fresh reading. Steady rounds record result=steady.
+//
+// Keep it in step with monitorNetworkTick: every step there that can act
+// must make this report true in that case. monitorSafety is not needed here:
+// it runs on its own without the operation lock.
+func (s *Server) networkRoundWanted(timing *monitorTiming) bool {
+	s.mu.Lock()
+	lost, recovering := s.proxyNetworkLost, s.recovery.RunID != ""
+	s.mu.Unlock()
+	// The locked round returns early for these; its record says why.
+	if lost || recovering || s.busy() || s.storageRecoveryStatus().Required || s.macSetupPending() {
+		return true
+	}
+	cfg, err := loadConfig(s.configPath)
+	if err != nil || cfg.RequireManagedProxy(s.profile) != nil {
+		return true
+	}
+	name, err := physicalProxyInterface(s.lifetimeContext())
+	timing.stage("physical_interface")
+	if err != nil {
+		return true
+	}
+	bound, err := managedproxy.BoundInterface(filepath.Join(managedproxy.Dir(s.profile), "config.yaml"))
+	if err != nil || bound != name {
+		return true
+	}
+	p, err := managedproxy.Load(s.profile)
+	if err != nil {
+		return true
+	}
+	if s.vmRunning() {
+		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 2*time.Second)
+		running := proxyCoreRunning(ctx, s.profile, p)
+		cancel()
+		timing.stage("proxy_health")
+		if !running {
+			return true
+		}
+	}
+	// The condition refreshProxySubscriptions submits an update for.
+	for _, src := range p.Sources {
+		if src.URL != "" && src.Interval > 0 && time.Since(src.Updated) >= time.Duration(src.Interval)*time.Hour && time.Since(src.Attempted) > 15*time.Minute {
+			return true
+		}
+	}
+	timing.result = "steady"
+	return false
 }
 
 func vmAlive(profile, workspace string) bool {

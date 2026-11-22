@@ -1,0 +1,4 @@
+.device-bar { position: fixed; z-index: 5; top: var(--mobile-top, 0px); left: 0; right: 0; height: var(--device-bar); display: flex; align-items: center; gap: 8px; padding: 0 12px;
+  border-bottom: 1px solid var(--line); background: var(--chrome, var(--paper)); color: var(--muted); font-size: 13px; }
+.device-bar-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-bar button { min-height: 26px; padding: 0 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); font-size: 13px; }

@@ -46,8 +46,31 @@ type Appearance struct {
 	ReducedMotion  string                 `json:"reducedMotion"`
 }
 
+// superCageTheme mirrors the "super-cage" preset in ui/src/appearance-presets.mjs
+// (the token table in brand/design-language.md). It is the default for
+// profiles that have never saved an appearance.
+func superCageTheme(dark bool) AppearanceTheme {
+	if dark {
+		return AppearanceTheme{Preset: "super-cage", Accent: "#d97757", Surface: "#1f1e1d", Ink: "#f3efe5", Contrast: 60, OpaqueWindows: true,
+			Colors:   map[string]string{"chrome": "#1a1918", "strong": "#f3efe5", "muted": "#aba597", "faint": "#7e786c", "line": "#3d3a35", "lineStrong": "#4a4640", "input": "#2a2926", "hover": "#34322e", "selected": "#3a3733", "selection": "#5c3d30", "button": "#f3efe5", "buttonInk": "#1f1e1d", "accentInk": "#ffffff", "accentSoft": "#4a3329", "link": "#e8936f", "focus": "#e8936f", "success": "#7bc79a", "warning": "#e3b341", "danger": "#f2b8b5", "inactive": "#7e786c"},
+			Terminal: map[string]string{"background": "#1f1e1d", "foreground": "#f3efe5", "cursor": "#d97757", "cursorAccent": "#1f1e1d", "selectionBackground": "#5c3d30", "black": "#8f897d", "red": "#f28b7d", "green": "#7bc79a", "yellow": "#e3b341", "blue": "#8fb3e0", "magenta": "#d4a2cf", "cyan": "#7cc6bf", "white": "#e8e2d4", "brightBlack": "#aba597", "brightRed": "#f7a99d", "brightGreen": "#9bd8b2", "brightYellow": "#f0c869", "brightBlue": "#aecaf0", "brightMagenta": "#e2bde0", "brightCyan": "#a0d9d3", "brightWhite": "#faf9f5"}}
+	}
+	return AppearanceTheme{Preset: "super-cage", Accent: "#d97757", Surface: "#faf9f5", Ink: "#1f1e1d", Contrast: 45, OpaqueWindows: true,
+		Colors:   map[string]string{"chrome": "#f3f1ea", "strong": "#1f1e1d", "muted": "#6b655b", "faint": "#9a9488", "line": "#e6e3d8", "lineStrong": "#d6d2c4", "input": "#ffffff", "hover": "#f0eee6", "selected": "#ece8dd", "selection": "#f0d5c7", "button": "#1f1e1d", "buttonInk": "#faf9f5", "accentInk": "#ffffff", "accentSoft": "#f6e5dc", "link": "#a4482a", "focus": "#a4482a", "success": "#2e7d4f", "warning": "#9a6700", "danger": "#b3261e", "inactive": "#9a9488"},
+		Terminal: map[string]string{"background": "#faf9f5", "foreground": "#1f1e1d", "cursor": "#c96442", "cursorAccent": "#faf9f5", "selectionBackground": "#f0d5c7", "black": "#1f1e1d", "red": "#b3261e", "green": "#2e7d4f", "yellow": "#8a5d00", "blue": "#365f8c", "magenta": "#86467f", "cyan": "#22706d", "white": "#6b655b", "brightBlack": "#6b655b", "brightRed": "#a4482a", "brightGreen": "#2a6e46", "brightYellow": "#7a5300", "brightBlue": "#2f5680", "brightMagenta": "#773d71", "brightCyan": "#1d6461", "brightWhite": "#3d3a35"}}
+}
+
+// codexTheme is the "codex" preset, the default before Super Cage. Importing
+// from the local Codex app starts from it.
+func codexTheme(dark bool) AppearanceTheme {
+	if dark {
+		return AppearanceTheme{Preset: "codex", Accent: "#339cff", Surface: "#181818", Ink: "#ffffff", Contrast: 60}
+	}
+	return AppearanceTheme{Preset: "codex", Accent: "#339cff", Surface: "#ffffff", Ink: "#1a1c1f", Contrast: 45}
+}
+
 func defaultAppearance() Appearance {
-	return Appearance{Mode: "system", Light: AppearanceTheme{Preset: "codex", Accent: "#339cff", Surface: "#ffffff", Ink: "#1a1c1f", Contrast: 45}, Dark: AppearanceTheme{Preset: "codex", Accent: "#339cff", Surface: "#181818", Ink: "#ffffff", Contrast: 60}, UIFontSize: 14, CodeFontSize: 13, FontSmoothing: true, ReducedMotion: "system"}
+	return Appearance{Mode: "system", Light: superCageTheme(false), Dark: superCageTheme(true), UIFontSize: 14, CodeFontSize: 13, FontSmoothing: true, ReducedMotion: "system"}
 }
 
 func (a Appearance) validate() error {
@@ -88,7 +111,7 @@ func (a Appearance) validate() error {
 	return nil
 }
 
-var appearanceColorKeys = strings.Fields("sidebar sidebarInk toolbar toolbarInk chrome chromeDark strong muted line input button buttonInk accentInk link focus hover selected selection success warning danger inactive")
+var appearanceColorKeys = strings.Fields("sidebar sidebarInk toolbar toolbarInk chrome chromeDark strong muted faint line lineStrong input button buttonInk accentInk accentSoft link focus hover selected selection success warning danger inactive")
 var terminalColorKeys = strings.Fields("background foreground cursor cursorAccent selectionBackground black red green yellow blue magenta cyan white brightBlack brightRed brightGreen brightYellow brightBlue brightMagenta brightCyan brightWhite")
 var appearanceColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
@@ -132,6 +155,10 @@ func (s *Server) getAppearance(w http.ResponseWriter, r *http.Request) {
 	a := defaultAppearance()
 	b, err := os.ReadFile(filepath.Join(s.profile, "appearance.json"))
 	if err == nil {
+		// Saved files omit empty colour maps. Decoding one over the default's
+		// Super Cage overrides would graft them onto a theme saved without any
+		// (every file written before Super Cage became the default).
+		a.Light.Colors, a.Light.Terminal, a.Dark.Colors, a.Dark.Terminal = nil, nil, nil, nil
 		err = json.Unmarshal(b, &a)
 	}
 	if err != nil && !os.IsNotExist(err) {
@@ -164,6 +191,7 @@ func (s *Server) saveAppearance(w http.ResponseWriter, r *http.Request) {
 
 func readCodexAppearance(configPath string) (Appearance, error) {
 	a := defaultAppearance()
+	a.Light, a.Dark = codexTheme(false), codexTheme(true)
 	a.CodeFontSize = 12
 	var config struct {
 		Desktop struct {

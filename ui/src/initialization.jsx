@@ -20,13 +20,13 @@ import { bindDetectedMacOSExit } from "./safety";
 import { needsProxySetup } from "./onboarding-state.mjs";
 import { networkState } from "./safety-state.mjs";
 import { useSSHNavigation } from "./remote-hosts";
-import logo from "./logo.png";
+import { BrandMark } from "./brand";
 import "./initialization.css";
 
 const steps = [["system", "系统与存储"], ["proxy", "网络代理"], ["install", "安装与检查"]];
 
 function InitializationFrame({ children }) {
-  return <main className="initialization"><header className="initialization-brand"><img src={logo} alt="" /><strong>Super Cage</strong><span>首次设置</span></header>{children}</main>;
+  return <main className="initialization"><header className="initialization-brand"><BrandMark size={28} /><strong>Super Cage</strong><span>首次设置</span></header>{children}</main>;
 }
 
 export function InitializationGate({ children }) {

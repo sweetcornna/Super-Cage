@@ -1,9 +1,15 @@
 package mobilelink
 
 import (
+	"bytes"
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSnapshotPollingQuery(t *testing.T) {
@@ -20,6 +26,9 @@ func TestSnapshotPollingQuery(t *testing.T) {
 		{"after=-1&epoch=" + id, false}, {"after=0&after=1", false}, {"after=1&other=x", false},
 		{"after=1&epoch=" + id + "&epoch=" + id, false}, {"after=%31&epoch=" + id, false},
 		{"after=18446744073709551616", false},
+		{"after=2&wait=25", true}, {"wait=25&after=2&epoch=" + id, true}, {"after=2&epoch=" + id + "&wait=1", true},
+		{"wait=25", false}, {"after=2&wait=0", false}, {"after=2&wait=05", false}, {"after=2&wait=100", false},
+		{"after=2&wait=1&wait=2", false}, {"after=2&wait=", false}, {"after=2&epoch=" + id + "&wait=1&other=x", false},
 	} {
 		u := &url.URL{Path: "/api/mobile/cli/sessions/" + id, RawQuery: tc.query}
 		if got := allowed("GET", u); got != tc.want {
@@ -57,6 +66,29 @@ func TestSessionListMutations(t *testing.T) {
 		u.RawQuery = "after=1"
 		if allowed("POST", u) {
 			t.Fatal("mutation query accepted", operation)
+		}
+	}
+}
+
+func TestSessionListRevisionQuery(t *testing.T) {
+	const revision = "0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		query string
+		want  bool
+	}{
+		{"after=" + revision, true}, {"after=" + revision + "&wait=25", true}, {"wait=25&after=" + revision, true},
+		{"archived=true&after=" + revision + "&wait=5", true}, {"after=" + revision + "&archived=true", true},
+		{"wait=25", false}, {"archived=true&wait=5", false}, {"after=" + strings.ToUpper(revision), false},
+		{"after=" + revision[:31], false}, {"after=" + revision + "0", false}, {"after=" + revision + "&after=" + revision, false},
+		{"after=" + revision + "&wait=0", false}, {"after=" + revision + "&wait=250", false},
+		{"after=" + revision + "&wait=5&other=1", false}, {"after=" + revision + "&wait=%35", false},
+	} {
+		u := &url.URL{Path: "/api/mobile/cli/sessions", RawQuery: tc.query}
+		if got := allowed("GET", u); got != tc.want {
+			t.Errorf("list query %q allowed=%v, want %v", tc.query, got, tc.want)
+		}
+		if allowed("POST", u) {
+			t.Errorf("list query %q allowed a POST", tc.query)
 		}
 	}
 }
@@ -134,5 +166,116 @@ func TestPhoneControlRoutes(t *testing.T) {
 	}
 	if allowed("GET", &url.URL{Path: "/api/mobile/environment", ForceQuery: true}) {
 		t.Fatal("empty query accepted")
+	}
+}
+
+func TestNegotiatedFrameQuery(t *testing.T) {
+	const tag = "b542cd94286a2489bc2df1241b043c76"
+	const id = "12345678-1234-4321-aaaa-123456789abc"
+	for _, tc := range []struct {
+		surface, query string
+		want           bool
+	}{
+		{"browser", "after=" + tag + "&wait=12000&fmt=jpeg", true},
+		{"desktop", "after=" + tag + "&wait=12000&fmt=jpeg", true},
+		{"browser", "fmt=jpeg&after=" + tag + "&wait=900", true},
+		{"desktop", "fmt=jpeg", true},
+		{"browser", "fmt=jpeg", true},
+		{"desktop", "after=" + tag + "&wait=30000", true},
+		{"desktop", "after=" + tag, false}, // the bare read stays browser-only
+		{"browser", "wait=1000", false},    // a held read needs a tag
+		{"browser", "after=" + tag + "&wait=0", false},
+		{"browser", "after=" + tag + "&wait=01", false},
+		{"browser", "after=" + tag + "&wait=30001", false},
+		{"browser", "after=" + tag + "&wait=-1", false},
+		{"browser", "after=" + tag + "&wait=1000&wait=1000", false},
+		{"browser", "after=" + tag + "&fmt=png", false},
+		{"browser", "after=" + tag + "&fmt=jpeg&fmt=jpeg", false},
+		{"browser", "after=" + tag + "&wait=1000&fmt=jpeg&x=1", false},
+		{"browser", "after=" + tag + "&wait=%31000", false},
+		{"browser", "after=" + strings.ToUpper(tag) + "&fmt=jpeg", false},
+		{"browser", "after=" + tag + "&", false},
+		{"browser", "after=" + tag + "&wait", false},
+	} {
+		u := &url.URL{Path: "/api/mobile/" + tc.surface + "/" + id + "/frame", RawQuery: tc.query}
+		if allowed("GET", u) != tc.want {
+			t.Errorf("%s %s allowed=%v, want %v", tc.surface, tc.query, !tc.want, tc.want)
+		}
+		if tc.want && allowed("POST", u) {
+			t.Errorf("%s %s allowed for POST", tc.surface, tc.query)
+		}
+	}
+	for _, operation := range []string{"action", "close", "open"} {
+		u := &url.URL{Path: "/api/mobile/browser/" + id + "/" + operation, RawQuery: "fmt=jpeg"}
+		if operation == "open" {
+			u.Path = "/api/mobile/browser/open"
+		}
+		if allowed("GET", u) || allowed("POST", u) {
+			t.Errorf("%s accepted a frame query", operation)
+		}
+	}
+	q, ok := ParseFrameQuery("after=" + tag + "&wait=2500&fmt=jpeg")
+	if !ok || q.After != tag || q.Wait != 2500*time.Millisecond || !q.Binary || !q.Stream {
+		t.Fatalf("parsed %+v", q)
+	}
+	if q, ok = ParseFrameQuery("after=" + tag); !ok || q.Stream {
+		t.Fatal("the bare conditional read must not look negotiated")
+	}
+}
+
+type frameRoundTripper func(*http.Request) *http.Response
+
+func (f frameRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r), nil }
+
+func TestFrameReplyRelaysBinaryAndMetadata(t *testing.T) {
+	const id = "12345678-1234-4321-aaaa-123456789abc"
+	jpeg := append([]byte{0xff, 0xd8, 0xff, 0xe0}, bytes.Repeat([]byte{0, 1, 2, 3, 0xff}, 1000)...)
+	path := "/api/mobile/desktop/" + id + "/frame?fmt=jpeg"
+	answer := func(contentType string, header http.Header, body []byte) performFunc {
+		return func(ctx context.Context, method, uri string, _ []byte) (*Reply, error) {
+			u, _ := url.ParseRequestURI(uri)
+			res := &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(bytes.NewReader(body))}
+			res.Header.Set("Content-Type", contentType)
+			return request(ctx, frameRoundTripper(func(*http.Request) *http.Response { return res }), "http://host.invalid", method, u.RequestURI(), nil, false)
+		}
+	}
+	serve := func(do performFunc, target string) *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		operations(do).ServeHTTP(w, httptest.NewRequest("GET", target, nil))
+		return w
+	}
+
+	meta := "eyJpZCI6IngifQ"
+	w := serve(answer("image/jpeg", http.Header{FrameMetaHeader: {meta}, FrameStreamHeader: {"1"}}, jpeg), path)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "image/jpeg" || w.Header().Get(FrameMetaHeader) != meta ||
+		w.Header().Get(FrameStreamHeader) != "1" || !bytes.Equal(w.Body.Bytes(), jpeg) {
+		t.Fatalf("binary frame was not relayed: %d %v", w.Code, w.Header())
+	}
+	if w.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal("frames must not be cached")
+	}
+
+	// The capability marker rides on an ordinary JSON frame without changing its body.
+	body := []byte(`{"id":"x","image":"AA=="}`)
+	w = serve(answer("application/json", http.Header{FrameStreamHeader: {"1"}, "X-Other": {"leak"}}, body), "/api/mobile/browser/"+id+"/frame")
+	if w.Header().Get(FrameStreamHeader) != "1" || w.Header().Get("X-Other") != "" || !bytes.Equal(w.Body.Bytes(), body) {
+		t.Fatalf("capability header not relayed alone: %v", w.Header())
+	}
+
+	// An image without usable metadata is refused instead of shown as text.
+	for _, bad := range []string{"", "not base64!", strings.Repeat("A", MaxFrameMeta+1)} {
+		w = serve(answer("image/jpeg", http.Header{FrameMetaHeader: {bad}}, jpeg), path)
+		if w.Code != http.StatusBadGateway {
+			t.Fatalf("metadata %q accepted: %d", bad[:min(len(bad), 8)], w.Code)
+		}
+	}
+	// Other routes and statuses never turn into images or carry the headers.
+	w = serve(answer("image/jpeg", http.Header{FrameMetaHeader: {meta}}, jpeg), "/api/mobile/cli/projects")
+	if w.Header().Get("Content-Type") == "image/jpeg" || w.Header().Get(FrameMetaHeader) != "" {
+		t.Fatal("a non-frame route returned an image")
+	}
+	w = serve(answer("application/json", http.Header{FrameStreamHeader: {"yes"}}, body), "/api/mobile/browser/"+id+"/frame")
+	if w.Header().Get(FrameStreamHeader) != "" {
+		t.Fatal("capability marker must be exactly 1")
 	}
 }

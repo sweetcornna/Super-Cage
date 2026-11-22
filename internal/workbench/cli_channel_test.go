@@ -919,7 +919,7 @@ func runSharedConversationBrowser(t *testing.T, s *Server, project string) {
 		t.Fatal(err)
 	}
 	go func() {
-		_ = mobilelink.ServeHost(ctx, relayServer.URL, room.ID, room.HostToken, hostIdentity, phoneIdentity.Pin, workbench)
+		_ = mobilelink.ServeHost(ctx, relayServer.URL, room.ID, room.HostToken, hostIdentity, phoneIdentity.Pin, mobilelink.Opened(workbench))
 	}()
 	client, err := mobilelink.ConnectClient(ctx, relayServer.URL, room.ID, room.ClientToken, phoneIdentity, hostIdentity.Pin)
 	if err != nil {

@@ -194,10 +194,13 @@ func (m *jobManager) finishLocked(execution *jobExecution, err error) {
 
 func jobName(kind string) string {
 	names := map[string]string{
-		"start": "启动环境", "stop": "停止环境", "restart": "重启环境", "setup": "准备环境", "settings": "应用设置", "project": "连接项目目录", "storage": "迁移环境目录", "restore": "恢复配置", "resources": "应用资源配置", "safety": "检查联网条件", "network-recovery": "恢复联网", "proxy": "应用代理节点", "proxy-network": "恢复代理连接", "environment-update": "更新环境组件", "environment-tools": "更新环境工具", "claude-desktop-install": "安装 Claude Desktop", "claude-desktop-start": "打开 Claude Desktop", "claude-desktop-stop": "关闭 Claude Desktop",
+		"start": "启动环境", "stop": "停止环境", "restart": "重启环境", "setup": "准备环境", "settings": "应用设置", "project": "连接项目目录", "storage": "迁移环境目录", "restore": "恢复配置", "resources": "应用资源配置", "safety": "检查联网条件", "network-recovery": "恢复联网", "proxy": "应用代理节点", "proxy-network": "恢复代理连接", "environment-update": "更新环境组件", "environment-tools": "更新环境工具", "claude-desktop-install": "安装 Claude Desktop", "claude-desktop-start": "打开 Claude Desktop", "claude-desktop-stop": "关闭 Claude Desktop", "claude-science-install": "安装 Claude Science", "claude-science-update": "更新 Claude Science", "claude-science-start": "启动 Claude Science", "claude-science-stop": "关闭 Claude Science", "browser-reset": "重置浏览器", "browser-clear": "清除浏览数据",
 	}
 	if name := names[kind]; name != "" {
 		return name
+	}
+	if action, id, ok := agentJobKind(kind); ok {
+		return agentJobName(action, id)
 	}
 	return "本次操作"
 }
@@ -229,6 +232,25 @@ func (m *jobManager) cancelRunning() string {
 		return m.active.id
 	}
 	return ""
+}
+
+// cancelJob cancels the running job id when match accepts its kind. found
+// is false when no job of that id is known; canceled is true when it was
+// running and matched, or had already ended.
+func (m *jobManager) cancelJob(id string, match func(kind string) bool) (found, canceled bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if id == "" || m.state.ID != id {
+		return false, false
+	}
+	if !m.state.Running {
+		return true, true
+	}
+	if !match(m.state.Kind) || m.cancel == nil {
+		return true, false
+	}
+	m.cancel()
+	return true, true
 }
 
 // close seals admission before waiting, so no worker can be added concurrently

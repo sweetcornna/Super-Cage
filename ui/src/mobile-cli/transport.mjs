@@ -5,7 +5,7 @@ import { httpErrorMessage, connectionErrorMessage } from "../error-message.mjs";
 const desktopConnection = location.pathname === "/mobile.html"
   ? sessionStorage.getItem("cage-cli-local-connection") : null;
 
-async function requestAPI(path, { body, signal, keepalive } = {}) {
+async function requestAPI(path, { body, signal, keepalive, frame } = {}) {
   let response;
   try {
     response = await fetch(path, {
@@ -25,7 +25,8 @@ async function requestAPI(path, { body, signal, keepalive } = {}) {
   if (!response.ok) {
     let message;
     const isPlainText = (response.headers.get("Content-Type") || "").startsWith("text/plain");
-    if (response.status === 401) message = "连接授权已失效，请从 Super Cage 重新打开此页面。";
+    // An event, not an import: the desktop workbench shares this module, and the phone web shell listens.
+    if (response.status === 401) { message = "连接授权已失效，请从 Super Cage 重新打开此页面。"; globalThis.dispatchEvent?.(new Event("cage-sign-in-expired")); }
     else if (response.status === 423) {
       const detail = isPlainText ? (await response.text()).trim().slice(0, 1200) : "";
       message = detail && !/^(?:(?:Super )?Cage 已锁定，请先登录|请先解锁 (?:Super )?Cage)$/.test(detail)
@@ -40,8 +41,20 @@ async function requestAPI(path, { body, signal, keepalive } = {}) {
     throw error;
   }
   if (response.status === 204) return null;
+  const invalid = error => new Error("读取结果失败：Super Cage 返回的数据格式无效。请重新读取；持续出现时从电脑上的 Super Cage 导出诊断包。", { cause: error });
+  if (frame) {
+    // A frame read may answer with a JPEG body whose metadata is one header.
+    // The marker tells the page that this host also understands negotiated reads.
+    const stream = response.headers.get("X-Cage-Frame-Stream") === "1";
+    if ((response.headers.get("Content-Type") || "").startsWith("image/jpeg")) {
+      try { return { stream, blob: await response.blob(), meta: response.headers.get("X-Cage-Frame") || "" }; }
+      catch (error) { throw invalid(error); }
+    }
+    try { return { stream, json: await response.json() }; }
+    catch (error) { throw invalid(error); }
+  }
   try { return await response.json(); }
-  catch (error) { throw new Error("读取结果失败：Super Cage 返回的数据格式无效。请重新读取；持续出现时从电脑上的 Super Cage 导出诊断包。", { cause: error }); }
+  catch (error) { throw invalid(error); }
 }
 
 export const request = (path, options) => requestAPI("/api/mobile/cli" + path, options);
@@ -49,6 +62,10 @@ export const mobileRequest = (path, options) => requestAPI("/api/mobile" + path,
 export const browserRequest = (path, options) => requestAPI("/api/mobile/browser" + path, options);
 
 export const desktopRequest = (path, options) => requestAPI("/api/mobile/desktop" + path, options);
+
+// Frame reads: { stream, json } for the original reply, { stream, blob, meta } for a JPEG body.
+export const browserFrameRequest = (path, options) => requestAPI("/api/mobile/browser" + path, { ...options, frame: true });
+export const desktopFrameRequest = (path, options) => requestAPI("/api/mobile/desktop" + path, { ...options, frame: true });
 
 export const sessionPath = (id) => "/sessions/" + encodeURIComponent(id);
 export const accessDenied = (error) => error.status === 401 || error.status === 423;

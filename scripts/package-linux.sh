@@ -11,14 +11,17 @@ output="$PWD/_output/releases/$version/linux"
 mkdir -p "$output"
 stage=$(mktemp -d "$PWD/_output/linux-amd64/package.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage"/{DEBIAN,usr/bin,usr/lib/claude-cage,usr/share/applications,usr/share/icons/hicolor/512x512/apps,usr/share/doc/claude-cage}
+mkdir -p "$stage"/{DEBIAN,usr/bin,usr/lib/claude-cage,usr/share/applications,usr/share/doc/claude-cage}
 cp -a _output/linux-amd64/app/. "$stage/usr/lib/claude-cage/"
 # The distro already owns /usr/bin/cage (a Wayland compositor).
 # Keep the backend adjacent to Mihomo, with a distinct public command.
 ln -s ../lib/claude-cage/cage "$stage/usr/bin/claude-cage"
 ln -s ../lib/claude-cage/cage-desktop "$stage/usr/bin/cage-desktop"
 install -m 644 packaging/linux/io.github.lee_xeo.Cage.desktop "$stage/usr/share/applications/"
-install -m 644 logo.png "$stage/usr/share/icons/hicolor/512x512/apps/io.github.lee_xeo.Cage.png"
+# hicolor PNG sizes and the scalable SVG come from brand/generate.mjs.
+(cd packaging/linux/icons && find hicolor -type f | sort) | while read -r icon; do
+  install -D -m 644 "packaging/linux/icons/$icon" "$stage/usr/share/icons/$icon"
+done
 install -m 644 docs/linux.md "$stage/usr/share/doc/claude-cage/README.md"
 install -m 755 packaging/linux/preinst "$stage/DEBIAN/preinst"
 install -m 755 packaging/linux/preinst "$stage/DEBIAN/prerm"

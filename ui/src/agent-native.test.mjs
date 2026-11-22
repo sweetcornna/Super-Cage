@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { agentClientPreferences, clientPreferences, createAgentNativeConsumer, executeAgentNative } from "./agent-native.js";
+import { readFileSync } from "node:fs";
+import { agentClientPreferences, agentNativeAllowed, clientPreferences, createAgentNativeConsumer, executeAgentNative } from "./agent-native.js";
 
 const context = { mode: "remote", connection_id: "generation-a", instance_id: "server-one" };
 function storage() {
@@ -94,7 +95,7 @@ test("native operations retain their production checks and never return the refr
   assert.deepEqual(result, { refreshed: true });
   assert.deepEqual(received, { action: "refreshSession", input: {} });
   deps.native = async () => { throw new Error("macOS 要求 Touch ID"); };
-  await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request: { action: "accountDevice", operation: "unlock" } }, deps), /Touch ID/);
+  await assert.rejects(executeAgentNative({ connection_id: context.connection_id, request: { action: "accountDevice", operation: "unlock", kind: "biometric" } }, deps), /Touch ID/);
 });
 
 test("lost completion response retries the receipt without repeating a native action", async () => {
@@ -103,7 +104,7 @@ test("lost completion response retries the receipt without repeating a native ac
     ...timers, getContext: () => context, storage: storage(), reload: () => {}, nativeAvailable: () => true,
     native: async () => { actions++; return { ok: true }; },
     api: async path => {
-      if (path.includes("consumer=window")) { claims++; return claims === 1 ? { id: "request-1", connection_id: context.connection_id, request: { action: "clipboardRead" } } : {}; }
+      if (path.includes("consumer=window")) { claims++; return claims === 1 ? { id: "request-1", connection_id: context.connection_id, request: { action: "chooseFolder" } } : {}; }
       completes++; if (completes === 1) throw new Error("lost acknowledgement"); return { ok: true };
     },
   });
@@ -205,4 +206,22 @@ test("independent desktop consumers retain distinct private window proofs", asyn
   }
   await flush(); consumers.forEach(consumer => consumer.stop());
   assert.equal(registrations, 2); assert.equal(proofs.size, 2);
+});
+
+// The same cases run against the server's table (agent_access_test.go).
+const sharedCases = JSON.parse(readFileSync(new URL("./agent-native-cases.json", import.meta.url), "utf8"));
+
+test("the window runs only the native requests the shared table opens to agents", async () => {
+  assert.ok(sharedCases.length > 40);
+  for (const { request, allowed } of sharedCases) {
+    assert.equal(agentNativeAllowed(request), allowed, JSON.stringify(request));
+    const calls = [];
+    const deps = { storage: storage(), getContext: () => context, native: async (action, input) => { calls.push({ action, input }); return action === "refreshSession" ? { url: "http://localhost:17777/#t" } : true; } };
+    const run = executeAgentNative({ connection_id: context.connection_id, request }, deps);
+    if (allowed) await run.catch(() => {});
+    else {
+      await assert.rejects(run, /只能在桌面窗口中由用户进行|原生请求格式无效/, JSON.stringify(request));
+      assert.deepEqual(calls, [], `refused request reached the bridge: ${JSON.stringify(request)}`);
+    }
+  }
 });

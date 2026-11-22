@@ -9,6 +9,7 @@ import http from "node:http";
 import { auditBrowser } from "./browser-audit.mjs";
 import { BrowserVault } from "./browser-vault.mjs";
 import { LoginBrowser } from "./browser-login.mjs";
+import { isScienceURL, publicScienceURL, readScienceConfig, scienceLink, scienceSignInWindow, scienceTabReusable, scienceTitle } from "./browser-science.mjs";
 import { PrivateBrowser } from "./browser-private.mjs";
 import { browserCookies } from "./browser-cookies.mjs";
 import { BrowserExtensions, extensionUploadLimit } from "./browser-extensions.mjs";
@@ -19,6 +20,7 @@ import { nativeInput } from "./native-input.mjs";
 import { createDisplaySettings, displayDensity } from "./display-density.mjs";
 import { DownloadManager } from "./browser-downloads.mjs";
 import { UploadManager, uploadLimit } from "./browser-uploads.mjs";
+import { applyPendingReset, cancelReset, diskCacheBytes, requestReset, resetStatus } from "./browser-data-profile.mjs";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const config = JSON.parse(
@@ -42,7 +44,7 @@ function rememberSelection() {
   const tab = targets.get(activeId);
   if (tab && !tab.login && !tab.incognito)
     try {
-      writeFileSync(selectionFile, JSON.stringify({ url: tab.url }), {
+      writeFileSync(selectionFile, JSON.stringify({ url: publicScienceURL(tab.url, sciencePort()) }), {
         mode: 0o600,
       });
     } catch {}
@@ -59,7 +61,7 @@ const splitURL = `chrome-extension://${extensionId}/control.html`;
 const settingsURL = `chrome-extension://${extensionId}/settings.html`;
 const extensionRepairURL = "chrome://extensions/?cage-browser-controller";
 const isSettingsTab = tab => tab.url === settingsURL || tab.url.startsWith(settingsURL + "#");
-const publicURL = tab => isSettingsTab(tab) ? "cage://settings" + new URL(tab.url).hash : tab.url;
+const publicURL = tab => isSettingsTab(tab) ? "cage://settings" + new URL(tab.url).hash : publicScienceURL(tab.url, sciencePort());
 let splitView = null, splitSession, splitTarget, splitOpening, resizeTimer;
 const favicons = new Map(), faviconRequests = new Map(), documents = new Map();
 
@@ -70,6 +72,8 @@ function isBrowserTab(target) {
     !auditExclusions.has(target.targetId) && !auditExclusions.has(target.url);
 }
 
+// A reset requested through /data takes effect here, before Chromium starts.
+applyPendingReset("/home/cage-browser", process.env.CAGE_LANGUAGE || "en-US");
 const flags = [
   `--load-extension=${splitDirectory}`,
   "--user-data-dir=/home/cage-browser/profile",
@@ -86,6 +90,7 @@ const flags = [
   "--disable-quic",
   "--disable-session-crashed-bubble",
   "--window-size=1440,900",
+  `--disk-cache-size=${diskCacheBytes("/home/cage-browser")}`,
   ...(displaySettings.available ? [] : [`--force-device-scale-factor=${displayScale}`]),
   `--lang=${process.env.CAGE_LANGUAGE || "en-US"}`,
   `--accept-lang=${process.env.CAGE_LANGUAGE || "en-US"}`,
@@ -131,18 +136,25 @@ const browserWheel = new BrowserWheel({
   },
 });
 let browserVNCViewers = false;
+// Streams the host keeps open while their pane is hidden (POST /visibility
+// "held"). They are workbench viewers, not legacy ones.
+let heldBrowserStreams = 0;
 function canHideBrowser() {
   // Legacy viewers connect directly to the loopback VNC server. Keep their
   // window visible after the last managed workbench viewer disconnects.
+  let established = 0;
   for (const file of ["/proc/net/tcp", "/proc/net/tcp6"]) {
     const entries = readFileSync(file, "utf8").trim().split("\n").slice(1);
-    if (entries.some(line => {
+    established += entries.filter(line => {
       const fields = line.trim().split(/\s+/);
       return fields[3] === "01" && fields[1].endsWith(":3E1C");
-    })) { browserVNCViewers = true; return false; }
+    }).length;
   }
-  browserVNCViewers = false;
-  return true;
+  // The host's count shrinks with the streams it describes, so a legacy viewer
+  // that connects after they closed is not taken for one of them.
+  heldBrowserStreams = Math.min(heldBrowserStreams, established);
+  browserVNCViewers = established > heldBrowserStreams;
+  return !browserVNCViewers;
 }
 const visibility = new BrowserVisibility(cdp, () => [...targets.keys()], canHideBrowser);
 let checkingBrowserViewers = false;
@@ -627,6 +639,38 @@ async function restartEditor(workspace) {
   }
   throw new Error("编辑器尚未恢复，请稍后重试。");
 }
+// Claude Science (phase 1) opens in an ordinary tab, kind "science". The
+// tab given the last link is remembered with the daemon start it was for.
+// While that daemon runs, that tab is only brought forward if it shows the
+// app or is signing in (scienceTabReusable). Otherwise a tab on the daemon's
+// origin gets the new link (a newer daemon has a new session), or a new tab
+// is opened; a tab the user took to another site is left alone.
+let scienceTab = { id: "", startedAt: "", handedAt: 0 };
+function sciencePort() {
+  return readScienceConfig()?.port;
+}
+function isScienceTab(tab) {
+  return !tab.login && !tab.incognito && isScienceURL(tab.url, sciencePort());
+}
+async function openScience({ url, started_at: startedAt = "", fresh = false }) {
+  const link = scienceLink(url, sciencePort());
+  if (typeof startedAt !== "string" || startedAt.length > 64) throw new Error("Claude Science 状态无效");
+  const remembered = targets.get(scienceTab.id);
+  if (remembered && !remembered.login && !remembered.incognito && fresh !== true && startedAt && startedAt === scienceTab.startedAt &&
+      scienceTabReusable(remembered.url, sciencePort(), Date.now() - scienceTab.handedAt < scienceSignInWindow)) {
+    await activate(remembered.targetId, true);
+    return { id: remembered.targetId, kind: "science", title: scienceTitle, reused: true };
+  }
+  const existing = remembered && isScienceTab(remembered) ? remembered : [...targets.values()].find(isScienceTab);
+  let id;
+  if (existing) {
+    await activate(existing.targetId, true);
+    await cdp("Page.navigate", { url: link }, await session(existing.targetId));
+    id = existing.targetId;
+  } else id = (await newTab(link)).id;
+  scienceTab = { id, startedAt, handedAt: Date.now() };
+  return { id, kind: "science", title: scienceTitle, reused: false };
+}
 async function tabState() {
   await Promise.allSettled([...auditCreations]);
   const { targetInfos } = await cdp("Target.getTargets");
@@ -656,6 +700,7 @@ async function refreshNavigation() {
 function displayTitle(tab) {
   if (isSettingsTab(tab)) return "设置";
   if (tab.login) return "账号授权";
+  if (isScienceTab(tab)) return scienceTitle;
   if (tab.url === "about:blank") return "新标签页";
   const title = tab.title;
   if (
@@ -687,7 +732,7 @@ function publicState() {
       url: publicURL(t),
       document: documents.get(t.targetId) || "",
       favicon: favicons.get(t.targetId) || "",
-      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : "web",
+      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : isScienceTab(t) ? "science" : "web",
       workspace: t.url.startsWith("http://127.0.0.1:18080/") ? new URL(t.url).searchParams.get("folder") || config.workspace : undefined,
     })),
   };
@@ -700,7 +745,80 @@ function broadcastState(focus = false, desktopFocus = false) {
 setInterval(() => {
   for (const stream of events) stream.write(": heartbeat\n\n");
 }, 10000).unref();
+// RandR state of VNC-0, kept between requests. displayModes lists the cage-WxH
+// modes the output has, the most recently used last. The first resize reads
+// them from the server; after that they are tracked here, so a resize costs
+// the xrandr calls it needs and no query.
 let displaySize = "";
+let displayModes = null;
+let displaySweep;
+const keptDisplayModes = 4;
+let displayChain = Promise.resolve();
+const runXrandr = (...args) => runFile("/usr/bin/xrandr", args, { timeout: 15000 });
+// Resizes and the removal of old modes run one at a time.
+function displayStep(work) {
+  const result = displayChain.then(work);
+  displayChain = result.catch(() => {});
+  return result;
+}
+async function selectDisplayMode(name, width, height) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      if (!displayModes) {
+        const { stdout } = await runXrandr("--query");
+        displayModes = [...stdout.matchAll(/^\s+(cage-\d+x\d+)\s/gm)].map(match => match[1]);
+      }
+      if (!displayModes.includes(name)) {
+        const rate = (((width + 32) * (height + 8) * 60) / 1000000).toFixed(3);
+        // An earlier run may have created the mode without adding it.
+        await runXrandr(
+          "--newmode",
+          name,
+          rate,
+          String(width),
+          String(width + 8),
+          String(width + 16),
+          String(width + 32),
+          String(height),
+          String(height + 1),
+          String(height + 2),
+          String(height + 8),
+          "+HSync",
+          "-VSync",
+        ).catch(() => {});
+        await runXrandr("--addmode", "VNC-0", name);
+        displayModes.push(name);
+      }
+      await runXrandr("--output", "VNC-0", "--mode", name);
+      displayModes = displayModes.filter(mode => mode !== name).concat(name);
+      return;
+    } catch (error) {
+      // What this process remembers is not what the server has, for example
+      // after the display restarted: read it again, once.
+      displayModes = null;
+      if (attempt > 0) throw error;
+    }
+  }
+}
+// Older modes go once the size has settled, one per step, and only while no
+// resize is waiting: a resize is never queued behind more than one removal.
+let displayWaiting = 0;
+function removeOldDisplayMode() {
+  void displayStep(async () => {
+    const old = (displayModes ?? []).slice(0, -keptDisplayModes).find(mode => mode !== displaySize);
+    if (!old) return false;
+    await runXrandr("--delmode", "VNC-0", old).catch(() => {});
+    await runXrandr("--rmmode", old).catch(() => {});
+    displayModes = displayModes.filter(mode => mode !== old);
+    return true;
+  }).then(more => { if (more && !displayWaiting) removeOldDisplayMode(); }, () => {});
+}
+function sweepDisplayModes() {
+  clearTimeout(displaySweep);
+  if (!displayModes || displayModes.length <= keptDisplayModes) return;
+  displaySweep = setTimeout(removeOldDisplayMode, displayModes.length > 32 ? 0 : 2000);
+  displaySweep.unref?.();
+}
 async function resizeDisplay(width, height, density) {
   // A viewer that names no density sized its display for the configured one.
   const scale = density === undefined || !displaySettings.available ? displayScale : displayDensity(density);
@@ -716,40 +834,21 @@ async function resizeDisplay(width, height, density) {
     throw new Error("Invalid display size");
   const result = { ok: true, ...(displaySettings.available ? { scale: displaySettings.set(scale) } : {}) };
   const name = `cage-${width}x${height}`;
-  if (displaySize === name) {
-    // A viewer attaching at an unchanged size still restores the full rate.
-    await runFile("/usr/bin/xrandr", ["--output", "VNC-0", "--mode", name]).catch(() => {});
-    return result;
+  displayWaiting++;
+  try {
+    await displayStep(async () => {
+      if (displaySize === name) {
+        // A viewer attaching at an unchanged size still restores the full rate.
+        await runXrandr("--output", "VNC-0", "--mode", name).catch(() => {});
+        return;
+      }
+      await selectDisplayMode(name, width, height);
+      displaySize = name;
+    });
+  } finally {
+    displayWaiting--;
   }
-  const { stdout } = await runFile("/usr/bin/xrandr", ["--query"]);
-  if (!stdout.includes(name)) {
-    const rate = (((width + 32) * (height + 8) * 60) / 1000000).toFixed(3);
-    await runFile("/usr/bin/xrandr", [
-      "--newmode",
-      name,
-      rate,
-      String(width),
-      String(width + 8),
-      String(width + 16),
-      String(width + 32),
-      String(height),
-      String(height + 1),
-      String(height + 2),
-      String(height + 8),
-      "+HSync",
-      "-VSync",
-    ]);
-    await runFile("/usr/bin/xrandr", ["--addmode", "VNC-0", name]);
-  }
-  await runFile("/usr/bin/xrandr", ["--output", "VNC-0", "--mode", name]);
-  displaySize = name;
-  for (const old of stdout.matchAll(/^\s+(cage-\d+x\d+)/gm))
-    if (old[1] !== name) {
-      await runFile("/usr/bin/xrandr", ["--delmode", "VNC-0", old[1]]).catch(
-        () => {},
-      );
-      await runFile("/usr/bin/xrandr", ["--rmmode", old[1]]).catch(() => {});
-    }
+  sweepDisplayModes();
   return result;
 }
 let mutations = Promise.resolve();
@@ -777,7 +876,7 @@ function pasteImage(png) {
 const tailnet = createTailnetClient();
 void tailnet.restore().catch(() => {});
 process.once("exit", () => tailnet.close());
-let phoneBrowser;
+let phoneBrowser, browserData;
 const server = http.createServer(async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Type", "application/json");
@@ -888,6 +987,29 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(downloads.retry(input.id)));
       return;
     }
+    if (req.url === "/data") {
+      const resetId = typeof input.id === "string" && /^[\w-]{1,64}$/.test(input.id) ? input.id : "";
+      if (input.mode === "reset") {
+        // Chromium cannot drop its own running profile: restart it (systemd
+        // restarts the controller after a non-zero exit) on a fresh one. A
+        // Chromium that acknowledges the close but does not exit is stopped.
+        requestReset("/home/cage-browser", resetId);
+        res.end('{"ok":true,"restarting":true}');
+        setTimeout(() => {
+          void cdp("Browser.close").catch(() => process.exit(1));
+          setTimeout(() => { try { chrome.kill("SIGKILL"); } catch {} setTimeout(() => process.exit(1), 2000).unref(); }, 20_000).unref();
+        }, 200);
+        return;
+      }
+      if (input.mode === "reset-status") { res.end(JSON.stringify(resetStatus("/home/cage-browser", resetId))); return; }
+      if (input.mode === "reset-cancel") { cancelReset("/home/cage-browser", resetId); res.end('{"ok":true}'); return; }
+      const { BrowserData } = await import("./browser-data.mjs");
+      browserData ??= new BrowserData({ cdp, control: splitController, session, tabs: () => [...targets.values()],
+        active: () => activeId, queue: mutate, privateContext: () => privateBrowser.context, downloads,
+        profile: "/home/cage-browser/profile" });
+      res.end(JSON.stringify(await browserData.request(input)));
+      return;
+    }
     if (req.url === "/audit") {
       if (typeof input.timezone !== "string" || input.timezone.length > 128) throw new Error("诊断时区无效");
       res.end(JSON.stringify(await auditBrowser(auditCDP, auditExclusions, input.network === true, input.timezone, input.device === true)));
@@ -950,6 +1072,7 @@ const server = http.createServer(async (req, res) => {
         return { ...await newTab(url), url, kind: "web", title: "浏览器设置" };
       }
       if (req.url === "/visibility") {
+        heldBrowserStreams = input.visible === false && Number.isInteger(input.held) && input.held > 0 && input.held <= 64 ? input.held : 0;
         await visibility.set(input.visible);
         return { ok: true };
       }
@@ -958,6 +1081,7 @@ const server = http.createServer(async (req, res) => {
       if (req.url === "/new") return newTab(input.url || undefined, input.incognito === true);
       if (req.url === "/editor") return editor(input.workspace || config.workspace);
       if (req.url === "/editor-restart") return restartEditor(input.workspace);
+      if (req.url === "/science") return openScience(input);
       if (req.url === "/ime") {
         if (!["browser", "desktop"].includes(input.target)) throw new Error("Input target is invalid");
         if (input.target === "browser" && input.mode !== "cancel" &&
@@ -1050,6 +1174,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.listen(18500, "127.0.0.1");
+// The host keeps several connections open between bursts of requests, and each
+// is an SSH channel that costs a handshake to open again. Node's default closes
+// an idle one after 5 s. The host closes its idle connections after 90 s, first.
+server.keepAliveTimeout = 120000;
+server.headersTimeout = 125000;
 (async () => {
   // A cold guest can spend several seconds initializing the sandbox and fonts.
   // Keep ordinary commands bounded separately from this initial handshake.

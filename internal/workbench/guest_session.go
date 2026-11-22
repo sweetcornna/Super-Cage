@@ -20,10 +20,18 @@ import (
 var guestSessionServer string
 
 const (
-	guestSessionReady   = "CAGE-GUEST-SESSION 1"
-	guestSessionIdle    = 30 * time.Second
-	guestSessionRetry   = 30 * time.Second
-	guestSessionStartup = 5 * time.Second
+	guestSessionReady = "CAGE-GUEST-SESSION 1"
+	// An open window polls at least every few seconds, so the idle period
+	// only matters after a pause; a reopen costs a key exchange and a login.
+	// The resident discovery helper shares it: a helper start also loads the
+	// channel helper, and a phone or window that comes back within two
+	// minutes finds it running. Idle, it is one sleeping python3 in the guest.
+	guestSessionIdle = 2 * time.Minute
+	// After a failed open, scripts use connections of their own until the
+	// retry time: 5 s after the first failure, doubling up to 30 s.
+	guestSessionRetry    = 5 * time.Second
+	guestSessionRetryMax = 30 * time.Second
+	guestSessionStartup  = 5 * time.Second
 )
 
 var errGuestSessionEnded = errors.New("guest control session ended")
@@ -38,10 +46,25 @@ type guestSessionReply struct {
 // shell and several processes on both sides, while status polls and display
 // changes arrive every second or two. It closes after a short idle period.
 type guestSession struct {
-	mu      sync.Mutex
-	conn    *guestSessionConn
-	retryAt time.Time
-	idle    *time.Timer
+	mu   sync.Mutex
+	conn *guestSessionConn
+	// opening is closed when the open in progress finishes. The open runs
+	// outside mu, so callers with short deadlines, release and close are not
+	// held up by a slow guest; concurrent callers share one open.
+	opening  chan struct{}
+	epoch    uint64 // advanced by close; an open begun before it is discarded
+	failures int
+	retryAt  time.Time
+	openErr  error // why the last open failed, returned until retryAt
+	idle     *time.Timer
+}
+
+func guestSessionBackoff(failures int) time.Duration {
+	delay := guestSessionRetry
+	for i := 1; i < failures && delay < guestSessionRetryMax; i++ {
+		delay *= 2
+	}
+	return min(delay, guestSessionRetryMax)
 }
 
 type guestSessionConn struct {
@@ -157,18 +180,26 @@ func openGuestSession(parent context.Context, command func(context.Context) *exe
 func (g *guestSession) run(ctx context.Context, lifetime context.Context, command func(context.Context) *exec.Cmd, script string) (reply guestSessionReply, sent bool, err error) {
 	g.mu.Lock()
 	conn := g.conn
-	if conn == nil || !conn.alive() {
+	for conn == nil || !conn.alive() {
 		g.conn = nil
-		if time.Now().Before(g.retryAt) {
-			g.mu.Unlock()
-			return reply, false, errGuestSessionEnded
+		if g.opening == nil {
+			if time.Now().Before(g.retryAt) {
+				err = g.openErr
+				g.mu.Unlock()
+				return reply, false, err
+			}
+			g.openLocked(lifetime, command)
 		}
-		if conn, err = openGuestSession(lifetime, command); err != nil {
-			g.retryAt = time.Now().Add(guestSessionRetry)
-			g.mu.Unlock()
-			return reply, false, err
+		opening := g.opening
+		g.mu.Unlock()
+		select {
+		case <-opening:
+		case <-ctx.Done():
+			// The open continues for the callers after this one.
+			return reply, false, ctx.Err()
 		}
-		g.conn = conn
+		g.mu.Lock()
+		conn = g.conn
 	}
 	if g.idle != nil {
 		g.idle.Stop()
@@ -205,6 +236,38 @@ func (g *guestSession) run(ctx context.Context, lifetime context.Context, comman
 	}
 }
 
+// openLocked starts opening the connection in the background. Every caller,
+// including the one that starts it, waits only as long as its own context
+// allows.
+func (g *guestSession) openLocked(lifetime context.Context, command func(context.Context) *exec.Cmd) {
+	opening, epoch := make(chan struct{}), g.epoch
+	g.opening = opening
+	go func() {
+		conn, err := openGuestSession(lifetime, command)
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		defer close(opening)
+		g.opening = nil
+		switch {
+		case g.epoch != epoch:
+			// Closed while opening, for example for a guest restart. Its
+			// failure belongs to the guest that went away, not to the session
+			// close() just reset.
+			if conn != nil {
+				conn.close()
+			}
+		case err != nil:
+			g.failures++
+			g.openErr = err
+			g.retryAt = time.Now().Add(guestSessionBackoff(g.failures))
+		default:
+			g.failures, g.openErr = 0, nil
+			g.conn = conn
+			g.idleLocked(conn)
+		}
+	}()
+}
+
 func (g *guestSession) release(conn *guestSessionConn) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -214,6 +277,11 @@ func (g *guestSession) release(conn *guestSessionConn) {
 	if busy || g.conn != conn {
 		return
 	}
+	g.idleLocked(conn)
+}
+
+// idleLocked closes conn after the idle period unless a script uses it.
+func (g *guestSession) idleLocked(conn *guestSessionConn) {
 	if g.idle != nil {
 		g.idle.Stop()
 	}
@@ -241,6 +309,8 @@ func (g *guestSession) close() {
 		g.conn.close()
 		g.conn = nil
 	}
+	g.epoch++
+	g.failures, g.openErr = 0, nil
 	g.retryAt = time.Time{}
 }
 

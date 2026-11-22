@@ -3,6 +3,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   FileCode2,
+  Anchor,
   Archive,
   LoaderCircle,
   Monitor,
@@ -16,12 +17,20 @@ import {
   X,
 } from "lucide-react";
 import { tabName } from "./workspace-state.mjs";
-import { AgentIcon } from "./agent-icon";
+import { ProviderMark } from "./provider-mark";
+import { api } from "./api";
 
-export function TabIcon({ kind, favicon, agent, accountNumber, size = 16 }) {
+const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
+// A Codex session another device or process writes: a quiet chip at the row's end.
+const ownerChips = {
+  phone: { label: "手机", tooltip: "手机上的一轮正在运行，点按以只读方式查看" },
+  external: { label: "外部", tooltip: "在其他 Codex 进程中打开" },
+};
+
+export function TabIcon({ kind, favicon, agent, provider = "claude", accountNumber, size = 16 }) {
   const [failed, setFailed] = useState("");
-  if (kind === "terminal" && agent) return <AgentIcon accountNumber={accountNumber} size={Math.max(20, size)} />;
-  if (kind === "terminal") return <TerminalSquare size={Math.max(20, size)} />;
+  if (kind === "terminal" && agent) return <ProviderMark provider={provider} accountNumber={accountNumber} />;
+  if (kind === "terminal") return <TerminalSquare size={16} />;
   if (kind === "editor") return <FileCode2 size={size} />;
   if (kind === "browser-settings") return <Settings size={size} />;
   if (typeof favicon === "string" && favicon.length <= 8192 &&
@@ -61,11 +70,24 @@ export function WorkspaceTabs({
   sessionOpenError,
 }) {
   const [menu, setMenu] = useState(null);
+  // 本机终端: "保留" on a terminal an ssh session opened, so it outlives the
+  // connection; the terminal list's next revision shows the change.
+  const [keepError, setKeepError] = useState(null);
+  const keep = (tab) => {
+    setKeepError(null);
+    api("/terminals/" + encodeURIComponent(tab.sessionId) + "/keep", {}).catch((error) => setKeepError({ id: tab.id, message: error.message }));
+  };
   const [drag, setDrag] = useState(null);
   const [allOpen, setAllOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [width, setWidth] = useState(0);
   const pointer = useRef(null);
+  const press = useRef(0);
+  // Until when the click that ends a long press is ignored (it would land on the menu's backdrop).
+  const settle = useRef(0);
+  // Under a finger the sidebar's rows scroll and the browser tabs may too, so a drag cannot reorder them:
+  // a long press on a row opens a menu to move it, and tabs keep a readable width and scroll sideways
+  // (touch.css).
   const suppressClick = useRef(false);
   const trigger = useRef();
   const list = useRef();
@@ -79,17 +101,19 @@ export function WorkspaceTabs({
   }, [horizontal]);
   const gap = tabs.length > 20 ? 1 : 4;
   const available = Math.max(0, width - gap * Math.max(0, tabs.length - 1));
-  const regularWidth = Math.min(220, available / Math.max(1, tabs.length));
+  const minTab = horizontal && matchMedia("(pointer: coarse) and (hover: none)").matches ? 156 : 0;
+  const regularWidth = Math.max(minTab, Math.min(220, available / Math.max(1, tabs.length)));
   const activeWidth =
     tabs.length > 1 && tabs.some((tab) => tab.id === active)
       ? Math.min(220, Math.max(regularWidth, Math.min(160, available * 0.4)))
       : regularWidth;
   const otherWidth = Math.max(
-    0,
+    minTab,
     (available - activeWidth) / Math.max(1, tabs.length - 1),
   );
   const tabWidth = (id) =>
     id === active ? activeWidth : Math.min(220, otherWidth);
+  const scrolls = minTab > 0 && tabs.length * (minTab + gap) - gap > width;
   const matchingTabs = tabs.filter((tab) =>
     `${tabName(tab, saved)} ${tab.url || ""}`
       .toLowerCase()
@@ -99,6 +123,8 @@ export function WorkspaceTabs({
     ? !busy && openingSession !== tab.cli_session_id && !tab.sessionRunningElsewhere
     : ready || tab.kind === "terminal");
   const finishDrag = (commit, event) => {
+    clearTimeout(press.current);
+    settle.current = Math.min(settle.current, performance.now() + 400);
     const current = pointer.current;
     pointer.current = null;
     setDrag(null);
@@ -143,6 +169,15 @@ export function WorkspaceTabs({
       id: tab.id, startX: event.clientX, startY: event.clientY,
       items, group, order: items.map(item => item.id), moved: false,
     };
+    clearTimeout(press.current);
+    if (!horizontal && !vertical && event.pointerType === "touch") {
+      const row = event.currentTarget.firstElementChild;
+      press.current = setTimeout(() => {
+        if (!pointer.current || pointer.current.moved) return;
+        settle.current = Infinity;
+        openMenu(tab, row, true);
+      }, 450);
+    }
     (event.target.closest("button") || event.currentTarget).setPointerCapture(event.pointerId);
   };
   const moveDrag = (event) => {
@@ -150,7 +185,8 @@ export function WorkspaceTabs({
     if (!current) return;
     if (!event.buttons) return finishDrag(false);
     let dx = event.clientX - current.startX;
-    if (!current.moved && Math.hypot(dx, event.clientY - current.startY) < 5) return;
+    // A fingertip wanders a few pixels during a tap: only a longer move is a drag.
+    if (!current.moved && Math.hypot(dx, event.clientY - current.startY) < (event.pointerType === "touch" ? 10 : 5)) return;
     current.moved = true;
     const dropSide = tabs.find(tab => tab.id === current.id)?.historySession ? null : splitDrag.hover(current.id, event.clientX, event.clientY);
     if (!horizontal || dropSide) {
@@ -195,6 +231,17 @@ export function WorkspaceTabs({
       ),
     });
   };
+  // The tab's menu under its button; order: only the move up / down choices (a long press on a sidebar row).
+  const openMenu = (tab, button, order) => {
+    trigger.current = button;
+    const rect = button.getBoundingClientRect();
+    setMenu({
+      tab,
+      order,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
+      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
+    });
+  };
   const showMenu = (tab, event) => {
     event.preventDefault();
     if (!horizontal && !vertical) {
@@ -202,20 +249,14 @@ export function WorkspaceTabs({
       event.currentTarget.parentElement.querySelector(".terminal-row-actions button:not(:disabled)")?.focus();
       return;
     }
-    trigger.current = event.currentTarget;
-    const rect = event.currentTarget.getBoundingClientRect();
-    setMenu({
-      tab,
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
-      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
-    });
+    openMenu(tab, event.currentTarget);
   };
   useEffect(() => {
-    if (horizontal) return;
+    if (horizontal && !scrolls) return;
     list.current
       ?.querySelector('[aria-selected="true"]')
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [active, horizontal, tabs.length]);
+  }, [active, horizontal, scrolls, tabs.length]);
   useEffect(() => {
     if (!menu && !allOpen) return;
     const dismiss = (event) => {
@@ -237,10 +278,17 @@ export function WorkspaceTabs({
       document.removeEventListener("click", outside, true);
     };
   }, [menu, allOpen]);
+  const at = menu?.order ? tabs.findIndex((tab) => tab.id === menu.tab.id) : -1;
   const actions = menu && (
     <div className="menu workspace-tab-menu"
       style={{ top: menu.top, left: menu.left }}
-      role="menu" aria-label="标签操作">
+      role="menu" aria-label={menu.order ? "调整顺序" : "标签操作"}>
+      {menu.order ? [["上移", -1], ["下移", 1]].map(([text, step]) => (
+        <button key={step} role="menuitem" disabled={!tabs[at + step]}
+          onClick={() => { setMenu(null); onReorder(menu.tab.id, tabs[at + step].id); }}>
+          {text}
+        </button>
+      )) : <>
               <button
                 role="menuitem"
                 onClick={() => {
@@ -260,6 +308,18 @@ export function WorkspaceTabs({
                 <Pin size={14} />
                 {saved[menu.tab.id]?.pinned ? "取消置顶" : "置顶标签"}
               </button>
+              {menu.tab.origin?.kind === "ssh" && !menu.tab.origin.kept && (
+                <button
+                  role="menuitem"
+                  title="连接断开后，这个终端继续运行"
+                  onClick={() => {
+                    setMenu(null);
+                    keep(menu.tab);
+                  }}
+                >
+                  保留终端
+                </button>
+              )}
               <button
                 role="menuitem"
                 onClick={() => {
@@ -270,6 +330,7 @@ export function WorkspaceTabs({
                 <X size={15} />
                 关闭标签<kbd>{shortcut("⌘W")}</kbd>
               </button>
+      </>}
     </div>
   );
   return (
@@ -281,7 +342,7 @@ export function WorkspaceTabs({
         aria-orientation={horizontal ? "horizontal" : "vertical"}
         className={
           horizontal || vertical
-            ? `browser-tabs ${vertical ? "browser-tabs-vertical" : ""} ${drag ? "is-dragging" : ""}`
+            ? `browser-tabs ${vertical ? "browser-tabs-vertical" : ""} ${drag ? "is-dragging" : ""} ${scrolls ? "scrolls" : ""}`
             : "sidebar-tabs"
         }
         style={
@@ -303,7 +364,14 @@ export function WorkspaceTabs({
             : "其他窗口占用中，退出原会话后可接续";
           const OwnerIcon = tab.sessionClaudeDesktop ? Monitor : TerminalSquare;
           const openError = tab.historySession && sessionOpenError?.id === tab.cli_session_id ? sessionOpenError.message : "";
+          const ownerChip = !horizontal && !vertical && ownerChips[tab.sessionOwner];
           const errorID = `session-open-error-${tab.cli_session_id}`;
+          // The row's chip: the account (the provider is in the mark, so the label
+          // is the account alone), or where an ssh terminal came from.
+          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.claudeLabel.replace(/^Codex · /, "") }
+            : tab.origin?.kind === "ssh" ? { text: `来自 ${tab.origin.device}${tab.origin.kept ? " · 已保留" : ""}`,
+              title: tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束" } : null;
+          const chipElement = chip && <small className="claude-tab-profile" title={chip.title}>{chip.text}</small>;
           return (
             <React.Fragment key={tab.id}>
             <div
@@ -327,7 +395,7 @@ export function WorkspaceTabs({
                 if (pointer.current) finishDrag(false);
               }}
               onClickCapture={(event) => {
-                if (suppressClick.current) {
+                if (suppressClick.current || performance.now() < settle.current) {
                   event.preventDefault();
                   event.stopPropagation();
                   suppressClick.current = false;
@@ -337,9 +405,10 @@ export function WorkspaceTabs({
               <button
                 role={tab.historySession ? undefined : "tab"}
                 className={tab.historySession ? "sidebar-session" : undefined}
+                data-codex-session={tab.cli_session_id && terminalProvider(tab) === "codex" ? "" : undefined}
                 aria-busy={opening || undefined}
                 aria-describedby={openError ? errorID : undefined}
-                aria-description={runningElsewhere ? runningNotice : undefined}
+                aria-description={runningElsewhere ? runningNotice : ownerChip ? ownerChip.tooltip : undefined}
                 aria-label={tab.claudeLabel ? `${title} · ${tab.claudeLabel}` : title}
                 aria-selected={tab.historySession ? undefined : tab.id === active}
                 tabIndex={
@@ -349,7 +418,7 @@ export function WorkspaceTabs({
                     : -1
                 }
                 disabled={tab.historySession ? busy || opening || runningElsewhere : !ready && tab.kind !== "terminal"}
-                title={runningElsewhere ? `${title}\n${runningNotice}` : tab.url ? `${title}\n${tab.url}` : [title, tab.claudeAccountNumber && `账号 ${tab.claudeAccountNumber}`, tab.claudeLabel].filter(Boolean).join(" · ")}
+                title={runningElsewhere ? `${title}\n${runningNotice}` : ownerChip ? `${title}\n${ownerChip.tooltip}` : tab.url ? `${title}\n${tab.url}` : [title, tab.claudeAccountNumber && `账号 ${tab.claudeAccountNumber}`, tab.claudeLabel].filter(Boolean).join(" · ")}
                 onClick={() => onSelect(tab.id)}
                 onContextMenu={(event) => showMenu(tab, event)}
                 onKeyDown={(event) => {
@@ -385,12 +454,18 @@ export function WorkspaceTabs({
               >
                 <TabIcon kind={tab.kind} favicon={tab.favicon} size={15}
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
-                  accountNumber={tab.claudeAccountNumber} />
-                <span>{title}</span>
-                {tab.claudeLabel && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
+                  provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
+                {/* A phone or external row names its owner instead; the account is in the label and tooltip.
+                    In the sidebar the title and the chip share one line: a chip that does not fit whole is not shown (cli-sessions.css). */}
+                {chip && !horizontal && !vertical
+                  ? <i className="session-text"><span>{title}</span>{chipElement}</i>
+                  : <><span>{title}</span>{chipElement}</>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
-                {!horizontal && !vertical && (opening || tab.sessionActive && !runningElsewhere) &&
-                  <LoaderCircle size={13} className="spin session-activity" role="img" aria-label={opening ? "正在打开会话" : "会话正在运行"} />}
+                {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
+                {!horizontal && !vertical && (opening
+                  ? <LoaderCircle size={13} className="spin session-activity" role="img" aria-label="正在打开会话" />
+                  : tab.sessionActive && !runningElsewhere &&
+                    <i className="live-dot session-activity" role="img" aria-label="会话正在运行" />)}
               </button>
               {!horizontal && !vertical && runningElsewhere &&
                 <span className="session-owner" role="img" aria-label={runningNotice} tabIndex={0}>
@@ -409,12 +484,15 @@ export function WorkspaceTabs({
                 <div className="terminal-row-actions" role="group" aria-label={`${title} 的操作`}>
                   <TerminalAction label={saved[tab.id]?.pinned ? "取消置顶" : "置顶"}
                     icon={saved[tab.id]?.pinned ? PinOff : Pin} disabled={busy} onClick={() => onPin(tab.id)} />
+                  {tab.origin?.kind === "ssh" && !tab.origin.kept &&
+                    <TerminalAction label="保留终端" icon={Anchor} disabled={busy} onClick={() => keep(tab)} />}
                   <TerminalAction label="重命名" icon={Pencil} disabled={busy} onClick={() => onRename(tab)} />
                   <TerminalAction label={tab.cli_session_id ? "归档" : "关闭终端"} icon={tab.cli_session_id ? Archive : X} disabled={busy} onClick={event => onClose(tab, event.currentTarget)} />
                 </div>
               )}
             </div>
             {openError && <p id={errorID} className="sidebar-session-open-error" role="alert">{openError}</p>}
+            {keepError?.id === tab.id && <p className="sidebar-session-open-error" role="alert">{keepError.message}</p>}
             </React.Fragment>
           );
         })}
@@ -464,7 +542,7 @@ export function WorkspaceTabs({
                     >
                       <TabIcon kind={tab.kind} favicon={tab.favicon}
                         agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
-                        accountNumber={tab.claudeAccountNumber} />
+                        provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
                       <span>{tabName(tab, saved)}</span>
                       {tab.id === active && (
                         <span className="current-tab-marker">当前</span>
@@ -480,7 +558,7 @@ export function WorkspaceTabs({
       {menu &&
         createPortal(
           <>
-            <div className="menu-dismiss" onClick={() => setMenu(null)} />
+            <div className="menu-dismiss" onClick={() => { if (performance.now() >= settle.current) setMenu(null); }} />
             {actions}
           </>,
           document.body,

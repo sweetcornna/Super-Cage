@@ -1,0 +1,358 @@
+/* Base layer: element defaults and the shared controls (buttons, inputs,
+ * checkboxes, radios, switches, selects). brand/design-language.md §2–3.
+ * Selectors use :where() so any component class overrides them. */
+@layer base {
+  :root {
+    font-family: var(--font-sans);
+    font-size: var(--ui-font-size, 14px);
+    line-height: var(--lh-body);
+    color: var(--ink);
+    background: var(--paper);
+    font-synthesis: none;
+    text-rendering: optimizeLegibility;
+    -webkit-text-size-adjust: 100%;
+    scrollbar-color: var(--line-strong) transparent;
+  }
+  :where(*, *::before, *::after) {
+    box-sizing: border-box;
+  }
+  :where(body) {
+    margin: 0;
+  }
+  ::selection {
+    background: var(--selection);
+  }
+  :where(svg) {
+    flex-shrink: 0;
+  }
+  :where(button, input, select, textarea) {
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+  }
+  :where(a) {
+    color: var(--clay-ink);
+    text-underline-offset: 2px;
+  }
+  :where(code, kbd, pre, samp) {
+    font-family: var(--font-mono);
+  }
+  :where(code) {
+    font-size: 0.92em;
+  }
+  :where(p, li, small, span, label) > :where(code) {
+    padding: 0.08em 0.36em;
+    border-radius: 5px;
+    background: var(--soft);
+  }
+  :where(kbd) {
+    display: inline-flex;
+    align-items: center;
+    min-height: 1.6em;
+    padding: 0 0.45em;
+    border: 1px solid var(--line);
+    border-bottom-width: 2px;
+    border-radius: 6px;
+    background: var(--surface);
+    color: var(--muted);
+    font-family: var(--font-sans);
+    font-size: var(--fs-caption);
+    font-variant-numeric: tabular-nums;
+  }
+  :where(:focus-visible) {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+  :where(.tabular) {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Buttons. Secondary is the default; .primary is ink, .clay is the one
+     call to action a page may have, .danger is the destructive style. */
+  :where(button) {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: var(--h-control);
+    padding: 0 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: var(--fs-body);
+    font-weight: 500;
+    line-height: 1.2;
+    white-space: nowrap;
+    cursor: var(--control-cursor, default);
+    transition:
+      background-color var(--dur-fast) var(--ease-out),
+      border-color var(--dur-fast) var(--ease-out),
+      color var(--dur-fast) var(--ease-out),
+      opacity var(--dur-fast) var(--ease-out);
+  }
+  :where(button:hover:not(:disabled)) {
+    background: var(--soft);
+  }
+  :where(button:active:not(:disabled)) {
+    background: var(--selected);
+  }
+  :where(button:disabled) {
+    opacity: 0.45;
+    cursor: default;
+  }
+  :where(button.primary) {
+    border-color: var(--button);
+    background: var(--button);
+    color: var(--button-ink);
+  }
+  :where(button.primary:hover:not(:disabled)) {
+    border-color: color-mix(in srgb, var(--button) 86%, var(--button-ink));
+    background: color-mix(in srgb, var(--button) 86%, var(--button-ink));
+  }
+  :where(button.primary:active:not(:disabled)) {
+    background: color-mix(in srgb, var(--button) 78%, var(--button-ink));
+  }
+  :where(button.clay) {
+    border-color: var(--clay);
+    background: var(--clay);
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+  :where(button.clay:hover:not(:disabled)) {
+    border-color: color-mix(in srgb, var(--clay) 88%, #000);
+    background: color-mix(in srgb, var(--clay) 88%, #000);
+  }
+  /* One destructive style everywhere (design-language.md §3): error text on a faint
+     error tint with an error hairline. Never a solid red fill; .danger-fill is the
+     same style under the name the confirm dialogs already use. */
+  :where(button.danger, button.danger-fill) {
+    border-color: color-mix(in srgb, var(--error) 40%, var(--line-strong));
+    background: color-mix(in srgb, var(--error) 8%, var(--surface));
+    color: var(--error);
+  }
+  :where(button.danger:hover:not(:disabled), button.danger-fill:hover:not(:disabled)) {
+    background: color-mix(in srgb, var(--error) 14%, var(--surface));
+  }
+  :where(button.large) {
+    min-height: var(--h-hero);
+    padding: 0 20px;
+    font-size: var(--fs-lead);
+  }
+  :where(button.compact) {
+    min-height: var(--h-compact);
+    padding: 0 10px;
+    font-size: var(--fs-secondary);
+  }
+  :where(.quiet-button) {
+    min-height: var(--h-compact);
+    padding: 0 10px;
+    border-color: transparent;
+    background: transparent;
+    color: var(--ink);
+    font-size: var(--fs-secondary);
+  }
+  :where(.quiet-button) svg {
+    color: var(--muted);
+  }
+  :where(.icon-button) {
+    width: var(--h-compact);
+    height: var(--h-compact);
+    min-height: 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--muted);
+  }
+  :where(.icon-button:hover:not(:disabled)) {
+    background: var(--soft);
+    color: var(--ink);
+  }
+  :where(.text-button) {
+    min-height: 28px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--clay-ink);
+    font-weight: 500;
+  }
+  :where(.text-button:hover:not(:disabled)) {
+    background: transparent;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* Text fields. */
+  :where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"], [type="hidden"]), select, textarea) {
+    min-height: var(--h-control);
+    padding: 0 12px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: var(--fs-body);
+    transition: border-color var(--dur-fast) var(--ease-out);
+  }
+  :where(textarea) {
+    padding: 10px 12px;
+    line-height: 1.5;
+  }
+  :where(input, textarea)::placeholder {
+    color: var(--faint);
+    opacity: 1;
+  }
+  :where(input, select, textarea):hover:not(:disabled, :focus) {
+    border-color: color-mix(in srgb, var(--line-strong) 70%, var(--muted));
+  }
+  :where(input, select, textarea):focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 1px;
+    border-color: var(--line-strong);
+  }
+  :where(input, select, textarea):disabled {
+    background: var(--soft);
+    color: var(--muted);
+  }
+  :where(select) {
+    appearance: none;
+    padding-right: 32px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239a9488' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+  }
+
+  /* Checkbox and radio: drawn, not native. */
+  :where(input[type="checkbox"]:not([role="switch"]), input[type="radio"]) {
+    appearance: none;
+    flex: none;
+    display: inline-grid;
+    place-content: center;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+    border: 1.5px solid var(--line-strong);
+    border-radius: 5px;
+    background: var(--surface);
+    cursor: var(--control-cursor, default);
+    transition: background-color var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out);
+  }
+  :where(input[type="radio"]) {
+    border-radius: 50%;
+  }
+  :where(input[type="checkbox"]:not([role="switch"]))::after {
+    content: "";
+    width: 8px;
+    height: 4.5px;
+    margin-top: -2px;
+    border-left: 2px solid var(--button-ink);
+    border-bottom: 2px solid var(--button-ink);
+    transform: rotate(-45deg) scale(0);
+    transition: transform var(--dur-fast) var(--ease-out);
+  }
+  :where(input[type="checkbox"]:not([role="switch"]):checked, input[type="radio"]:checked) {
+    border-color: var(--button);
+    background: var(--button);
+  }
+  :where(input[type="checkbox"]:not([role="switch"]):checked)::after {
+    transform: rotate(-45deg) scale(1);
+  }
+  :where(input[type="radio"]:checked) {
+    box-shadow: inset 0 0 0 3.5px var(--surface);
+  }
+  :where(input[type="checkbox"], input[type="radio"]):disabled {
+    opacity: 0.45;
+  }
+
+  /* Switch: a checkbox with role="switch". */
+  :where(input[type="checkbox"][role="switch"]) {
+    appearance: none;
+    position: relative;
+    flex: none;
+    width: 34px;
+    height: 20px;
+    margin: 0;
+    border: 0;
+    border-radius: var(--r-pill);
+    background: var(--line-strong);
+    cursor: var(--control-cursor, default);
+    transition: background-color var(--dur) var(--ease-out);
+  }
+  :where(input[type="checkbox"][role="switch"])::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--surface);
+    box-shadow: 0 1px 2px #1f1e1d29;
+    transition: transform var(--dur) var(--ease-out);
+  }
+  :where(input[type="checkbox"][role="switch"]:checked) {
+    background: var(--button);
+  }
+  :where(input[type="checkbox"][role="switch"]:checked)::after {
+    transform: translateX(14px);
+    background: var(--button-ink);
+  }
+  :where(input[type="checkbox"][role="switch"]:disabled) {
+    opacity: 0.45;
+  }
+
+  :where(input[type="range"]) {
+    accent-color: var(--clay);
+  }
+  :where(progress) {
+    accent-color: var(--clay);
+  }
+
+  /* Motion primitives. */
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @keyframes pulse {
+    50% {
+      opacity: 0.35;
+    }
+  }
+  @keyframes breathe {
+    50% {
+      opacity: 0.4;
+      transform: scale(0.82);
+    }
+  }
+  @keyframes appear {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+  }
+  @keyframes fade {
+    from {
+      opacity: 0;
+    }
+  }
+  @keyframes progress {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(250%);
+    }
+  }
+}
+
+/* The appearance setting can force reduced motion regardless of the system. */
+:root[data-reduced-motion="true"] *,
+:root[data-reduced-motion="true"] *::before,
+:root[data-reduced-motion="true"] *::after {
+  animation: none !important;
+  transition: none !important;
+}

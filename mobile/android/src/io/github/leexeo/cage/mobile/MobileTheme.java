@@ -31,7 +31,7 @@ final class MobileTheme {
     static MobileTheme apply(Activity activity, String mode) {
         int night = activity.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
         boolean dark = "dark".equals(mode) || (!"light".equals(mode) && night == Configuration.UI_MODE_NIGHT_YES);
-        // The app themes also carry ?attr/cageInk for the logo and doodle vectors.
+        // The app themes also carry ?attr/cageInk and ?attr/cageGlow for the logo and doodle vectors.
         int style = activity.getResources().getIdentifier(dark ? "CageDark" : "CageLight", "style", activity.getPackageName());
         activity.setTheme(style != 0 ? style : dark ? android.R.style.Theme_Material_NoActionBar : android.R.style.Theme_Material_Light_NoActionBar);
         MobileTheme theme = new MobileTheme(dark);

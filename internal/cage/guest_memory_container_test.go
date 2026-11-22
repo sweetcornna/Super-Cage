@@ -23,7 +23,7 @@ func TestContainerMemorySetupNeverInvokesKernelOrSwapCommands(t *testing.T) {
 	}
 	cmd := exec.Command(bash, "-e", "-s")
 	cmd.Env = []string{"PATH=" + directory}
-	cmd.Stdin = strings.NewReader(guestMemory)
+	cmd.Stdin = strings.NewReader(guestMemoryScript())
 	if output, err := cmd.CombinedOutput(); err != nil || len(output) > 0 {
 		t.Fatalf("container touched kernel setup: %v %s", err, output)
 	}

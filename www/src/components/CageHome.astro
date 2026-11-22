@@ -56,7 +56,7 @@ const canonical = new URL(pathFor(locale), Astro.site);
   <link rel="canonical" href={canonical} />
   {languages.map(l => <link rel="alternate" hreflang={l.lang} href={new URL(pathFor(l.code), Astro.site)} />)}
   <link rel="alternate" hreflang="x-default" href={new URL(base, Astro.site)} />
-  <link rel="icon" href={`${base}cage-icon.png`} />
+  <link rel="icon" href={`${base}favicon.ico`} sizes="48x48" /><link rel="icon" type="image/svg+xml" href={`${base}cage-icon.svg`} /><link rel="apple-touch-icon" href={`${base}apple-touch-icon.png`} />
   <meta property="og:type" content="website" /><meta property="og:site_name" content="Claude Cage" />
   <meta property="og:title" content={c.title} /><meta property="og:description" content={c.description} />
   <meta property="og:url" content={canonical} /><meta property="og:image" content={new URL(art.src, Astro.site)} />

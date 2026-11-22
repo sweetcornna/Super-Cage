@@ -853,6 +853,78 @@ describe("新建虚拟机", () => {
 
 });
 
+describe("错误文本映射", () => {
+  // Every code internal/tenant can answer with, and its English message: none may reach the user as English.
+  const GATEWAY = [
+    ["session_changed", 409, "The signed-in account has changed. Refresh your session and try again.", "登录账户已在其他标签页变化。"],
+    ["registration_closed", 403, "Self-service registration is closed. Contact the administrator for an account.", "此门户未开放自助注册，请联系管理员获取账户。"],
+    ["invalid_credentials", 401, "Invalid username or password.", "用户名或密码不正确。"],
+    ["username_taken", 409, "Username is already registered.", "该用户名已被使用。"],
+    ["vm_limit", 409, "The workspace quota has been reached.", "已达到虚拟机数量上限。"],
+    ["invalid_input", 400, "Invalid request fields.", "输入内容无效，请检查后重试。"],
+    ["invalid_input", 400, "Invalid request target.", "输入内容无效，请检查后重试。"],
+    ["origin_refused", 403, "Request host is not allowed.", "请求来源被拒绝，请从门户地址重新打开页面。"],
+    ["origin_refused", 403, "Request origin is not allowed.", "请求来源被拒绝，请从门户地址重新打开页面。"],
+    ["runtime_unavailable", 503, "The service or workspace is temporarily unavailable.", "虚拟机运行时暂时不可用，请稍后重试。"],
+    ["not_found", 404, "Resource not found.", "请求的内容不存在。"],
+    ["vm_not_found", 404, "Workspace not found.", "虚拟机不存在或无权访问。"],
+    ["unauthenticated", 401, "A valid sign-in is required.", "登录已失效，请重新登录。"],
+    ["rate_limited", 429, "Too many requests. Try again shortly.", "操作过于频繁，请稍后再试。"],
+    ["invalid_content_type", 415, "Use application/json with UTF-8.", "请求格式不受支持。"],
+  ];
+
+  test("网关的每个错误码都换成中文，不显示英文原文", () => {
+    for (const [code, status, english, chinese] of GATEWAY) {
+      assert.deepEqual(app.describeProblem(code, english, status), { message: chinese }, code);
+    }
+  });
+
+  test("已经是中文的服务端文本原样显示", () => {
+    assert.deepEqual(app.describeProblem("vm_limit", "每个账户最多 5 台虚拟机。", 409), { message: "每个账户最多 5 台虚拟机。" });
+    assert.deepEqual(app.describeProblem("mystery", "  镜像缺失\u0000 ", 500), { message: "镜像缺失" });
+  });
+
+  test("未知错误码：通用中文句子，服务端原文作为次要说明", () => {
+    assert.deepEqual(app.describeProblem("quota_frozen", "Quota is frozen.", 409), { message: "请求失败（HTTP 409），请稍后重试。", detail: "Quota is frozen." });
+    assert.deepEqual(app.describeProblem(undefined, "Unexpected token < in JSON", 0), { message: "请求失败，请稍后重试。", detail: "Unexpected token < in JSON" });
+    assert.deepEqual(app.describeProblem("quota_frozen", "", 502), { message: "请求失败（HTTP 502），请稍后重试。" });
+    assert.deepEqual(app.describeProblem("toString", "x", 400), { message: "请求失败（HTTP 400），请稍后重试。", detail: "x" }, "原型上的名字不算已知错误码");
+  });
+
+  test("虚拟机启动失败文本：网关的固定句子换成中文，其他英文保留为说明", () => {
+    const startup = "The workspace is unavailable. Open it again to retry.";
+    assert.deepEqual(app.describeVmFailure(startup), { message: "虚拟机暂时无法启动，可以重新打开再试。" });
+    assert.deepEqual(app.describeVmFailure("disk quota exceeded"), { message: "虚拟机启动失败，可以重试。", detail: "disk quota exceeded" });
+    assert.deepEqual(app.describeVmFailure("所选系统镜像缺失。"), { message: "所选系统镜像缺失。" });
+    assert.equal(app.describeVmFailure("  "), null);
+    const failed = app.normalizeVm(vm(ID_A, "error", { message: startup }));
+    assert.equal(failed.message, "虚拟机暂时无法启动，可以重新打开再试。");
+    assert.equal("message_detail" in failed, false);
+    assert.equal(app.normalizeVm(vm(ID_A, "error", { message: "disk quota exceeded" })).message_detail, "disk quota exceeded");
+  });
+
+  test("控制器经过映射：英文错误显示中文，未知错误码保留原文", async () => {
+    const ctx = setup();
+    await signIn(ctx, { vms: [], limit: 5 });
+    ctx.portal.openCreate();
+    const creating = ctx.portal.createVm("第一台");
+    ctx.f.next("POST", "/api/tenant/vms").respond(400, { error: { code: "invalid_input", message: "Invalid request fields." } });
+    await creating;
+    assert.equal(ctx.state.create.error.message, "输入内容无效，请检查后重试。");
+    assert.equal("detail" in ctx.state.create.error, false);
+
+    const again = ctx.portal.createVm("第一台");
+    ctx.f.next("POST", "/api/tenant/vms").respond(409, { error: { code: "quota_frozen", message: "Quota is frozen." } });
+    await again;
+    assert.equal(ctx.state.create.error.message, "请求失败（HTTP 409），请稍后重试。");
+    assert.equal(ctx.state.create.error.detail, "Quota is frozen.");
+  });
+
+  test("总览行的操作文字：开机中的虚拟机只查看进度", () => {
+    assert.deepEqual({ ...app.VM_ACTION_LABELS }, { ready: "打开", starting: "查看进度", stopped: "启动并打开", error: "启动并打开" });
+  });
+});
+
 describe("会话绑定与跨标签同步", () => {
   const unauth = { error: { code: "unauthenticated", message: "请先登录。" } };
   const changed = { error: { code: "session_changed", message: "登录账户已变化。" } };
@@ -1192,7 +1264,16 @@ describe("静态约束", () => {
     assert.match(scripts[0][1], /src="\/app\.mjs"/);
     assert.equal(scripts[0][2].trim(), "");
     assert.equal(/<style\b|\sstyle=|\son[a-z]+=/i.test(html), false);
-    assert.deepEqual([...html.matchAll(/(?:href|src)="([^"]+)"/g)].map((m) => m[1]), ["/styles.css", "/app.mjs"]);
+    const refs = [...html.matchAll(/(?:href|src)="([^"]+)"/g)].map((m) => m[1]);
+    // The brand mark is inlined once as <symbol>s and reused through <use href="#id">: fragment references
+    // must resolve to a symbol in this same file; every other reference is still only the two same-origin files.
+    const symbols = new Set([...html.matchAll(/<symbol\b[^>]*\bid="([^"]+)"/g)].map((m) => m[1]));
+    for (const ref of refs.filter((value) => value.startsWith("#"))) assert.ok(symbols.has(ref.slice(1)), `${ref} 指向本文件中的 symbol`);
+    // Besides the two files, only the gateway's fixed icons and web manifest (internal/tenant/portal_icons.go).
+    assert.deepEqual(refs.filter((value) => !value.startsWith("#")), [
+      "/favicon.ico", "/icon.svg", "/apple-touch-icon.png", "/manifest.webmanifest", "/styles.css", "/app.mjs",
+    ]);
+    assert.equal(/<image\b|<foreignObject\b/i.test(html), false, "内联 SVG 不加载图像或嵌入 HTML");
     assert.equal(/https?:\/\//.test(html), false);
     assert.match(html, /<html lang="zh-CN">/);
   });
@@ -1202,5 +1283,72 @@ describe("静态约束", () => {
     assert.equal(/@import|url\(|https?:\/\//i.test(css), false);
     assert.match(css, /prefers-color-scheme: dark/);
     assert.match(css, /\[data-theme="dark"\]/);
+  });
+});
+
+describe("手机上的工作台：门户自己判断", () => {
+  const device = ({ agent = "", mobile, coarse = true, hover = false, width = 390, height = 844, screen = [390, 844] } = {}) => ({
+    navigator: { userAgent: agent, userAgentData: mobile === undefined ? undefined : { mobile } },
+    matchMedia: (query) => ({ matches: query === "(pointer: coarse)" ? coarse : query === "(hover: hover)" ? hover : false }),
+    innerWidth: width,
+    innerHeight: height,
+    screen: { width: screen[0], height: screen[1] },
+  });
+  const iPhone = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+  const iPad = "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  const pixel = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36";
+  const mac = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15";
+
+  test("phoneDevice 与网关（internal/webentry）和页面守卫（entry-layout）的规则一致", () => {
+    assert.equal(app.phoneDevice(device({ agent: iPhone })), true);
+    assert.equal(app.phoneDevice(device({ agent: pixel, mobile: true })), true);
+    assert.equal(app.phoneDevice(device({ agent: pixel, mobile: false, width: 980, height: 2000 })), false, "Client Hints 说不是手机，且是电脑版网页");
+    assert.equal(app.phoneDevice(device({ agent: iPad, width: 820, height: 1180, screen: [820, 1180] })), false, "平板");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 375, height: 667, screen: [375, 667] })), true, "报告为电脑的触屏小窗口");
+    assert.equal(app.phoneDevice(device({ agent: mac, coarse: false, hover: true, width: 375, height: 667 })), false, "缩窄的电脑浏览器");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 980, height: 450 })), false, "横屏请求电脑版网页");
+    assert.equal(app.phoneDevice(device({ agent: mac, width: 900, height: 450 })), false, "布局视口宽于屏幕");
+  });
+
+  test("externalLink 只接受 http(s)、无凭据、有长度上限、没有控制和方向字符", () => {
+    assert.deepEqual(app.externalLink("https://example.com/a?b=1#c"), { href: "https://example.com/a?b=1#c", host: "example.com" });
+    assert.deepEqual(app.externalLink("http://example.com:8080/"), { href: "http://example.com:8080/", host: "example.com:8080" });
+    assert.equal(app.externalLink("https://bücher.example/").host, "xn--bcher-kva.example", "国际化域名显示为 punycode");
+    for (const bad of [
+      "javascript:alert(1)", "data:text/html,x", "file:///etc/passwd", "blob:https://example.com/x", "about:blank",
+      "https://user:pass@example.com/", "https://user@example.com/", "not a url", "", null, 42, { toString: () => "https://example.com/" },
+      "https://example.com/" + "a".repeat(app.LINK_MAX_LENGTH),
+      "https://exa\tmple.com/", "https://example.com/\n", "https://example.com/\u0000", "https://example.com/\u0085",
+      "https://example.com/\u202egnp.exe", "https://example.com/\u2066x\u2069", "https://exa\u200bmple.com/", "https://example.com/\u061c", "\ufeffhttps://example.com/",
+    ]) assert.equal(app.externalLink(bad), null, JSON.stringify(String(bad)).slice(0, 60));
+    assert.ok(app.externalLink("https://example.com/" + "a".repeat(app.LINK_MAX_LENGTH - 20)));
+  });
+
+  test("重新进入：每台虚拟机每分钟最多一次，持续请求时间隔翻倍，安静后恢复", () => {
+    let now = 0;
+    const allow = app.createReentryLimiter(() => now);
+    const minute = app.REENTRY_MIN_GAP_MS;
+    assert.equal(allow("a"), true);
+    assert.equal(allow("a"), false);
+    assert.equal(allow("b"), true, "另一台虚拟机各自计数");
+    now = minute - 1;
+    assert.equal(allow("a"), false);
+    const allowed = [];
+    for (now = minute; now < 40 * minute; now += 1000) if (allow("a")) allowed.push(now / minute);
+    assert.deepEqual(allowed, [1, 3, 7, 15, 31], "一直请求：间隔 1、2、4、8、16 分钟");
+    now = 31 * minute + 2 * app.REENTRY_MAX_GAP_MS;
+    assert.equal(allow("a"), true, "安静一段时间后");
+    now += minute - 1;
+    assert.equal(allow("a"), false);
+    now += 1;
+    assert.equal(allow("a"), true, "又回到一分钟");
+  });
+
+  test("门户不替工作台打开标签页，也不接受工作台给出的深度", async () => {
+    const source = await readFile(join(HERE, "app.mjs"), "utf8");
+    assert.equal(/\bwin\.open\(|window\.open\(/.test(source), false, "门户代码里没有 window.open");
+    const handler = source.slice(source.indexOf("function phoneMessage("), source.indexOf("win.addEventListener(\"popstate\""));
+    assert.equal(/depth/.test(handler), false);
+    assert.match(handler, /type === "cage:phone-ui"\) return true/);
   });
 });

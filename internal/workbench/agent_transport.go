@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,47 +13,20 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
 // AgentTarget separates the desktop's client configuration from its selected
 // workload. A selected workload always requires an explicit generation.
-type AgentTarget struct {
-	Scope      string `json:"scope"`
-	Connection string `json:"connection_id,omitempty"`
-}
+type AgentTarget = controlclient.AgentTarget
 
 func agentConnectTarget(ctx context.Context, configPath string, target AgentTarget) (*controllerClient, error) {
-	if target.Scope == "" || target.Scope == "local" {
-		return agentConnect(ctx, configPath)
-	}
-	if target.Scope != "desktop" && target.Scope != "selected" && target.Scope != "client" {
-		return nil, &AgentError{Code: "invalid_input", Message: "scope must be local, desktop, selected or client.", NextAction: "capabilities"}
-	}
-	if target.Scope == "selected" && target.Connection == "" {
-		return nil, &AgentError{Code: "invalid_input", Message: "selected scope requires --connection from client.context.", NextAction: "client.context"}
-	}
-	path := desktopConfigPath(configPath)
-	if target.Scope == "client" {
-		path = configPath
-	}
-	c, err := connectController(filepath.Dir(path))
+	c, err := controlclient.AgentConnectTarget(ctx, configPath, target, agentSameBuild, connectProvenControllerConn)
 	if err != nil {
-		return nil, &AgentError{Code: "service_unavailable", Message: "Open the Super Cage desktop before managing client configuration.", NextAction: "open_desktop"}
+		return nil, err
 	}
-	want, err := currentController()
-	if err != nil || !want.matches(c.launch.Controller) || (target.Scope != "client" && !c.launch.DesktopGateway) || (target.Scope == "client" && !c.launch.ClientOnly) || filepath.Clean(c.launch.ConfigPath) != filepath.Clean(path) {
-		c.close()
-		return nil, &AgentError{Code: "controller_mismatch", Message: "The desktop controller does not match this CLI and configuration.", NextAction: "open_desktop"}
-	}
-	u, _ := url.Parse(c.launch.URL)
-	code, err := c.callContext(ctx, "POST", "/api/session", map[string]string{"token": u.Fragment}, nil)
-	if err != nil || code != 200 {
-		c.close()
-		return nil, agentHTTPError(401)
-	}
-	c.client.Jar.SetCookies(u, []*http.Cookie{{Name: cookieName + "_" + u.Port() + "-desktop", Value: trustedViewProof(c.record.Token), Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode}})
-	return c, nil
+	return c.(*controllerClient), nil
 }
 
 type AgentResponse struct {
@@ -70,7 +44,7 @@ type AgentResponse struct {
 func AgentRequest(ctx context.Context, configPath string, target AgentTarget, method, path string, input io.Reader, contentType, output string) (AgentResponse, error) {
 	var result AgentResponse
 	u, err := url.Parse(path)
-	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/api/") || u.Fragment != "" || strings.ContainsAny(path, "\r\n\\") || strings.Contains(u.Path, "//") || strings.Contains(u.Path, "/../") {
+	if err != nil || u.IsAbs() || u.Host != "" || !strings.HasPrefix(u.Path, "/api/") || u.Fragment != "" || strings.ContainsAny(path, "\r\n\\") || u.RawPath != "" || !agentPlainPath(u.Path) {
 		return result, &AgentError{Code: "invalid_input", Message: "Use a relative /api/ path without a host, fragment or traversal.", NextAction: "capabilities"}
 	}
 	switch method {
@@ -78,16 +52,23 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 	default:
 		return result, &AgentError{Code: "invalid_input", Message: "Unsupported HTTP method.", NextAction: "capabilities"}
 	}
-	// These endpoints are internal transports, not user actions. Device
-	// enrollment/unlock must run inside the same native credential store and
-	// biometric policy as the desktop; never return its wrapping secret.
-	if u.Path == "/api/agent/native/window" || u.Path == "/api/account/device-enroll" || u.Path == "/api/account/device-unlock" || u.Path == "/api/account/device-revoke" || u.Path == "/api/session" || u.Path == "/api/launch" || u.Path == "/api/handoff" || u.Path == "/api/desktop-owner" || strings.HasPrefix(u.Path, "/api/desktop-local/") {
-		return result, &AgentError{Code: "native_transport_required", Message: "Use native.submit with the same accountDevice or desktop action. Transport credentials are not exported.", NextAction: "native.submit"}
+	// Window-only routes and state-changing routes nobody classified are
+	// refused before anything is sent (agent_access.go).
+	if refusal := agentRouteRefusal(method, u.Path); refusal != nil {
+		return result, refusal
 	}
-	// Local VM inventory carries private profile grants and is owned by the
-	// native desktop generation. Never export it through the agent transport.
-	if strings.HasPrefix(u.Path, "/api/client/virtual-machines") {
-		return result, &AgentError{Code: "native_transport_required", Message: "Local virtual machines are managed only by the native desktop window; profile grants are not exported through the agent transport.", NextAction: "open_desktop"}
+	// Routes with body rules: read the body once, check it, send those bytes.
+	if rules := agentBodyRulesFor(method, u.Path); len(rules) > 0 {
+		var body []byte
+		if input != nil {
+			if body, err = io.ReadAll(io.LimitReader(input, agentBodyLimit+1)); err != nil {
+				return result, &AgentError{Code: "invalid_input", Message: "The request body could not be read; nothing was sent.", NextAction: "capabilities"}
+			}
+		}
+		if refusal := agentBodyRefusal(rules, body); refusal != nil {
+			return result, refusal
+		}
+		input = bytes.NewReader(body)
 	}
 	// Client-only operations must address the desktop explicitly. Ordinary
 	// business routes on that listener require the selected target's generation.
@@ -125,6 +106,7 @@ func AgentRequest(ctx context.Context, configPath string, target AgentTarget, me
 		connection = target.Connection
 	}
 	req.Header.Set(connectionHeader, connection)
+	req.Header.Set(agentRequestHeader, "1")
 	response, err := c.client.Do(req)
 	if err != nil {
 		return result, &AgentError{Code: "outcome_unknown", Message: "The request was interrupted. Inspect the original target before repeating a mutation.", NextAction: "status"}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/guestos"
+	"github.com/sylvinus/agent-vm/internal/guestprofile"
 	"github.com/sylvinus/agent-vm/internal/host"
 )
 
@@ -30,7 +31,8 @@ func macOSWorkbenchRoute(path string) bool {
 		return id == "requests" || id == "open" || browserFileID.MatchString(id)
 	}
 	switch path {
-	case "/api/environment/macos-screen-sharing", "/api/macos/first-setup", "/api/appearance/codex", "/api/macos/project-approval", "/api/macos/exit-policy", "/api/macos/login", "/api/macos/maintenance":
+	// Claude Science answers "unsupported" here; its actions stay unreachable.
+	case "/api/environment/macos-screen-sharing", "/api/macos/first-setup", "/api/appearance/codex", "/api/macos/project-approval", "/api/macos/exit-policy", "/api/macos/login", "/api/macos/maintenance", "/api/claude-science":
 		return true
 	}
 	return strings.HasPrefix(path, "/api/macos/claude/") || strings.HasPrefix(path, "/api/macos-browser/")
@@ -84,41 +86,148 @@ func (s *Server) checkMacOSGuest(ctx context.Context) error {
 	if err != nil {
 		return errors.New("无法验证 macOS 客机的网络门槛")
 	}
-	if state.Mode != cage.GateClosed {
-		s.mu.Lock()
-		ready, paused := s.ready, s.networkPaused
-		s.mu.Unlock()
-		reason := ""
-		switch {
-		case s.macSetupPending():
-			reason = "首次系统设置期间外网关闭"
-		case paused:
-			reason = "网络保持暂停，请手动恢复后再联网"
-		case !ready:
-			reason = "客机重新连接，外网等待重新检查"
-		default:
-			cfg, cfgErr := loadConfig(s.configPath)
-			if state.Mode != cage.GateOpen || cfgErr != nil || state.Report == nil || !time.Now().Before(state.Until) || state.Report.Authorizes(state.RunID, cfg.Fingerprint(), time.Now()) != nil {
-				reason = "网络授权未通过当前配置的完整检查"
-			}
-		}
-		if reason != "" {
-			state, err = client.Close(ctx, reason)
-			if err != nil || state.Mode != cage.GateClosed {
-				return errors.New("macOS 客机网络状态不能确认")
-			}
+	if reason := s.macOSGateCloseReason(state); reason != "" {
+		state, err = client.Close(ctx, reason)
+		if err != nil || state.Mode != cage.GateClosed {
+			return errors.New("macOS 客机网络状态不能确认")
 		}
 	}
 	s.publishGate(state)
-	probe := `test "$(uname -s)" = Darwin && [[ $(sysctl -n hw.model) == VirtualMac* ]] && test "$(id -un)" = ` +
-		shellescape.Quote(s.macosGuest.User) + ` && [[ " $(id -Gn) " != *" admin "* ]]`
-	if s.macosGuest.Backend == guestos.MacOSQEMU {
-		probe = `/usr/local/libexec/cage-guest-check --expect ` + shellescape.Quote(s.macosGuest.UUID) + ` && test "$(id -un)" = ` + shellescape.Quote(s.macosGuest.User) + ` && [[ " $(id -Gn) " != *" admin "* ]]`
-	}
-	if _, err := s.guest(ctx, probe); err != nil {
+	if _, err := s.guest(ctx, s.macOSIdentityProbe()); err != nil {
 		return errors.New("无法以已绑定的普通用户连接到这台虚拟 Mac，请检查客机身份和 SSH 登录")
 	}
 	return nil
+}
+
+// macOSGateCloseReason is why a gate that is not closed must close now, or
+// "" when it may stay as it is.
+func (s *Server) macOSGateCloseReason(state cage.GateStatus) string {
+	if state.Mode == cage.GateClosed {
+		return ""
+	}
+	s.mu.Lock()
+	ready, paused := s.ready, s.networkPaused
+	s.mu.Unlock()
+	switch {
+	case s.macSetupPending():
+		return "首次系统设置期间外网关闭"
+	case paused:
+		return "网络保持暂停，请手动恢复后再联网"
+	case !ready:
+		return "客机重新连接，外网等待重新检查"
+	}
+	cfg, cfgErr := loadConfig(s.configPath)
+	if state.Mode != cage.GateOpen || cfgErr != nil || state.Report == nil || !time.Now().Before(state.Deadline()) || state.Report.Authorizes(state.RunID, cfg.Fingerprint(), time.Now()) != nil {
+		return "网络授权未通过当前配置的完整检查"
+	}
+	return ""
+}
+
+// macOSIdentityProbe succeeds only as the bound standard user of the bound
+// virtual Mac.
+func (s *Server) macOSIdentityProbe() string {
+	if s.macosGuest.Backend == guestos.MacOSQEMU {
+		return `/usr/local/libexec/cage-guest-check --expect ` + shellescape.Quote(s.macosGuest.UUID) + ` && test "$(id -un)" = ` + shellescape.Quote(s.macosGuest.User) + ` && [[ " $(id -Gn) " != *" admin "* ]]`
+	}
+	return `test "$(uname -s)" = Darwin && [[ $(sysctl -n hw.model) == VirtualMac* ]] && test "$(id -un)" = ` +
+		shellescape.Quote(s.macosGuest.User) + ` && [[ " $(id -Gn) " != *" admin "* ]]`
+}
+
+// What a lock-free look at a ready guest found.
+type monitorObservation int
+
+const (
+	observedSteady      monitorObservation = iota
+	observedUnreachable                    // a probe failed; one is tolerated
+	observedChange                         // attach has something to do
+)
+
+// observeMacOSGuest checks a ready virtual Mac without the operation lock,
+// making the reads attachMacOSGuest makes. It changes nothing except the
+// published gate status, which monitorSafety also publishes without the
+// lock, and the guest browser's profile, which attach sends every round.
+// Whenever attach would change anything it reports observedChange, and the
+// monitor attaches under the lock as before.
+func (s *Server) observeMacOSGuest(ctx context.Context) monitorObservation {
+	if s.macSetupPending() || !s.vmRunning() {
+		return observedChange
+	}
+	s.mu.Lock()
+	settledError := ""
+	if s.guestUpdateRequired {
+		settledError = errMacOSComponentUpdate.Error()
+	}
+	settled := s.ready && s.macComponentsChecked && s.guestUpdateError == settledError
+	s.mu.Unlock()
+	if !settled || s.macOSProjectRetryDue() {
+		return observedChange
+	}
+	client, err := s.gateClient()
+	if err != nil {
+		return observedChange
+	}
+	state, err := client.Status(ctx)
+	if err != nil || s.macOSGateCloseReason(state) != "" {
+		return observedChange
+	}
+	s.publishGate(state)
+	if _, err := s.guest(ctx, s.macOSIdentityProbe()); err != nil {
+		return observedUnreachable
+	}
+	if !s.guestAdmitsLockFreeCalls() {
+		// A job began meanwhile; it owns the guest now.
+		return observedChange
+	}
+	profile := guestProfileStamp(s.profile)
+	if err := s.syncNativeBrowserProfile(ctx); err != nil {
+		return observedUnreachable
+	}
+	if guestProfileStamp(s.profile) != profile {
+		// Changed while it was sent: let attach send the current one.
+		return observedChange
+	}
+	return observedSteady
+}
+
+// guestAdmitsLockFreeCalls applies the admission rule of lock-free guest
+// requests: jobs that disturb the guest are running or have marked it not
+// ready first.
+func (s *Server) guestAdmitsLockFreeCalls() bool {
+	s.mu.Lock()
+	ready := s.ready && !s.closing
+	s.mu.Unlock()
+	return ready && !s.busy()
+}
+
+func guestProfileStamp(directory string) string {
+	p, err := guestprofile.Load(directory)
+	if err != nil {
+		return "unreadable: " + err.Error()
+	}
+	data, _ := json.Marshal(p)
+	return string(data)
+}
+
+// macOSProjectRetryDue reports whether retryMacOSProjectShares would retry
+// a project share now. Keep the two in step.
+func (s *Server) macOSProjectRetryDue() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	pending, waitingForLogin := false, false
+	for _, failure := range s.projectErrors {
+		if failure.Recovery == "guest-login" || failure.Recovery == "project-retry" || failure.Recovery == "filesystem-permission" {
+			pending = true
+			waitingForLogin = waitingForLogin || failure.Recovery == "guest-login"
+		}
+	}
+	for _, share := range s.projectShares {
+		select {
+		case <-share.done:
+			pending = true
+		default:
+		}
+	}
+	return pending && (waitingForLogin || !time.Now().Before(s.macProjectsRetryAt))
 }
 
 // macOSComponentReceiptProbe reads only the identity of the installed

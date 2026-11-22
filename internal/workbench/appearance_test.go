@@ -188,3 +188,63 @@ func TestAppearanceLegacyFileKeepsDerivedDefaults(t *testing.T) {
 		t.Fatalf("legacy appearance lost: %s", w.Body.String())
 	}
 }
+
+func TestAppearanceWithoutSavedFileUsesSuperCage(t *testing.T) {
+	s := &Server{profile: t.TempDir()}
+	w := httptest.NewRecorder()
+	s.getAppearance(w, httptest.NewRequest("GET", "/api/appearance", nil))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var loaded Appearance
+	if err := json.Unmarshal(w.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	for _, theme := range []AppearanceTheme{loaded.Light, loaded.Dark} {
+		if theme.Preset != "super-cage" || theme.Accent != "#d97757" || !theme.OpaqueWindows || theme.Colors["line"] == "" || theme.Terminal["background"] != theme.Surface {
+			t.Fatalf("profile without a saved appearance did not get Super Cage: %+v", theme)
+		}
+	}
+	if loaded.Light.Surface != "#faf9f5" || loaded.Dark.Surface != "#1f1e1d" {
+		t.Fatalf("unexpected Super Cage paper: %+v", loaded)
+	}
+}
+
+func TestAppearanceSavedCodexFileIsNotMigrated(t *testing.T) {
+	// Exactly what earlier versions wrote: the Codex default with no colour maps.
+	// It cannot be told apart from a user who picked Codex, so it stays Codex and
+	// must not pick up the new default's Super Cage overrides.
+	legacy := `{"mode":"dark","lightTheme":{"preset":"codex","accent":"#339cff","surface":"#ffffff","ink":"#1a1c1f","contrast":45,"opaqueWindows":false,"fonts":{"ui":"","code":""}},"darkTheme":{"preset":"codex","accent":"#339cff","surface":"#181818","ink":"#ffffff","contrast":60,"opaqueWindows":false,"fonts":{"ui":"","code":""}},"uiFontSize":16,"codeFontSize":13,"pointerCursors":false,"fontSmoothing":true,"reducedMotion":"system"}`
+	s := &Server{profile: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(s.profile, "appearance.json"), []byte(legacy), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.getAppearance(w, httptest.NewRequest("GET", "/api/appearance", nil))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	var loaded Appearance
+	if err := json.Unmarshal(w.Body.Bytes(), &loaded); err != nil {
+		t.Fatal(err)
+	}
+	want := Appearance{Mode: "dark", Light: codexTheme(false), Dark: codexTheme(true), UIFontSize: 16, CodeFontSize: 13, FontSmoothing: true, ReducedMotion: "system"}
+	if !reflect.DeepEqual(loaded, want) {
+		t.Fatalf("saved Codex appearance changed: %s", w.Body.String())
+	}
+}
+
+func TestCodexImportStartsFromCodexColours(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	if err := os.WriteFile(path, []byte("[desktop]\nsansFontSize = 15\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := readCodexAppearance(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(a.Light, codexTheme(false)) || !reflect.DeepEqual(a.Dark, codexTheme(true)) || a.UIFontSize != 15 {
+		t.Fatalf("Codex import without chrome themes must keep Codex colours: %+v", a)
+	}
+}

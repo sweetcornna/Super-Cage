@@ -110,6 +110,8 @@ func browserOperation(path string) string {
 		return "打开编辑器"
 	case "/extensions":
 		return "读取浏览器扩展"
+	case "/science":
+		return "打开 Claude Science"
 	default:
 		return "执行浏览器操作"
 	}

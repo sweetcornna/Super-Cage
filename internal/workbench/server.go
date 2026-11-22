@@ -10,11 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 	"github.com/sylvinus/agent-vm/internal/guestprofile"
 	"github.com/sylvinus/agent-vm/internal/host"
 	"github.com/sylvinus/agent-vm/internal/hostimage"
+	"github.com/sylvinus/agent-vm/internal/keepawake"
 	"io"
 	"io/fs"
 	"log"
@@ -34,19 +36,17 @@ import (
 //go:embed web/*
 var assets embed.FS
 
-const cookieName = "cage_session"
+const cookieName = controlclient.CookieName
 
-type controlFile struct {
-	Port       int                `json:"port"`
-	Token      string             `json:"token"`
-	PID        int                `json:"pid"`
-	Controller ControllerIdentity `json:"controller"`
-}
+type controlFile = controlclient.ControlFile
 type Server struct {
 	desktopViews                                     displayViewDemand
 	desktopDisplayUpdate                             func(bool) error
 	browserViews                                     displayViewDemand
+	browserClears                                    browserClearTracker
 	desktopStatus                                    desktopStatusCache
+	scienceLast                                      claudeScienceLast
+	scienceHost                                      scienceHost
 	agentNativeQueue                                 agentNativeQueue
 	macSetupProjectsChecked                          time.Time
 	macSetupProjectsAttempt                          time.Time
@@ -66,6 +66,8 @@ type Server struct {
 	clipboardCancel                                  context.CancelFunc
 	clipboardGuestSession                            string
 	phones                                           mobilePairing
+	devices                                          deviceLinks
+	keepAwake                                        func(context.Context, func(keepawake.State)) // nil: keepawake.Run
 	instanceID                                       string
 	clientOnly                                       bool
 	desktopEntry                                     bool
@@ -75,6 +77,9 @@ type Server struct {
 	account                                          *localAccount
 	identity                                         ControllerIdentity
 	guestManifest                                    *cage.GuestManifest
+	clients                                          clientPresence // last good presence reading (client_presence.go)
+	clientsTracked                                   bool           // set for a Linux-guest workload, the only one that reads presence
+	agentState                                       agentState     // 其他客户端 jobs and verify reads (agents.go)
 	guestUpdateRequired                              bool
 	macComponentsChecked                             bool
 	guestUpdateError                                 string
@@ -85,6 +90,7 @@ type Server struct {
 	codexAccounts                                    codexAccountManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
+	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
 	diagnosticRateMu                                 sync.Mutex
 	diagnosticWindow                                 time.Time
 	diagnosticCount                                  int
@@ -98,8 +104,11 @@ type Server struct {
 	nativeDownloadSlots                              chan struct{}
 	nativeDownloadRevision                           uint64
 	windowsNetwork                                   *windowsHostNetwork
+	appUpdate                                        appUpdateState
+	appUpdateSealed                                  bool
 	op                                               sync.Mutex
 	profile, configPath, exe, origin, token, session string
+	proofKey                                         string
 	mu                                               sync.Mutex
 	preferences                                      Preferences
 	jobs                                             jobManager
@@ -112,6 +121,7 @@ type Server struct {
 	terminals                                        terminalManager
 	mobileCLI                                        mobileCLIStore
 	conversationMu                                   sync.Mutex
+	cliDiscovery                                     cliDiscovery
 	mobileConnectMu                                  sync.Mutex
 	mobileUploads                                    mobileUploads
 	audioClients                                     int
@@ -137,6 +147,7 @@ type Server struct {
 	closeOnce                                        sync.Once
 	closeErr                                         error
 	controlPublished                                 bool
+	entry                                            entryService
 }
 
 func randomToken() string {
@@ -200,6 +211,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	}
 	defer listener.Close()
 	s := &Server{profile: profile, configPath: configPath, exe: exe, clientOnly: clientOnly, origin: fmt.Sprintf("http://localhost:%d", port), token: randomToken(), session: randomToken(), preferences: Preferences{Keyboard: defaultKeyboard(), AutoTimezone: true, AutoLanguage: true, BalancedDisplay: true, ProjectFileCache: true}}
+	s.proofKey = randomToken()
 	s.desktopEntry = fullConfigPath != ""
 	s.appUpdateConfigPath = configPath
 	if fullConfigPath != "" {
@@ -212,11 +224,13 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 		}
 		s.remote = newDesktopGateway(profile, NewDesktopLocalController(fullConfigPath, exe))
 		s.remote.desktop.localVMs = newLocalVMStore(filepath.Dir(fullConfigPath), exe)
+		go s.pruneLocalTerminal()
 	} else {
 		s.remote = newRemoteGateway(profile)
 		s.remote.clientOnly = clientOnly
 	}
 	defer s.remote.close()
+	defer s.devices.shutdown()
 	if workload {
 		if err = guestos.RecoverWindowsStorage(context.Background(), profile); err != nil {
 			s.failStorageRecovery(err)
@@ -258,6 +272,10 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			s.preferences.BalancedDisplay = false
 			_ = json.Unmarshal(b, &s.preferences)
 		}
+		if s.macosGuest == nil && s.windowsGuest == nil {
+			s.clientsTracked = true
+			s.clients = loadClientPresence(profile)
+		}
 		if !s.storageRecoveryStatus().Required {
 			if err = s.prepareEnvironment(); err != nil {
 				if s.windowsGuest == nil {
@@ -286,21 +304,28 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			_ = s.closeProxyGate("网络保持暂停，请手动恢复后再联网")
 		}
 		s.startMonitors()
-		if err = s.restorePhone(); err != nil {
-			s.phones.status = "无法恢复手机配对，请移除旧记录后重试"
+		// Continue an update chain the previous version began, or record a
+		// rollback and bring the environment back.
+		go s.resumeAppUpdateChain()
+		if err := s.restoreDevices(); err != nil {
+			diagnostics.Log("warn", "devices", "paired devices not fully restored: "+err.Error())
 		}
-		defer s.stopPhone()
+		defer s.stopDevices()
 	}
 	s.identity, err = currentController()
 	if err != nil {
 		return err
 	}
-	if err = writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity}); err != nil {
+	if err = writePrivate(filepath.Join(profile, "control.json"), s.controlRecord(port)); err != nil {
 		return err
 	}
 	s.controlPublished = true
 	if !workload {
 		defer os.Remove(filepath.Join(profile, "control.json"))
+	} else {
+		// Off (the default) starts nothing.
+		s.syncScienceFront()
+		defer s.stopScienceFront()
 	}
 	serverErrors := store.Stream("http", "error")
 	defer serverErrors.Close()
@@ -342,6 +367,11 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 func (s *Server) handler() http.Handler {
 	mux := newDiscoverableMux()
 	mux.HandleFunc("GET /api/agent/routes", func(w http.ResponseWriter, r *http.Request) {
+		// ?access=1 adds what each route allows an agent and why.
+		if r.URL.Query().Get("access") != "" {
+			jsonReply(w, agentRoutesWithAccess(mux.routes()))
+			return
+		}
 		jsonReply(w, mux.routes())
 	})
 	s.agentRoutes(mux)
@@ -350,21 +380,24 @@ func (s *Server) handler() http.Handler {
 	s.mobileControlRoutes(mux)
 	s.mobileSurfaceRoutes(mux)
 	mux.HandleFunc("GET /api/mobile-pair", s.phoneStatus)
-	mux.HandleFunc("POST /api/mobile-pair", s.pairPhone)
+	mux.HandleFunc("POST /api/mobile-pair", s.deviceWindowOnly(s.inviteDevice))
 	mux.HandleFunc("DELETE /api/mobile-pair", s.removePhone)
 	mux.HandleFunc("POST /api/mobile/device", s.reportPhoneDevice)
+	s.deviceRoutes(mux)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonReply(w, map[string]bool{"ready": true}) })
 	mux.HandleFunc("POST /api/launch", func(w http.ResponseWriter, r *http.Request) {
 		if !s.launcherAuthenticated(w, r) {
 			return
 		}
-		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.identity})
+		jsonReply(w, launchResponse{ConfigPath: s.configPath, ClientOnly: s.clientOnly, DesktopGateway: s.desktopEntry, URL: s.origin + "/?launch=" + randomToken()[:8] + "#" + s.issueTicket(), Controller: s.launchIdentity()})
 	})
 	if s.desktopEntry || s.clientOnly {
 		mux.HandleFunc("POST /api/handoff", s.handoffEntry)
 	} else {
 		mux.HandleFunc("POST /api/handoff", s.handoff)
 		mux.HandleFunc("POST /api/desktop-local/trusted-login", s.localTrustedLogin)
+		mux.HandleFunc("POST /api/desktop-local/app-update-handoff", s.appUpdateHandoff)
+		mux.HandleFunc("POST /api/desktop-local/app-update-blockers", s.appUpdateBlockers)
 		mux.HandleFunc("POST /api/desktop-local/{action}", s.desktopLocalControl)
 	}
 	if s.desktopEntry {
@@ -405,6 +438,10 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("GET /api/client/about", s.appAbout)
 	mux.HandleFunc("POST /api/client/about", s.appAbout)
+	mux.HandleFunc("GET /api/app-update", s.appUpdateStatus)
+	mux.HandleFunc("POST /api/app-update/policy", s.appUpdatePolicy)
+	mux.HandleFunc("GET /api/app-update/interruptions", s.appUpdateInterruptions)
+	mux.HandleFunc("GET /api/app-update/terminals", s.appUpdateTerminals)
 	mux.HandleFunc("POST /api/projects/open", s.openProject)
 	mux.HandleFunc("POST /api/projects/save", s.saveProject)
 	mux.HandleFunc("POST /api/projects/remove", s.removeProject)
@@ -456,6 +493,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/browser/preferences", s.browserPreferences)
 	mux.HandleFunc("POST /api/browser/preferences", s.browserPreferences)
 	mux.HandleFunc("POST /api/browser/extensions/upload", s.browserExtensionUpload)
+	mux.HandleFunc("POST /api/browser/data", s.browserData)
+	mux.HandleFunc("GET /api/browser/data-settings", s.browserDataSettingsRoute)
+	mux.HandleFunc("POST /api/browser/data-settings", s.browserDataSettingsRoute)
 	mux.HandleFunc("GET /api/client/browser-extensions", s.localBrowserExtensions)
 	mux.HandleFunc("POST /api/client/browser-extensions", s.localBrowserExtensions)
 	mux.HandleFunc("POST /api/browser/{action}", s.browser)
@@ -490,6 +530,12 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/claude-desktop/vnc", s.claudeDesktopVNC)
 	mux.HandleFunc("POST /api/claude-desktop/resize", s.claudeDesktopResize)
 	mux.HandleFunc("POST /api/claude-desktop/{action}", s.claudeDesktopAction)
+	mux.HandleFunc("GET /api/agents", s.agentsList)
+	mux.HandleFunc("POST /api/agents/cancel", agentsWindowOnly(s.agentsCancel))
+	mux.HandleFunc("POST /api/agents/{id}/{action}", agentsWindowOnly(s.agentsAction))
+	mux.HandleFunc("GET /api/claude-science", s.claudeScienceStatus)
+	mux.HandleFunc("POST /api/claude-science/{action}", s.claudeScienceAction)
+	mux.HandleFunc("GET /api/claude-science/host-render", s.scienceHostRenderRead)
 	if s.macosGuest != nil {
 		mux.HandleFunc("POST /api/macos/first-setup", s.macOSLoginWindow)
 		mux.HandleFunc("POST /api/macos/login", s.macOSLoginWindow)
@@ -500,6 +546,7 @@ func (s *Server) handler() http.Handler {
 		mux.HandleFunc("POST /api/macos/exit-policy", s.bindMacOSExit)
 	}
 	mux.HandleFunc("GET /api/terminals", s.listTerminals)
+	mux.HandleFunc("GET /api/terminals/viewers", s.terminalViewers)
 	mux.HandleFunc("GET /api/audio", s.audio)
 	mux.HandleFunc("GET /api/clipboard", s.sharedClipboard)
 	mux.HandleFunc("POST /api/clipboard/copy", s.clipboardCopy)
@@ -511,8 +558,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/login-link", s.terminalLoginLink)
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
+	s.entryRoutes(mux)
 	web, _ := fs.Sub(assets, "web")
-	mux.Handle("GET /", http.FileServer(http.FS(web)))
+	mux.Handle("GET /", newEntryStaticHandler(web, s.phoneEntry, s.phoneEntryAvailable))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin, err := url.Parse(s.origin)
 		if err != nil || r.Host != origin.Host {
@@ -523,12 +571,19 @@ func (s *Server) handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		frames, checks := s.scienceDocumentSources(r)
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+checks+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frames+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		if (r.Method != "GET" && r.Method != "HEAD") || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			if r.Header.Get("Origin") != s.origin {
 				http.Error(w, "Origin refused", 403)
 				return
 			}
+		}
+		// The identity proof answers before any credential is sent, on this
+		// listener only, in every mode (control_proof.go).
+		if r.URL.Path == controllerProofPath {
+			s.controllerProof(w, r)
+			return
 		}
 		// Launcher-token routes are handled only by this listener, never by a
 		// selected workload. They perform their own authentication.
@@ -574,12 +629,19 @@ func (s *Server) handler() http.Handler {
 			mux.ServeHTTP(w, r)
 			return
 		}
+		// A window's requests to a joined computer (device_links.go).
+		if s.routeDevice(w, r) {
+			return
+		}
 		if s.windowsGuest != nil && (!windowsWorkbenchRoute(r.URL.Path) || s.windowsGuest.Remote() && strings.HasPrefix(r.URL.Path, "/api/projects/")) {
 			s.windowsUnavailable(w)
 			return
 		}
 		if s.macosGuest != nil && (!macOSWorkbenchRoute(r.URL.Path) || s.macSetupPending() && !macOSSetupRoute(r.URL.Path)) {
 			http.Error(w, "此功能尚未接入 macOS 客机", http.StatusConflict)
+			return
+		}
+		if s.scienceEntryRefuses(w, r) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/mobile/") {
@@ -609,7 +671,12 @@ func (s *Server) handler() http.Handler {
 		accountRoute := r.URL.Path == "/api/account" || strings.HasPrefix(r.URL.Path, "/api/account/")
 		bootstrapRoute := r.URL.Path == "/api/session" || r.URL.Path == "/api/launch" || r.URL.Path == "/api/handoff" || r.URL.Path == "/api/remote/manifest"
 		trustedDesktop := s.hasTrustedView(r)
-		phoneRoom := s.pairedPhoneRoom(r)
+		_, phoneRoom := s.pairedDevice(r)
+		if phoneRoom != nil {
+			s.notePhoneRequest()
+		} else if !trustedDesktop && !bootstrapRoute && strings.HasPrefix(r.URL.Path, "/api/") {
+			s.noteRemoteRequest()
+		}
 		if (s.windowsGuest != nil || s.macosGuest != nil) && strings.HasPrefix(r.URL.Path, "/api/") && !bootstrapRoute && !trustedDesktop && phoneRoom == nil && !s.hasRemoteWindowsView(r) {
 			http.Error(w, "请通过本机 Super Cage 窗口或当前配对手机打开客机", http.StatusForbidden)
 			return
@@ -630,7 +697,12 @@ func (s *Server) handler() http.Handler {
 			}
 			r = r.WithContext(ctx)
 		}
-		defer interruptHTTPOnCancel(w, r)()
+		// The local SSH entry's socket ends through entryServe, which lets
+		// its terminal sessions write their reset first; a deadline set here
+		// on a lock or a quit would cut it before.
+		if r.URL.Path != "/api/entry/ssh" {
+			defer interruptHTTPOnCancel(w, r)()
+		}
 		response := &diagnosticResponse{ResponseWriter: w}
 		w = response
 		defer func() {
@@ -717,9 +789,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"storage_recovery": s.storageRecoveryStatusLocked(),
 		"keyboard":         s.preferences.Keyboard, "auto_timezone": s.preferences.AutoTimezone, "job": s.jobs.snapshot(),
 		"location": s.location, "network_error": s.currentNetworkErrorLocked(), "can_restore": e == nil,
-		"safety": s.safety, "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
+		"safety": s.safetyViewLocked(time.Now()), "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
 		"terminals_revision": terminals,
 	}
+	s.clientPresenceViewLocked(view)
 	if s.windowsGuest != nil {
 		view["guest_system"] = guestos.Windows11
 		if s.windowsGuest.Remote() {
@@ -764,6 +837,7 @@ func (s *Server) proposed(w http.ResponseWriter, r *http.Request) (savedProfile,
 	input.TransferAllowUnclean = s.preferences.TransferAllowUnclean
 	input.Clock12Hour = s.preferences.Clock12Hour
 	input.BrowserHomeURL = browserHomeURL(s.preferences)
+	input.ScienceHostRender = s.preferences.ScienceHostRender
 	s.mu.Unlock()
 	if !readJSON(w, r, &input) {
 		return savedProfile{}, false
@@ -816,6 +890,8 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	s.launch(w, kind, func() error {
 		s.mu.Lock()
 		v.Preferences.BrowserHomeURL = s.preferences.BrowserHomeURL
+		// Changed only through POST /api/claude-science/host-render.
+		v.Preferences.ScienceHostRender = s.preferences.ScienceHostRender
 		s.mu.Unlock()
 		return s.apply(v, true)
 	})
@@ -949,7 +1025,11 @@ func (s *Server) startRun(options *guestprofile.Options, system string) func() e
 		if err := s.prepareEnvironment(); err != nil {
 			return err
 		}
-		return s.startEnvironment(true)
+		if err := s.startEnvironment(true); err != nil {
+			return err
+		}
+		s.browserDataAutoClean("start")
+		return nil
 	}
 }
 func (s *Server) stop(w http.ResponseWriter, r *http.Request) {
@@ -965,15 +1045,30 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
+	s.stopEnvironmentOwners()
+	jobID := s.jobs.cancelRunning()
+	if jobID != "" {
+		_ = cage.RequestJobStop(s.profile, jobID)
+	}
+	s.pauseNetworkForStop()
+	kind := "stop"
+	if logout {
+		kind = "logout"
+	}
+	s.launchJob(w, kind, s.stopEnvironment, reply)
+}
+
+// stopEnvironmentOwners asks the cage processes that own the environment to stop.
+func (s *Server) stopEnvironmentOwners() {
 	for _, name := range []string{cage.InstanceName(s.profile, s.environmentDir()), "base-building"} {
 		if owner := cage.InstanceJobID(filepath.Join(s.profile, "state"), name); owner != "" {
 			_ = cage.RequestJobStop(s.profile, owner)
 		}
 	}
-	jobID := s.jobs.cancelRunning()
-	if jobID != "" {
-		_ = cage.RequestJobStop(s.profile, jobID)
-	}
+}
+
+// pauseNetworkForStop closes the network before a stop job runs.
+func (s *Server) pauseNetworkForStop() {
 	if s.macosGuest != nil {
 		// Stopping the guest revokes its current grant. A user's saved pause
 		// remains distinct so the next Mac start can honor the same intent.
@@ -981,11 +1076,6 @@ func (s *Server) requestStopWith(w http.ResponseWriter, logout bool, reply func(
 	} else if s.windowsGuest == nil {
 		_ = s.pauseNetworkNow("正在停止环境")
 	}
-	kind := "stop"
-	if logout {
-		kind = "logout"
-	}
-	s.launchJob(w, kind, s.stopEnvironment, reply)
 }
 
 func (s *Server) cookieName() string { u, _ := url.Parse(s.origin); return cookieName + "_" + u.Port() }

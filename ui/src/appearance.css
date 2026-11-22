@@ -89,8 +89,9 @@ button.primary:hover:not(:disabled) {
   overflow: hidden;
   background: var(--paper);
 }
+/* Selection is ink, not the accent: clay stays for the one call to action. */
 .appearance-theme-card.current {
-  border-color: var(--focus);
+  border-color: var(--ink);
 }
 .theme-card-heading {
   display: flex;
@@ -227,33 +228,6 @@ button.primary:hover:not(:disabled) {
   justify-content: space-between;
   gap: 16px !important;
   margin: 0 !important;
-}
-.appearance-switch input {
-  appearance: none;
-  width: 34px;
-  height: 20px;
-  margin: 0;
-  border-radius: 12px;
-  background: var(--line);
-  position: relative;
-  flex: none;
-}
-.appearance-switch input:after {
-  content: "";
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  top: 3px;
-  left: 3px;
-  background: var(--paper);
-  border-radius: 50%;
-  transition: transform 120ms;
-}
-.appearance-switch input:checked {
-  background: var(--accent);
-}
-.appearance-switch input:checked:after {
-  transform: translateX(14px);
 }
 .font-size-control {
   display: flex;
@@ -514,12 +488,7 @@ button.primary:hover:not(:disabled) {
 .status-bar button {
   color: var(--toolbar-ink);
 }
-.appearance-sample {
-  background: var(--chrome-dark);
-}
-.appearance-switch input:checked:after {
-  background: var(--accent-ink);
-}
+.appearance-sample { background: var(--soft); }
 .theme-preset-summary {
   padding: 12px 16px 0;
 }

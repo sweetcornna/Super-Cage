@@ -76,18 +76,35 @@ func (s *Server) remoteManifest(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(filepath.Join(s.profile, "container.json")); err == nil {
 		kind = "container"
 	}
+	capabilities := map[string]bool{"projects_browse": true, "client_project_share": runtime.GOOS == "linux" && kind == "container", "terminal": true,
+		"browser": true, "desktop": true, "audio": true}
+	// "clients": this controller's /status reports the optional clients'
+	// presence (client_presence.go). Without it a window reads presence as
+	// unknown, so an older controller keeps the Codex surfaces as before.
+	if s.clientsTracked {
+		capabilities["clients"] = true
+	}
 	jsonReply(w, RemoteEntry{APIProtocol: remoteAPIProtocol, InstanceID: s.instanceID,
-		Version: version.Version, Platform: runtime.GOOS, Runtime: kind, Origin: s.origin,
-		Capabilities: map[string]bool{"projects_browse": true, "client_project_share": runtime.GOOS == "linux" && kind == "container", "terminal": true,
-			"browser": true, "desktop": true, "audio": true}})
+		Version: version.Version, Platform: runtime.GOOS, Runtime: kind, Origin: s.origin, Capabilities: capabilities})
 }
+
+// errServerControllerOutdated is errControllerOutdated on a server, where
+// nobody opens a window: the server's service is updated and restarted as
+// the cloud guide's maintenance says.
+var errServerControllerOutdated = errors.New("服务器上的 Super Cage 服务需要更新：在服务器维护时先保存任务、停止相关环境与服务，更新并重启服务器上的 Super Cage 后再连接。")
 
 // ServerEntry is used only over an authenticated SSH command channel. It
 // attaches to the existing server without triggering desktop build takeover.
 // The returned ticket must travel on that private pipe, never a shared log.
 func ServerEntry(configPath string) (RemoteEntry, error) {
 	var result RemoteEntry
-	c, err := connectController(filepath.Dir(configPath))
+	c, err := connectProvenController(filepath.Dir(configPath))
+	if errors.Is(err, errControllerOutdated) {
+		return result, errServerControllerOutdated
+	}
+	if controllerIdentityError(err) {
+		return result, err
+	}
 	if err != nil {
 		return result, errors.New("云端 Super Cage 服务尚未运行或无法认证，请检查服务状态")
 	}
