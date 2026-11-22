@@ -42,20 +42,24 @@ import (
 // does, with ssh's words and exit status 255.
 
 var testSSH struct {
-	dir   string
-	mu    sync.Mutex
-	known []string
-	shims map[string]string // real ssh -> its shim
+	dir     string
+	control string // short folder for control sockets
+	mu      sync.Mutex
+	known   []string
+	shims   map[string]string // real ssh -> its shim
 }
 
 // testSSHShimEnv names the shim's folder for the test binary's helper
 // processes, which use the parent's shim.
 const testSSHShimEnv = "CAGE_TEST_SSH_SHIM"
 
+// testSSHControlEnv names the shim's control socket folder the same way.
+const testSSHControlEnv = "CAGE_TEST_SSH_CONTROL"
+
 // TestMain puts the shim in place before any test runs and removes it after.
 func TestMain(m *testing.M) {
 	if dir := os.Getenv(testSSHShimEnv); dir != "" {
-		testSSH.dir = dir
+		testSSH.dir, testSSH.control = dir, os.Getenv(testSSHControlEnv)
 		sshProgram = testSSHShim("/usr/bin/ssh")
 		_ = os.Setenv("PATH", filepath.Dir(sshProgram)+string(os.PathListSeparator)+os.Getenv("PATH"))
 		os.Exit(m.Run())
@@ -71,8 +75,14 @@ func TestMain(m *testing.M) {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	testSSH.dir = dir
+	control, err := os.MkdirTemp("/tmp", "csc-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(2)
+	}
+	testSSH.dir, testSSH.control = dir, control
 	_ = os.Setenv(testSSHShimEnv, dir)
+	_ = os.Setenv(testSSHControlEnv, control)
 	sshProgram = testSSHShim("/usr/bin/ssh")
 	_ = os.Setenv("PATH", filepath.Dir(sshProgram)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	code := m.Run()
@@ -82,6 +92,7 @@ func TestMain(m *testing.M) {
 		_ = os.WriteFile(keep, data, 0o600)
 	}
 	_ = os.RemoveAll(dir)
+	_ = os.RemoveAll(control)
 	os.Exit(code)
 }
 
@@ -94,7 +105,7 @@ func testSSHShim(real string) string {
 	}
 	folder := filepath.Join(testSSH.dir, "bin"+strings.ReplaceAll(real, "/", "_"))
 	shim := filepath.Join(folder, "ssh")
-	script := fmt.Sprintf(testSSHShimScript, testSSH.dir, real)
+	script := fmt.Sprintf(testSSHShimScript, testSSH.dir, real, testSSH.control)
 	// A helper process finds its parent's shim in place.
 	if data, err := os.ReadFile(shim); err != nil || string(data) != script {
 		if err := os.MkdirAll(folder, 0o700); err != nil {
@@ -115,6 +126,7 @@ const testSSHShimScript = `#!/bin/sh
 # The workbench tests' ssh (ssh_shim_test.go): never the owner's ~/.ssh.
 shim='%[1]s'
 real='%[2]s'
+control='%[3]s'
 printf '%%s %%s\n' "$real" "$*" >> "$shim/calls.log"
 set -f
 refuse() {
@@ -154,34 +166,49 @@ $includes
 EOF
 }
 option() {
+	opt=$1
 	name=$(printf '%%s' "$1" | sed 's/[ =].*//' | tr 'A-Z' 'a-z')
 	value=$(printf '%%s' "$1" | sed 's/^[^ =]*[ =]//')
 	case "$name" in
 	userknownhostsfile) safe "$value" || refuse "known hosts outside a temporary folder: $value" ;;
 	globalknownhostsfile) safe "$value" || refuse "global known hosts outside a temporary folder: $value" ;;
-	controlpath) one "$value" || refuse "a control socket outside a temporary folder: $value" ;;
+	controlpath) one "$value" || opt="ControlPath=$control/%%C" ;;
 	identityagent) one "$value" || refuse "an agent outside a temporary folder: $value" ;;
 	identityfile) one "$value" || refuse "a key outside a temporary folder: $value" ;;
 	certificatefile) one "$value" || refuse "a certificate outside a temporary folder: $value" ;;
 	esac
 }
-g= f= prev=
+# Each argument is checked; a control socket outside a temporary folder is
+# moved into the tests' own short folder (a socket path has ~100 bytes).
+g= f= prev= n=$#
 for a in "$@"; do
+	b=$a
 	case "$prev" in
-	-S) one "$a" || refuse "a control socket outside a temporary folder: $a" ;;
-	-o) option "$a" ;;
+	-S) one "$a" || b="$control/%%C" ;;
+	-o) option "$a"; b=$opt ;;
 	-F) config "$a" ;;
 	-i) one "$a" || refuse "a key outside a temporary folder: $a" ;;
+	*)
+		case "$a" in
+		-G) g=1 ;;
+		-F) f=1 ;;
+		-F?*) f=1; config "${a#-F}" ;;
+		-i?*) one "${a#-i}" || refuse "a key outside a temporary folder: ${a#-i}" ;;
+		-o?*) option "${a#-o}"; b="-o$opt" ;;
+		esac ;;
 	esac
-	case "$a" in
-	-G) g=1 ;;
-	-F) f=1 ;;
-	-F?*) f=1; config "${a#-F}" ;;
-	-i?*) one "${a#-i}" || refuse "a key outside a temporary folder: ${a#-i}" ;;
-	-o?*) option "${a#-o}" ;;
-	esac
+	set -- "$@" "$b"
 	prev=$a
 done
+shift "$n"
+# Without -F of the caller's, the configuration is the shim's own empty one,
+# or the one a test names in CAGE_TEST_SSH_CONFIG (an owner's ~/.ssh/config
+# stand-in).
+cfg="$shim/config"
+if [ -n "${CAGE_TEST_SSH_CONFIG:-}" ]; then
+	config "$CAGE_TEST_SSH_CONFIG"
+	cfg=$CAGE_TEST_SSH_CONFIG
+fi
 if [ -n "$g" ]; then
 	[ -n "$f" ] || refuse "-G without -F"
 	exec "$real" "$@"
@@ -189,7 +216,7 @@ fi
 # What ssh would use for this command line and its configuration, from
 # ssh -G, and one value of it.
 look() {
-	effective=$("$real" -G -F "$shim/config" "$@" 2>&1) && return
+	effective=$("$real" -G -F "$cfg" "$@" 2>&1) && return
 	# What ssh itself refuses (a configuration gone, say) it says as ssh.
 	printf '%%s\n' "$effective" >&2
 	printf 'ssh shim: ssh -G failed\n' >> "$shim/calls.log"
@@ -217,7 +244,7 @@ v=$(value userknownhostsfile)
 v=$(value globalknownhostsfile)
 [ -n "$v" ] && safe "$v" || { set -- -o GlobalKnownHostsFile=/dev/null "$@"; changed=1; }
 v=$(value controlpath)
-[ -z "$v" ] || one "$v" || { set -- -o ControlPath=none "$@"; changed=1; }
+[ -z "$v" ] || one "$v" || { set -- -o "ControlPath=$control/%%C" "$@"; changed=1; }
 v=$(value identityagent)
 [ -n "$v" ] && one "$v" || { set -- -o IdentityAgent=none "$@"; changed=1; }
 case "$(value identityfile)" in
@@ -233,7 +260,7 @@ done <<EOF
 $effective
 EOF
 [ -n "$(value identityagent)" ] || refuse "ssh would use the agent of SSH_AUTH_SOCK"
-exec "$real" -F "$shim/config" "$@"
+exec "$real" -F "$cfg" "$@"
 `
 
 // testSSHEcho is a shim whose ssh prints what it was given, except that
@@ -325,7 +352,7 @@ func TestSSHShimIsTheSSHTheTestsRun(t *testing.T) {
 	if out, err := exec.Command(sshExecutable(), "-G", "probe").CombinedOutput(); err == nil || !strings.Contains(string(out), "-G without -F") {
 		t.Fatalf("-G without -F: %v %s", err, out)
 	}
-	for _, args := range [][]string{{"-S", "/Users/someone/.ssh/cm"}, {"-o", "ControlPath=~/.ssh/cm-%r"}, {"-oUserKnownHostsFile=/etc/ssh/known"}, {"-o", "IdentityAgent=SSH_AUTH_SOCK"}} {
+	for _, args := range [][]string{{"-oUserKnownHostsFile=/etc/ssh/known"}, {"-o", "IdentityAgent=SSH_AUTH_SOCK"}} {
 		if out, err := exec.Command(sshExecutable(), append(args, "probe")...).CombinedOutput(); err == nil || !strings.Contains(string(out), "outside a temporary folder") {
 			t.Fatalf("%q: %v %s", args, err, out)
 		}
@@ -381,7 +408,6 @@ func TestSSHShimKeepsToTemporaryFiles(t *testing.T) {
 		{"-i", "/Users/someone/.ssh/id_ed25519", "-F", keyed, "probe"},
 		{"-o", "IdentityFile=~/.ssh/id_rsa", "-F", keyed, "probe"},
 		{"-o", "CertificateFile=/Users/someone/.ssh/id_rsa-cert.pub", "-F", keyed, "probe"},
-		{"-o", "ControlPath=" + dir + "/../../../Users/someone/.ssh/cm", "-F", keyed, "probe"},
 		{"-F", owners, "probe"},
 		{"-F", includes, "probe"},
 		{"-G", "-F", includes, "probe"},
@@ -421,5 +447,50 @@ func TestSSHShimKeepsToTemporaryFiles(t *testing.T) {
 	// What ssh -G refuses, ssh's words and exit.
 	if out, err := exec.Command(shim, "-F", filepath.Join(dir, "gone"), "probe").CombinedOutput(); err == nil || err.(*exec.ExitError).ExitCode() != 255 || !strings.Contains(string(out), "gone") {
 		t.Errorf("a configuration gone: %v %s", err, out)
+	}
+}
+
+// A control socket the command line or a configuration puts outside a
+// temporary folder (a Herdr core's own ControlPath, say) moves into the
+// tests' short folder: the system ssh would otherwise make it in the
+// owner's home. Without -F of its own, ssh reads CAGE_TEST_SSH_CONFIG when a
+// test names one.
+func TestSSHShimForcesControlSocketsIntoTheTestsFolder(t *testing.T) {
+	dir := t.TempDir()
+	shim := testSSHEcho(t)
+	forced := "ControlPath=" + testSSH.control + "/%C"
+	if !strings.HasPrefix(testSSH.control, "/tmp/") || len(testSSH.control)+1+40+17 > 100 {
+		t.Fatalf("control folder %q", testSSH.control)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-o", "ControlMaster=auto", "-o", "ControlPath=~/.ssh/cm-%C", "-o", "ControlPersist=600", "probe"}, "-o " + forced + " -o ControlPersist=600 probe\n"},
+		{[]string{"-oControlPath=/Users/someone/.ssh/cm", "probe"}, "-o" + forced + " probe\n"},
+		{[]string{"-S", "/Users/someone/.ssh/cm", "probe"}, "-S " + testSSH.control + "/%C probe\n"},
+		{[]string{"-o", "ControlPath=" + dir + "/../../../Users/someone/.ssh/cm", "probe"}, "-o " + forced + " probe\n"},
+	} {
+		out, err := exec.Command(shim, c.args...).Output()
+		if err != nil || !strings.HasSuffix(string(out), c.want) || strings.Contains(string(out), ".ssh") {
+			t.Errorf("%q: the shim ran %q (%v)", c.args, out, err)
+		}
+	}
+	config := filepath.Join(dir, "config")
+	if err := os.WriteFile(config, []byte("Host probe\n ControlMaster auto\n ControlPath ~/.ssh/cm-%r@%h\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(shim, "-F", config, "probe").Output(); err != nil || !strings.Contains(string(out), " -o "+forced+" ") {
+		t.Errorf("a configuration's control socket: the shim ran %q (%v)", out, err)
+	}
+	cmd := exec.Command(shim, "probe")
+	cmd.Env = append(os.Environ(), "CAGE_TEST_SSH_CONFIG="+config)
+	if out, err := cmd.Output(); err != nil || !strings.HasPrefix(string(out), "-F "+config+" ") || !strings.Contains(string(out), " -o "+forced+" ") {
+		t.Errorf("CAGE_TEST_SSH_CONFIG: the shim ran %q (%v)", out, err)
+	}
+	cmd = exec.Command(shim, "probe")
+	cmd.Env = append(os.Environ(), "CAGE_TEST_SSH_CONFIG=/Users/someone/.ssh/config")
+	if out, err := cmd.CombinedOutput(); err == nil || !strings.Contains(string(out), "outside a temporary folder") {
+		t.Errorf("CAGE_TEST_SSH_CONFIG outside: %v %s", err, out)
 	}
 }
