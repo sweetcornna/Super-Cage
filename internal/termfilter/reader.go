@@ -8,9 +8,10 @@ import (
 // InputHold is how long an InputReader holds an escape sequence cut at the
 // end of a read for its rest. A terminal application writes an answer to a
 // query at once, so only a read boundary cuts one, and the rest is already
-// there or in the next packet. A lone Esc key waits this long; programs wait
-// for more after Esc themselves (vim: 100 ms).
-const InputHold = 50 * time.Millisecond
+// in the kernel's buffer (locally it comes within a millisecond) or in the
+// next packet. A lone Esc key waits this long, and it matters: it
+// interrupts Claude Code and leaves insert mode in vim.
+const InputHold = 25 * time.Millisecond
 
 const (
 	pasteStart = "\x1b[200~"

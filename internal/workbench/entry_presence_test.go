@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // The review's case (review3-ssh R3-1), for the ssh window: answers to 5000
@@ -33,41 +31,59 @@ func TestEntryPresenceAnswersCutByReadsAreNotTheOwner(t *testing.T) {
 }
 
 // The ssh window's input reaches send in whole units: a cut answer waits for
-// its rest, a lone Esc is passed on after termfilter.InputHold, and neither
-// is the owner at the window.
+// its rest, a lone Esc is passed on when the wait for its rest is over, and
+// neither is the owner at the window. The test ends each wait itself.
 func TestEntryReadInputHoldsCutSequences(t *testing.T) {
 	r, w := io.Pipe()
+	defer w.Close()
 	p := &entryPresence{}
+	armed := make(chan chan time.Time, 16)
+	hold := func() (<-chan time.Time, func() bool) {
+		fired := make(chan time.Time, 1)
+		armed <- fired
+		return fired, func() bool { return true }
+	}
 	sends := make(chan string, 16)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		entryReadInput(r, p, func() bool { return false }, func(data []byte) bool {
+		entryReadInputHeld(r, p, func() bool { return false }, func(data []byte) bool {
 			if len(data) > 0 {
 				sends <- string(data)
 			}
 			return string(data) != "q"
-		})
+		}, hold)
 	}()
 	next := func() string {
 		t.Helper()
 		select {
 		case s := <-sends:
 			return s
-		case <-time.After(5 * time.Second):
+		case <-time.After(10 * time.Second):
 			t.Fatal("nothing sent")
 			return ""
 		}
 	}
+	wait := func() chan time.Time {
+		t.Helper()
+		select {
+		case fired := <-armed:
+			return fired
+		case <-time.After(10 * time.Second):
+			t.Fatal("no wait armed")
+			return nil
+		}
+	}
 	w.Write([]byte("\x1b[12;1"))
+	wait() // never ends: the rest comes first
 	w.Write([]byte("45R"))
 	if got := next(); got != "\x1b[12;145R" || p.lastInput.Load() != 0 {
 		t.Fatalf("%q, owner %v", got, p.lastInput.Load() != 0)
 	}
-	start := time.Now()
 	w.Write([]byte("\x1b"))
-	if got := next(); got != "\x1b" || time.Since(start) < termfilter.InputHold || p.lastInput.Load() != 0 {
-		t.Fatalf("%q after %v, owner %v", got, time.Since(start), p.lastInput.Load() != 0)
+	wait() <- time.Now()
+	if got := next(); got != "\x1b" || p.lastInput.Load() != 0 {
+		t.Fatalf("%q, owner %v", got, p.lastInput.Load() != 0)
 	}
 	w.Write([]byte("a"))
 	if got := next(); got != "a" || p.lastInput.Load() == 0 {
@@ -76,7 +92,9 @@ func TestEntryReadInputHoldsCutSequences(t *testing.T) {
 	w.Write([]byte("q"))
 	next()
 	<-done
-	w.Close()
+	if len(armed) != 0 {
+		t.Fatalf("%d waits armed with nothing held", len(armed))
+	}
 }
 
 // entryScript is a window's input: each Read gives the next part, the last
@@ -99,12 +117,13 @@ func (s *entryScript) Read(b []byte) (int, error) {
 func TestEntryReadInputEndSendsWhatIsHeld(t *testing.T) {
 	p := &entryPresence{}
 	var sent []string
-	entryReadInput(&entryScript{parts: []string{"\x1b[12;1"}}, p, func() bool { return false }, func(data []byte) bool {
+	never := func() (<-chan time.Time, func() bool) { return nil, func() bool { return true } }
+	entryReadInputHeld(&entryScript{parts: []string{"\x1b[12;1"}}, p, func() bool { return false }, func(data []byte) bool {
 		if len(data) > 0 {
 			sent = append(sent, string(data))
 		}
 		return true
-	})
+	}, never)
 	if strings.Join(sent, "") != "\x1b[12;1" || p.lastInput.Load() != 0 {
 		t.Fatalf("sent %q, owner %v", sent, p.lastInput.Load() != 0)
 	}

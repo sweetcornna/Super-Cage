@@ -15,6 +15,19 @@ import (
 // key), typed but not the owner's presence. It returns when send fails or
 // the window's input ends; the reading goroutine ends with the channel.
 func entryReadInput(channel io.Reader, presence *entryPresence, guestFocus func() bool, send func([]byte) bool) {
+	entryReadInputHeld(channel, presence, guestFocus, send, entryHoldTimer)
+}
+
+// entryHold starts the wait for the rest of a held sequence: fired when it
+// is over, stop ends it sooner. Tests end it themselves.
+type entryHold func() (fired <-chan time.Time, stop func() bool)
+
+func entryHoldTimer() (<-chan time.Time, func() bool) {
+	timer := time.NewTimer(termfilter.InputHold)
+	return timer.C, timer.Stop
+}
+
+func entryReadInputHeld(channel io.Reader, presence *entryPresence, guestFocus func() bool, send func([]byte) bool, hold entryHold) {
 	reads := make(chan []byte)
 	stop := make(chan struct{})
 	defer close(stop)
@@ -35,10 +48,10 @@ func entryReadInput(channel io.Reader, presence *entryPresence, guestFocus func(
 			}
 		}
 	}()
-	var hold *time.Timer
+	var stopHold func() bool
 	defer func() {
-		if hold != nil {
-			hold.Stop()
+		if stopHold != nil {
+			stopHold()
 		}
 	}()
 	for {
@@ -46,8 +59,7 @@ func entryReadInput(channel io.Reader, presence *entryPresence, guestFocus func(
 		if presence.input.Held() {
 			// Armed after the last send returned: the wait is for the
 			// owner's terminal, not for the program reading its input.
-			hold = time.NewTimer(termfilter.InputHold)
-			held = hold.C
+			held, stopHold = hold()
 		}
 		var data []byte
 		select {
@@ -71,9 +83,9 @@ func entryReadInput(channel io.Reader, presence *entryPresence, guestFocus func(
 				data = presence.release()
 			}
 		}
-		if hold != nil {
-			hold.Stop()
-			hold = nil
+		if stopHold != nil {
+			stopHold()
+			stopHold = nil
 		}
 		if !send(data) {
 			return
