@@ -127,6 +127,28 @@ internal static partial class ScienceFrame
         return null;
     }
 
+    // FrameProcesses picks, from the renderer processes and the sources of
+    // the frames each holds, the ones to end for the frames of origin: those
+    // holding one, when every frame they hold is of origin (an about:
+    // document, or one not navigated yet, is its creator's). Null when one of
+    // them also holds a frame of another origin: the host crashes the frame
+    // through its session instead.
+    public static List<int>? FrameProcesses(IEnumerable<(int Id, IReadOnlyList<string> Sources)> renderers, string origin)
+    {
+        var chosen = new List<int>();
+        if (origin.Length == 0) return chosen;
+        foreach (var (id, sources) in renderers)
+        {
+            if (!sources.Any(source => SourceOrigin(source) == origin)) continue;
+            if (!sources.All(source => source.Length == 0 || source.StartsWith("about:", StringComparison.Ordinal) || SourceOrigin(source) == origin)) return null;
+            chosen.Add(id);
+        }
+        return chosen;
+    }
+
+    private static string SourceOrigin(string source) =>
+        Uri.TryCreate(source, UriKind.Absolute, out var url) && url.Scheme is "http" or "https" ? url.GetLeftPart(UriPartial.Authority) : "";
+
     // RemoveFrame removes the pane's frame elements of one session origin
     // (all of them for ""), wherever the pane parked them.
     public static string RemoveFrame(string origin) =>

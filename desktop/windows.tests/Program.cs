@@ -202,6 +202,15 @@ assertions = 0;
         }
         Check(scenarios == 18, "scenario count " + scenarios);
 
+        // The renderer processes the host terminates for a frame's origin.
+        IReadOnlyList<string> Sources(params string[] sources) => sources;
+        var workbenchProcess = (2, Sources("http://localhost:4321/", ""));
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/_cage/enter")), workbenchProcess, (3, Sources())], origin) is [1], "the frame's process not chosen alone");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/a", "about:blank", "about:srcdoc", "")), (4, Sources(origin + "/b"))], origin) is [1, 4], "frames of the origin's documents not all chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin + "/a", "http://localhost:4321/"))], origin) == null, "a process with a frame of another origin was chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources(origin.Replace("0123", "f123") + "/", origin[..origin.LastIndexOf(':')] + ":1/", "http://user@" + origin[7..] + "/")), workbenchProcess], origin) is [], "a process of another origin was chosen");
+        Check(ScienceFrame.FrameProcesses([(1, Sources("")), workbenchProcess], "") is [], "a process chosen for no origin");
+
         // Preferences: written before the browser starts, the default again without the switches.
         var data = Path.Combine(scienceRoot, "webview2");
         var preferences = ScienceFrame.PreferencesPath(data);

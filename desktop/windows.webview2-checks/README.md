@@ -18,7 +18,8 @@ front, so the policy's front end is only recorded.
 | `proxy` | the proxy proof's two loads (`.invalid`, then `127.0.0.3`) |
 | `remove` | the frame element is removed (no crash): which detaches arrive |
 | `remove-busy` | as `remove`, the frame's `pagehide` spins for 3 s: what its workers report afterwards |
-| `teardown` | the policy's detach: crash, removal, every target gone, auto-attach off |
+| `teardown` | the policy's detach: the frame's process ended (`ScienceFrameHost.Terminate`), removal, every target gone, auto-attach off |
+| `page-crash` | as `teardown`, the process ended with `Page.crash` instead: the minidump it leaves |
 | `move` | `moveBefore` into a hidden place first (the pane's park), then the teardown |
 | `hung` | the frame's main thread spins forever, then the teardown |
 | `steady` | a frame kept for 15 s before the teardown |
@@ -35,7 +36,10 @@ WebView for the WebView's life, as in `MainWindow`.
 
 For each case it records the DevTools target events (with the session they
 arrived on), `ProcessFailed`, navigation events, `Target.getTargets` on the page
-session, and what each reporter reported before and after the teardown.
+session, and what each reporter reported before and after the teardown. The
+minidumps created or deleted under the user data folder are recorded for the
+whole run. The checks turn on `IsCustomCrashReportingEnabled` (the shell does
+not), so what crash reporting writes stays on the machine.
 
 A WebView2 cannot start in an SSH session (0x80070578), so `run-checks.ps1`
 starts it in the signed-in user's session through a scheduled task:

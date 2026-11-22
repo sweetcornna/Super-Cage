@@ -49,6 +49,12 @@ internal sealed class ChecksForm : Form
     private bool driverOff;
     private string endSecret = "";
     private readonly JsonArray ends = [];
+    // pageCrash: the driver ends a frame's process with Page.crash (the
+    // page-crash case) instead of ScienceFrameHost.Terminate. dumps are the
+    // minidumps created or deleted under the user data folder.
+    private bool pageCrash;
+    private readonly JsonArray dumps = [];
+    private FileSystemWatcher? dumpWatch;
     private LoopbackServer workbench = null!, labels = null!;
     public int ExitCode { get; private set; } = 1;
 
@@ -170,10 +176,16 @@ internal sealed class ChecksForm : Form
             labels = new LoopbackServer(request => Serve(request, true));
             await Start();
             results["runtime"] = core.Environment.BrowserVersionString;
+            dumpWatch = new FileSystemWatcher(Path.Combine(data, "EBWebView"), "*.dmp") { IncludeSubdirectories = true, NotifyFilter = NotifyFilters.FileName };
+            void Dump(string kind, string path) { lock (gate) dumps.Add(new JsonObject { ["t"] = Now, ["kind"] = kind, ["name"] = Path.GetFileName(path) }); }
+            dumpWatch.Created += (_, e) => Dump("created", e.FullPath);
+            dumpWatch.Deleted += (_, e) => Dump("deleted", e.FullPath);
+            dumpWatch.Renamed += (_, e) => Dump("renamed", e.FullPath);
+            dumpWatch.EnableRaisingEvents = true;
             var cases = new JsonObject();
             foreach (var (name, run) in new (string, Func<Task<JsonObject>>)[] {
                 ("proxy", ProxyCase), ("remove", () => FrameCase("remove", "")), ("remove-busy", () => FrameCase("remove-busy", "busy")),
-                ("teardown", () => FrameCase("teardown", "")), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
+                ("teardown", () => FrameCase("teardown", "")), ("page-crash", PageCrashCase), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
                 ("steady", () => FrameCase("steady", "")), ("storage", StorageCase), ("navigation", NavigationCase),
                 ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase),
                 // The host case runs last: a ScienceFrameHost stays subscribed to its
@@ -199,7 +211,9 @@ internal sealed class ChecksForm : Form
 
     private async Task Start()
     {
-        var environment = await CoreWebView2Environment.CreateAsync(null, data, new CoreWebView2EnvironmentOptions(ScienceFrame.BackstopArguments));
+        // The checks end frame processes on purpose: what crash reporting
+        // writes stays in the user data folder (the shell sets nothing here).
+        var environment = await CoreWebView2Environment.CreateAsync(null, data, new CoreWebView2EnvironmentOptions(ScienceFrame.BackstopArguments) { IsCustomCrashReportingEnabled = true });
         await web.EnsureCoreWebView2Async(environment);
         core = web.CoreWebView2;
         policy = new ScienceFrame.Policy();
@@ -430,11 +444,10 @@ internal sealed class ChecksForm : Form
             record["first_reports"] = Summary(first, teardown);
             var second = await HostFrame();
             record["second"] = second;
-            string frame;
-            lock (gate) frame = frameSession;
             var exit = Now;
             record["exit"] = exit;
-            _ = core.CallDevToolsProtocolMethodForSessionAsync(frame, "Page.crash", "{}");
+            // An exit the host did not cause (as a renderer killed outside it).
+            record["exit_terminated"] = await ScienceFrameHost.Terminate(core, "http://" + second);
             record["exit_told_pane"] = await Until(5000, () => { lock (gate) return failedCalls.Count > 0; });
             await host.Detach();
             await Until(6000, () => !ScienceFrame.Journal(data).Any(item => item.Origin == "http://" + second));
@@ -623,10 +636,20 @@ internal sealed class ChecksForm : Form
                 var seen = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
                 lock (gate) crashWaits[action.Session] = seen;
                 var session = action.Session;
+                crashes.Add(seen.Task);
+                // As ScienceFrameHost.Crash: the process is terminated when it
+                // holds that origin's frames only, Page.crash otherwise.
+                if (!pageCrash && ending.Length != 0)
+                {
+                    var processes = await Processes();
+                    var asked = Now;
+                    var ended = await ScienceFrameHost.Terminate(core, ending);
+                    Event("policy terminate", new JsonObject { ["session"] = session, ["origin"] = ending, ["ended"] = ended, ["ms"] = Now - asked, ["processes"] = processes });
+                    if (ended) continue;
+                }
                 Event("policy crash", new JsonObject { ["session"] = session });
                 _ = core.CallDevToolsProtocolMethodForSessionAsync(session, "Page.crash", "{}")
                     .ContinueWith(task => Event("Page.crash reply", new JsonObject { ["session"] = session, ["status"] = task.Status.ToString(), ["error"] = task.Exception?.InnerException?.Message }), TaskScheduler.Default);
-                crashes.Add(seen.Task);
             }
             else if (action.Remove)
             {
@@ -660,6 +683,29 @@ internal sealed class ChecksForm : Form
         heldUri = "";
         if (uri.Length == 0) return;
         if (heldReload) core.Reload(); else core.Navigate(uri);
+    }
+
+    // Processes is the environment's renderer processes and their frames.
+    private async Task<JsonNode> Processes()
+    {
+        try
+        {
+            var infos = await core.Environment.GetProcessExtendedInfosAsync();
+            return new JsonArray(infos.Where(info => info.ProcessInfo.Kind == CoreWebView2ProcessKind.Renderer).Select(info => (JsonNode)new JsonObject
+            {
+                ["pid"] = info.ProcessInfo.ProcessId,
+                ["frames"] = new JsonArray((info.AssociatedFrameInfos ?? []).Select(frame => (JsonNode)(frame.Source ?? "")).ToArray()),
+            }).ToArray());
+        }
+        catch (Exception error) { return "error: " + error.Message; }
+    }
+
+    // PageCrashCase: the teardown with Page.crash, as before Terminate.
+    private async Task<JsonObject> PageCrashCase()
+    {
+        pageCrash = true;
+        try { return await FrameCase("page-crash", ""); }
+        finally { pageCrash = false; }
     }
 
     private async Task List()
@@ -734,8 +780,12 @@ internal sealed class ChecksForm : Form
             results["failures"] = failures.DeepClone();
             results["call_errors"] = callErrors.DeepClone();
             results["requests"] = requests.DeepClone();
+            results["dumps"] = dumps.DeepClone();
             results["elapsed_ms"] = Now;
         }
+        dumpWatch?.Dispose();
+        var reports = Path.Combine(data, "EBWebView", "Crashpad", "reports");
+        results["dumps_left"] = Directory.Exists(reports) ? new JsonArray(Directory.GetFiles(reports, "*.dmp").Select(path => (JsonNode)Path.GetFileName(path)).ToArray()) : new JsonArray();
         try { File.WriteAllText(output, results.ToJsonString(new JsonSerializerOptions { WriteIndented = true })); }
         catch (IOException) { }
         workbench?.Dispose();
