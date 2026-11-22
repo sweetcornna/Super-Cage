@@ -51,7 +51,12 @@ agent_check_input() {
   local re_url='^https://[a-z0-9.-]+/[A-Za-z0-9._~/%+-]+$' re_sha256='^([0-9a-f]{64})?$' re_sha512='^([0-9a-f]{128})?$'
   local re_bytes='^[1-9][0-9]{0,14}$' re_member='^[A-Za-z0-9_+-][A-Za-z0-9._+-]*(/[A-Za-z0-9_+-][A-Za-z0-9._+-]*)*$'
   local re_package='^[a-z0-9][a-z0-9+.-]{1,63}$' re_env='^[A-Z][A-Z0-9_]{1,63}=[A-Za-z0-9_.,:/@%+=-]*$'
-  local word line rest
+  local word line rest name
+  # Every input is declared, even when empty: a missing one is a host bug,
+  # never a quiet install without its settings.
+  for name in AGENT_ACTION AGENT_ID AGENT_NAME AGENT_VENDOR AGENT_STATUS AGENT_VERSION AGENT_COMMAND AGENT_ARCH AGENT_LIBC AGENT_MIN_GLIBC AGENT_URL AGENT_SHA256 AGENT_SHA512 AGENT_SIZE AGENT_UNPACKED AGENT_ENTRY AGENT_PACKAGES AGENT_USERNS AGENT_KEYRING AGENT_ENV AGENT_SETTINGS AGENT_REMOVE_DATA; do
+    declare -p "$name" >/dev/null 2>&1 || agent_bad_input "$name"
+  done
   [[ ${AGENT_ACTION-} =~ $re_action ]] || agent_bad_input AGENT_ACTION
   [[ ${AGENT_ID-} =~ $re_id ]] || agent_bad_input AGENT_ID
   [[ ${AGENT_COMMAND-} =~ $re_command ]] || agent_bad_input AGENT_COMMAND
