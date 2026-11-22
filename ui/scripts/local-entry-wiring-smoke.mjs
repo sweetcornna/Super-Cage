@@ -23,7 +23,7 @@ const fixture = await createWorkbench({ beforeNavigate: async (page, state) => {
     terminal.origin = { ...terminal.origin, kept: true };
     return route.fulfill({ json: terminal });
   });
-  await page.route("**/api/entry", (route) => route.fulfill({ json: { enabled: false, supported: true, environment: "default", name: "默认环境", state: "off", connections: { total: 0 }, devices: [], herdr: false } }));
+  await page.route("**/api/entry", (route) => route.fulfill({ json: { enabled: false, supported: true, environment: "default", name: "默认环境", state: "off", connections: { total: 0 }, devices: [] } }));
 } });
 const { page, browser, errors } = fixture;
 try {

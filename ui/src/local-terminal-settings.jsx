@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Check, LoaderCircle } from "lucide-react";
 import { api } from "./api";
+import { getClientContext } from "./client-context.mjs";
 import {
-  APPS_PATH, BUILT_IN, SETTINGS_PATH, SWITCHES, automationNote, chooserOptions, missingChoice, normalizeSettings, settingsChanged,
+  BUILT_IN, SETTINGS_PATH, SWITCHES, appsRequest, automationNote, chooserOptions, goneText, normalizeSettings, settingsChanged,
 } from "./local-terminal-state.mjs";
 import "./local-terminal-settings.css";
 
@@ -23,7 +24,8 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
   useEffect(() => {
     const controller = new AbortController();
     const options = { signal: controller.signal };
-    Promise.all([api(SETTINGS_PATH, undefined, undefined, {}, options), api(APPS_PATH, undefined, undefined, {}, options)])
+    const listing = appsRequest(getClientContext());
+    Promise.all([api(SETTINGS_PATH, undefined, undefined, {}, options), api(listing.path, undefined, undefined, listing.headers, options)])
       .then(([state, found]) => {
         const settings = normalizeSettings(state?.settings);
         setSaved(settings);
@@ -39,7 +41,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
   // Where no application can be used, the built-in terminal is what opens.
   const shown = supported ? draft?.app : BUILT_IN;
   const options = useMemo(() => chooserOptions(apps, shown), [apps, shown]);
-  const gone = supported ? missingChoice(saved, apps) : "";
+  const gone = supported ? goneText(saved, apps) : "";
   const dirty = Boolean(saved && draft && settingsChanged(saved, draft));
   const loading = !error && (!saved || !apps);
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
@@ -51,7 +53,8 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     setSaving(true);
     setError("");
     try {
-      const result = await api(SETTINGS_PATH, draft, "PUT");
+      // Herdr can be chosen only for an environment it added: name it.
+      const result = await api(SETTINGS_PATH, draft, "PUT", appsRequest(getClientContext()).headers);
       window.dispatchEvent(new Event("cage-local-terminal-settings"));
       const settings = normalizeSettings(result?.settings);
       setSaved(settings);
@@ -70,7 +73,7 @@ export default function LocalTerminalSettings({ onSaved, onDirty }) {
     <p className="field-help">在终端标签页或项目上选择“在本机终端中打开”时，用这里选的应用。终端仍在环境中运行，关掉窗口也不会结束它。</p>
     {loading && <p className="local-terminal-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在查找这台电脑上的终端应用…</p>}
     {!loading && !supported && <p className="field-help">这台电脑的系统暂不支持本机终端应用，终端会在 Super Cage 的标签页中打开。</p>}
-    {!loading && gone && draft?.app === saved?.app && <p className="local-terminal-gone" role="status">之前选择的 {gone} 在这台电脑上找不到了。请另选一个应用，或使用内置终端。</p>}
+    {!loading && gone && draft?.app === saved?.app && <p className="local-terminal-gone" role="status">{gone}</p>}
     {saved && apps && <>
       <div className="choice-list local-terminal-apps" role="radiogroup" aria-label="本机终端应用">
         {options.map(option => <label key={option.id || "built-in"}

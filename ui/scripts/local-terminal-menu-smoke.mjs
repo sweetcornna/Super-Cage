@@ -134,6 +134,78 @@ async function run({ theme, viewport, desktop = true }) {
   } finally { await browser.close(); }
 }
 
+// Herdr chosen: the item on a project opens a shell through the owner's
+// hc. When the environment is not a machine in Herdr (412), design 6.3's
+// dialog offers the command that adds it, and only copies it.
+async function runHerdr({ theme, viewport }) {
+  const context = { mode: "local", connection_id: connection, desktop_gateway: true, client_platform: "darwin", server_platform: "darwin", connection: { state: "connected" } };
+  const opens = [];
+  const listed = [];
+  const replies = [{ status: 412, body: "先把这个环境加到 Herdr" }];
+  const natives = [];
+  const fixture = await createWorkbench({
+    viewport, clientContext: context,
+    nativeRequest: body => { natives.push(body); return null; },
+    beforeNavigate: async page => {
+      await page.emulateMedia({ colorScheme: theme });
+      await page.route("**/api/entry", route => route.fulfill({ json: { enabled: true, state: "idle", host_alias: "cage-default", herdr: { state: "not_set_up", command: "hc machine add cage-default", lines: 0 } } }));
+    },
+    clientRequest: async (route, path, body) => {
+      if (path === "/client/context") return route.fulfill({ json: context });
+      if (path === "/client/local-terminal/apps") {
+        listed.push(route.request().headers()["x-cage-connection"]);
+        return route.fulfill({ json: { apps: [{ id: "herdr", name: "Herdr", automation: false, hosts: false, machine: true, installed: true }] } });
+      }
+      if (path === "/client/local-terminal") return route.fulfill({ json: { settings: { app: "herdr", image_upload: true, clipboard_write: true }, supported: true } });
+      if (path === "/client/local-terminal/open") {
+        opens.push(body);
+        const reply = replies.shift() || { status: 200, json: { app: "Herdr", automation: false } };
+        return reply.json ? route.fulfill({ status: reply.status, json: reply.json }) : route.fulfill({ status: reply.status, contentType: "text/plain; charset=utf-8", body: reply.body });
+      }
+      return route.fulfill({ json: {} });
+    },
+  });
+  const { page, browser, errors, state } = fixture;
+  state.status.vm_running = true;
+  state.status.ready = true;
+  await page.reload();
+  await page.locator('button[data-terminal-location="' + project + '"]:not([disabled])').waitFor();
+  const shot = name => page.screenshot({ path: fileURLToPath(new URL(theme + "-" + viewport.width + "x" + viewport.height + "-" + name + ".png", output)) });
+  const menu = () => page.getByRole("menu", { name: "新建终端" });
+  const openProjectMenu = async () => {
+    await page.locator('button[data-terminal-location="' + project + '"]').click();
+    await menu().waitFor();
+  };
+  try {
+    await openProjectMenu();
+    const item = menu().getByRole("menuitem", { name: /在本机终端中打开/ });
+    await item.waitFor();
+    assert.equal(await item.getAttribute("title"), "Herdr");
+    await item.click();
+    const dialog = page.getByRole("dialog", { name: "先把这个环境加到 Herdr" });
+    await dialog.getByText("hc machine add cage-default", { exact: true }).waitFor();
+    await dialog.getByText(/在这台电脑的终端里运行一次下面的命令/).waitFor();
+    assert.deepEqual(opens, [{ project, kind: "shell" }]);
+    assert.deepEqual(listed, [connection], "the list is asked for the environment shown");
+    await page.waitForTimeout(400); // the dialog's entrance
+    await shot("herdr-set-up");
+    await dialog.getByRole("button", { name: "复制命令" }).click();
+    await dialog.waitFor({ state: "detached" });
+    assert.deepEqual(natives.filter(body => body.action === "clipboardWrite").map(body => body.text), ["hc machine add cage-default"]);
+    // Added: the next open goes through, without a dialog.
+    await openProjectMenu();
+    await menu().getByRole("menuitem", { name: /在本机终端中打开/ }).click();
+    for (let i = 0; i < 50 && opens.length < 2; i++) await page.waitForTimeout(50);
+    assert.equal(opens.length, 2);
+    await page.waitForTimeout(200);
+    assert.equal(await page.getByRole("dialog").count(), 0);
+    assert.deepEqual(errors, []);
+    console.log("PASS: " + theme + " " + viewport.width + "x" + viewport.height + " Herdr: project item, set-up dialog with the command (copied, never run), open");
+  } finally { await browser.close(); }
+}
+
 await run({ theme: "light", viewport: { width: 1440, height: 900 } });
 await run({ theme: "dark", viewport: { width: 1000, height: 700 } });
+await runHerdr({ theme: "light", viewport: { width: 1000, height: 700 } });
+await runHerdr({ theme: "dark", viewport: { width: 1440, height: 900 } });
 await run({ theme: "light", viewport: { width: 1000, height: 700 }, desktop: false });

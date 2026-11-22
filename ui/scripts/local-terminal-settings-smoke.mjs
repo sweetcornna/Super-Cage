@@ -16,12 +16,16 @@ const table = [
   ["warp", "Warp", false, true], ["wezterm", "WezTerm", false, true], ["kitty", "kitty", false, true],
   ["alacritty", "Alacritty", false, true], ["herdr", "Herdr", false, false],
 ];
+// The desktop lists Herdr only where it can open a terminal of the
+// environment shown; here it can.
+const herdrNote = "在项目上新建终端时用 Herdr 打开；已有的终端仍在 Super Cage 中打开";
 const installed = new Set(["ghostty", "iterm2", "terminal", "kitty", "herdr"]);
 
 async function run({ theme, viewport, desktop = true }) {
   const context = { mode: "local", connection_id: "g".repeat(64), desktop_gateway: desktop, client_platform: "darwin", server_platform: "darwin", connection: { state: "connected" } };
   let settings = { app: "ghostty", image_upload: true, clipboard_write: true };
   const puts = [];
+  const named = [];
   let detections = 0;
   const fixture = await createWorkbench({
     viewport, clientContext: context,
@@ -30,10 +34,11 @@ async function run({ theme, viewport, desktop = true }) {
       if (path === "/client/context") return route.fulfill({ json: context });
       if (path === "/client/local-terminal/apps") {
         detections++;
-        return route.fulfill({ json: { apps: table.map(([id, name, automation, hosts]) => ({ id, name, automation, hosts, installed: installed.has(id), ...(hosts ? {} : { note: "Herdr 通过本机终端的 SSH 入口连接，稍后的版本提供" }) })) } });
+        named.push(route.request().headers()["x-cage-connection"]);
+        return route.fulfill({ json: { apps: table.map(([id, name, automation, hosts]) => ({ id, name, automation, hosts, installed: installed.has(id), ...(hosts ? {} : { machine: true, note: herdrNote }) })) } });
       }
       if (path === "/client/local-terminal") {
-        if (route.request().method() === "PUT") { puts.push(body); settings = body; }
+        if (route.request().method() === "PUT") { puts.push(body); settings = body; named.push(route.request().headers()["x-cage-connection"]); }
         return route.fulfill({ json: { settings, supported: true } });
       }
       return route.fulfill({ json: {} });
@@ -70,7 +75,10 @@ async function run({ theme, viewport, desktop = true }) {
     assert.ok(chunk.length > 0);
     assert.equal(detections, 1);
     const names = await group.locator(".local-terminal-app strong").allTextContents();
-    assert.deepEqual(names, ["Ghostty", "iTerm2", "kitty", "终端", "Super Cage 内置终端", "Herdr", "Alacritty", "Warp", "WezTerm"]);
+    assert.deepEqual(names, ["Ghostty", "Herdr", "iTerm2", "kitty", "终端", "Super Cage 内置终端", "Alacritty", "Warp", "WezTerm"]);
+    await group.getByText(herdrNote, { exact: true }).waitFor();
+    assert.equal(await group.getByRole("radio", { name: /Herdr/ }).isDisabled(), false);
+    assert.deepEqual(named, [context.connection_id], "the list is asked for the environment shown");
     assert.ok(await group.getByRole("radio", { name: /Ghostty/ }).isChecked());
     assert.ok(await group.getByRole("radio", { name: /WezTerm/ }).isDisabled());
     await page.screenshot({ path: fileURLToPath(new URL(theme + "-" + viewport.width + "x" + viewport.height + ".png", output)) });
@@ -94,6 +102,7 @@ async function run({ theme, viewport, desktop = true }) {
     await section.getByRole("button", { name: "保存", exact: true }).click();
     await section.getByText("已保存", { exact: true }).waitFor();
     assert.deepEqual(puts, [{ app: "kitty", image_upload: true, clipboard_write: false }]);
+    assert.equal(named.at(-1), context.connection_id, "the save names the environment shown");
     assert.equal(await section.getByText("有尚未保存的修改").count(), 0);
     // Saved: leaving asks nothing.
     await nav.getByRole("button", { name: "外观", exact: true }).click();

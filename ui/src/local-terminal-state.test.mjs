@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
   APP_NAMES, BUILT_IN, BUILT_IN_NAME, MENU_LABEL, OPEN_PATH, automationNote, automationNotice, chooserOptions, copyCommand,
-  launchFailure, menuItem, missingChoice, normalizeSettings, openRequest, settingsChanged,
+  appsRequest, goneText, herdrSetUp, launchFailure, menuItem, missingChoice, normalizeSettings, openRequest, settingsChanged,
 } from "./local-terminal-state.mjs";
 
 const apps = [
@@ -14,7 +14,7 @@ const apps = [
   { id: "wezterm", name: "WezTerm", automation: false, hosts: true, installed: true },
   { id: "kitty", name: "kitty", automation: false, hosts: true, installed: true },
   { id: "alacritty", name: "Alacritty", automation: false, hosts: true, installed: false },
-  { id: "herdr", name: "Herdr", automation: false, hosts: false, installed: true, note: "Herdr 通过本机终端的 SSH 入口连接，稍后的版本提供" },
+  { id: "herdr", name: "Herdr", automation: false, hosts: false, machine: true, installed: true, note: "在项目上新建终端时用 Herdr 打开；已有的终端仍在 Super Cage 中打开" },
 ];
 const desktop = { desktop_gateway: true, connection_id: "c".repeat(64), mode: "local" };
 
@@ -33,8 +33,8 @@ test("settings default to the web terminal's behaviour and the built-in terminal
 
 test("the chooser lists found applications, then the built-in terminal, then the rest", () => {
   const options = chooserOptions(apps, "wezterm");
-  assert.deepEqual(options.map(option => option.name), ["iTerm2", "kitty", "WezTerm", "终端", BUILT_IN_NAME, "Herdr", "Alacritty", "Ghostty", "Warp"]);
-  assert.deepEqual(options.map(option => option.group), ["ready", "ready", "ready", "ready", "built-in", "waiting", "missing", "missing", "missing"]);
+  assert.deepEqual(options.map(option => option.name), ["Herdr", "iTerm2", "kitty", "WezTerm", "终端", BUILT_IN_NAME, "Alacritty", "Ghostty", "Warp"]);
+  assert.deepEqual(options.map(option => option.group), ["ready", "ready", "ready", "ready", "ready", "built-in", "missing", "missing", "missing"]);
   assert.deepEqual(options.filter(option => option.checked).map(option => option.id), ["wezterm"]);
   assert.ok(options.filter(option => !option.selectable).every(option => option.chip));
   assert.equal(options.find(option => option.id === "ghostty").chip, "未安装");
@@ -43,9 +43,14 @@ test("the chooser lists found applications, then the built-in terminal, then the
   assert.equal(automationNote(apps), "第一次用 iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
   assert.equal(automationNote(apps.map(app => ({ ...app, installed: true }))), "第一次用 Ghostty、iTerm2 打开时，macOS 会询问是否允许 Super Cage 控制它。");
   assert.equal(automationNote(apps.filter(app => !app.automation)), "");
-  assert.match(options.find(option => option.id === "herdr").note, /SSH 入口/);
+  // Herdr is listed only where it can open a terminal (the desktop leaves
+  // it out otherwise), and says what it opens.
+  const herdr = options.find(option => option.id === "herdr");
+  assert.equal(herdr.selectable, true);
+  assert.match(herdr.note, /在项目上新建终端时用 Herdr 打开/);
+  assert.equal(chooserOptions(apps.filter(app => app.id !== "herdr")).some(option => option.id === "herdr"), false);
   assert.equal(chooserOptions(null)[0].id, BUILT_IN);
-  assert.equal(chooserOptions(apps)[4].checked, true);
+  assert.equal(chooserOptions(apps)[5].checked, true);
 });
 
 test("a saved application that is gone is named", () => {
@@ -53,6 +58,32 @@ test("a saved application that is gone is named", () => {
   assert.equal(missingChoice({ app: "kitty" }, apps), "");
   assert.equal(missingChoice({ app: BUILT_IN }, apps), "");
   assert.equal(missingChoice({ app: "kitty" }, null), "");
+  assert.equal(missingChoice({ app: "herdr" }, apps), "");
+  assert.match(goneText({ app: "ghostty" }, apps), /^之前选择的 Ghostty 在这台电脑上找不到了/);
+  // Herdr left out: this environment was not added to it.
+  assert.equal(goneText({ app: "herdr" }, apps.filter(app => app.id !== "herdr")), "之前选择的 Herdr 不能用于这个环境：先把这个环境加到 Herdr，或另选一个应用。");
+  assert.equal(goneText({ app: "kitty" }, apps), "");
+});
+
+test("Herdr opens a new shell in a project and nothing else", () => {
+  const settings = { app: "herdr" };
+  const visible = target => menuItem({ settings, apps, target, context: desktop }).visible;
+  assert.equal(visible({ kind: "terminal", id: "0123456789abcdef" }), false);
+  assert.equal(visible({ kind: "session", id: "s1" }), false);
+  assert.equal(visible({ kind: "project", path: "/work", run: "claude" }), false);
+  assert.equal(visible({ kind: "project", path: "/work", run: "shell" }), true);
+  const item = menuItem({ settings, apps, target: { kind: "project", path: "/work" }, context: desktop });
+  assert.deepEqual([item.visible, item.enabled, item.detail], [true, true, "Herdr"]);
+  assert.deepEqual(openRequest({ kind: "project", path: "/work" }, desktop).body, { project: "/work", kind: "shell" });
+  // The list is asked for the environment shown.
+  assert.deepEqual(appsRequest(desktop), { path: "/client/local-terminal/apps", headers: { "X-Cage-Connection": desktop.connection_id } });
+  assert.equal(appsRequest(undefined).headers["X-Cage-Connection"], "disconnected");
+  // Design 6.3: the command that adds the environment, never run for the owner.
+  const dialog = herdrSetUp("hc machine add cage-default", "先把这个环境加到 Herdr");
+  assert.deepEqual(dialog, { title: "先把这个环境加到 Herdr", body: "在这台电脑的终端里运行一次下面的命令，之后就能在 Herdr 里新建这个环境的终端。", code: "hc machine add cage-default", confirm: "复制命令" });
+  assert.match(herdrSetUp("hc machine add cage-default", "no machine cage-default").body, /^no machine cage-default。/);
+  assert.deepEqual([herdrSetUp("", "").code, herdrSetUp("", "").confirm], ["", "知道了"]);
+  assert.match(herdrSetUp("").body, /开启“从你自己的终端或 Herdr 连进来”/);
 });
 
 test("the menu item is hidden for the built-in terminal and outside the desktop", () => {

@@ -29,7 +29,6 @@ const on = {
   commands: { ssh: "ssh cage-default", cage_ssh: "cage ssh default", cage_on_path: true },
   include: { line: "Include ~/.ssh/super-cage/config", present: true },
   devices: [],
-  herdr: false,
 };
 
 test("every state has one plain Chinese line", () => {
@@ -53,25 +52,28 @@ test("every state has one plain Chinese line", () => {
 
 test("connections split by kind only once Herdr exists", () => {
   assert.equal(connectionSummary({ connections: { total: 1 } }), "1 个连接");
-  assert.equal(connectionSummary({ herdr: true, connections: { total: 2, herdr: 1 } }), "2 个连接（ssh 1，Herdr 1）");
+  assert.equal(connectionSummary({ herdr: { state: "connected" }, connections: { total: 2, herdr: 1 } }), "2 个连接（ssh 1，Herdr 1）");
   assert.equal(connectionSummary({ connections: {} }), "没有连接");
 });
 
 test("the first command works with and without the Include line", () => {
-  assert.deepEqual(commandRows(on).filter((row) => !row.later).map((row) => row.command), ["ssh cage-default"]);
+  assert.deepEqual(commandRows(on).map((row) => row.command), ["ssh cage-default"]);
   const without = commandRows({ ...on, include: { present: false } });
   assert.equal(without[0].command, "cage ssh default");
   assert.match(without[0].caption, /不改动/);
   assert.deepEqual(commandRows({ ...on, enabled: false }), []);
 });
 
-test("Herdr and attach rows wait for their capabilities", () => {
-  assert.equal(commandRows(on).some((row) => row.id === "attach"), false);
-  // Herdr is named, as 稍后提供, until the server offers it.
-  assert.deepEqual(commandRows(on).filter((row) => row.later).map((row) => [row.id, row.name, row.command]), [["herdr", "Herdr", undefined]]);
-  const later = commandRows({ ...on, herdr: true, commands: { ...on.commands, attach: "cage attach" } });
-  assert.deepEqual(later.map((row) => row.command), ["ssh cage-default", "cage attach", "hc machine add cage-default"]);
-  assert.equal(later.some((row) => row.later), false);
+test("Herdr and attach rows come with their capabilities", () => {
+  assert.equal(commandRows(on).some((row) => row.id === "attach" || row.id === "herdr"), false);
+  const rows = commandRows({ ...on, herdr: { state: "not_set_up", command: "hc machine add cage-default", lines: 0 }, commands: { ...on.commands, attach: "cage attach" } });
+  assert.deepEqual(rows.map((row) => row.command), ["ssh cage-default", "cage attach", "hc machine add cage-default"]);
+  const herdr = rows[2];
+  assert.equal(herdr.status, "未添加");
+  assert.match(herdr.caption, /herdr-core/);
+  assert.match(herdr.caption, /空闲 10 分钟后自动停止/);
+  const states = ["not_set_up", "ready", "connected"].map((state) => commandRows({ ...on, herdr: { state, command: "hc machine add cage-default" } }).at(-1));
+  assert.deepEqual(states.map((row) => [row.status, Boolean(row.connected)]), [["未添加", false], ["已添加", false], ["已连接", true]]);
 });
 
 test("include row and dialog", () => {
@@ -99,7 +101,7 @@ test("include row and dialog", () => {
 
 test("the page says exactly what is filtered", () => {
   const note = unfilteredNote();
-  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s", "和 cage attach 一样的过滤", "拖入的图片不上传"]) assert.ok(note.includes(word), word);
+  for (const word of ["ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s", "和 cage attach 一样的过滤", "拖入的图片不上传", "Herdr 的终端画面同样经过过滤"]) assert.ok(note.includes(word), word);
   assert.equal(note.includes("会被拒绝"), false);
 });
 

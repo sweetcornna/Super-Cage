@@ -2,7 +2,7 @@
 // (main.jsx imports it on demand), so none of it is in the first chunk.
 import { api, writeClipboard } from "./api";
 import { getClientContext } from "./client-context.mjs";
-import { APPS_PATH, SETTINGS_PATH, appName, automationNotice, copyCommand, launchFailure, menuItem, normalizeSettings, openRequest } from "./local-terminal-state.mjs";
+import { MACHINE_APPS, SETTINGS_PATH, appName, appsRequest, automationNotice, copyCommand, herdrSetUp, launchFailure, menuItem, normalizeSettings, openRequest } from "./local-terminal-state.mjs";
 
 const acknowledged = app => "cage-local-terminal-automation-" + app;
 
@@ -25,7 +25,11 @@ export async function localTerminalOpener(changed) {
     async open(target, { confirm, notify }) {
       if (pending) return;
       try {
-        apps ||= (await api(APPS_PATH)).apps;
+        // Herdr's place in the list depends on the environment shown.
+        if (!apps || MACHINE_APPS.includes(settings.app)) {
+          const listing = appsRequest(getClientContext());
+          apps = (await api(listing.path, undefined, undefined, listing.headers)).apps;
+        }
       } catch (error) { notify(error.message); return; }
       const app = apps.find(item => item.id === settings.app);
       // Before the request: it waits until the owner answers macOS.
@@ -42,7 +46,13 @@ export async function localTerminalOpener(changed) {
       } catch (error) {
         // Only an application that failed to open gets the advice to pick
         // another; a lock, the bound or an open in progress say so.
-        if (error.status === 502) {
+        if (error.status === 412) {
+          // Herdr: the environment is not a machine there (any more).
+          let command = "";
+          try { command = (await api("/entry"))?.herdr?.command || ""; } catch { /* the dialog says where to turn it on */ }
+          const dialog = herdrSetUp(command, String(error.message || "").replace(/^Herdr 没能打开：/, ""));
+          if (await confirm(dialog) && dialog.code) await writeClipboard(dialog.code);
+        } else if (error.status === 502) {
           const reason = String(error.message || "").replace(/^无法在 .+? 中打开：/, "");
           notify(launchFailure(appName(settings.app, apps), reason), { label: "复制命令", run: () => writeClipboard(copyCommand(target)) });
         } else notify(error.message);

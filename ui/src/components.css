@@ -151,6 +151,20 @@
   .modal-body > p:last-child {
     margin-bottom: 0;
   }
+  /* A command the dialog offers to copy (Herdr's hc machine add). */
+  .modal-body > .modal-code {
+    margin: 0;
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--soft);
+    color: var(--ink);
+    font-family: var(--font-mono);
+    font-size: var(--fs-secondary);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    user-select: all;
+  }
   .modal-footer {
     display: flex;
     align-items: center;

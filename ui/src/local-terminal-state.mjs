@@ -25,6 +25,12 @@ export const APP_NAMES = Object.freeze({
   herdr: "Herdr",
 });
 
+// Applications that open a new terminal of the environment as a machine of
+// their own (internal/localterm Machine): Herdr. They open only a new shell
+// in a project; existing terminals keep opening in Super Cage.
+export const MACHINE_APPS = Object.freeze(["herdr"]);
+const isMachine = id => MACHINE_APPS.includes(id);
+
 export const DEFAULT_SETTINGS = Object.freeze({ app: BUILT_IN, image_upload: true, clipboard_write: true });
 
 export const SWITCHES = Object.freeze([
@@ -65,19 +71,21 @@ const byName = (a, b) => collator.compare(a.name, b.name);
 
 // chooserOptions orders the chooser as design 5.8 and 6.1 ask: applications
 // found on this computer (alphabetical), then the built-in terminal, then the
-// others greyed out. An installed application that cannot show Cage
-// terminals yet (Herdr) sits with the greyed ones and says why.
+// others greyed out. Herdr is listed only where it can open a terminal of
+// the environment shown (the desktop leaves it out otherwise) and says what
+// it opens.
 export function chooserOptions(apps, selected = BUILT_IN) {
   const list = Array.isArray(apps) ? apps : [];
-  const ready = list.filter(app => app.installed && app.hosts).sort(byName);
-  const waiting = list.filter(app => app.installed && !app.hosts).sort(byName);
+  const usable = app => app.installed && (app.hosts || app.machine);
+  const ready = list.filter(usable).sort(byName);
+  const waiting = list.filter(app => app.installed && !usable(app)).sort(byName);
   const missing = list.filter(app => !app.installed).sort(byName);
   const option = (app, group) => ({
     id: app.id,
     name: app.name,
     group,
     selectable: group === "ready",
-    note: group === "waiting" ? (app.note || "稍后的版本提供") : "",
+    note: group === "waiting" ? (app.note || "稍后的版本提供") : app.machine ? (app.note || "") : "",
     chip: group === "missing" ? "未安装" : group === "waiting" ? "稍后提供" : "",
     checked: app.id === selected,
   });
@@ -103,7 +111,22 @@ export function missingChoice(settings, apps) {
   const chosen = normalizeSettings(settings).app;
   if (chosen === BUILT_IN || !Array.isArray(apps)) return "";
   const app = apps.find(item => item.id === chosen);
-  return app && app.installed && app.hosts ? "" : appName(chosen, apps);
+  return app && app.installed && (app.hosts || app.machine) ? "" : appName(chosen, apps);
+}
+
+// goneText is the line the chooser shows for missingChoice: Herdr is left
+// out where the environment shown was not added to it, not uninstalled.
+export function goneText(settings, apps) {
+  const name = missingChoice(settings, apps);
+  if (!name) return "";
+  if (isMachine(normalizeSettings(settings).app)) return "之前选择的 " + name + " 不能用于这个环境：先把这个环境加到 " + name + "，或另选一个应用。";
+  return "之前选择的 " + name + " 在这台电脑上找不到了。请另选一个应用，或使用内置终端。";
+}
+
+// appsRequest lists the applications for the environment shown: the desktop
+// offers Herdr only where that environment was added to it.
+export function appsRequest(context) {
+  return { path: APPS_PATH, headers: { "X-Cage-Connection": context?.connection_id || "disconnected" } };
 }
 
 const terminalID = /^[0-9a-f]{16}$/;
@@ -138,6 +161,8 @@ function targetProblem(target) {
 export function menuItem({ settings, apps, target, context, environment } = {}) {
   const chosen = normalizeSettings(settings).app;
   if (chosen === BUILT_IN || !context?.desktop_gateway) return { visible: false };
+  // Herdr opens a new shell in a project, nothing else.
+  if (isMachine(chosen) && (target?.kind !== "project" || (target.run && target.run !== "shell"))) return { visible: false };
   const item = {
     visible: true,
     label: MENU_LABEL,
@@ -192,6 +217,21 @@ export function copyCommand(target) {
   if (body.codex_account_id) args.push("--codex-account", body.codex_account_id);
   args.push("current");
   return args.map(shellWord).join(" ");
+}
+
+// herdrSetUp is design 6.3's dialog when Herdr cannot open the terminal:
+// the environment is not (or no longer) a machine in this computer's Herdr.
+// It offers the command from 本机终端 and never runs it.
+export function herdrSetUp(command, reason = "") {
+  const why = String(reason || "").trim().replace(/[。.]+$/, "");
+  return {
+    title: "先把这个环境加到 Herdr",
+    body: (why && why !== "先把这个环境加到 Herdr" ? why + "。" : "") + (command
+      ? "在这台电脑的终端里运行一次下面的命令，之后就能在 Herdr 里新建这个环境的终端。"
+      : "先在 设置 › 本机终端 里开启“从你自己的终端或 Herdr 连进来”。"),
+    code: command || "",
+    confirm: command ? "复制命令" : "知道了",
+  };
 }
 
 export function launchFailure(name, reason) {

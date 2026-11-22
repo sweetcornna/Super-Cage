@@ -1592,6 +1592,7 @@ function App() {
         >
           <div className="modal-body">
             <p>{dialog.body}</p>
+            {dialog.code && <pre className="modal-code">{dialog.code}</pre>}
             {dialog.error && <div className="error-message" role="alert">{dialog.error}</div>}
           </div>
         </Modal>

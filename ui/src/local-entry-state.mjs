@@ -40,11 +40,15 @@ export function connectionSummary(view) {
   return `${total} 个连接`;
 }
 
+// Herdr's row: whether this computer's Herdr added the environment (the
+// server knows from the machine link) and is connected now.
+const HERDR_STATES = { not_set_up: "未添加", ready: "已添加", connected: "已连接" };
+
 // The command rows. "ssh cage-x" only works once ~/.ssh/config includes
 // Super Cage's file; until then the first row is the cage ssh form, which
 // needs no Include. The attach row shows when the server offers cage attach
-// for this environment (commands.attach); Herdr's row says 稍后提供 (later)
-// until its filter exists (view.herdr).
+// for this environment (commands.attach); Herdr's when it sends the
+// command that adds the environment to Herdr (view.herdr).
 export function commandRows(view) {
   const commands = view?.commands;
   if (!view?.enabled || !commands) return [];
@@ -55,12 +59,17 @@ export function commandRows(view) {
       : { id: "ssh", command: commands.cage_ssh, caption: "任何终端：直接登录（不改动 ~/.ssh/config）" },
   ];
   if (commands.attach) {
-    rows.push({ id: "attach", command: commands.attach, caption: "在任何终端应用里打开这个环境的新终端（会出现在 Super Cage 的终端列表里）" });
+    rows.push({ id: "attach", command: commands.attach, caption: "任何终端：新开一个这个环境的终端，也会出现在 Super Cage 里" });
   }
-  if (view.herdr && view.host_alias) {
-    rows.push({ id: "herdr", command: "hc machine add " + view.host_alias, caption: view.herdr_installed === false ? "安装 Herdr 后使用" : "Herdr：添加为一台机器，之后在 Herdr 里新建终端即可" });
-  } else {
-    rows.push({ id: "herdr", later: true, name: "Herdr", caption: "把这个环境添加为 Herdr 里的一台机器" });
+  const herdr = view.herdr;
+  if (herdr?.command) {
+    rows.push({
+      id: "herdr",
+      command: herdr.command,
+      status: HERDR_STATES[herdr.state] || "",
+      connected: herdr.state === "connected",
+      caption: "Herdr：运行一次，把环境加为一台机器。它会在环境里装上 herdr-core，空闲 10 分钟后自动停止",
+    });
   }
   return rows;
 }
@@ -101,7 +110,8 @@ export function includeDialog(preview) {
 // help does (entryTerminalNote in entry_cli.go).
 export function unfilteredNote() {
   return "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤，剪贴板写入按这台电脑的“允许环境写入剪贴板”；拖入的图片不上传，按文字粘贴。" +
-    "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。";
+    "不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。" +
+    "Herdr 的终端画面同样经过过滤；环境不能经 Herdr 向这台电脑的终端输入文字或读取它们。";
 }
 
 // What the page says when a revocation did not reach a running environment

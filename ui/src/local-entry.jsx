@@ -166,7 +166,7 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
   const part = (children) => (
     <section className="settings-group local-terminal-part local-entry" aria-label={ENTRY_PART}>
       <h3>{ENTRY_PART}</h3>
-      <p className="field-help">用 Ghostty、iTerm2 或任何终端里的 ssh 连接到这个环境，就像在本机工作。环境看不到你的电脑。</p>
+      <p className="field-help">在任何终端里用 ssh，或在 Herdr 里，连接到这个环境。环境看不到你的电脑。</p>
       {children}
     </section>
   );
@@ -226,19 +226,14 @@ export default function LocalEntryPage({ onConfirm, environmentReady }) {
       {error && <p className="local-entry-error" role="alert">{error}</p>}
       {notice && <p className="local-entry-notice" role="status">{notice}</p>}
       <ul className="local-entry-commands" aria-label="连接命令">
-        {rows.map((row) => row.later ? (
-          <li key={row.id} data-later="">
-            <div>
-              <strong>{row.name}</strong>
-              <span>{row.caption}</span>
-            </div>
-            <span className="local-terminal-chip">稍后提供</span>
-          </li>
-        ) : (
-          <li key={row.id}>
+        {rows.map((row) => (
+          <li key={row.id} data-row={row.id}>
             <div>
               <code>{row.command}</code>
-              <span>{row.caption}</span>
+              <span>
+                {row.status && <span className="local-terminal-chip local-entry-status" data-connected={row.connected || undefined}>{row.status}</span>}
+                {row.caption}
+              </span>
             </div>
             <button
               type="button"

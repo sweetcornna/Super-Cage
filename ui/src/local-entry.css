@@ -88,6 +88,17 @@
   font-size: var(--fs-secondary);
   line-height: 1.5;
 }
+/* Herdr's state before its caption: 未添加, 已添加, 已连接. */
+.settings-subpage .local-entry-commands .local-entry-status {
+  display: inline-block;
+  margin-right: 8px;
+  font-size: var(--fs-caption);
+  vertical-align: 1px;
+}
+.settings-subpage .local-entry-commands .local-entry-status[data-connected] {
+  background: color-mix(in srgb, var(--green) 13%, var(--surface));
+  color: var(--green);
+}
 .settings-subpage .local-entry :is(.local-entry-copy, .local-entry-icon) {
   display: inline-grid;
   flex: none;

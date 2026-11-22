@@ -22,7 +22,7 @@ function entryState() {
     includePresent: false,
     view: {
       enabled: false, supported: true, environment: "default", name: "默认环境", state: "off",
-      connections: { total: 0, shell: 0, exec: 0, sftp: 0 }, devices: [], herdr: false,
+      connections: { total: 0, shell: 0, exec: 0, sftp: 0 }, devices: [],
       revoked: false, kept: [], kept_limit: 4,
     },
     bom: false,
@@ -38,6 +38,7 @@ function turnedOn(entry) {
   view.host_alias = "cage-default";
   view.commands = { ssh: "ssh cage-default", cage_ssh: "cage ssh default", attach: "cage attach", cage_on_path: true };
   view.include = { line: "Include ~/.ssh/super-cage/config", present: entry.includePresent, display_path: "~/.ssh/config" };
+  view.herdr ||= { state: "not_set_up", command: "hc machine add cage-default", lines: 0 };
   if (!view.devices.some((device) => device.current)) view.devices.push({ id: "a".repeat(32), name: "shihao 的 MacBook Pro", fingerprint, created: ago(1), current: true, revoked: false });
   view.devices = view.devices.map((device) => (device.current ? { ...device, revoked: false } : device));
   view.revoked = false;
@@ -94,7 +95,8 @@ const populated = (entry) => {
   const ago = (minutes) => new Date(Date.now() - minutes * 60000).toISOString();
   turnedOn(entry);
   entry.view.state = "in_use";
-  entry.view.connections = { total: 2, shell: 1, exec: 1, sftp: 0 };
+  entry.view.connections = { total: 3, shell: 1, exec: 1, sftp: 0, herdr: 1 };
+  entry.view.herdr = { state: "connected", command: "hc machine add cage-default", lines: 1 };
   entry.view.include.present = true;
   entry.includePresent = true;
   entry.view.devices = [
@@ -163,12 +165,15 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       await content.getByText(/scp、sftp 和 rsync 原样传送环境的字节，不经过滤/).waitFor();
       await content.getByText(/带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤/).waitFor();
       assert.equal(await content.getByText(/会被拒绝/).count(), 0);
-      // cage attach has its row; Herdr is named, 稍后提供, with nothing to copy.
+      // cage attach has its row; Herdr's has the one command that adds the
+      // environment, its state, and what Herdr leaves running there.
       await content.getByText("cage attach", { exact: true }).waitFor();
-      const herdr = content.locator(".local-entry-commands li[data-later]");
-      assert.equal(await herdr.count(), 1);
-      await herdr.getByText("稍后提供", { exact: true }).waitFor();
-      assert.equal(await herdr.getByRole("button").count(), 0);
+      const herdr = content.locator('.local-entry-commands li[data-row="herdr"]');
+      await herdr.getByText("hc machine add cage-default", { exact: true }).waitFor();
+      await herdr.getByText("未添加", { exact: true }).waitFor();
+      await herdr.getByText(/装上 herdr-core，空闲 10 分钟后自动停止/).waitFor();
+      assert.equal(await herdr.getByRole("button", { name: "复制 hc machine add cage-default" }).count(), 1);
+      await content.getByText(/Herdr 的终端画面同样经过过滤/).waitFor();
       await shot("on-without-include");
       // Writing it later, from the row; a BOM is warned about first.
       entry.bom = true;
@@ -187,7 +192,8 @@ for (const [width, height] of [[1440, 900], [1000, 700]]) {
       populated(entry);
       await nav.getByRole("button", { name: "远程连接", exact: true }).click();
       await nav.getByRole("button", { name: "本机终端", exact: true }).click();
-      await content.getByText("已开启 · 2 个连接").waitFor();
+      await content.getByText("已开启 · 3 个连接（ssh 2，Herdr 1）").waitFor();
+      await content.locator('.local-entry-commands li[data-row="herdr"]').getByText("已连接", { exact: true }).waitFor();
       await content.getByText("最近使用 3 分钟前").waitFor();
       await content.getByText("SHA256:o/+qFR…b6/A").waitFor();
       await content.getByText("已撤销", { exact: true }).waitFor();
