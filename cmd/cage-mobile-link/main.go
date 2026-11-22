@@ -201,7 +201,7 @@ func run(ctx context.Context, args []string, out, errs io.Writer) error {
 		defer stop()
 		stopAwake := keepHostAwake(active, log.New(errs, "", 0))
 		defer stopAwake()
-		err = mobilelink.ServeHost(active, base, room.ID, room.HostToken, id, peer, b)
+		err = mobilelink.ServeHost(active, base, room.ID, room.HostToken, id, peer, mobilelink.Opened(b))
 		if active.Err() != nil {
 			return context.Cause(active)
 		}

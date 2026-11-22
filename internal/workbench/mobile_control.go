@@ -3,7 +3,7 @@ package workbench
 import "net/http"
 
 // Phone control of the environment, its terminals and project files. Every
-// route is also listed in mobilelink's allowlist and in pairedPhoneRoom.
+// route is also listed in mobilelink's allowlist and in pairedDevice.
 func (s *Server) mobileControlRoutes(mux routeRegistrar) {
 	mux.HandleFunc("GET /api/mobile/environment", s.mobileEnvironment)
 	mux.HandleFunc("POST /api/mobile/environment/start", s.mobileEnvironmentStart)

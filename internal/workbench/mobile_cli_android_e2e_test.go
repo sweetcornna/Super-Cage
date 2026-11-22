@@ -91,7 +91,7 @@ func TestMobileCLIAndroidApp(t *testing.T) {
 	go func() {
 		defer close(done)
 		for ctx.Err() == nil {
-			serveErr = mobilelink.ServeHost(ctx, relayOrigin, room.ID, room.HostToken, id, phonePin, bridge)
+			serveErr = mobilelink.ServeHost(ctx, relayOrigin, room.ID, room.HostToken, id, phonePin, mobilelink.Opened(bridge))
 			if ctx.Err() != nil || (serveErr != nil && !mobilelink.Retryable(serveErr)) {
 				return
 			}

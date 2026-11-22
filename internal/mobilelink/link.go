@@ -204,8 +204,11 @@ func join(ctx context.Context, base, roomID, role, token string) (*websocket.Con
 
 // ServeHost waits for an authenticated device and serves this workbench only.
 // All requests pass the canonical mobile route filter and local Cage gates.
-func ServeHost(ctx context.Context, base, roomID, hostToken string, identity *remotelink.Identity, expectedPin string, b *Workbench) error {
-	if b == nil {
+// open is called once the device has authenticated, never while the room
+// waits, so a paired device that is away costs no local session. ServeHost
+// closes the idle connections of what open returned when the link ends.
+func ServeHost(ctx context.Context, base, roomID, hostToken string, identity *remotelink.Identity, expectedPin string, open func() (*Workbench, error)) error {
+	if open == nil {
 		return errors.New("local workbench session required")
 	}
 	ws, err := join(ctx, base, roomID, "host", hostToken)
@@ -222,6 +225,14 @@ func ServeHost(ctx context.Context, base, roomID, hostToken string, identity *re
 	stop := context.AfterFunc(ctx, func() { _ = conn.NetConn().Close() })
 	defer stop()
 	defer conn.NetConn().Close()
+	b, err := open()
+	if err != nil || b == nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return retryableError{errors.New("local workbench session unavailable")}
+	}
+	defer b.Close()
 	hostHandler := b.handler()
 	server := &http2.Server{MaxConcurrentStreams: 16}
 	server.ServeConn(conn, &http2.ServeConnOpts{Context: ctx, BaseConfig: &http.Server{

@@ -68,7 +68,7 @@ func (s *Server) serveFavorites(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/api/mobile/browser/favorites" {
 		s.account.mu.Lock()
 		s.phones.mu.Lock()
-		if !s.mobileAuthorized(r.Context()) || !s.phones.pairedRequestLocked(r) {
+		if !s.mobileAuthorized(r.Context()) || s.phones.deviceForRequestLocked(r) == nil {
 			s.phones.mu.Unlock()
 			s.account.mu.Unlock()
 			http.Error(w, "请用电脑的配对码或二维码连接后打开收藏夹。", http.StatusForbidden)

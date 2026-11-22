@@ -154,7 +154,7 @@ func (s *Server) scienceHostAvailability(r *http.Request) (string, string) {
 	if code, reason := s.scienceHostPlatform(); code != "" {
 		return code, reason
 	}
-	if !s.hasTrustedView(r) || s.pairedPhoneRoom(r) != nil {
+	if _, phoneRoom := s.pairedDevice(r); !s.hasTrustedView(r) || phoneRoom != nil {
 		return "client", scienceReasonHostClient
 	}
 	return "", ""

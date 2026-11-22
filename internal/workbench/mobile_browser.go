@@ -3,8 +3,6 @@ package workbench
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,10 +45,6 @@ func (p *mobilePairing) surface(kind phoneSurface) *phoneSurfaceState {
 	return &p.browser
 }
 
-func (p *mobilePairing) pairedRequestLocked(r *http.Request) bool {
-	return p.roomCtx != nil && p.roomCtx.Err() == nil && p.roomProof != "" && equalSecret(p.roomProof, r.Header.Get(mobilelink.PhoneRoomHeader))
-}
-
 func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
 	mux.HandleFunc("GET /api/mobile/browser/favorites", s.serveFavorites)
 	mux.HandleFunc("POST /api/mobile/browser/favorites", s.serveFavorites)
@@ -62,15 +56,6 @@ func (s *Server) mobileSurfaceRoutes(mux routeRegistrar) {
 		mux.HandleFunc("POST "+route+"/{id}/action", handle)
 		mux.HandleFunc("POST "+route+"/{id}/close", handle)
 	}
-}
-
-// Keep the private guest profile stable across reconnects to the same enrollment.
-func (p *mobilePairing) peerLocked() string {
-	if p.record == nil {
-		return ""
-	}
-	digest := sha256.Sum256(p.record.Seed)
-	return hex.EncodeToString(digest[:])
 }
 
 type phoneSurfaceSession struct {
@@ -246,10 +231,14 @@ func (s *Server) phoneSurfaceRequest(surface phoneSurface, w http.ResponseWriter
 	p := &s.phones
 	p.mu.Lock()
 	state := p.surface(surface)
-	room, profile := p.roomCtx, p.peerLocked()
-	allowed := p.pairedRequestLocked(r)
+	device := p.deviceForRequestLocked(r)
+	var room context.Context
+	var profile string
+	if device != nil {
+		room, profile = device.roomCtx, device.guestProfile()
+	}
 	p.mu.Unlock()
-	if !allowed {
+	if device == nil {
 		http.Error(w, "请通过电脑 Super Cage 的二维码或配对码连接这台主机，再打开"+surface.label()+"。", 403)
 		return
 	}

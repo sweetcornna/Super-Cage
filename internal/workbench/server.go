@@ -305,10 +305,10 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 		// Continue an update chain the previous version began, or record a
 		// rollback and bring the environment back.
 		go s.resumeAppUpdateChain()
-		if err = s.restorePhone(); err != nil {
-			s.phones.status = "无法恢复手机配对，请移除旧记录后重试"
+		if err := s.restoreDevices(); err != nil {
+			diagnostics.Log("warn", "devices", "paired devices not fully restored: "+err.Error())
 		}
-		defer s.stopPhone()
+		defer s.stopDevices()
 	}
 	s.identity, err = currentController()
 	if err != nil {
@@ -378,7 +378,7 @@ func (s *Server) handler() http.Handler {
 	s.mobileControlRoutes(mux)
 	s.mobileSurfaceRoutes(mux)
 	mux.HandleFunc("GET /api/mobile-pair", s.phoneStatus)
-	mux.HandleFunc("POST /api/mobile-pair", s.pairPhone)
+	mux.HandleFunc("POST /api/mobile-pair", s.inviteDevice)
 	mux.HandleFunc("DELETE /api/mobile-pair", s.removePhone)
 	mux.HandleFunc("POST /api/mobile/device", s.reportPhoneDevice)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { jsonReply(w, map[string]bool{"ready": true}) })
@@ -664,7 +664,7 @@ func (s *Server) handler() http.Handler {
 		accountRoute := r.URL.Path == "/api/account" || strings.HasPrefix(r.URL.Path, "/api/account/")
 		bootstrapRoute := r.URL.Path == "/api/session" || r.URL.Path == "/api/launch" || r.URL.Path == "/api/handoff" || r.URL.Path == "/api/remote/manifest"
 		trustedDesktop := s.hasTrustedView(r)
-		phoneRoom := s.pairedPhoneRoom(r)
+		_, phoneRoom := s.pairedDevice(r)
 		if phoneRoom != nil {
 			s.notePhoneRequest()
 		} else if !trustedDesktop && !bootstrapRoute && strings.HasPrefix(r.URL.Path, "/api/") {

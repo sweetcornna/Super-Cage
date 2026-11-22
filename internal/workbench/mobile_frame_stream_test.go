@@ -136,9 +136,7 @@ func testPairedFrameStream(t *testing.T, ctx context.Context, s *Server, phone *
 	s.desktopDisplayUpdate = func(show bool) error { shown.Store(show); return nil }
 	s.browserControl = browserClientForTest(t, s, guest.transport(t, id))
 	browser := &s.phones.browser
-	s.phones.mu.Lock()
-	proof := s.phones.roomProof
-	s.phones.mu.Unlock()
+	proof := liveProof(t, s)
 
 	call := func(callCtx context.Context, method, surface, path, body string) (*mobilelink.Reply, error) {
 		var payload []byte
