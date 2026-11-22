@@ -22,6 +22,23 @@ internal static partial class ScienceFrame
     // a killed window's frame stored (N6).
     public const int Contract = 3;
 
+    // HostVerified: this window was built for host rendering's real-window
+    // run (scripts/build-windows.ps1 -ScienceHostVerified, which lifts the
+    // server's gate, workbench.scienceHostVerified, with the same
+    // parameter; TestScienceHostGatesMoveTogether keeps them together).
+    // Built without it, the window never adds its network switches, so it
+    // never seeds Preferences or runs the proxy check, and publishes no
+    // frame contract, whatever a workbench.json says.
+#if SCIENCE_HOST_VERIFIED
+    public const bool HostVerified = true;
+#else
+    public const bool HostVerified = false;
+#endif
+
+    // PublishedContract is what the window tells the workbench
+    // (window.cageNativeScienceFrame): none unless HostVerified.
+    public const int PublishedContract = HostVerified ? Contract : 0;
+
     // Only while some environment has host rendering on: no proxy (loopback
     // still bypasses it, so the workbench and the front load), no non-proxied
     // WebRTC, no shared workers (CDP cannot pause them before they run), no
@@ -73,9 +90,10 @@ internal static partial class ScienceFrame
     }
 
     // Arguments is null (the environment options the window always had)
-    // unless some profile's workbench.json has science_host_render.
-    public static string? Arguments(string root) =>
-        Profiles(root).Any(profile => ReadObject(Path.Combine(profile, "workbench.json"))?["science_host_render"] is JsonValue value &&
+    // unless the window is built for host rendering (verified) and some
+    // profile's workbench.json has science_host_render.
+    public static string? Arguments(string root, bool verified = HostVerified) =>
+        verified && Profiles(root).Any(profile => ReadObject(Path.Combine(profile, "workbench.json"))?["science_host_render"] is JsonValue value &&
             value.TryGetValue<bool>(out var on) && on) ? BackstopArguments : null;
 
     [GeneratedRegex(@"^[0-9a-f]{32}\.localhost$")]

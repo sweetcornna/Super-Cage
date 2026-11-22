@@ -868,5 +868,5 @@ internal sealed class MainWindow : Form
           }); }};
           Object.defineProperty(window, 'webkit', {value: {messageHandlers: {cage}}, writable: false});
         })();
-        """.Replace("SCIENCE_FRAME_CONTRACT", ScienceFrame.Contract.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        """.Replace("SCIENCE_FRAME_CONTRACT", ScienceFrame.PublishedContract.ToString(System.Globalization.CultureInfo.InvariantCulture));
 }

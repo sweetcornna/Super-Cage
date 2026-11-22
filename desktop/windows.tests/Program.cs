@@ -74,12 +74,18 @@ assertions = 0;
     try
     {
         Directory.CreateDirectory(Path.Combine(scienceRoot, "vms", "lab"));
-        Check(ScienceFrame.Arguments(scienceRoot) == null, "switches without any profile");
+        Check(ScienceFrame.Arguments(scienceRoot, true) == null, "switches without any profile");
         File.WriteAllText(Path.Combine(scienceRoot, "workbench.json"), "{\n  \"science_host_render\": false\n}");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{ broken");
-        Check(ScienceFrame.Arguments(scienceRoot) == null, "switches while host rendering is off");
+        Check(ScienceFrame.Arguments(scienceRoot, true) == null, "switches while host rendering is off");
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "workbench.json"), "{\n  \"keyboard\": \"pc\",\n  \"science_host_render\": true\n}");
-        Check(ScienceFrame.Arguments(scienceRoot) == ScienceFrame.BackstopArguments, "no switches with host rendering on in a named environment");
+        Check(ScienceFrame.Arguments(scienceRoot, true) == ScienceFrame.BackstopArguments, "no switches with host rendering on in a named environment");
+        // A window built without host rendering (the gate not lifted) never
+        // has the switches, whatever workbench.json says, and publishes no
+        // frame contract.
+        Check(ScienceFrame.Arguments(scienceRoot, false) == null, "switches in a window built without host rendering");
+        Check(ScienceFrame.Arguments(scienceRoot) == (ScienceFrame.HostVerified ? ScienceFrame.BackstopArguments : null), "the window's switches do not follow its build");
+        Check(ScienceFrame.PublishedContract == (ScienceFrame.HostVerified ? ScienceFrame.Contract : 0), "the published contract does not follow the window's build");
         Check(ScienceFrame.BackstopArguments == string.Join(' ', golden["backstop"]!.AsArray().Select(item => item!.GetValue<string>())),
             "the window's switches differ from the ones the browser tests prove");
 

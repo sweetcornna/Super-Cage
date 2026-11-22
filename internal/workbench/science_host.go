@@ -65,15 +65,23 @@ var scienceHostOS = runtime.GOOS
 // where host rendering has run a real Claude Science session in the real
 // window. The switch is offered nowhere else, whatever frame contract the
 // window answers: the pane hides it (unavailable_code "unverified"), turning
-// it on is refused, and a stored "on" is treated as off (syncScienceFront
-// says why in the log).
+// it on is refused, and a stored "on" is turned off (syncScienceFront says
+// so in the log).
 //
-// It is empty: no real session has run in the real window yet. A build for
-// that run lifts the gate without a code change:
+// The Windows window has the matching gate (ScienceFrame.HostVerified, the
+// SCIENCE_HOST_VERIFIED symbol): without it the window never adds its
+// network switches. The two are lifted together, never one alone
+// (TestScienceHostGatesMoveTogether). It is empty: no real session has run
+// in the real window yet. The build for that run lifts both with one
+// parameter:
 //
-//	go build -ldflags "-X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows" ./cmd/cage
+//	scripts/build-windows.ps1 -ScienceHostVerified
 //
-// After a successful run the platform is written here, in a reviewed commit.
+// which passes -ldflags "-X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows"
+// to cage.exe and -p:ScienceHostVerified=true to Cage.exe. After a
+// successful run, windows is written here and the default of
+// ScienceHostVerified in desktop/windows/Cage.Windows.csproj becomes true,
+// in one reviewed commit.
 var scienceHostVerified = ""
 
 // scienceHostRenderVerified reports whether the gate is lifted for goos.
@@ -97,8 +105,8 @@ type scienceHost struct {
 	front *scienceFront
 	err   string
 	stop  context.CancelFunc
-	// unverified: the log has said once that a stored "on" is treated
-	// as off in this build (scienceHostVerified).
+	// unverified: the log has said once that a stored "on" was turned
+	// off in this build (scienceHostVerified).
 	unverified sync.Once
 	// vmRunning replaces Server.vmRunning in tests.
 	vmRunning func() bool
@@ -184,13 +192,30 @@ func (s *Server) scienceHostRender(r *http.Request) *scienceHostRenderState {
 
 // syncScienceFront starts or stops the front to match the setting.
 func (s *Server) syncScienceFront() {
+	code, _ := s.scienceHostPlatform()
 	s.mu.Lock()
 	enabled, closing := s.preferences.ScienceHostRender, s.closing
+	// A stored "on" this build does not offer (it came from a build that
+	// did) is turned off, so a later build that offers it does not start
+	// on by surprise.
+	var cleared error
+	unverified := enabled && code == "unverified"
+	if unverified {
+		next := s.preferences
+		next.ScienceHostRender = false
+		if cleared = writePrivate(filepath.Join(s.profile, "workbench.json"), next); cleared == nil {
+			s.preferences.ScienceHostRender = false
+		}
+		enabled = false
+	}
 	s.mu.Unlock()
-	code, _ := s.scienceHostPlatform()
-	if enabled && code == "unverified" {
+	if unverified {
 		s.scienceHost.unverified.Do(func() {
-			scienceLog("warn", "claude-science", "host rendering is stored on, but this build does not offer it on "+scienceHostOS+" (scienceHostVerified is empty): treated as off")
+			message := "host rendering was stored on, but this build does not offer it on " + scienceHostOS + " (scienceHostVerified is empty): turned off"
+			if cleared != nil {
+				message = "host rendering is stored on, but this build does not offer it on " + scienceHostOS + " (scienceHostVerified is empty): treated as off; the setting could not be cleared: " + cleared.Error()
+			}
+			scienceLog("warn", "claude-science", message)
 		})
 	}
 	want := enabled && code == "" && !closing

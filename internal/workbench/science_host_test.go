@@ -216,7 +216,8 @@ func TestScienceHostGateClosedInThisTree(t *testing.T) {
 }
 
 // With the gate closed the server never offers the switch, whatever frame
-// contract the window answers; a stored "on" is off and the log says why.
+// contract the window answers; a stored "on" is turned off and the log says
+// so.
 // Lifted, the same stored "on" starts the front.
 func TestScienceHostRenderGate(t *testing.T) {
 	workload := scienceWorkload(t)
@@ -265,7 +266,11 @@ func TestScienceHostRenderGate(t *testing.T) {
 	// A stored "on" from a build that offered it.
 	workload.mu.Lock()
 	workload.preferences.ScienceHostRender = true
+	err := writePrivate(filepath.Join(workload.profile, "workbench.json"), workload.preferences)
 	workload.mu.Unlock()
+	if err != nil || !strings.Contains(stored(), "science_host_render") {
+		t.Fatalf("stored on: %v %s", err, stored())
+	}
 	workload.syncScienceFront()
 	workload.syncScienceFront()
 	if workload.scienceFrontRunning() != nil {
@@ -277,7 +282,15 @@ func TestScienceHostRenderGate(t *testing.T) {
 	if state := read(); state.Enabled || state.Running || state.Available {
 		t.Fatalf("stored on not treated as off: %+v", state)
 	}
-	if len(logged) != 1 || !strings.Contains(logged[0], "treated as off") || !strings.HasPrefix(logged[0], "warn claude-science ") {
+	// Turned off where it is stored, so a later build that offers it does
+	// not start on by surprise; said once.
+	workload.mu.Lock()
+	still := workload.preferences.ScienceHostRender
+	workload.mu.Unlock()
+	if still || strings.Contains(stored(), "science_host_render") {
+		t.Fatalf("stored on not cleared: %s", stored())
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "turned off") || !strings.HasPrefix(logged[0], "warn claude-science ") {
 		t.Fatalf("log: %q", logged)
 	}
 	// Turning it off is still accepted (and forgets the stored "on").

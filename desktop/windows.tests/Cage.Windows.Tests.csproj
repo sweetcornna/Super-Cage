@@ -6,6 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <WindowsNativeInputTests Condition="'$(WindowsNativeInputTests)' == '' and $([MSBuild]::IsOSPlatform('Windows'))">true</WindowsNativeInputTests>
   </PropertyGroup>
+  <!-- The window's host-rendering gate, as Cage.Windows.csproj sets it. -->
+  <PropertyGroup>
+    <DefineConstants Condition="'$(ScienceHostVerified)' == 'true'">$(DefineConstants);SCIENCE_HOST_VERIFIED</DefineConstants>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(WindowsNativeInputTests)' == 'true'">
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
