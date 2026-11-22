@@ -358,7 +358,22 @@ func TestEntryKeptTerminalsHaveTheirOwnCapAndExpire(t *testing.T) {
 	t.Cleanup(func() { entryKeptLimit, entryKeptIdle = previousLimit, previousIdle })
 	f := newEntryFixture(t, true)
 	f.on()
+	// Registered after the fixture, so it runs before the limits are put
+	// back: nothing is kept and the idle check has stopped by then.
+	t.Cleanup(func() {
+		for _, session := range f.s.terminals.keptSessions() {
+			f.s.terminals.remove(session.id)
+		}
+		f.s.entryUnkept()
+		for deadline := time.Now().Add(10 * time.Second); f.s.entryKeptTimerRunning() && time.Now().Before(deadline); {
+			time.Sleep(20 * time.Millisecond)
+		}
+		if f.s.entryKeptTimerRunning() {
+			t.Error("the idle check still runs with nothing kept")
+		}
+	})
 	n := 0
+	seen := map[string]bool{}
 	open := func(command string) (*entryShell, string) {
 		t.Helper()
 		n++
@@ -366,8 +381,14 @@ func TestEntryKeptTerminalsHaveTheirOwnCapAndExpire(t *testing.T) {
 		marker := fmt.Sprintf("R%d=", n)
 		shell.send(command + "printf '" + marker + "%s\\n' ready\n")
 		shell.expect(marker)
-		listed := entrySSHTerminals(f.s)
-		return shell, listed[len(listed)-1]["id"].(string)
+		for _, summary := range entrySSHTerminals(f.s) {
+			if id := summary["id"].(string); !seen[id] {
+				seen[id] = true
+				return shell, id
+			}
+		}
+		t.Fatal("no new ssh terminal")
+		return nil, ""
 	}
 	keep := func(id string) error { return f.call("POST", "/api/terminals/"+id+"/keep", map[string]any{}, nil) }
 	busyShell, busy := open("sleep 30 & ")
