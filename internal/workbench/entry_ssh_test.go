@@ -98,7 +98,9 @@ func entryOpenShell(t *testing.T, client *ssh.Client, cols, rows int, command st
 	return shell
 }
 
-// expect waits for a line with prefix and returns its rest.
+// expect waits for a whole line with prefix and returns its rest. A line
+// still arriving does not count: its rest may be cut anywhere, and what a
+// test looks for on it (an escape sequence, say) may not be there yet.
 func (s *entryShell) expect(prefix string) string {
 	s.t.Helper()
 	deadline := time.After(10 * time.Second)
@@ -106,7 +108,8 @@ func (s *entryShell) expect(prefix string) string {
 		s.mu.Lock()
 		text := s.output.String()
 		s.mu.Unlock()
-		for _, line := range strings.Split(text, "\n") {
+		lines := strings.Split(text, "\n")
+		for _, line := range lines[:len(lines)-1] {
 			line = strings.TrimRight(line, "\r")
 			if i := strings.Index(line, prefix); i >= 0 && !strings.Contains(line, "printf") {
 				return line[i+len(prefix):]
@@ -118,6 +121,13 @@ func (s *entryShell) expect(prefix string) string {
 			s.t.Fatalf("no %q in %q", prefix, text)
 		}
 	}
+}
+
+// prompt waits for text anywhere in the output, also on a line still open:
+// what Super Cage asks without ending the line.
+func (s *entryShell) prompt(text string) {
+	s.t.Helper()
+	entryAwait(s.t, 10*time.Second, "the prompt "+text, func() bool { return strings.Contains(s.text(), text) })
 }
 
 func (s *entryShell) send(text string) {

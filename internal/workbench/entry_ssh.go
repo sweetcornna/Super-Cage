@@ -1082,8 +1082,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	if paths, err := s.entryPaths(); err == nil {
 		settings, _ = localterm.LoadSettings(paths.ComputerDir)
 	}
-	presence := &entryPresence{}
-	output := &entryOutput{filter: termfilter.New(termfilter.Options{ClipboardWrite: settings.ClipboardWrite, ClipboardNow: presence.here})}
+	presence, output := entryWindow(settings)
 	// The peer exists before the subscription, so queries in live output
 	// are counted for this window from the first byte.
 	peer := session.openPeer(entryViewerID(), false)

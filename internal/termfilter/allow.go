@@ -152,6 +152,9 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 	case marker == 0 && in == '!' && final == 'p': // soft reset
 		if len(params) == 0 {
 			f.resets++
+			// xterm.js turns bracketed paste off; taken as off for every
+			// window: a paste start read as typing is harmless.
+			f.paste.Store(false)
 			return true
 		}
 	case marker == 0 && in == '"' && final == 'q': // character protection
@@ -159,7 +162,9 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 	case marker == 0 && in == '\'' && (final == '}' || final == '~'): // insert and delete columns
 		return true
 	case (marker == 0 || marker == '?') && in == '$' && final == 'p': // DECRQM
-		return !f.replay && count(params, ';') == 0 && len(params) > 0
+		// The answer echoes the mode: at most five digits, so that it is
+		// read as an answer (NextInput), not as keys.
+		return !f.replay && number(params) && len(params) <= 5
 	}
 	return false
 }
@@ -170,7 +175,7 @@ func (f *Filter) privateModes(params []byte, final byte) bool {
 	if len(params) == 0 {
 		return false
 	}
-	focus, blink := false, false
+	focus, blink, paste := false, false, false
 	ok := everyParam(params, func(n int) bool {
 		switch n {
 		case 1004:
@@ -178,6 +183,8 @@ func (f *Filter) privateModes(params []byte, final byte) bool {
 			return true
 		case 12:
 			blink = true
+		case 2004:
+			paste = true
 		}
 		return privateModes[n]
 	})
@@ -185,6 +192,9 @@ func (f *Filter) privateModes(params []byte, final byte) bool {
 		return false
 	}
 	f.left.blink = f.left.blink || blink
+	if paste {
+		f.paste.Store(final == 'h')
+	}
 	if !focus {
 		return true
 	}

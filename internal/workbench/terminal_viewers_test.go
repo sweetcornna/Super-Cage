@@ -98,6 +98,9 @@ func (f *recordingPTY) received(t *testing.T, want string) string {
 	}
 }
 
+// refusedSetting is a DECRQSS answer longer than any the viewers read as one.
+var refusedSetting = "\x1bP1$r" + strings.Repeat("1;", 70) + "m\x1b\\"
+
 func TestSplitTerminalReplies(t *testing.T) {
 	var z terminalSizing
 	z.init(80, 24)
@@ -139,6 +142,11 @@ func TestSplitTerminalReplies(t *testing.T) {
 		{in: "\x1b[I", rest: ""},                                                                              // focus in
 		{in: "\x1b[?1;2ca", rest: "a", typing: true, asked: true},                                             // answer and a key together
 		{in: "\x1b[200~\x1b[?1;2c\x1b[201~", rest: "\x1b[200~\x1b[?1;2c\x1b[201~", typing: true, asked: true}, // pasted text
+		// Shaped like answers but refused by the answer grammar
+		// (termfilter.InputFragment): typing, passed on byte for byte.
+		{in: "\x1b[?99999999999;0$y", rest: "\x1b[?99999999999;0$y", typing: true, asked: true},
+		{in: "\x1b]4;1234;rgb:0/0/0\x07", rest: "\x1b]4;1234;rgb:0/0/0\x07", typing: true, asked: true},
+		{in: refusedSetting, rest: refusedSetting, typing: true, asked: true},
 		// Answers to what no viewer is ever asked (the filter and Cage's web
 		// terminal ask none of these) are typing.
 		{in: "\x1b[?15u", rest: "\x1b[?15u", typing: true, asked: true},                             // kitty keyboard flags
