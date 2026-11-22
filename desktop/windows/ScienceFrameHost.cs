@@ -32,12 +32,13 @@ internal sealed class ScienceFrameHost
     private readonly CoreWebView2 core;
     private readonly string data;
     private readonly Action<string> failed;
-    private readonly Action<string> navigate;
+    private readonly Action<string, bool> navigate;
     private readonly ScienceFrame.Policy policy = new();
     private readonly CoreWebView2DevToolsProtocolEventReceiver attached, detached, crashed;
     private string origin = "";
     private readonly HashSet<string> framed = new(StringComparer.Ordinal);
     private string heldUri = "";
+    private bool heldReload;
     private int navigation;
     // Frames this host crashed (their Inspector.targetCrashed is awaited) and
     // the session origins whose frame process exit it caused (N4).
@@ -47,8 +48,8 @@ internal sealed class ScienceFrameHost
 
     // data is the WebView's user data folder (the journal of framed
     // origins); failed tells the pane its frame ended; navigate re-issues a
-    // navigation this host held.
-    public ScienceFrameHost(CoreWebView2 core, string data, Action<string> failed, Action<string> navigate)
+    // navigation this host held (true: as a reload).
+    public ScienceFrameHost(CoreWebView2 core, string data, Action<string> failed, Action<string, bool> navigate)
     {
         this.core = core;
         this.data = data;
@@ -122,8 +123,11 @@ internal sealed class ScienceFrameHost
     }
 
     // Hold answers NavigationStarting for the window's own document: true
-    // cancels it, and it is issued again once the frame's targets are gone.
-    public bool Hold(string uri)
+    // cancels it, and it is issued again once the frame's targets are gone
+    // (N7): a reload as a reload; anything else as a navigation to its
+    // address, so a back or forward one becomes a new history entry and a
+    // form's POST body would be lost (the workbench submits no forms).
+    public bool Hold(string uri, bool reload)
     {
         var ending = origin;
         origin = "";
@@ -134,6 +138,7 @@ internal sealed class ScienceFrameHost
             return false;
         }
         heldUri = uri;
+        heldReload = reload;
         var current = ++navigation;
         _ = Apply(actions, ending);
         _ = DropAfter(current);
@@ -214,7 +219,7 @@ internal sealed class ScienceFrameHost
         navigation++;
         var uri = heldUri;
         heldUri = "";
-        if (uri.Length != 0) navigate(uri);
+        if (uri.Length != 0) navigate(uri, heldReload);
     }
 
     // EndFront asks the front of a session origin to end that frame's

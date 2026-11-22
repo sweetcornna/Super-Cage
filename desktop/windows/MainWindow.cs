@@ -206,7 +206,7 @@ internal sealed class MainWindow : Form
             core.NavigationStarting += (_, e) => {
                 if (!UpdatePolicy.IsWorkbench(e.Uri, expectedPort)) e.Cancel = true;
                 // The pane's document is going away: its frame goes first.
-                else if (science?.Hold(e.Uri) == true) { e.Cancel = true; heldNavigations.Add(e.NavigationId); }
+                else if (science?.Hold(e.Uri, e.NavigationKind == CoreWebView2NavigationKind.Reload) == true) { e.Cancel = true; heldNavigations.Add(e.NavigationId); }
             };
             core.NewWindowRequested += (_, e) => e.Handled = true;
             core.DownloadStarting += (_, e) => e.Cancel = true;
@@ -228,7 +228,10 @@ internal sealed class MainWindow : Form
             await ScienceFrameHost.Sweep(core, Path.Combine(Backend.Root, "webview2"));
             science = arguments == null ? null : new ScienceFrameHost(core, Path.Combine(Backend.Root, "webview2"), reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
-                uri => { if (!web.IsDisposed && web.CoreWebView2 == core) core.Navigate(uri); });
+                (uri, reload) => {
+                    if (web.IsDisposed || web.CoreWebView2 != core) return;
+                    if (reload) core.Reload(); else core.Navigate(uri);
+                });
             core.NavigationCompleted += (_, e) => {
                 if (heldNavigations.Remove(e.NavigationId)) return;
                 if (!e.IsSuccess) {
