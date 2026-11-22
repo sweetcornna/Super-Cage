@@ -1106,6 +1106,9 @@ agent_unpack() {
     *) agent_fail archive "安装文件的内容不符合要求（$(agent_reason)），已停止安装，原有版本保持不变。" ;;
   esac
   sudo chown -hR 0:0 -- "$agent_stage"
+  # mktemp -d made it 0700: the version check and the tree digest run as the
+  # guest user and must still reach the tree.
+  sudo chmod 0755 "$agent_stage"
 }
 
 # The staged copy runs with an empty environment from the start (env -i

@@ -119,7 +119,8 @@ Every refusal before the download changes nothing in the guest: `/usr/local/lib/
    `sudo mktemp -d /usr/local/lib/agent-clients/.stage-XXXXXX` handed to the user. The extraction reads the
    archive once, hashes every byte it reads (to the end of the file) and refuses with `digest` unless that is
    the pin, so what is unpacked is what was checked; it records the digests of the tree as it writes it. Then
-   `chown -hR 0:0` of the **whole stage**, so no same-user process can rename the tree away.
+   `chown -hR 0:0` of the **whole stage**, so no same-user process can rename the tree away, and `chmod 0755`
+   of it (`mktemp -d` made it 0700; the version check and the digest run as the guest user).
 7. Verify the staged, root-owned copy: `(cd / && ulimit -f 64 && env -i HOME=… PATH=/usr/bin:/bin <entry env>
    timeout -k 2 8 <entry> --version)` with its output in a file (never a pipe a child left behind could hold
    open); the pinned version must be a word in the first 4 KB. `env -i` comes before `timeout`, so neither

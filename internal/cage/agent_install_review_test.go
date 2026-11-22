@@ -283,6 +283,22 @@ func TestAgentInstallCommitsTheTreeItUnpacked(t *testing.T) {
 	}
 }
 
+// F2: root takes the whole stage, and opens it again for the guest user
+// (mktemp -d makes 0700), who runs the version check and the tree digest.
+// The rig's chown changes nothing, so the sudo log is what shows it.
+func TestAgentInstallStageIsRootsAndReadable(t *testing.T) {
+	r := newAgentRig(t)
+	r.install("0.171.0")
+	log := r.read(filepath.Join(r.root, "sudo.log"))
+	chown := regexp.MustCompile(`(?m)^chown -hR 0:0 -- (\S+/\.stage-\w+)$`).FindStringSubmatch(log)
+	if chown == nil {
+		t.Fatalf("the stage is not handed to root as a whole:\n%s", log)
+	}
+	if after := log[strings.Index(log, chown[0]):]; !strings.Contains(after, "chmod 0755 "+chown[1]+"\n") {
+		t.Fatalf("the root-owned stage stays 0700:\n%s", after)
+	}
+}
+
 // F2: the tree belongs to root and holds no hard links. Here the owner the
 // installer expects is another user's, and a hard link makes a repair.
 func TestAgentInstallTreeOwnerAndLinks(t *testing.T) {
