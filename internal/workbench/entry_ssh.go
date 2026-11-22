@@ -52,6 +52,16 @@ import (
 // variable for tests.
 var entryWrapperTimeout = 20 * time.Second
 
+// entryWriteTimeout bounds one write to the client. A write that waits
+// longer is a client that stopped reading (ssh suspended with ~^Z): the
+// connection ends as if the owner hung up, and its terminals are kept
+// (R3-4). A variable for tests.
+var entryWriteTimeout = terminalWriteTimeout
+
+// errEntryStalled is the cause of a connection cut because the client
+// stopped reading.
+var errEntryStalled = errors.New("the ssh client took no output for the write timeout")
+
 const (
 	entryMaxChannels      = 8
 	entryHandshakeTimeout = 20 * time.Second
@@ -324,7 +334,14 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
-	s.entryServe(conn, newEntryWSConn(ws), record, signer)
+	transport := newEntryWSConn(ws)
+	transport.stalled = func() {
+		if !conn.stalled.Swap(true) {
+			diagnostics.Log("info", "entry", "an ssh connection ended: the client took no output for "+entryWriteTimeout.String()+"; its terminals are kept")
+		}
+		conn.cancel(errEntryStalled)
+	}
+	s.entryServe(conn, transport, record, signer)
 }
 
 // entryServe runs the SSH server of one connection until it ends or is cut.
@@ -1208,6 +1225,11 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
 	// already: then it ends, and says so (entryKeepOnLock decides which).
 	full := locked && !s.entryKeepOnLock(conn.epoch, session)
+	if !ended && !failed.Load() && !locked && conn.stalled.Load() {
+		// The client stopped reading: a hang-up that keeps the terminal,
+		// within entryKeptLimit (R3-4). Nothing reaches that client any more.
+		_ = s.entryKeep(session)
+	}
 	session.mu.Lock()
 	kept := session.kept
 	session.mu.Unlock()
@@ -1297,6 +1319,8 @@ type entryWSConn struct {
 	readMu, writeMu sync.Mutex
 	reader          io.Reader
 	closing         sync.Once
+	// stalled, when set, hears of a write that waited entryWriteTimeout.
+	stalled func()
 }
 
 // entryCloseLinger bounds how long a closed connection waits for the
@@ -1340,8 +1364,11 @@ func (c *entryWSConn) Read(p []byte) (int, error) {
 func (c *entryWSConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
+	_ = c.ws.SetWriteDeadline(time.Now().Add(entryWriteTimeout))
 	if err := c.ws.WriteMessage(websocket.BinaryMessage, p); err != nil {
+		if timeout := net.Error(nil); errors.As(err, &timeout) && timeout.Timeout() && c.stalled != nil {
+			c.stalled()
+		}
 		return 0, err
 	}
 	return len(p), nil
