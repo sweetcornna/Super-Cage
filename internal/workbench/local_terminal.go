@@ -110,7 +110,10 @@ func (s *Server) localTerminalUnlocked(ctx context.Context, connection string) (
 	return account.Unlocked, nil
 }
 
-const localTerminalLocked = "Super Cage 已锁定：解锁后再打开本机终端"
+const (
+	localTerminalLocked     = "Super Cage 已锁定：解锁后再打开本机终端"
+	localTerminalUnanswered = "无法确认工作环境是否已解锁，请稍后再试"
+)
 
 var localTerminalConnection = regexp.MustCompile("^[A-Za-z0-9_-]{1,128}$")
 
@@ -139,10 +142,15 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 		if !readJSON(w, r, &settings) {
 			return
 		}
-		// Not while the environment shown is locked. With none shown, or
-		// one that cannot answer, there is no lock to keep.
+		// Not while the environment shown is locked, or cannot say whether
+		// it is, as for opening a window. With none shown there is no lock
+		// to keep.
 		if current := s.remote.context(); current.Mode != "none" && current.ConnectionID != "" {
-			if unlocked, err := s.localTerminalUnlocked(r.Context(), current.ConnectionID); err == nil && !unlocked {
+			switch unlocked, err := s.localTerminalUnlocked(r.Context(), current.ConnectionID); {
+			case err != nil:
+				http.Error(w, localTerminalUnanswered, http.StatusConflict)
+				return
+			case !unlocked:
 				http.Error(w, localTerminalLocked, http.StatusLocked)
 				return
 			}
@@ -244,7 +252,7 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	switch unlocked, err := s.localTerminalUnlocked(r.Context(), connection); {
 	case err != nil:
-		http.Error(w, "无法确认工作环境是否已解锁，请稍后再试", http.StatusConflict)
+		http.Error(w, localTerminalUnanswered, http.StatusConflict)
 		return
 	case !unlocked:
 		http.Error(w, localTerminalLocked, http.StatusLocked)

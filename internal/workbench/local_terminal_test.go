@@ -435,3 +435,24 @@ func TestLocalTerminalOpenRateLimit(t *testing.T) {
 	}
 	t.Fatal("never refused within a minute")
 }
+
+// Settings are not changed while the environment shown cannot say whether
+// it is locked, as a window is not opened then. With none shown there is
+// no lock to keep.
+func TestLocalTerminalSettingsWaitForTheLockAnswer(t *testing.T) {
+	desktop, _, _ := kittyOpens(t)
+	gateway := desktop.remote.desktop
+	gateway.active.cancel() // the environment no longer answers
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != http.StatusConflict {
+		t.Fatal("settings changed without the lock answer:", w.Code, w.Body.String())
+	}
+	if settings, _ := localterm.LoadSettings(desktop.localTerminalDir()); settings.ClipboardWrite {
+		t.Fatal("written anyway")
+	}
+	gateway.mu.Lock()
+	gateway.active = nil
+	gateway.mu.Unlock()
+	if w := clientCall(desktop, "PUT", "/api/client/local-terminal", "{\"app\":\"kitty\",\"clipboard_write\":true}", ""); w.Code != 200 {
+		t.Fatal("refused with no environment shown:", w.Code, w.Body.String())
+	}
+}

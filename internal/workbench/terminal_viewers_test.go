@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // recordingPTY is a PTY whose program records every input and resize.
@@ -115,6 +116,8 @@ func TestSplitTerminalReplies(t *testing.T) {
 		{in: "\x1b_", rest: "\x1b_", typing: true, asked: true},                 // Alt+_
 		{in: "\x1b]ls\r", rest: "\x1b]ls\r", typing: true, asked: true},         // Esc, then ] typed fast
 		{in: "\x1b[<0;10;5M", rest: "\x1b[<0;10;5M", typing: true, asked: true}, // mouse press
+		{in: "\x1b[<35;10;5M", rest: ""},                                        // pointer motion, no button
+		{in: "\x1b[<32;10;5M", rest: "\x1b[<32;10;5M", typing: true},            // drag with the left button
 		{in: "\x1b[97;5u", rest: "\x1b[97;5u", typing: true, asked: true},       // kitty key
 		{in: "\x1b[?1;2c", rest: "", asked: true},                               // DA1 answer
 		{in: "\x1b[?1;2c", rest: "\x1b[?1;2c", typing: true},                    // the same, nothing asked
@@ -144,10 +147,9 @@ func TestSplitTerminalReplies(t *testing.T) {
 	} {
 		p := &terminalPeer{key: "v:viewer"}
 		if row.asked {
-			for i := range p.asked {
-				p.asked[i] = 1
+			for kind := range termfilter.ReplyKinds {
+				p.askLocked(termfilter.Reply(kind), 1, time.Now())
 			}
-			p.askedAt = time.Now()
 		}
 		typing, rest := z.splitReplies(p, row.in, time.Now())
 		if typing != row.typing || rest != row.rest {
@@ -660,15 +662,87 @@ func TestTerminalAnswersPastTheQueryCount(t *testing.T) {
 	_ = session.peerResize(other, 100, 30)
 	_ = session.peerResize(owner, 120, 40)
 	_, _ = session.peerInput(owner, "x")
-	for range 3 * terminalAskedLimit {
+	for range 300 {
 		output(session, "\x1b[c")
 	}
-	for i := range 3 * terminalAskedLimit {
+	for i := range 300 {
 		if data, _ := session.peerInput(other, "\x1b[?62;22c"); data != "" {
 			t.Fatalf("answer %d passed from a non-owner", i+1)
 		}
 	}
 	if file.lastSize() != [2]uint16{120, 40} {
 		t.Fatal("an answer took the size", file.sizes)
+	}
+}
+
+// Answers pay the queries they answer: after ten cursor queries and ten
+// answers nothing is owed, and xterm's Shift+F3, shaped like a cursor
+// answer, is typing.
+func TestTerminalOwedAnswersArePaidDown(t *testing.T) {
+	var z terminalSizing
+	z.init(80, 24)
+	p := &terminalPeer{key: "v:viewer"}
+	now := time.Now()
+	p.askLocked(termfilter.ReplyCursor, 10, now)
+	if typing, rest := z.splitReplies(p, strings.Repeat("\x1b[1;1R", 10), now); typing || rest != "" {
+		t.Fatalf("an owed answer was typing: %v %q", typing, rest)
+	}
+	if typing, _ := z.splitReplies(p, "\x1b[1;2R", now.Add(time.Second)); !typing {
+		t.Fatal("Shift+F3 swallowed after every query was answered")
+	}
+}
+
+// Each query is owed for terminalQueryLive (and less than a second more),
+// however many queries of any kind follow it.
+func TestTerminalOwedAnswersExpireOneByOne(t *testing.T) {
+	var z terminalSizing
+	z.init(80, 24)
+	p := &terminalPeer{key: "v:viewer"}
+	start := time.Now()
+	p.askLocked(termfilter.ReplyCursor, 1, start) // never answered
+	for s := 2; s <= 8; s += 2 {
+		now := start.Add(time.Duration(s) * time.Second)
+		p.askLocked(termfilter.ReplyDA1, 1, now)
+		if typing, _ := z.splitReplies(p, "\x1b[?62;22c", now); typing {
+			t.Fatal("an owed answer was typing")
+		}
+	}
+	if typing, _ := z.splitReplies(p, "\x1b[1;2R", start.Add(8*time.Second)); !typing {
+		t.Fatal("a cursor query 8 seconds old still swallowed Shift+F3")
+	}
+	asked := start.Add(9 * time.Second)
+	p.askLocked(termfilter.ReplyCursor, 1, asked)
+	if typing, _ := z.splitReplies(p, "\x1b[1;1R", asked.Add(terminalQueryLive-time.Millisecond)); typing {
+		t.Fatal("an answer within terminalQueryLive was typing")
+	}
+	p.askLocked(termfilter.ReplyCursor, 1, asked)
+	if typing, _ := z.splitReplies(p, "\x1b[1;2R", asked.Add(terminalQueryLive+time.Second)); !typing {
+		t.Fatal("a query was owed past terminalQueryLive and a second")
+	}
+}
+
+// Moving the pointer over a window is not typing: it never takes the size,
+// and reaches the program only from the owner. A click does both.
+func TestTerminalPointerMotionIsNotTyping(t *testing.T) {
+	session, file := newRecordingSession(t)
+	owner := session.openPeer("owner-identity-1", false)
+	other := session.openPeer("other-identity-1", false)
+	_ = session.peerResize(other, 100, 30)
+	_ = session.peerResize(owner, 120, 40)
+	_, _ = session.peerInput(owner, "x")
+	// SGR, X10 and urxvt encodings of motion with no button held.
+	for _, motion := range []string{"\x1b[<35;10;5M", "\x1b[MC*%", "\x1b[67;10;5M"} {
+		if data, _ := session.peerInput(other, motion); data != "" {
+			t.Fatalf("%q passed from a non-owner", motion)
+		}
+		if data, _ := session.peerInput(owner, motion); data != motion {
+			t.Fatalf("%q did not pass from the owner", motion)
+		}
+	}
+	if file.lastSize() != [2]uint16{120, 40} {
+		t.Fatal("pointer motion took the size", file.sizes)
+	}
+	if data, _ := session.peerInput(other, "\x1b[<0;10;5M"); data != "\x1b[<0;10;5M" || file.lastSize() != [2]uint16{100, 30} {
+		t.Fatal("a click did not pass or take the size", data, file.sizes)
 	}
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/controlwire"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 	"github.com/sylvinus/agent-vm/internal/version"
 )
 
@@ -253,6 +254,10 @@ func (c *attachClient) waitFor(want string, n int) string {
 	}
 }
 
+// leftSequence is what the attach writes as it leaves a window whose
+// program changed nothing the reset undoes only when changed.
+var leftSequence = string(termfilter.New(termfilter.Options{}).End(nil, 0))
+
 // leftReset checks that the window was left as a shell expects: the title
 // pushed before the first output, the reset written last.
 func (c *attachClient) leftReset() {
@@ -260,7 +265,7 @@ func (c *attachClient) leftReset() {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		out := c.output()
-		if strings.HasPrefix(out, attach.TitlePush) && strings.HasSuffix(out, attach.ResetSequence) {
+		if strings.HasPrefix(out, attach.TitlePush) && strings.HasSuffix(out, leftSequence) {
 			return
 		}
 		if time.Now().After(deadline) {
@@ -363,7 +368,7 @@ func TestAttachResumesWithoutLossOrDuplication(t *testing.T) {
 			t.Fatalf("%q appears %d times after %d reconnects", line, strings.Count(out, line), reconnects)
 		}
 	}
-	if strings.Contains(out, "\x1bc") {
+	if strings.Contains(out, termfilter.ClearReset) {
 		t.Fatal("a resumed stream cleared the screen")
 	}
 }
@@ -1229,8 +1234,8 @@ func TestAttachExitSpoilsAnOpenClipboardWrite(t *testing.T) {
 	a.cancel()
 	a.exit(5 * time.Second)
 	a.leftReset()
-	if out := a.output(); !strings.HasSuffix(out, "QUFB!\x07"+attach.ResetSequence) {
-		t.Fatalf("not spoiled: %q", out[max(0, len(out)-len(attach.ResetSequence)-20):])
+	if out := a.output(); !strings.HasSuffix(out, "QUFB!\x07"+leftSequence) {
+		t.Fatalf("not spoiled: %q", out[max(0, len(out)-len(leftSequence)-20):])
 	}
 }
 
@@ -1345,7 +1350,7 @@ func TestAttachProcessEndsReset(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 			got := read()
 			push := strings.Index(got, attach.TitlePush)
-			reset := strings.Index(got, attach.ResetSequence)
+			reset := strings.Index(got, leftSequence)
 			if push < 0 || reset < push {
 				t.Fatalf("not reset: %q", got)
 			}

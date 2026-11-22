@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"bytes"
+	"math"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -22,7 +23,8 @@ import (
 //     Until someone types, or while the owner has gone, a resize applies at
 //     once and makes its viewer the owner.
 //   - Answers to queries reach the program only from the owner, so a query
-//     is answered once.
+//     is answered once. So does pointer motion with no button held, which
+//     a window sends as the pointer passes over it: it is not typing.
 //
 // Viewers that do not identify themselves (older desktop clients, the phone)
 // keep today's behaviour exactly: their resizes apply at once and their input
@@ -56,9 +58,18 @@ const (
 	// an input shaped like the answer is taken as that answer. Shift+F3 in
 	// xterm's encoding has the shape of a cursor position answer.
 	terminalQueryLive = 5 * time.Second
-	// terminalAskedLimit bounds the answers one viewer owes per kind.
-	terminalAskedLimit = 8
+	// terminalAskSeconds: owed answers are counted per second, so each query
+	// is owed for terminalQueryLive and less than a second more, however
+	// many queries follow it.
+	terminalAskSeconds = int(terminalQueryLive/time.Second) + 1
 )
+
+// terminalOwed counts the answers one viewer owes for the queries of one
+// kind shown to it in one second.
+type terminalOwed struct {
+	second int64 // seconds since the viewer's first query
+	n      uint16
+}
 
 type terminalPeer struct {
 	key        string
@@ -69,10 +80,10 @@ type terminalPeer struct {
 	live       int       // open streams of this identity
 	seen       time.Time // phone: last request
 	active     time.Time // last typing, else when it connected
-	// asked counts, per kind, the queries this viewer was shown and has not
-	// answered yet; askedAt is when the last one was asked.
-	asked   [termfilter.ReplyKinds]uint8
-	askedAt time.Time
+	// asked counts, per kind and second, the queries this viewer was shown
+	// and has not answered yet; askedFrom is when the first one was asked.
+	asked     [termfilter.ReplyKinds][terminalAskSeconds]terminalOwed
+	askedFrom time.Time
 }
 
 type terminalSizing struct {
@@ -395,11 +406,45 @@ func (z *terminalSizing) noteQuery(kind termfilter.Reply) {
 // askLocked records n queries of one kind shown to this viewer. Caller
 // holds mu.
 func (p *terminalPeer) askLocked(kind termfilter.Reply, n int, now time.Time) {
-	if now.Sub(p.askedAt) >= terminalQueryLive {
-		p.asked = [termfilter.ReplyKinds]uint8{}
+	if p.askedFrom.IsZero() {
+		p.askedFrom = now
 	}
-	p.asked[kind] = uint8(min(int(p.asked[kind])+n, terminalAskedLimit))
-	p.askedAt = now
+	second := p.askSecond(now)
+	owed := &p.asked[kind][second%int64(terminalAskSeconds)]
+	if owed.second != second {
+		*owed = terminalOwed{second: second}
+	}
+	owed.n = uint16(min(int(owed.n)+n, math.MaxUint16))
+}
+
+// payLocked takes an answer of one kind for the oldest query of that kind
+// still owed, and reports whether there was one. A second that saw more
+// queries than its count holds stays owed until it expires: past that
+// flood every answer is taken as one. Caller holds mu.
+func (p *terminalPeer) payLocked(kind termfilter.Reply, now time.Time) bool {
+	if p.askedFrom.IsZero() {
+		return false
+	}
+	second := p.askSecond(now)
+	var oldest *terminalOwed
+	for i := range p.asked[kind] {
+		owed := &p.asked[kind][i]
+		if owed.n > 0 && second-owed.second < int64(terminalAskSeconds) && (oldest == nil || owed.second < oldest.second) {
+			oldest = owed
+		}
+	}
+	if oldest == nil {
+		return false
+	}
+	if oldest.n < math.MaxUint16 {
+		oldest.n--
+	}
+	return true
+}
+
+// askSecond is the second of the viewer's queries now falls in.
+func (p *terminalPeer) askSecond(now time.Time) int64 {
+	return max(0, int64(now.Sub(p.askedFrom)/time.Second))
 }
 
 // showQueries records the queries in output a viewer is shown apart from the
@@ -426,15 +471,13 @@ func (t *terminalSession) showQueries(p *terminalPeer, data []byte) {
 
 // splitReplies reads a viewer's input. typing is false when it holds only
 // what a terminal application sends by itself: answers to queries this
-// viewer was asked, and focus reports. rest is the input without them.
+// viewer was asked, focus reports and pointer motion with no button held.
+// rest is the input without them.
 // Anything else is typing, whatever it looks like: a pasted answer, an
 // answer nobody asked for, Alt+P. Caller holds mu.
 func (z *terminalSizing) splitReplies(p *terminalPeer, data string, now time.Time) (typing bool, rest string) {
 	if strings.IndexByte(data, 0x1b) < 0 {
 		return data != "", data
-	}
-	if now.Sub(p.askedAt) >= terminalQueryLive {
-		p.asked = [termfilter.ReplyKinds]uint8{}
 	}
 	var kept strings.Builder
 	dropped := false
@@ -459,13 +502,11 @@ func (z *terminalSizing) splitReplies(p *terminalPeer, data string, now time.Tim
 		case kind == termfilter.InputFocusIn || kind == termfilter.InputFocusOut:
 			dropped = true
 			continue
-		case kind == termfilter.InputReply && p.asked[reply] > 0:
-			// At the bound the count stays: a burst of queries past it
-			// (a program starting, a long replay) has every answer taken
-			// as one until the queries are terminalQueryLive old.
-			if p.asked[reply] < terminalAskedLimit {
-				p.asked[reply]--
-			}
+		case kind == termfilter.InputMotion:
+			// The pointer passing over a window, no button held.
+			dropped = true
+			continue
+		case kind == termfilter.InputReply && p.payLocked(reply, now):
 			dropped = true
 			continue
 		}
