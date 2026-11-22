@@ -422,7 +422,12 @@ func run() int {
 		return 0
 	}
 	if args[0] == "serve" {
-		if err := workbench.Serve(path); err != nil {
+		serve := workbench.Serve
+		if len(args) == 2 && args[1] == "--tenant-workspace" {
+			// A cloud workspace's workbench, behind the portal's gateway.
+			serve = workbench.ServeTenantWorkspace
+		}
+		if err := serve(path); err != nil {
 			return fail(err)
 		}
 		return 0

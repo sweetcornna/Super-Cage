@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sylvinus/agent-vm/internal/cloudentry"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 )
 
@@ -238,10 +239,16 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 // state-changing route fails here until it is classified.
 func TestAgentRegistryClassifiesEveryRoute(t *testing.T) {
 	registered := map[string]bool{}
-	for _, listener := range []string{"workload", "desktop", "client"} {
+	for _, listener := range []string{"workload", "desktop", "client", "tenant"} {
 		for _, guest := range []string{"linux", "macos", "windows"} {
 			s := testServer(t)
 			s.desktopEntry, s.clientOnly = listener == "desktop", listener == "client"
+			if listener == "tenant" {
+				// A cloud workspace's workbench in a build with the cloud
+				// entry: its routes are classified like every other.
+				cloudentry.Lift(t)
+				s.tenantWorkspace = true
+			}
 			switch guest {
 			case "macos":
 				s.macosGuest = &guestos.MacOSProfile{Instance: "test", User: "test"}

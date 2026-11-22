@@ -95,6 +95,12 @@ type Options struct {
 	Window time.Duration
 	// Count hears of what the filter did, by kind; never content.
 	Count func(event string)
+	// OwnerActive, when set, hears of the owner's own activity on the link:
+	// a key, mouse or paste typed into a pane, a pane taking focus or
+	// resized, a pane attached. Flow control, closes, facts, automatic
+	// input and every other call (Herdr's heartbeat among them) are not
+	// activity; the cloud entry's idle rule reads this (design 5.2).
+	OwnerActive func()
 }
 
 // Result says how a link ended.
@@ -296,6 +302,7 @@ func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
 		switch method {
 		case "terminal.attach":
 			opens = streamTerminal
+			l.ownerActive()
 		case "events.subscribe":
 			opens = streamEvents
 		default:
@@ -322,9 +329,23 @@ func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
 	}
 	switch kind {
 	case KindFocus:
-		s.presence.Focus(len(payload) > 0 && payload[0] == 1)
+		in := len(payload) > 0 && payload[0] == 1
+		s.presence.Focus(in)
+		if in {
+			l.ownerActive()
+		}
 	case KindData:
-		s.presence.Input(payload)
+		if s.presence.Input(payload) {
+			l.ownerActive()
+		}
+	case KindResize:
+		l.ownerActive()
+	}
+}
+
+func (l *Link) ownerActive() {
+	if l.opts.OwnerActive != nil {
+		l.opts.OwnerActive()
 	}
 }
 
@@ -637,9 +658,10 @@ func (p *Presence) Focus(in bool) {
 	}
 }
 
-// Input records what the owner's pane sent as DATA. A sequence cut at the
-// end of a frame waits for the next; one that never completes never counts.
-func (p *Presence) Input(data []byte) {
+// Input records what the owner's pane sent as DATA and reports whether it
+// was typed. A sequence cut at the end of a frame waits for the next; one
+// that never completes never counts.
+func (p *Presence) Input(data []byte) bool {
 	typed := false
 	p.input.Read(data, func(_ []byte, kind termfilter.InputKind, _ termfilter.Reply) {
 		typed = typed || kind == termfilter.InputKey || kind == termfilter.InputMouse || kind == termfilter.InputPaste
@@ -647,6 +669,7 @@ func (p *Presence) Input(data []byte) {
 	if typed {
 		p.lastInput.Store(time.Now().UnixNano())
 	}
+	return typed
 }
 
 // Here reports whether the owner is at this pane now.

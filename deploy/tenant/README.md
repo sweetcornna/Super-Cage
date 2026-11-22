@@ -32,7 +32,7 @@ incus --force-local --project cage-tenant profile show default
 ## 2. 制作空白 VM 镜像
 
 1. 在独立构建项目中从已验证的 Incus Linux **VM** 基础镜像启动一次性构建机。选择已安装并启用 Incus guest agent 的基础镜像。在 `cage-image-build` 项目导入验证过的 `debian-12-vm` 后执行 `incus --project cage-image-build launch local:debian-12-vm cage-template --vm`。为 Ubuntu 24.04 单独制作模板并使用独立镜像别名。
-2. 在构建机中安装 Super Cage Linux 服务端、所选工作环境的依赖、`socat` 和 `coreutils`。确认 `/usr/bin/socat` 与 `/usr/bin/head` 存在。以普通 `cage` 系统账户运行 `cage serve`，使用独立配置目录。`CLAUDE_CAGE_CONFIG=/home/cage/.claude-cage/config.json` 对应默认的 `-guest-control-path`。可用专用 systemd 用户服务和 `loginctl enable-linger cage` 确保无需登录即可开机启动。宿主提供嵌套虚拟化时，VM 内的 Super Cage 用本机模式运行自己的客机：再安装 `qemu-system-x86`（arm64 为 `qemu-system-arm`）、`qemu-utils`、`ovmf`、`openssh-client`、`iproute2` 和 `git`，把 `cage` 用户加入 `kvm` 组，并把 Linux 安装包 `/usr/lib/claude-cage/` 中的 `cage` 与 `mihomo` 放在同一目录（代理核心只在 `cage` 旁边查找）。`images:debian/12/cloud` 等 cloud 镜像会由 cloud-init 创建 UID 1000 的默认用户，建模板前删除该用户，并写入 `users: []` 禁止新 VM 首次启动时再建。
+2. 在构建机中安装 Super Cage Linux 服务端、所选工作环境的依赖、`socat` 和 `coreutils`。确认 `/usr/bin/socat` 与 `/usr/bin/head` 存在。以普通 `cage` 系统账户运行 `cage serve --tenant-workspace`（云端工作区的工作台；旧版本会忽略这个参数），使用独立配置目录。`CLAUDE_CAGE_CONFIG=/home/cage/.claude-cage/config.json` 对应默认的 `-guest-control-path`。可用专用 systemd 用户服务和 `loginctl enable-linger cage` 确保无需登录即可开机启动。宿主提供嵌套虚拟化时，VM 内的 Super Cage 用本机模式运行自己的客机：再安装 `qemu-system-x86`（arm64 为 `qemu-system-arm`）、`qemu-utils`、`ovmf`、`openssh-client`、`iproute2` 和 `git`，把 `cage` 用户加入 `kvm` 组，并把 Linux 安装包 `/usr/lib/claude-cage/` 中的 `cage` 与 `mihomo` 放在同一目录（代理核心只在 `cage` 旁边查找）。`images:debian/12/cloud` 等 cloud 镜像会由 cloud-init 创建 UID 1000 的默认用户，建模板前删除该用户，并写入 `users: []` 禁止新 VM 首次启动时再建。
 3. 如采用 Super Cage 云工作环境，按云端文档准备当前版本的完整工作环境模板、rootless 引擎与用户服务。将经过校验的模板预载进**构建 VM 内**的 rootless 引擎，并用 `cage init` 和 `cage container-configure --json` 写入空白运行配置。使用 `deploy/cloud/cage-container-engine.service` 与 `deploy/cloud/cage-server.service`，依赖、镜像与 socket 都留在每台租户 VM 内。仅复制空白模板层，让新 VM 自行生成工作台、浏览器和工作环境身份。[Super Cage 云端构建说明](../cloud/README.md)
 4. 在一次性构建机停止 Super Cage 服务和引擎。按发行版镜像制作步骤清理构建机身份、SSH 密钥和构建日志。检查 Super Cage 配置和引擎镜像层，确保镜像内没有工作台账户或保险箱、项目、历史、`control.json`、会话、模型或代理凭据，以及任何用户数据。保持开机服务与 guest agent 启用后停止构建 VM。
 
@@ -299,7 +299,7 @@ incus --force-local --project cage-tenant profile set default \
 
 `security.nesting` 让容器内可以运行 Super Cage 的 rootless 引擎；`limits.processes` 限制任务数；`limits.memory.swap` 见第 7 节。以上 profile 已在测试机上实测。容器模式下网关还接受 `security.idmap.isolated`、`security.idmap.size`、`security.syscalls.intercept.mknod`、`security.syscalls.intercept.setxattr` 和 `limits.memory.swap.priority`，但 `security.idmap.isolated` 未验证通过：测试机上 Incus 为实例分配的独立区间不在 root 的 `/etc/subuid` 范围内，`newuidmap` 拒绝映射，实例无法启动；默认的 65536 个 ID 也容不下容器内 rootless 引擎需要的从属 ID。启用前先核对 root 的 subuid/subgid 区间，并把 `security.idmap.size` 设到 131072 以上，然后实测。
 
-**空白容器镜像。** 步骤与第 2 节相同，区别是从容器镜像启动构建实例，并用系统服务运行 `cage serve`。构建项目需要一个受管网络用于安装软件包，构建网络不会进入发布的镜像。
+**空白容器镜像。** 步骤与第 2 节相同，区别是从容器镜像启动构建实例，并用系统服务运行 `cage serve --tenant-workspace`。构建项目需要一个受管网络用于安装软件包，构建网络不会进入发布的镜像。
 
 ```sh
 incus --force-local --project cage-image-build launch images:debian/12 cage-template
@@ -322,7 +322,7 @@ User=cage
 Environment=CLAUDE_CAGE_CONFIG=/home/cage/.claude-cage/config.json
 Environment=HOME=/home/cage
 WorkingDirectory=/home/cage
-ExecStart=/usr/local/bin/cage serve
+ExecStart=/usr/local/bin/cage serve --tenant-workspace
 Restart=on-failure
 RestartSec=3
 

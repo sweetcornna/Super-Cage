@@ -203,6 +203,7 @@ func (s *Server) entryHerdrLink(ctx context.Context, conn *entryConn, channel ss
 			counts[event]++
 			countsMu.Unlock()
 		},
+		OwnerActive: conn.active,
 	}, channel, channel, stdout, stdin)
 	if linkErr != nil {
 		// A broken bound ends the link at once; the hop goes with it.

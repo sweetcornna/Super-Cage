@@ -360,7 +360,7 @@ func (s *Server) entryServe(conn *entryConn, transport net.Conn, record entryDev
 		MaxAuthTries:  6,
 		// Any user name is accepted and ignored; only the device's key counts.
 		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			if s.entryKeyAccepted(record, key) {
+			if s.entryKeyAllowed(conn, record, key) {
 				return &ssh.Permissions{}, nil
 			}
 			return nil, errors.New("unknown key")
@@ -685,6 +685,9 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 			if request.Type == "exec" {
 				herdr, session = entryHerdrClassify(command)
 			}
+			if herdr == entryHerdrNone {
+				conn.noteActive()
+			}
 			refusal := ""
 			switch {
 			case herdr == entryHerdrTUI:
@@ -810,12 +813,12 @@ func (s *Server) entryRunHop(ctx context.Context, conn *entryConn, channel ssh.C
 	}
 	go func() {
 		// The client's EOF reaches the guest command as its stdin's end.
-		_, _ = io.Copy(stdin, channel)
+		_, _ = io.Copy(stdin, conn.activeReader(channel))
 		_ = stdin.Close()
 	}()
 	var outputs sync.WaitGroup
 	outputs.Add(2)
-	go func() { defer outputs.Done(); _, _ = io.Copy(channel, stdout) }()
+	go func() { defer outputs.Done(); _, _ = io.Copy(channel, conn.activeReader(stdout)) }()
 	go func() { defer outputs.Done(); _, _ = io.Copy(channel.Stderr(), stderr) }()
 	// Everything the command wrote reaches the client before its status.
 	outputs.Wait()
@@ -1190,7 +1193,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		if len(typed) > 0 && !send(entryNote(presence, typed, output.filter.GuestFocus)) {
 			return
 		}
-		entryReadInput(channel, presence, output.filter.GuestFocus, send)
+		entryReadInput(conn.activeReader(channel), presence, output.filter.GuestFocus, send)
 	}()
 	// History only draws, as in cage attach; a re-joined terminal's does not
 	// continue what the client's window shows.
@@ -1323,6 +1326,8 @@ type entryWSConn struct {
 	closing         sync.Once
 	// stalled, when set, hears of a write that waited entryWriteTimeout.
 	stalled func()
+	// marked is when the cloud entry's last activity mark went out.
+	marked atomic.Int64
 }
 
 // entryCloseLinger bounds how long a closed connection waits for the

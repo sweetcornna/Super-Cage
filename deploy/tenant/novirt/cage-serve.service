@@ -7,7 +7,7 @@ User=cage
 Environment=CLAUDE_CAGE_CONFIG=/home/cage/.claude-cage/config.json
 Environment=HOME=/home/cage
 WorkingDirectory=/home/cage
-ExecStart=/usr/local/bin/cage serve
+ExecStart=/usr/local/bin/cage serve --tenant-workspace
 Restart=on-failure
 RestartSec=3
 

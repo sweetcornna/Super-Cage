@@ -47,6 +47,11 @@ type entryConn struct {
 	// tests can tell "the client never asked" from "asked and refused".
 	refusedMu sync.Mutex
 	refused   map[string]int
+	// The cloud entry's (entry_cloud.go): the key fingerprint the gateway
+	// admitted, which the SSH key must match, and the activity mark it
+	// reads in place of every byte. Empty and nil for the local entry.
+	cloudKey string
+	active   func()
 }
 
 func (c *entryConn) refuse(kind string) {

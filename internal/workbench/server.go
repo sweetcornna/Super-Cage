@@ -68,6 +68,7 @@ type Server struct {
 	instanceID                                       string
 	clientOnly                                       bool
 	desktopEntry                                     bool
+	tenantWorkspace                                  bool // a cloud workspace's workbench (entry_cloud.go)
 	appUpdateConfigPath                              string
 	windowOwners                                     map[int]bool
 	remote                                           *remoteGateway
@@ -154,17 +155,22 @@ func randomToken() string {
 func equalSecret(a, b string) bool {
 	return len(a) > 0 && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
-func Serve(configPath string) error { return serve(configPath, false, "") }
+func Serve(configPath string) error { return serve(configPath, false, "", false) }
 
-func ServeClient(configPath string) error { return serve(configPath, true, "") }
+// ServeTenantWorkspace is a cloud workspace's workbench, behind the
+// portal's gateway (cage serve --tenant-workspace): Serve, plus the cloud
+// entry's endpoint in a build that has it (entry_cloud.go).
+func ServeTenantWorkspace(configPath string) error { return serve(configPath, false, "", true) }
+
+func ServeClient(configPath string) error { return serve(configPath, true, "", false) }
 
 // ServeDesktop is the desktop window's connection gateway. Its control lock and
 // logs live separately from the workload it may later attach to.
 func ServeDesktop(fullConfigPath string) error {
-	return serve(desktopConfigPath(fullConfigPath), false, fullConfigPath)
+	return serve(desktopConfigPath(fullConfigPath), false, fullConfigPath, false)
 }
 
-func serve(configPath string, clientOnly bool, fullConfigPath string) (returned error) {
+func serve(configPath string, clientOnly bool, fullConfigPath string, tenantWorkspace bool) (returned error) {
 	store := diagnostics.New(filepath.Dir(configPath))
 	diagnostics.SetDefault(store)
 	if err := store.Clean(); err != nil {
@@ -207,6 +213,7 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	s := &Server{profile: profile, configPath: configPath, exe: exe, clientOnly: clientOnly, origin: fmt.Sprintf("http://localhost:%d", port), token: randomToken(), session: randomToken(), preferences: Preferences{Keyboard: defaultKeyboard(), AutoTimezone: true, AutoLanguage: true, BalancedDisplay: true, ProjectFileCache: true}}
 	s.proofKey = randomToken()
 	s.desktopEntry = fullConfigPath != ""
+	s.tenantWorkspace = tenantWorkspace && !s.desktopEntry && !clientOnly
 	s.appUpdateConfigPath = configPath
 	if fullConfigPath != "" {
 		s.appUpdateConfigPath = fullConfigPath
@@ -544,6 +551,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
 	s.entryRoutes(mux)
+	s.entryCloudRoutes(mux)
 	web, _ := fs.Sub(assets, "web")
 	mux.Handle("GET /", newEntryStaticHandler(web, s.phoneEntry, s.phoneEntryAvailable))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -681,7 +689,7 @@ func (s *Server) handler() http.Handler {
 		// The local SSH entry's socket ends through entryServe, which lets
 		// its terminal sessions write their reset first; a deadline set here
 		// on a lock or a quit would cut it before.
-		if r.URL.Path != "/api/entry/ssh" {
+		if r.URL.Path != "/api/entry/ssh" && r.URL.Path != entryCloudSSHPath {
 			defer interruptHTTPOnCancel(w, r)()
 		}
 		response := &diagnosticResponse{ResponseWriter: w}
