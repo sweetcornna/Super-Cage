@@ -76,6 +76,7 @@ type Server struct {
 	guestManifest                                    *cage.GuestManifest
 	clients                                          clientPresence // last good presence reading (client_presence.go)
 	clientsTracked                                   bool           // set for a Linux-guest workload, the only one that reads presence
+	agentState                                       agentState     // 其他客户端 jobs and verify reads (agents.go)
 	guestUpdateRequired                              bool
 	macComponentsChecked                             bool
 	guestUpdateError                                 string
@@ -524,6 +525,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/claude-desktop/vnc", s.claudeDesktopVNC)
 	mux.HandleFunc("POST /api/claude-desktop/resize", s.claudeDesktopResize)
 	mux.HandleFunc("POST /api/claude-desktop/{action}", s.claudeDesktopAction)
+	mux.HandleFunc("GET /api/agents", s.agentsList)
+	mux.HandleFunc("POST /api/agents/cancel", s.agentsCancel)
+	mux.HandleFunc("POST /api/agents/{id}/{action}", s.agentsAction)
 	mux.HandleFunc("GET /api/claude-science", s.claudeScienceStatus)
 	mux.HandleFunc("POST /api/claude-science/{action}", s.claudeScienceAction)
 	mux.HandleFunc("GET /api/claude-science/host-render", s.scienceHostRenderRead)

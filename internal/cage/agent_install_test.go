@@ -277,9 +277,14 @@ func (r *agentRig) env(extra ...string) []string {
 	}, extra...)
 }
 
+// agentScriptText is AgentInstallScript for an input a test has tampered with.
+func agentScriptText(input string) string {
+	return "set -euo pipefail\n" + ToolInstallPrelude() + "\n" + input + "\n" + agentInstall
+}
+
 func (r *agentRig) compose(input string, rewrites ...[2]string) string {
 	r.t.Helper()
-	script := AgentInstallScript(input)
+	script := agentScriptText(input)
 	rewrites = append([][2]string{
 		{"agent_lib=/usr/local/lib/agent-clients\n", "agent_lib=" + r.lib + "\n"},
 		{"agent_state=/var/lib/agent-clients\n", "agent_state=" + r.state + "\n"},
@@ -289,6 +294,8 @@ func (r *agentRig) compose(input string, rewrites ...[2]string) string {
 		{"agent_python=/usr/bin/python3\n", "agent_python=" + r.python + "\n"},
 		{"agent_etc=/etc\n", "agent_etc=" + r.etc + "\n"},
 		{"agent_tmp_root=/tmp\n", "agent_tmp_root=" + filepath.Join(r.root, "tmp") + "\n"},
+		// The rig cannot make root's files: the tree belongs to the test user.
+		{"agent_root_uid=0\n", "agent_root_uid=" + strconv.Itoa(os.Getuid()) + "\n"},
 	}, rewrites...)
 	for _, rewrite := range rewrites {
 		if strings.Count(script, rewrite[0]) != 1 {
@@ -430,13 +437,26 @@ func (r *agentRig) entry(version string, body []byte) agents.Entry {
 	return e
 }
 
-func (r *agentRig) input(e agents.Entry, action agents.Action, data ...string) string {
+// input is the job's input; the shipped codex entry is hidden, so the rig
+// asks as a developer build does.
+func (r *agentRig) input(e agents.Entry, action agents.Action) string {
 	r.t.Helper()
-	input, err := agents.ScriptInput(e, agents.ARM64, action, data)
+	return r.job(e, agents.Job{Action: action, Arch: agents.ARM64, Hidden: true})
+}
+
+// inputData is a remove that also deletes the entry's data directories.
+func (r *agentRig) inputData(e agents.Entry) string {
+	r.t.Helper()
+	return r.job(e, agents.Job{Action: agents.Remove, Arch: agents.ARM64, RemoveData: true})
+}
+
+func (r *agentRig) job(e agents.Entry, job agents.Job) string {
+	r.t.Helper()
+	input, err := agents.ScriptInput(e, job)
 	if err != nil {
 		r.t.Fatal(err)
 	}
-	return input
+	return input.String()
 }
 
 // install publishes a client of version and installs it.
@@ -503,11 +523,14 @@ func (r *agentRig) statKey(path string) string {
 
 func TestAgentInstallScriptParsesAndIsNotHashed(t *testing.T) {
 	e, _, _ := agents.Lookup("codex")
-	input, err := agents.ScriptInput(e, agents.ARM64, agents.Install, nil)
+	input, err := agents.ScriptInput(e, agents.Job{Action: agents.Install, Arch: agents.ARM64, Hidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	script := AgentInstallScript(input)
+	if script != agentScriptText(input.String()) {
+		t.Fatal("agentScriptText no longer builds what AgentInstallScript builds")
+	}
 	if bash, err := exec.LookPath("bash"); err == nil {
 		cmd := exec.Command(bash, "-n")
 		cmd.Stdin = strings.NewReader(script)
@@ -546,19 +569,13 @@ func TestAgentInstallFollowsGuestAccount(t *testing.T) {
 	checked := 0
 	for _, e := range entries {
 		for _, action := range []agents.Action{agents.Install, agents.Remove} {
-			var data []string
-			if action == agents.Remove {
-				for _, d := range e.DataDirs {
-					data = append(data, d.Path)
-				}
-			}
-			input, err := agents.ScriptInput(e, agents.ARM64, action, data)
+			input, err := agents.ScriptInput(e, agents.Job{Action: action, Arch: agents.ARM64, RemoveData: action == agents.Remove, Hidden: true})
 			if err != nil {
 				continue
 			}
 			checked++
 			// The prelude is rendered as for every other job; the installer and its input must come through unchanged.
-			script := input + agentInstall
+			script := input.String() + agentInstall
 			if rendered := p.Linux(script); rendered != script {
 				got, want := strings.Split(rendered, "\n"), strings.Split(script, "\n")
 				for i := range min(len(got), len(want)) {
@@ -1059,7 +1076,7 @@ func TestAgentRemoveWithData(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "sessions"), filepath.Join(r.home, ".local/share/cage/codex-sessions")); err != nil {
 		t.Fatal(err)
 	}
-	result := r.run(r.input(e, agents.Remove, "~/.codex", "~/.local/share/cage/codex-accounts", "~/.local/share/cage/codex-sessions"))
+	result := r.run(r.inputData(e))
 	if result.code != 0 || !result.removed {
 		t.Fatalf("exit %d\n%s", result.code, result.out)
 	}
@@ -1081,7 +1098,7 @@ func TestAgentRemoveWithData(t *testing.T) {
 	if err := os.Symlink(filepath.Join(outside, "local"), filepath.Join(r.home, ".local")); err != nil {
 		t.Fatal(err)
 	}
-	result = r.run(r.input(e, agents.Remove, "~/.local/share/cage/codex-accounts"))
+	result = r.run(r.inputData(e))
 	if result.code != 0 || !r.exists(filepath.Join(outside, "local/share/cage/codex-accounts/keep")) || !strings.Contains(result.out, "位于用户目录之外") {
 		t.Fatalf("deleted through a link that leaves the home:\n%s", result.out)
 	}

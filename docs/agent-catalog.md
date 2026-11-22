@@ -27,20 +27,30 @@ Decoding is strict: unknown fields, data after the catalog, and a `measured` blo
 errors (write `"measured": null` until the entry is measured).
 
 - `schema` is 1; `id` matches `^[a-z][a-z0-9-]{1,31}$` and is unique; `name`, `vendor` set; `summary_zh` at most
-  40 characters.
+  40 characters. No text field holds a control or Unicode format character (bidi overrides, zero-width marks).
+- **Reviewed per entry in code** (`reviewed` in `validate.go`, mirrored in `internal/cage/agent-install.sh`;
+  a test keeps the two equal): the launcher name, the vendor prefixes of its environment variables, and data dirs
+  that are one level below the home or inside one of Cage's folders. A new entry is therefore a code change with
+  a review, like a new download host.
 - `kind` terminal or app; `session` existing:claude, existing:codex or generic; a built kind belongs to one entry; an
   app uses generic; `person_only` needs generic (the built kinds take phone turns and agent-opened terminals).
 - `with_environment` if and only if every artifact is `builtin`; such an entry carries no version, libc, packages, env,
   settings, updater, telemetry, data dirs, launch or measurements, and says where today's mechanism lives.
 - Artifacts: `arm64`/`amd64` only; format `tar.gz` (the only download format implemented; `zip`, `binary`,
   `npm-tgz` and `apt` are added with their installer code and field rules, never as data); https on port 443, no
-  credentials, query, fragment or address literal; the host is in `hosts.install`; the URL names the pinned version;
+  credentials, query, fragment, address literal, percent-encoding or empty, `.` or `..` path segment (what curl
+  fetches is what was reviewed); the host is in `hosts.install`; the URL names the pinned version;
   sha256 (64 hex) or sha512 (128 hex), lowercase; size and unpacked size; `entry` a clean relative path without `..`.
-- Optional entries: a version, `libc` glibc/musl/any, `min_glibc` only with glibc; `requires.packages` from an
-  allow-list in code; `env` names `^[A-Z][A-Z0-9_]{1,63}$` outside the deny-list (`PATH`, `LD_*`, `*_PROXY`, `HOME`,
-  `SHELL`, `BROWSER`, `TZ`, `LANG`, `LC_*`, `NODE_OPTIONS`, `PYTHON*`, `CAGE_*`) with plain values up to 256 bytes;
+- Optional entries: a version of three numbers with an optional pre-release (`0.171.0`, `1.0.0-rc.1`; no build
+  suffix: the installer's version check and its semver ordering read exactly this form), `libc` glibc/musl/any,
+  `min_glibc` only with glibc; `requires.packages` from an allow-list in code; `env` names
+  `^[A-Z][A-Z0-9_]{1,63}$` under one of the entry's reviewed vendor prefixes (codex `CODEX_`, antigravity-cli
+  `AGY_`), and never on the deny-list (`PATH`, `HOME`, `SHELL`, `BROWSER`, `TZ`, `LANG`, `NODE_OPTIONS`, `ENV`,
+  `BASH_ENV`, `IFS`, `SHELLOPTS`, `LD_*`, `LC_*`, `PYTHON*`, `CAGE_*`, and any name ending in `_PROXY`, `_HOME`,
+  `_PATH`, `_DIR`, `_FILE`, `_COMMAND`, `_OPTIONS`, `_SOCK` or `_CERTS`) with plain values up to 256 bytes;
   `settings` json or toml with a matching extension, either a system file allowed for that entry in code
-  (`/etc/codex/config.toml` for codex) or a file inside one of the entry's own data dirs, setting bool, string or
+  (`/etc/codex/config.toml` for codex) or a file inside one of the entry's own data dirs (never inside one of
+  Cage's folders or a protected tree), setting bool, string or
   integer values under dotted keys; `updater.off_by` env (needs env), setting (needs settings) or none (a self-updating
   client then needs a note); `telemetry.how`, and a note when telemetry stays on; at least one sign-in method from the
   closed set; at least one data dir; sources.
@@ -48,13 +58,20 @@ errors (write `"measured": null` until the entry is measured).
   (`internal/workbench/maintenance.go`; a test keeps the copy in `validate.go` from drifting) or in
   `extraInstallHosts` for that entry in code, so a new download host is a visible code change with a security review.
   Login-link hosts are sign-in hosts.
-- Data dirs: under `~/`, clean, not a shared root (`~/.config`, `~/.local`, `~/.local/share`, `~/.cache`, Cage's
-  `~/.local/share/cage`, ...) and not in a protected tree (`~/.ssh`, `~/.gnupg`, `~/.pki`, `~/.claude`); not nested
-  within one entry; two entries may claim the same or nested directories only when both mark them `shared`.
-  "Depth 2 or more" in the design counts `~` as level 1, so `~/.codex` is allowed and `~/` is not.
+- Data dirs: under `~/`, clean, a dot folder (`~/project` or `~/Documents` never), two levels deep
+  (`~/.gemini/antigravity-cli`), not a shared root (`~/.config`, `~/.local`, `~/.local/share`, `~/.cache`, ...),
+  not one of Cage's folders or inside one (`~/.local/share/cage`, `~/.cache/cage`, `~/.claude-cage`,
+  `~/.config/cage`), and not in a protected tree (`~/.ssh`, `~/.gnupg`, `~/.pki`, `~/.claude`, `~/.aws`, `~/.kube`,
+  `~/.docker`, `~/.netrc`, `~/.gitconfig`, `~/.git-credentials`, `~/.password-store`, `~/.config/gh`,
+  `~/.config/gcloud`, `~/.config/git`, `~/.config/systemd`, `~/.config/autostart`, `~/.local/share/keyrings`,
+  `~/.mozilla`, `~/.config/chromium`). A folder one level deep or inside Cage's folders needs the entry's reviewed
+  list (codex: `~/.codex`, `~/.local/share/cage/codex-accounts`, `~/.local/share/cage/codex-sessions`). Not
+  nested within one entry; two entries may claim the same or nested directories only when both mark them `shared`.
+  A remove with data never deletes a `shared` directory, nor one another catalog entry declares.
 - Project files: clean relative paths.
-- Launch: `command` matches `^[a-z][a-z0-9-]{0,31}$`, is unique, is not `cage`, `cage-*`, `claude` or another name Cage
-  installs in `/usr/local/bin`, and does not shadow a system program (`sudo`, `git`, `ssh`, ...); `argv[0]` is
+- Launch: `command` matches `^[a-z][a-z0-9-]{0,31}$`, is the entry's reviewed name, is unique, is not `cage`,
+  `cage-*`, `claude` or another name Cage installs in `/usr/local/bin`, and does not shadow a system program on the
+  reserved list (`sudo`, `git`, `ssh`, `ls`, `rg`, `bwrap`, `timeout`, ...); `argv[0]` is
   `/usr/local/bin/<command>`; `cwd` is `project`; a title.
 - Mark: a drawn mark matching the session (`claude`, `codex`) or a monogram of one or two letters or digits.
 - Regions are two-letter codes; terms and sources are https; dates are YYYY-MM-DD; an available entry names its
