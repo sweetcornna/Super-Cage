@@ -124,7 +124,7 @@ export function WorkspaceTabs({
     : ready || tab.kind === "terminal");
   const finishDrag = (commit, event) => {
     clearTimeout(press.current);
-    if (settle.current === Infinity) settle.current = performance.now() + 400;
+    settle.current = Math.min(settle.current, performance.now() + 400);
     const current = pointer.current;
     pointer.current = null;
     setDrag(null);

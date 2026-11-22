@@ -823,7 +823,6 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
   const ended = session.closed || link === "ended";
   // A refused Codex launch is not an ordinary close: the note says it did not open and quotes the
   // reason, the last line the launch printed.
-  const refused = codexLaunchRefused(session);
   return (
     <div className={`terminal-view ${visible ? "" : "concealed"}`}>
       {session.workspace_notice && <p className="connection-banner" role="status">{session.workspace_notice}</p>}
@@ -839,7 +838,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       {link !== "open" && (ended || link === "stalled" || notice) && (
         <div className={`terminal-note ${ended || link === "stalled" ? "" : "terminal-note-quiet"}`} role="status">
           {ended
-            ? refused ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示") : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
+            ? codexLaunchRefused(session) ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示") : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
             : link === "stalled" ? "终端连接已断开。" : link === "connecting" ? "正在连接终端…" : "正在重新连接…"}
           {!ended && link === "stalled" && (
             <button onClick={() => reconnectNow.current?.()}>

@@ -214,7 +214,7 @@ test("a newer server's stable sentences carry one live countdown, in one next-st
   assert.deepEqual(browser.nextParts, ["浏览器内存回落后会自动重检并恢复联网，最迟 ", "58 秒后", "。"]);
   assert.equal(browser.countdown, null, "the countdown lives in the sentence, not beside it");
   assert.equal(view({ ...waiting, memory_cause: "environment" }).next, "环境内存回落后会自动重检并恢复联网，最迟 58 秒后。");
-  assert.equal(view({ ...waiting, memory_cause: "machine" }).next, "这台机器的内存回落后会自动重检并恢复联网，最迟 58 秒后。");
+  assert.equal(view({ ...waiting, memory_cause: "machine" }).next, "内存回落后会自动重检并恢复联网，最迟 58 秒后。", "the reason names which memory; the next sentence stays short");
   assert.equal(view(waiting, undefined, now + 20_000).nextParts[1], "38 秒后", "the same answer counts down on this client's clock");
   assert.equal(view({ ...waiting, deadline_ms: now + 125_000 }).nextParts[1], "2 分 5 秒后");
   assert.equal(view({ ...waiting, deadline_ms: now + 120_000 }).nextParts[1], "2 分钟后");

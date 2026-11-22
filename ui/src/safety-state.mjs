@@ -115,7 +115,7 @@ export function countdownText(seconds) {
 }
 
 // What the recheck waits for, as the next sentence names it.
-const MEMORY_SUBJECTS = { environment: "环境内存", browser: "浏览器内存", machine: "这台机器的内存" };
+const MEMORY_SUBJECTS = { environment: "环境内存", browser: "浏览器内存" };
 
 // The next-step sentence for a state that has a deadline, as [before, timer,
 // after]: the one live countdown sits in the middle. Other states, and the

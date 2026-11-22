@@ -165,12 +165,74 @@ const ready = async (page, state) => {
   } finally { await browser.close(); }
 }
 
-// 2. A touch tablet held upright (744 px).
+// 2. The mouse still reorders sidebar rows (drag, Alt+Arrow, Escape cancels): the touch work shares the drag code.
+{
+  let state;
+  const { browser, page, errors } = await createWorkbench({ url, viewport: { width: 1440, height: 900 },
+    beforeNavigate: async (page, value) => { state = value; await ready(page, state); } });
+  try {
+    state.terminals = ["A", "B", "C"].map((name) => ({ id: "t-" + name, title: "终端 " + name, workspace: state.settings.workspace }));
+    await page.reload(); await homeReady(page);
+    const rows = () => page.locator(".sidebar-tab > button").evaluateAll((nodes) => nodes.map((node) => node.textContent.trim()));
+    const row = (name) => page.locator(".sidebar-tab", { hasText: name });
+    await row("终端 C").waitFor();
+    assert.deepEqual(await rows(), ["终端 A", "终端 B", "终端 C"]);
+    const drag = async (from, to, release = true) => {
+      const a = await row(from).boundingBox(), b = await row(to).boundingBox();
+      await page.mouse.move(a.x + 60, a.y + a.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(b.x + 60, b.y + b.height / 2, { steps: 10 });
+      if (release) await page.mouse.up();
+    };
+    await drag("终端 C", "终端 A");
+    await page.waitForFunction(() => document.querySelector(".sidebar-tab > button").textContent.trim() === "终端 C");
+    assert.deepEqual(await rows(), ["终端 C", "终端 A", "终端 B"], "a mouse drag still moves a row");
+    await row("终端 C").locator("> button").focus();
+    await page.keyboard.press("Alt+ArrowDown");
+    assert.deepEqual(await rows(), ["终端 A", "终端 C", "终端 B"], "Alt+ArrowDown still moves a row down");
+    await drag("终端 B", "终端 A", false);
+    await page.keyboard.press("Escape");
+    await page.mouse.up();
+    assert.deepEqual(await rows(), ["终端 A", "终端 C", "终端 B"], "Escape cancels a drag");
+    assert.equal(await page.locator(".workspace-tab-menu").count(), 0);
+    ok("mouse: drag, Alt+ArrowDown and Escape-cancel still reorder sidebar rows");
+    // Browser tabs on a mouse window: shrunk to fit, never scrolled, and a drag still reorders them.
+    state.tabs = Array.from({ length: 12 }, (_, i) => ({ id: "web-" + i, kind: "web", title: "网页 " + i, url: "https://example.com/" + i }));
+    state.active = "web-0";
+    await page.reload(); await homeReady(page);
+    await page.getByRole("button", { name: "打开浏览器", exact: true }).click();
+    await page.waitForFunction(() => document.querySelectorAll(".browser-tabs .browser-tab").length === 12);
+    assert.equal(await page.locator(".browser-tabs.scrolls").count(), 0, "a mouse window does not scroll the strip");
+    assert.equal(await page.locator(".browser-tabs").evaluate((list) => list.scrollWidth <= list.clientWidth + 1), true, "twelve tabs shrink to fit");
+    await page.waitForFunction(() => document.querySelector('[data-tab-id="web-0"]').getBoundingClientRect().width > 150);
+    await page.waitForTimeout(300);
+    const from = await page.locator('[data-tab-id="web-0"]').boundingBox(), to = await page.locator('[data-tab-id="web-3"]').boundingBox();
+    await page.mouse.move(from.x + from.width / 2, from.y + 16);
+    await page.mouse.down();
+    await page.mouse.move(to.x + to.width - 6, to.y + 16, { steps: 18 });
+    await page.locator(".browser-tab.dragging").waitFor();
+    await page.mouse.up();
+    await page.waitForFunction(() => {
+      const ids = [...document.querySelectorAll(".browser-tab")].map((node) => node.dataset.tabId);
+      return ids.indexOf("web-0") > ids.indexOf("web-3");
+    });
+    ok("mouse: twelve browser tabs shrink to fit, and a drag still reorders them");
+    assert.deepEqual(errors, []);
+  } finally { await browser.close(); }
+}
+
+// 3. A touch tablet held upright (744 px).
 {
   let state;
   const { browser, page, errors } = await createWorkbench({ url, viewport: { width: 744, height: 1133 }, deviceScaleFactor: 2,
     contextOptions: { hasTouch: true, isMobile: true },
-    beforeNavigate: async (page, value) => { state = value; await ready(page, state); } });
+    beforeNavigate: async (page, value) => {
+      state = value;
+      await ready(page, state);
+      // The longest labels the bar can carry: an exit address with a city, and a closed gate.
+      Object.assign(state.status, { location: { ip: "203.0.113.45", country: "United States", city: "San Francisco" },
+        safety: { exit_ip: "203.0.113.45", gate: { mode: "closed", until: new Date(Date.now() - 60000).toISOString() } } });
+    } });
   try {
     const workspace = state.settings.workspace;
     state.terminals.push(...["A", "B", "C"].map((name) => ({ id: "t-" + name, title: "终端 " + name, workspace })));
@@ -201,11 +263,16 @@ const ready = async (page, state) => {
     await page.waitForTimeout(300);
     assert.equal(await page.getByRole("dialog").count(), 0, "the long press that showed the tooltip did not restart");
     ok("744 px touch: status bar icons only (44 px buttons), names kept, long press shows the tooltip");
-    await page.setViewportSize({ width: 1024, height: 1133 });
-    await page.waitForFunction((fold) => eval("(" + fold + ")")() === 0, foldedLabels.toString());
-    await page.setViewportSize({ width: 744, height: 1133 });
-    await page.waitForFunction((fold) => eval("(" + fold + ")")() >= 3, foldedLabels.toString());
-    ok("the labels are back above 900 px and fold again below it");
+    // The longest labels (exit address with a city, the gate label, the sync message) and the time zone need
+    // about 1150 px: folded below it, whether the sidebar is a drawer or docked, and nothing is cut at any width.
+    const cutLabels = () => [...document.querySelectorAll(".status-bar > button > span, .status-feedback, .status-clock")]
+      .filter((el) => el.offsetWidth > 1 && el.scrollWidth > el.clientWidth + 1).map((el) => el.textContent.trim());
+    for (const [width, folds] of [[744, true], [901, true], [1024, true], [1180, true], [1440, false], [744, true]]) {
+      await page.setViewportSize({ width, height: 1133 });
+      await page.waitForFunction(([fold, expect]) => (eval("(" + fold + ")")() >= 3) === expect, [foldedLabels.toString(), folds]);
+      if (folds) assert.deepEqual(await page.evaluate(cutLabels), [], "nothing is cut at " + width);
+    }
+    ok("the status bar folds its labels while it is under 1150 px wide (drawer or docked), back to words above, with nothing cut");
 
     // Item 6: a long press on a sidebar row opens a menu to move it.
     await page.locator(".sidebar-expand").first().tap();

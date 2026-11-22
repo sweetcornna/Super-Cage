@@ -90,18 +90,24 @@
   }
 }
 
-/* A narrow touch screen: the status bar shows icons only. The words stay in the accessibility tree and become the
-   tooltip (a long press; icon-hints.jsx). */
-@media (pointer: coarse) and (hover: none) and (max-width: 900px) {
-  .status-bar > button > .status-label {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
+/* A status bar under 1150 px (a tablet held upright, or on its side beside the sidebar) shows icons only: the
+   longest exit address, gate label, sync message and the time zone need that much room. The words stay in the
+   accessibility tree and become the tooltip (a long press; icon-hints.jsx). */
+@media (pointer: coarse) and (hover: none) {
+  .status-bar {
+    container-type: inline-size;
   }
-  .status-bar > button:has(> .status-label) {
-    min-width: 44px;
+  @container (max-width: 1150px) {
+    .status-bar > button > .status-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .status-bar > button:has(> .status-label) {
+      min-width: 44px;
+    }
   }
 }
 
