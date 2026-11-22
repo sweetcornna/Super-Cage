@@ -31,11 +31,13 @@ func TestScriptInputEveryShippedEntry(t *testing.T) {
 	for _, e := range entries {
 		for _, arch := range []Arch{ARM64, AMD64} {
 			for _, action := range []Action{Install, Update, Remove} {
-				_, err := ScriptInput(e, arch, action, nil)
-				_, pinned := e.Artifact(arch)
-				want := e.Optional() && (action == Remove || pinned && e.Status != Withdrawn)
-				if (err == nil) != want {
-					t.Errorf("%s %s %s: err=%v, want success=%v", e.ID, arch, action, err, want)
+				for _, hidden := range []bool{false, true} {
+					_, err := ScriptInput(e, Job{Action: action, Arch: arch, Hidden: hidden})
+					_, pinned := e.Artifact(arch)
+					want := e.Optional() && (action == Remove || pinned && e.Status != Withdrawn && (hidden || e.Status != Hidden))
+					if (err == nil) != want {
+						t.Errorf("%s %s %s (hidden allowed: %v): err=%v, want success=%v", e.ID, arch, action, hidden, err, want)
+					}
 				}
 			}
 		}
@@ -59,49 +61,76 @@ func TestScriptInputRefuses(t *testing.T) {
 	app.Session = SessionGeneric
 	app.Mark = Mark{Monogram: "Cx"}
 	for _, tc := range []struct {
-		name   string
-		e      Entry
-		arch   Arch
-		action Action
-		data   []string
-		want   string
+		name string
+		e    Entry
+		job  Job
+		want string
 	}{
-		{"builtin", lookup(t, "claude-code"), ARM64, Install, nil, "comes with the environment"},
-		{"builtin remove", lookup(t, "claude-code"), ARM64, Remove, nil, "comes with the environment"},
-		{"unknown action", codex, ARM64, Action("repair"), nil, "unknown action"},
-		{"unknown arch", codex, Arch("riscv64"), Install, nil, "unknown architecture"},
-		{"withdrawn install", withdrawn, ARM64, Install, nil, "withdrawn"},
-		{"withdrawn update", withdrawn, ARM64, Update, nil, "withdrawn"},
-		{"no artifact", noArm, ARM64, Install, nil, "no arm64 artifact"},
-		{"entry with a space", spaced, ARM64, Install, nil, "characters the installer does not take"},
-		{"invalid entry", invalid, ARM64, Install, nil, "launch.command"},
-		{"app", app, ARM64, Install, nil, "only terminal clients"},
-		{"data on install", codex, ARM64, Install, []string{"~/.codex"}, "only for a remove"},
-		{"data not declared", codex, ARM64, Remove, []string{"~/.ssh"}, "not one of its data directories"},
-		{"data listed twice", codex, ARM64, Remove, []string{"~/.codex", "~/.codex"}, "listed twice"},
-		{"data parent", codex, ARM64, Remove, []string{"~/.local/share/cage"}, "not one of its data directories"},
+		{"builtin", lookup(t, "claude-code"), Job{Action: Install, Arch: ARM64}, "comes with the environment"},
+		{"builtin remove", lookup(t, "claude-code"), Job{Action: Remove, Arch: ARM64}, "comes with the environment"},
+		{"unknown action", codex, Job{Action: Action("repair"), Arch: ARM64, Hidden: true}, "unknown action"},
+		{"unknown arch", codex, Job{Action: Install, Arch: Arch("riscv64"), Hidden: true}, "unknown architecture"},
+		{"withdrawn install", withdrawn, Job{Action: Install, Arch: ARM64, Hidden: true}, "withdrawn"},
+		{"withdrawn update", withdrawn, Job{Action: Update, Arch: ARM64, Hidden: true}, "withdrawn"},
+		{"hidden install", codex, Job{Action: Install, Arch: ARM64}, "hidden"},
+		{"hidden update", codex, Job{Action: Update, Arch: ARM64}, "hidden"},
+		{"no artifact", noArm, Job{Action: Install, Arch: ARM64, Hidden: true}, "no arm64 artifact"},
+		{"entry with a space", spaced, Job{Action: Install, Arch: ARM64, Hidden: true}, "characters the installer does not take"},
+		{"invalid entry", invalid, Job{Action: Install, Arch: ARM64, Hidden: true}, "launch.command"},
+		{"app", app, Job{Action: Install, Arch: ARM64, Hidden: true}, "only terminal clients"},
+		{"data on install", codex, Job{Action: Install, Arch: ARM64, Hidden: true, RemoveData: true}, "only for a remove"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := ScriptInput(tc.e, tc.arch, tc.action, tc.data); err == nil || !strings.Contains(err.Error(), tc.want) {
+			if _, err := ScriptInput(tc.e, tc.job); err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("err = %v, want %q", err, tc.want)
 			}
 		})
 	}
-	if _, err := ScriptInput(withdrawn, ARM64, Remove, []string{"~/.codex"}); err != nil {
-		t.Fatalf("a withdrawn entry must stay removable: %v", err)
+	for _, e := range []Entry{withdrawn, noArm, codex} {
+		if _, err := ScriptInput(e, Job{Action: Remove, Arch: ARM64, RemoveData: true}); err != nil {
+			t.Fatalf("every entry stays removable, hidden, withdrawn or without this architecture: %v", err)
+		}
 	}
-	if _, err := ScriptInput(noArm, ARM64, Remove, nil); err != nil {
-		t.Fatalf("an entry without this architecture must stay removable: %v", err)
+}
+
+// F8: the data directories a remove deletes are decided here, never by the
+// caller: a shared one, or one another catalog entry declares, stays.
+func TestRemovableData(t *testing.T) {
+	codex := lookup(t, "codex")
+	got, err := RemovableData(codex)
+	if err != nil || !slices.Equal(got, []string{"~/.codex", "~/.local/share/cage/codex-accounts", "~/.local/share/cage/codex-sessions"}) {
+		t.Fatalf("codex: %v %v", got, err)
+	}
+	agy := lookup(t, "antigravity-cli")
+	got, err = RemovableData(agy)
+	if err != nil || slices.Contains(got, "~/.gemini/config") || !slices.Contains(got, "~/.gemini/antigravity-cli") {
+		t.Fatalf("antigravity-cli: the shared ~/.gemini/config must stay: %v %v", got, err)
+	}
+	// A directory another entry declares stays, whichever of the two is the parent.
+	overlapping := codex.clone()
+	overlapping.ID = "codex-next"
+	overlapping.DataDirs = []DataDir{{Path: "~/.codex/next"}, {Path: "~/.gemini"}, {Path: "~/.config/codex-next"}}
+	got, err = RemovableData(overlapping)
+	if err != nil || !slices.Equal(got, []string{"~/.config/codex-next"}) {
+		t.Fatalf("overlaps: %v %v", got, err)
+	}
+	input, err := ScriptInput(codex, Job{Action: Remove, Arch: ARM64, RemoveData: true})
+	if err != nil || !strings.Contains(input.String(), "AGENT_REMOVE_DATA='~/.codex\n~/.local/share/cage/codex-accounts\n~/.local/share/cage/codex-sessions'\n") {
+		t.Fatalf("remove input: %v\n%s", err, input)
+	}
+	if input, _ := ScriptInput(codex, Job{Action: Remove, Arch: ARM64}); !strings.Contains(input.String(), "AGENT_REMOVE_DATA=''\n") {
+		t.Fatalf("a remove without data names none:\n%s", input)
 	}
 }
 
 var assignment = regexp.MustCompile(`^(AGENT_[A-Z0-9_]+)=`)
 
 func TestScriptInputShape(t *testing.T) {
-	input, err := ScriptInput(lookup(t, "codex"), ARM64, Install, nil)
+	script, err := ScriptInput(lookup(t, "codex"), Job{Action: Install, Arch: ARM64, Hidden: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	input := script.String()
 	var names []string
 	for _, line := range strings.Split(strings.TrimSuffix(input, "\n"), "\n") {
 		m := assignment.FindStringSubmatch(line)
@@ -124,8 +153,9 @@ func TestScriptInputShape(t *testing.T) {
 			t.Errorf("input lacks %q:\n%s", want, input)
 		}
 	}
-	remove, err := ScriptInput(lookup(t, "antigravity-cli"), AMD64, Remove, nil)
-	if err != nil || !strings.Contains(remove, "AGENT_URL=''\n") || !strings.Contains(remove, "AGENT_ENTRY=''\n") ||
+	removeScript, err := ScriptInput(lookup(t, "antigravity-cli"), Job{Action: Remove, Arch: AMD64})
+	remove := removeScript.String()
+	if err != nil || !strings.Contains(remove, "AGENT_URL=''\n") || !strings.Contains(remove, "AGENT_ENTRY=antigravity\n") ||
 		!strings.Contains(remove, "AGENT_SHA512=83311d3f") || !strings.Contains(remove, "AGENT_ENV=AGY_CLI_DISABLE_AUTO_UPDATE=true\n") {
 		t.Fatalf("remove input carries only what a remove needs: %v\n%s", err, remove)
 	}
@@ -151,12 +181,16 @@ func TestScriptInputQuotesHostileValues(t *testing.T) {
 	for _, action := range []Action{Install, Remove} {
 		var data []string
 		if action == Remove {
-			data = []string{hostileDir, "~/.codex"}
+			data, _ = RemovableData(e)
+			if !slices.Contains(data, hostileDir) {
+				t.Fatalf("the hostile directory is not removable: %v", data)
+			}
 		}
-		input, err := ScriptInput(e, ARM64, action, data)
+		script, err := ScriptInput(e, Job{Action: action, Arch: ARM64, RemoveData: action == Remove, Hidden: true})
 		if err != nil {
 			t.Fatal(err)
 		}
+		input := script.String()
 		for _, shell := range []string{"bash", "sh"} {
 			path, err := exec.LookPath(shell)
 			if err != nil {
