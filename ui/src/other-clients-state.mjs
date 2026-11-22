@@ -14,6 +14,7 @@ export const STOPPED_LINE = "启动环境后可以添加。";
 export const BUSY_LINE = "另一个操作仍在进行，完成后可以继续。";
 export const EMPTY_LINE = "暂时没有可添加的客户端。";
 export const ADDED_LINE = "已添加。可以在 新建 中打开。";
+export const REPAIRED_LINE = "已修复。";
 export const NOT_ALLOWED = "这个服务器的管理员未开放";
 export const OWN_NOTE = "Super Cage 不会修改它。";
 
@@ -166,12 +167,12 @@ const fallbackOperation = (entry) => (!entry.present || entry.present.state === 
 
 /**
  * One row. context: { environment, job (currentJob, any entry), anyJobRunning,
- * added (the id just added, for the one-time line), operations (id -> the
+ * added / repaired (the id just added / repaired, for the one-time line), operations (id -> the
  * operation asked for in this visit, for 重试) }.
  * actions: { id, label, kind: "secondary" | "ghost", disabled }; menu lists the
  * quiet actions behind ⋯.
  */
-export function rowFor(entry, { environment, job = null, anyJobRunning = false, added = "", operations = {} }) {
+export function rowFor(entry, { environment, job = null, anyJobRunning = false, added = "", repaired = "", operations = {} }) {
   const base = { id: entry.id, name: entry.name, mark: markOf(entry), muted: false, bar: null, error: null, actions: [], menu: [], parts: [entry.vendor, entry.kind === "app" ? "应用" : "终端"].filter(Boolean), meta: "" };
   const mine = job && job.id === entry.id ? job : null;
   const idle = environment.running && !anyJobRunning;
@@ -199,10 +200,14 @@ export function rowFor(entry, { environment, job = null, anyJobRunning = false, 
     };
   }
   if (entry.status === "withdrawn") {
-    return { ...base, state: "withdrawn", parts: [version], meta: "不再受支持", actions: [], menu: [act("remove", "移除")] };
+    // Only what Super Cage installed can be removed; a withdrawn client is never added again.
+    return { ...base, state: "withdrawn", parts: [version], meta: "不再受支持", actions: [], menu: quiet };
   }
   if (!entry.allowed) return { ...base, state: "not-allowed", muted: true, meta: NOT_ALLOWED };
-  if (!entry.supported) return { ...base, state: "unsupported", muted: true, meta: entry.unsupportedReason || "这个环境暂不支持" };
+  if (!entry.supported) {
+    // A client installed before the environment stopped supporting it can still be removed.
+    return { ...base, state: "unsupported", muted: true, parts: entry.present ? [version] : base.parts, meta: entry.unsupportedReason || "这个环境暂不支持", menu: quiet };
+  }
   if (entry.present?.by === "own") {
     return { ...base, state: "own", parts: ["已安装（自行安装）", version].filter(Boolean), meta: OWN_NOTE };
   }
@@ -211,7 +216,7 @@ export function rowFor(entry, { environment, job = null, anyJobRunning = false, 
     const update = entry.updateAvailable && !drifted;
     return {
       ...base, state: drifted ? "drifted" : update ? "update" : "installed", parts: [version],
-      meta: drifted ? "程序文件与安装时不同" : update ? "有新版本 " + entry.pinnedVersion : added === entry.id ? ADDED_LINE : "",
+      meta: drifted ? "程序文件与安装时不同" : update ? "有新版本 " + entry.pinnedVersion : added === entry.id ? ADDED_LINE : repaired === entry.id ? REPAIRED_LINE : "",
       actions: drifted ? [act("repair", "修复")] : update ? [act("update", "更新")] : [],
       menu: [act("remove", "移除")],
     };

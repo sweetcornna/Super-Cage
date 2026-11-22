@@ -4,7 +4,7 @@ import { api } from "./api";
 import { Modal } from "./modal";
 import { ProviderMark } from "./provider-mark";
 import {
-  ADDED_LINE, AGENTS_PATH, EMPTY_LINE, LEAD, NOTE, addDialog, agentJob, currentJob, jobEnded, normalizeAgents, removeDialog, requestFor, rowFor, waitLine,
+  ADDED_LINE, AGENTS_PATH, REPAIRED_LINE, EMPTY_LINE, LEAD, NOTE, addDialog, agentJob, currentJob, jobEnded, normalizeAgents, removeDialog, requestFor, rowFor, waitLine,
 } from "./other-clients-state.mjs";
 import "./other-clients.css";
 
@@ -73,7 +73,8 @@ export default function OtherClientsSection({ status }) {
   const [removeData, setRemoveData] = useState(false);
   const [local, setLocal] = useState(null);
   const [sending, setSending] = useState(false);
-  const [added, setAdded] = useState("");
+  // The entry an install just finished for, for its one-time line: { id, repaired }.
+  const [done, setDone] = useState(null);
   const raw = status?.job;
   const job = currentJob(raw, local);
   // What each entry was last asked to do in this visit, for 重试.
@@ -81,6 +82,9 @@ export default function OtherClientsSection({ status }) {
   const running = agentJob(raw);
   if (running?.running) operations.current[running.id] = running.operation;
   const anyJobRunning = Boolean(raw?.running) || Boolean(local && !local.error);
+  // Which entries had something installed before the job: an install onto one is a repair.
+  const had = useRef(new Set());
+  if (!raw?.running) had.current = new Set((data?.entries || []).filter((entry) => entry.present).map((entry) => entry.id));
 
   const load = useCallback((verify, signal) => api(AGENTS_PATH + (verify ? "?verify=1" : ""), undefined, undefined, {}, { signal })
     .then((answer) => { const next = normalizeAgents(answer); setData(next || { entries: [], environment: { running: false } }); setError(""); })
@@ -102,7 +106,7 @@ export default function OtherClientsSection({ status }) {
     if (!(jobEnded(was, raw) || (accepted && !raw.running))) return;
     void load(false);
     const ended = agentJob(raw);
-    if (ended && ended.operation === "install" && !raw.error && !raw.canceled) setAdded(ended.id);
+    if (ended && ended.operation === "install" && !raw.error && !raw.canceled) setDone({ id: ended.id, repaired: had.current.has(ended.id) });
   }, [raw, local, load]);
   // The poll never showed the accepted job (it was over before the next read): do not hold the row.
   useEffect(() => {
@@ -117,7 +121,7 @@ export default function OtherClientsSection({ status }) {
     setSending(true);
     try {
       const result = await api(path, body);
-      if (action !== "cancel") { operations.current[entry.id] = operation; setAdded(""); setLocal(result?.id ? { id: entry.id, operation, jobId: result.id } : null); }
+      if (action !== "cancel") { operations.current[entry.id] = operation; setDone(null); setLocal(result?.id ? { id: entry.id, operation, jobId: result.id } : null); }
     } catch (reason) {
       if (action !== "cancel") { operations.current[entry.id] = operation; setLocal({ id: entry.id, operation, error: reason.message }); }
       else setError(reason.message);
@@ -135,7 +139,7 @@ export default function OtherClientsSection({ status }) {
   };
 
   const environment = data?.environment || { running: false };
-  const rows = (data?.entries || []).map((entry) => rowFor(entry, { environment, job, anyJobRunning, added, operations: operations.current }));
+  const rows = (data?.entries || []).map((entry) => rowFor(entry, { environment, job, anyJobRunning, added: done && !done.repaired ? done.id : "", repaired: done?.repaired ? done.id : "", operations: operations.current }));
   const mineRunning = Boolean(job?.running) || (data?.entries || []).some((entry) => entry.operation);
   const line = data ? waitLine(environment, anyJobRunning, mineRunning) : "";
   return <div className="other-clients-page">
@@ -157,7 +161,7 @@ export default function OtherClientsSection({ status }) {
             </div>
             {row.error
               ? <p className={"other-client-meta " + row.error.tone} role="status">{row.error.line}</p>
-              : row.meta && <p className={"other-client-meta" + (row.meta === ADDED_LINE ? " added" : "")} aria-live="polite">{row.meta}</p>}
+              : row.meta && <p className={"other-client-meta" + ([ADDED_LINE, REPAIRED_LINE].includes(row.meta) ? " added" : "")} aria-live="polite">{row.meta}</p>}
             {row.bar && <div className="other-client-bar" role="progressbar" aria-label={row.name + "的进度"} aria-valuemin={0} aria-valuemax={100}
               aria-valuenow={row.bar.fraction === null ? undefined : Math.round(row.bar.fraction * 100)}>
               <i style={{ width: Math.max(2, Math.round((row.bar.fraction ?? 0) * 100)) + "%" }} />
