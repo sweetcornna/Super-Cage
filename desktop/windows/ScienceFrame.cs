@@ -105,6 +105,13 @@ internal static partial class ScienceFrame
     // science_end; null when no running workload publishes that front.
     public sealed record FrontEnd(Uri Address, string Label, string Secret);
 
+    // The end's path, the headers the shell sends and the one it gets back
+    // (science_front.go serveEnd; pinned by the golden).
+    public const string EndPath = "/_cage/end";
+    public const string EndSecretHeader = "X-Cage-End";
+    public const string EndLabelHeader = "X-Cage-End-Label";
+    public const string EndedHeader = "X-Cage-Ended";
+
     public static FrontEnd? End(string root, string origin)
     {
         if (!Uri.TryCreate(origin, UriKind.Absolute, out var url) || url.Scheme != "http" || !Label().IsMatch(url.Host) || url.IsDefaultPort) return null;
@@ -115,7 +122,7 @@ internal static partial class ScienceFrame
             if (control["pid"] is not JsonValue pid || !pid.TryGetValue<int>(out var process) || !Running(process)) continue;
             var secret = Text(control, "science_end");
             if (secret.Length == 0 || !Plain().IsMatch(secret)) continue;
-            return new FrontEnd(new Uri("http://127.0.0.1:" + url.Port + "/_cage/end"), url.Host[..^".localhost".Length], secret);
+            return new FrontEnd(new Uri("http://127.0.0.1:" + url.Port + EndPath), url.Host[..^".localhost".Length], secret);
         }
         return null;
     }
@@ -495,11 +502,18 @@ internal static partial class ScienceFrame
             return MaybeDetach();
         }
 
-        // Listed is the page session's Target.getTargets: a page-level frame
-        // whose target is not listed is gone, with everything under it.
-        public List<Action> Listed(IReadOnlyCollection<string> listed)
+        // PageFrames are the page-level frames the policy knows now (guest or
+        // paused).
+        public List<string> PageFrames() => parents.Where(pair => pair.Value.Length == 0).Select(pair => pair.Key).ToList();
+
+        // Listed is the page session's Target.getTargets, asked when the
+        // policy knew the page-level frames known: such a frame whose target
+        // is not listed is gone, with everything under it. A frame that
+        // attached while the list was on its way is not in it, and stays.
+        public List<Action> Listed(IReadOnlyCollection<string> listed, IReadOnlyCollection<string> known)
         {
-            foreach (var session in parents.Where(pair => pair.Value.Length == 0 && !listed.Contains(targets.GetValueOrDefault(pair.Key, ""))).Select(pair => pair.Key).ToList())
+            foreach (var session in known.Where(session => parents.TryGetValue(session, out var parent) && parent.Length == 0 &&
+                         !listed.Contains(targets.GetValueOrDefault(session, ""))).ToList())
                 Forget(session);
             return MaybeDetach();
         }

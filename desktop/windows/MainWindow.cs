@@ -215,9 +215,9 @@ internal sealed class MainWindow : Form
             core.ProcessFailed += (_, e) => {
                 // A frame's own process (the Claude Science frame's) leaves
                 // the window's document running (N4).
-                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited)
+                if (e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited && science != null)
                 {
-                    science?.FrameExited(e.FrameInfosForFailedProcess);
+                    science.FrameExited(e.FrameInfosForFailedProcess);
                     return;
                 }
                 science?.EndForExit();
@@ -226,7 +226,7 @@ internal sealed class MainWindow : Form
             // What a killed or crashed window's Claude Science frame stored
             // (N6); without a journal, one existence check.
             await ScienceFrameHost.Sweep(core, Path.Combine(Backend.Root, "webview2"));
-            science = arguments == null ? null : new ScienceFrameHost(core, Path.Combine(Backend.Root, "webview2"), reason =>
+            science = arguments == null ? null : new ScienceFrameHost(core, Backend.Root, Path.Combine(Backend.Root, "webview2"), reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),
                 (uri, reload) => {
                     if (web.IsDisposed || web.CoreWebView2 != core) return;

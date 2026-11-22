@@ -223,12 +223,26 @@ func (p *scienceFramePolicy) detachedTarget(session string) []scienceAction {
 	return p.maybeDetach()
 }
 
-// listed is the page session's Target.getTargets: a page-level frame whose
-// target is not listed is gone, with everything under it.
-func (p *scienceFramePolicy) listed(targets []string) []scienceAction {
-	var gone []string
+// pageFrames are the page-level frames the policy knows now (guest or
+// paused).
+func (p *scienceFramePolicy) pageFrames() []string {
+	var frames []string
 	for session, parent := range p.parents {
-		if parent == "" && !slices.Contains(targets, p.targets[session]) {
+		if parent == "" {
+			frames = append(frames, session)
+		}
+	}
+	return frames
+}
+
+// listed is the page session's Target.getTargets, asked when the policy
+// knew the page-level frames known: such a frame whose target is not
+// listed is gone, with everything under it. A frame that attached while the
+// list was on its way is not in it, and stays.
+func (p *scienceFramePolicy) listed(targets, known []string) []scienceAction {
+	var gone []string
+	for _, session := range known {
+		if parent, ok := p.parents[session]; ok && parent == "" && !slices.Contains(targets, p.targets[session]) {
 			gone = append(gone, session)
 		}
 	}
@@ -259,6 +273,9 @@ func (p *scienceFramePolicy) forget(session string) {
 }
 
 var scienceShellTrace = os.Getenv("CAGE_TEST_SHELL_TRACE") == "1"
+
+// scienceBenignHits counts the locale override errors the shell let pass.
+var scienceBenignHits atomic.Int32
 
 func short(session string) string {
 	if len(session) > 6 {
@@ -554,7 +571,14 @@ func (s *scienceShell) run(actions []scienceAction, ending string) {
 			}
 			for _, call := range calls {
 				err := s.browser.call(target, call.Method, call.Params, nil)
-				if err == nil || scienceBenignOverrideError(err) {
+				if err == nil {
+					continue
+				}
+				if scienceBenignOverrideError(err) {
+					// WebView2 reports this error without its text: the
+					// window would end the frame here (ScienceFrame.Benign).
+					scienceBenignHits.Add(1)
+					s.t.Logf("BENIGN OVERRIDE ERROR on %s %s: the Windows window would end the frame", short(session), call.Method)
 					continue
 				}
 				s.failed.Add(1)
@@ -613,14 +637,14 @@ func (s *scienceShell) endFront(origin string) {
 	if !ok {
 		return
 	}
-	request, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/_cage/end", port), nil)
-	request.Header.Set("X-Cage-End", value.(*scienceFront).endSecret)
-	request.Header.Set("X-Cage-End-Label", strings.TrimSuffix(parsed.Hostname(), ".localhost"))
+	request, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d%s", port, scienceEndPath), nil)
+	request.Header.Set(scienceEndSecretHeader, value.(*scienceFront).endSecret)
+	request.Header.Set(scienceEndLabelHeader, strings.TrimSuffix(parsed.Hostname(), ".localhost"))
 	client := &http.Client{Timeout: scienceShellEndWait, Transport: &http.Transport{Proxy: nil}}
 	result := "failed"
 	if response, err := client.Do(request); err == nil {
 		response.Body.Close()
-		result = response.Header.Get("X-Cage-Ended")
+		result = response.Header.Get(scienceEndedHeader)
 	}
 	s.mu.Lock()
 	s.endResults = append(s.endResults, result)
@@ -651,6 +675,7 @@ func (s *scienceShell) list() {
 		time.Sleep(scienceListEvery)
 		s.mu.Lock()
 		going := s.policy.attached && s.policy.detaching
+		known := s.policy.pageFrames()
 		s.mu.Unlock()
 		if !going {
 			return
@@ -668,7 +693,7 @@ func (s *scienceShell) list() {
 			targets = append(targets, info.TargetID)
 		}
 		s.mu.Lock()
-		actions := s.policy.listed(targets)
+		actions := s.policy.listed(targets, known)
 		s.mu.Unlock()
 		s.run(actions, "")
 	}

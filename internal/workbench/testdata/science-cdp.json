@@ -60,9 +60,16 @@
         "mobile": false,
         "bitness": "64"
       }
-    }
+    },
+    "science_end": "SECRET"
   },
   "crash_wait_ms": 1500,
+  "end": {
+    "ended_header": "X-Cage-Ended",
+    "label_header": "X-Cage-End-Label",
+    "path": "/_cage/end",
+    "secret_header": "X-Cage-End"
+  },
   "end_wait_ms": 2500,
   "frame": [
     {
@@ -924,6 +931,9 @@
             "TF",
             "TW"
           ],
+          "known": [
+            "F"
+          ],
           "expect": []
         },
         {
@@ -931,6 +941,62 @@
           "targets": [
             "TW"
           ],
+          "known": [
+            "F"
+          ],
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a frame that attaches while the targets are listed stays",
+      "steps": [
+        {
+          "do": "arm",
+          "expect": [
+            "page Target.setAutoAttach"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "F",
+          "type": "iframe",
+          "expect": [
+            "F Emulation.setTimezoneOverride",
+            "F Emulation.setLocaleOverride",
+            "F Emulation.setUserAgentOverride",
+            "F Page.enable",
+            "F Page.setInterceptFileChooserDialog",
+            "F Target.setAutoAttach",
+            "F Runtime.runIfWaitingForDebugger"
+          ]
+        },
+        {
+          "do": "detach",
+          "expect": [
+            "endfront",
+            "F crash",
+            "remove"
+          ]
+        },
+        {
+          "do": "attached",
+          "session": "G",
+          "type": "iframe",
+          "expect": []
+        },
+        {
+          "do": "listed",
+          "known": [
+            "F"
+          ],
+          "expect": []
+        },
+        {
+          "do": "detached",
+          "session": "G",
           "expect": [
             "page Target.setAutoAttach"
           ]

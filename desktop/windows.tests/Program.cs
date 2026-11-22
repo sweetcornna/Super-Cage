@@ -118,8 +118,14 @@ assertions = 0;
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), control.ToJsonString());
 
         // Ending a frame's session: the running workload's science_end for the front's port, the label from the origin.
-        Check(ScienceFrame.End(scienceRoot, origin) == null, "an end without science_end");
+        var endContract = golden["end"]!.AsObject();
+        Check(ScienceFrame.EndPath == endContract["path"]!.GetValue<string>() && ScienceFrame.EndSecretHeader == endContract["secret_header"]!.GetValue<string>() &&
+            ScienceFrame.EndLabelHeader == endContract["label_header"]!.GetValue<string>() && ScienceFrame.EndedHeader == endContract["ended_header"]!.GetValue<string>(), "the end differs from the front's");
+        Check(ScienceFrame.End(scienceRoot, origin)?.Secret == "SECRET", "the end's secret is not the golden control file's science_end");
         var ending = control.DeepClone().AsObject();
+        ending.Remove("science_end");
+        File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), ending.ToJsonString());
+        Check(ScienceFrame.End(scienceRoot, origin) == null, "an end without science_end");
         ending["science_end"] = "0123456789abcdefABCDEF_-";
         File.WriteAllText(Path.Combine(scienceRoot, "vms", "lab", "control.json"), ending.ToJsonString());
         var end = ScienceFrame.End(scienceRoot, origin);
@@ -178,7 +184,8 @@ assertions = 0;
                     "arm" => policy.Arm(identity!),
                     "detach" => policy.Detach(),
                     "attached" => policy.AttachedTarget(Field("parent"), Field("session"), Field("type"), "T" + Field("session")),
-                    "listed" => policy.Listed(step["targets"]!.AsArray().Select(item => item!.GetValue<string>()).ToList()),
+                    "listed" => policy.Listed((step["targets"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList(),
+                        (step["known"]?.AsArray() ?? []).Select(item => item!.GetValue<string>()).ToList()),
                     "failed" => policy.CallFailed(Field("session")),
                     "settle" => policy.Settle(Field("session")),
                     "detached" => policy.DetachedTarget(Field("session")),
@@ -193,7 +200,7 @@ assertions = 0;
             }
             scenarios++;
         }
-        Check(scenarios == 17, "scenario count " + scenarios);
+        Check(scenarios == 18, "scenario count " + scenarios);
 
         // Preferences: written before the browser starts, the default again without the switches.
         var data = Path.Combine(scienceRoot, "webview2");

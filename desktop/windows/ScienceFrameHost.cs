@@ -30,7 +30,7 @@ internal sealed class ScienceFrameHost
     };
 
     private readonly CoreWebView2 core;
-    private readonly string data;
+    private readonly string root, data;
     private readonly Action<string> failed;
     private readonly Action<string, bool> navigate;
     private readonly ScienceFrame.Policy policy = new();
@@ -46,12 +46,14 @@ internal sealed class ScienceFrameHost
     private readonly HashSet<string> dead = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DateTime> expected = new(StringComparer.Ordinal);
 
-    // data is the WebView's user data folder (the journal of framed
-    // origins); failed tells the pane its frame ended; navigate re-issues a
-    // navigation this host held (true: as a reload).
-    public ScienceFrameHost(CoreWebView2 core, string data, Action<string> failed, Action<string, bool> navigate)
+    // root holds the workloads' control.json files (Backend.Root); data is
+    // the WebView's user data folder (the journal of framed origins); failed
+    // tells the pane its frame ended; navigate re-issues a navigation this
+    // host held (true: as a reload).
+    public ScienceFrameHost(CoreWebView2 core, string root, string data, Action<string> failed, Action<string, bool> navigate)
     {
         this.core = core;
+        this.root = root;
         this.data = data;
         this.failed = failed;
         this.navigate = navigate;
@@ -89,7 +91,7 @@ internal sealed class ScienceFrameHost
     // falls back to the browser pane.
     public async Task Attach(string url)
     {
-        var next = ScienceFrame.Identity(Backend.Root, url) ?? throw new InvalidDataException("找不到这个本机渲染页面对应的环境，请回到 Claude Science 重新打开。");
+        var next = ScienceFrame.Identity(root, url) ?? throw new InvalidDataException("找不到这个本机渲染页面对应的环境，请回到 Claude Science 重新打开。");
         var label = ScienceFrame.LabelOrigin(url)!;
         // Before the frame can store anything: a start after a kill or a
         // crash clears what it stored (N6).
@@ -227,17 +229,22 @@ internal sealed class ScienceFrameHost
     }
 
     // EndFront asks the front of a session origin to end that frame's
-    // session (POST /_cage/end) and waits for its answer, at most EndWait. A
+    // session (POST /_cage/end) and waits for its answer, at most EndWait:
+    // "complete", "timeout" or "stale" from the front, "" without one. A
     // failure is left to the crash and the removal that follow.
-    private static async Task EndFront(string ending)
+    private async Task<string> EndFront(string ending)
     {
-        var end = ending.Length == 0 ? null : ScienceFrame.End(Backend.Root, ending);
-        if (end == null) return;
+        var end = ending.Length == 0 ? null : ScienceFrame.End(root, ending);
+        if (end == null) return "";
         using var request = new HttpRequestMessage(HttpMethod.Post, end.Address);
-        request.Headers.Add("X-Cage-End", end.Secret);
-        request.Headers.Add("X-Cage-End-Label", end.Label);
-        try { using var _ = await Front.SendAsync(request).ConfigureAwait(false); }
-        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or InvalidOperationException) { }
+        request.Headers.Add(ScienceFrame.EndSecretHeader, end.Secret);
+        request.Headers.Add(ScienceFrame.EndLabelHeader, end.Label);
+        try
+        {
+            using var response = await Front.SendAsync(request).ConfigureAwait(false);
+            return response.StatusCode == System.Net.HttpStatusCode.NoContent && response.Headers.TryGetValues(ScienceFrame.EndedHeader, out var ended) ? ended.FirstOrDefault() ?? "" : "";
+        }
+        catch (Exception error) when (error is HttpRequestException or TaskCanceledException or InvalidOperationException) { return ""; }
     }
 
     // Crash sends Page.crash to a frame's session without awaiting it (it
@@ -267,6 +274,7 @@ internal sealed class ScienceFrameHost
         {
             await Task.Delay(ScienceFrame.ListEveryMilliseconds);
             if (!policy.Attached || !policy.Detaching) return;
+            var known = policy.PageFrames();
             var listed = new List<string>();
             try
             {
@@ -275,7 +283,7 @@ internal sealed class ScienceFrameHost
                     listed.Add(info.GetProperty("targetId").GetString() ?? "");
             }
             catch (Exception error) when (error is JsonException or KeyNotFoundException or InvalidOperationException or COMException or ArgumentException) { continue; }
-            await Apply(policy.Listed(listed), "");
+            await Apply(policy.Listed(listed, known), "");
         }
     }
 

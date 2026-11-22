@@ -18,7 +18,7 @@ import (
 // checks ScienceFrame.cs against the same file. CAGE_UPDATE_GOLDEN=1
 // rewrites it.
 func TestScienceCDPGolden(t *testing.T) {
-	control, _ := json.Marshal(controlFile{Port: 17777, SciencePort: 17840, ScienceIdentity: &testScienceIdentity})
+	control, _ := json.Marshal(controlFile{Port: 17777, SciencePort: 17840, ScienceIdentity: &testScienceIdentity, ScienceEnd: "SECRET"})
 	golden := map[string]any{
 		"contract":         scienceBridgeContract,
 		"control":          json.RawMessage(control),
@@ -31,7 +31,14 @@ func TestScienceCDPGolden(t *testing.T) {
 		"navigate_wait_ms": scienceNavigateWait.Milliseconds(),
 		// How long the window waits for the front's end and for a crashed
 		// frame's Inspector.targetCrashed before it removes the frame.
-		"end_wait_ms":   scienceShellEndWait.Milliseconds(),
+		"end_wait_ms": scienceShellEndWait.Milliseconds(),
+		// The shell's end of a frame's session (control.json science_end).
+		"end": map[string]any{
+			"path":          scienceEndPath,
+			"secret_header": scienceEndSecretHeader,
+			"label_header":  scienceEndLabelHeader,
+			"ended_header":  scienceEndedHeader,
+		},
 		"crash_wait_ms": scienceCrashWait.Milliseconds(),
 		// The proxy proof prepare runs (F5) and the preferences the shell
 		// writes before the WebView starts with the switches.
@@ -69,14 +76,16 @@ func TestScienceCDPGolden(t *testing.T) {
 	}
 }
 
-// A step's target id is "T" + its session unless Target says otherwise;
-// listed gives the target ids Target.getTargets returns.
+// A step's target id is "T" + its session; listed gives the target ids
+// Target.getTargets returned and the page-level frames known when it was
+// asked.
 type scienceScenarioStep struct {
 	Do      string   `json:"do"`
 	Parent  string   `json:"parent,omitempty"`
 	Session string   `json:"session,omitempty"`
 	Type    string   `json:"type,omitempty"`
 	Targets []string `json:"targets,omitempty"`
+	Known   []string `json:"known,omitempty"`
 	Expect  []string `json:"expect"`
 }
 
@@ -223,8 +232,16 @@ func scienceScenarios() []scienceScenario {
 			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
 			{Do: "attached", Parent: "F", Session: "W", Type: "worker", Expect: scienceExpect("W", worker)},
 			{Do: "detach", Expect: teardown("F")},
-			{Do: "listed", Targets: []string{"TF", "TW"}, Expect: none},
-			{Do: "listed", Targets: []string{"TW"}, Expect: detach},
+			{Do: "listed", Targets: []string{"TF", "TW"}, Known: []string{"F"}, Expect: none},
+			{Do: "listed", Targets: []string{"TW"}, Known: []string{"F"}, Expect: detach},
+		}},
+		{"a frame that attaches while the targets are listed stays", []scienceScenarioStep{
+			{Do: "arm", Expect: attach},
+			{Do: "attached", Session: "F", Type: "iframe", Expect: scienceExpect("F", frame)},
+			{Do: "detach", Expect: teardown("F")},
+			{Do: "attached", Session: "G", Type: "iframe", Expect: none},
+			{Do: "listed", Targets: []string{}, Known: []string{"F"}, Expect: none},
+			{Do: "detached", Session: "G", Expect: detach},
 		}},
 		{"a call that fails while the frame goes ends nothing", []scienceScenarioStep{
 			{Do: "arm", Expect: attach},
@@ -261,7 +278,7 @@ func TestScienceFramePolicyScenarios(t *testing.T) {
 			case "attached":
 				actions = policy.attachedTarget(step.Parent, step.Session, step.Type, "T"+step.Session)
 			case "listed":
-				actions = policy.listed(step.Targets)
+				actions = policy.listed(step.Targets, step.Known)
 			case "failed":
 				actions = policy.callFailed(step.Session)
 			case "settle":
