@@ -294,6 +294,8 @@ func (r *agentRig) compose(input string, rewrites ...[2]string) string {
 		{"agent_python=/usr/bin/python3\n", "agent_python=" + r.python + "\n"},
 		{"agent_etc=/etc\n", "agent_etc=" + r.etc + "\n"},
 		{"agent_tmp_root=/tmp\n", "agent_tmp_root=" + filepath.Join(r.root, "tmp") + "\n"},
+		// The rig cannot make root's files: the tree belongs to the test user.
+		{"agent_root_uid=0\n", "agent_root_uid=" + strconv.Itoa(os.Getuid()) + "\n"},
 	}, rewrites...)
 	for _, rewrite := range rewrites {
 		if strings.Count(script, rewrite[0]) != 1 {

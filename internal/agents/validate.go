@@ -370,7 +370,7 @@ func (v *checker) setting(e Entry, field string, s Setting) {
 		if systemSettings[s.File] != id {
 			v.add(id, field+".file", "%s is not a system file this entry may write", s.File)
 		}
-	} else if rest, ok := homePath(s.File); !ok || !strings.Contains(rest, "/") || protected(rest) || !ownsFile(e, s.File) {
+	} else if rest, ok := homePath(s.File); !ok || !strings.Contains(rest, "/") || protected(rest) || inCageOwn(rest, true) || !ownsFile(e, s.File) {
 		v.add(id, field+".file", "%q must lie inside one of the entry's data_dirs", s.File)
 	}
 	if len(s.Set) == 0 {
@@ -555,22 +555,16 @@ func (v *checker) review(e Entry) {
 // or Cage reads, and never one that names a path, a file, a command, options
 // or a proxy. internal/cage/agent-install.sh refuses the same.
 func deniedEnv(key string) bool {
-	switch key {
-	case "PATH", "HOME", "SHELL", "BROWSER", "TZ", "LANG", "NODE_OPTIONS", "ENV", "BASH_ENV", "IFS", "SHELLOPTS":
-		return true
-	}
-	for _, prefix := range []string{"LD_", "LC_", "PYTHON", "CAGE_"} {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	for _, suffix := range []string{"_PROXY", "_HOME", "_PATH", "_DIR", "_FILE", "_COMMAND", "_OPTIONS", "_SOCK", "_CERTS"} {
-		if strings.HasSuffix(key, suffix) {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(deniedEnvNames, key) ||
+		slices.ContainsFunc(deniedEnvPrefixes, func(p string) bool { return strings.HasPrefix(key, p) }) ||
+		slices.ContainsFunc(deniedEnvSuffixes, func(s string) bool { return strings.HasSuffix(key, s) })
 }
+
+var (
+	deniedEnvNames    = []string{"PATH", "HOME", "SHELL", "BROWSER", "TZ", "LANG", "NODE_OPTIONS", "ENV", "BASH_ENV", "IFS", "SHELLOPTS"}
+	deniedEnvPrefixes = []string{"LD_", "LC_", "PYTHON", "CAGE_"}
+	deniedEnvSuffixes = []string{"_PROXY", "_HOME", "_PATH", "_DIR", "_FILE", "_COMMAND", "_OPTIONS", "_SOCK", "_CERTS"}
+)
 
 // plainURLPath reports whether the path is what curl fetches: no percent
 // encoding and no empty, "." or ".." segment.
