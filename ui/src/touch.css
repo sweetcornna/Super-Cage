@@ -78,6 +78,44 @@
   .browser-tab {
     -webkit-touch-callout: none;
   }
+  .workspace-tab-menu button {
+    min-height: 44px;
+  }
+
+  /* More browser tabs than fit at a readable width (workspace-tabs.jsx): the strip scrolls sideways under a
+     finger; a drag on a tab pans it instead of carrying the tab. */
+  .browser-tabs.scrolls {
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .browser-tabs.scrolls::-webkit-scrollbar {
+    display: none;
+  }
+  .browser-tabs.scrolls .browser-tab {
+    touch-action: pan-x;
+  }
+}
+
+/* A narrow touch screen: the status bar shows icons only. The words stay in the accessibility tree and become the
+   tooltip (a long press; icon-hints.jsx). status-label.jsx renders them hidden under the same query (900 px). */
+@media (pointer: coarse) and (hover: none) and (max-width: 900px) {
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .status-bar > button:has(> .visually-hidden) {
+    position: relative;
+    min-width: 44px;
+    padding: 0 8px;
+  }
 }
 
 /* The sidebar's rows scroll under a finger; a sideways drag still carries a row onto the panes to split them

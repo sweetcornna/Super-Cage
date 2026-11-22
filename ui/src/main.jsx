@@ -52,6 +52,7 @@ import { EnvironmentRestartContext, SafetyChecklistContext, SafetyMessage } from
 import { networkState, isGuestLocalURL, needsEnvironmentRestart, withLeaseClock } from "./safety-state.mjs";
 import { needsProxySetup } from "./onboarding-state.mjs";
 import { NetworkLatency } from "./network-latency";
+import { StatusLabel } from "./status-label";
 import { WorkbenchHome } from "./workbench-home";
 import { BrandMark } from "./brand";
 import { Drawing } from "./drawings";
@@ -1985,7 +1986,7 @@ function App() {
             <span className="status-divider" />
             <button onClick={() => openSettings("network")}>
               <MapPin size={12} />
-              <span>
+              <StatusLabel>
                 {status.network_error
                   ? "出口待确认"
                   : status.location || status.safety?.exit_ip
@@ -1995,7 +1996,7 @@ function App() {
                         status.location?.city,
                       ].filter(Boolean).join(" · ")
                     : "指定代理出口"}
-              </span>
+              </StatusLabel>
             </button>
             <span className="status-divider" />
             <button onClick={() => openSettings("region")}>
@@ -2039,7 +2040,7 @@ function App() {
               title="停止并重新启动当前环境"
             >
               <RotateCcw size={12} />
-              <span>重启环境</span>
+              <StatusLabel>重启环境</StatusLabel>
             </button>
             <button
               onClick={stop}
@@ -2049,7 +2050,7 @@ function App() {
               title="停止当前环境"
             >
               <Power size={12} />
-              <span>停止环境</span>
+              <StatusLabel>停止环境</StatusLabel>
             </button>
           </footer>
         </div>

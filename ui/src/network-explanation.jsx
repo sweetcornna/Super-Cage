@@ -4,6 +4,7 @@ import { Globe2, Laptop, MemoryStick, RefreshCw } from "lucide-react";
 import { api } from "./api";
 import { EnvironmentShield } from "./environment-shield";
 import { explanationView } from "./safety-state.mjs";
+import { StatusLabel, useIconsOnly } from "./status-label";
 import "./network-explanation.css";
 
 // The server explains a closed or uncertain gate (status.safety.explanation,
@@ -150,6 +151,7 @@ export function NetworkExplanation({ explanation, compact = false, inline = fals
 // navigation asks it to open through the "cage-network-explain" event.
 export function NetworkStatusButton({ network, running, healthy, canRecheck, onRechecked, onDetails, onResources }) {
   const view = explanationView(network?.explanation);
+  const iconsOnly = useIconsOnly();
   const [open, setOpen] = useState(false);
   const [place, setPlace] = useState(null);
   const button = useRef(null);
@@ -194,17 +196,18 @@ export function NetworkStatusButton({ network, running, healthy, canRecheck, onR
     return (
       <button onClick={onDetails} title="网络与隔离检查">
         <EnvironmentShield size={14} healthy={healthy} />
-        <span>{running ? network.label : "网络检查"}</span>
+        <StatusLabel>{running ? network.label : "网络检查"}</StatusLabel>
       </button>
     );
   }
   return (
     <>
       <button ref={button} className={`network-status tone-${view.tone}`} onClick={() => setOpen((value) => !value)}
-        aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? "network-popover" : undefined} title="外网状态说明">
+        aria-expanded={open} aria-haspopup="dialog" aria-controls={open ? "network-popover" : undefined}
+        title={iconsOnly ? view.label : "外网状态说明"}>
         <EnvironmentShield size={14} healthy={healthy} />
         <i className={`network-tone-dot tone-${view.tone}`} aria-hidden="true" />
-        <span>{view.label}</span>
+        <StatusLabel>{view.label}</StatusLabel>
       </button>
       {open && createPortal(
         <div ref={popover} id="network-popover" className="network-popover" role="dialog" aria-labelledby="network-popover-title" tabIndex={-1}

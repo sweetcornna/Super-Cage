@@ -19,6 +19,9 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
     let touchTimer;
     let longPressed = null;
 
+    const labelOf = (element) => element.getAttribute("title") || element.getAttribute("aria-label")
+      || element.querySelector("img[alt]")?.getAttribute("alt") || element.querySelector(".visually-hidden")?.textContent;
+
     function candidate(node) {
       const element = node instanceof Element ? node.closest('button, a[href], [role="button"], [role="img"][aria-label], svg[aria-label]') : null;
       if (!element || element.closest(".icon-hint")) return null;
@@ -30,8 +33,7 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
         if (clone.textContent.trim()) return null;
         if (!element.querySelector('svg, img, [aria-hidden="true"]')) return null;
       }
-      const label = element.getAttribute("title") || element.getAttribute("aria-label") || element.querySelector("img[alt]")?.getAttribute("alt");
-      return label?.trim() ? element : null;
+      return labelOf(element)?.trim() ? element : null;
     }
 
     function hide() {
@@ -48,7 +50,7 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
       hide();
       current = element;
       savedTitle = element.getAttribute("title");
-      hint.textContent = savedTitle || element.getAttribute("aria-label") || element.querySelector("img[alt]")?.getAttribute("alt");
+      hint.textContent = savedTitle || labelOf(element);
       if (savedTitle !== null) {
         if (!element.hasAttribute("aria-label")) { element.setAttribute("aria-label", savedTitle); temporaryLabel = true; }
         element.removeAttribute("title");
