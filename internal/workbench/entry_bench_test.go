@@ -168,7 +168,8 @@ func TestEntryBench(t *testing.T) {
 		runtime.ReadMemStats(&after)
 		used := func(m runtime.MemStats) float64 { return float64(m.HeapInuse+m.StackInuse) / 1024 }
 		results[kind+"_endpoint_kb_per_connection"] = (used(after) - used(before)) / 10
-		hops := entryChildRSS(t, os.Getpid(), sshExecutable())
+		// The shim execs the real ssh, so the process is that one.
+		hops := entryChildRSS(t, os.Getpid(), "/usr/bin/ssh")
 		results[kind+"_inner_hop_ssh_rss_kb"] = hops
 		for _, cmd := range clients {
 			_ = cmd.Process.Kill()

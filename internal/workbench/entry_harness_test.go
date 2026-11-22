@@ -152,6 +152,7 @@ ForceCommand %s
 	}
 	port := g.listener.Addr().(*net.TCPAddr).Port
 	known := filepath.Join(g.dir, "hop_known_hosts")
+	testSSHKnown(t, known)
 	if err := os.WriteFile(known, append([]byte(fmt.Sprintf("[127.0.0.1]:%d ", port)), ssh.MarshalAuthorizedKey(hostKey.PublicKey())...), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -305,6 +306,11 @@ func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 		Cage: "/opt/super-cage/cage",
 	}
 	s.entry.paths = &f.paths
+	// The shim's known hosts include the entry's own (ssh_shim_test.go).
+	testSSHKnown(t, f.paths.knownHosts(entryEnvironmentID(s.profile)))
+	if entryEnvironmentID(s.profile) != defaultLocalVMID {
+		testSSHKnown(t, f.paths.knownHosts(defaultLocalVMID))
+	}
 	run := strings.Replace(cage.EntryRunScript(), "environment=/etc/claude-cage/environment", "environment="+filepath.Join(dir, "guest", "environment"), 1)
 	if err := os.MkdirAll(filepath.Join(dir, "guest"), 0o700); err != nil {
 		t.Fatal(err)
@@ -450,7 +456,7 @@ func entryRun(t *testing.T, client *ssh.Client, command string, stdin []byte, en
 // paths from it. HOME points into the test directory.
 func (f *entryFixture) sshEnv(extra ...string) []string {
 	paths, _ := json.Marshal(map[string]string{"ssh": f.paths.SSHDir, "device": f.paths.DeviceDir, "computer": f.paths.ComputerDir})
-	env := []string{"PATH=/usr/bin:/bin:/usr/sbin:/sbin", "HOME=" + filepath.Join(f.dir, "client"), "CAGE_ENTRY_TEST_HELPER=1", "CAGE_ENTRY_TEST_CONFIG=" + f.s.configPath, "CAGE_ENTRY_TEST_ENV=" + defaultLocalVMID, "CAGE_ENTRY_TEST_PATHS=" + string(paths)}
+	env := []string{testSSHPath("/usr/bin:/bin:/usr/sbin:/sbin"), "HOME=" + filepath.Join(f.dir, "client"), "CAGE_ENTRY_TEST_HELPER=1", "CAGE_ENTRY_TEST_CONFIG=" + f.s.configPath, "CAGE_ENTRY_TEST_ENV=" + defaultLocalVMID, "CAGE_ENTRY_TEST_PATHS=" + string(paths), testSSHShimEnv + "=" + testSSH.dir}
 	return append(env, extra...)
 }
 

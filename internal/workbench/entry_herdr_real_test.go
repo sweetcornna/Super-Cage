@@ -53,6 +53,7 @@ func TestEntryHerdrRealCores(t *testing.T) {
 	}
 
 	// The owner adds the environment with the command the page prints.
+	calls := len(testSSHCalls())
 	before := entryHeapKB()
 	out, code := h.shell(view.Herdr.Command)
 	if code != 0 || !strings.Contains(out, "\"name\":\"cage-default\"") {
@@ -65,6 +66,8 @@ func TestEntryHerdrRealCores(t *testing.T) {
 	})
 	time.Sleep(time.Second)
 	results["endpoint_kb_one_herdr_line"] = entryHeapKB() - before
+	// The owner's core dialled through the shim (ssh_shim_test.go).
+	testSSHCalledSince(t, calls, "/usr/bin/ssh -F "+f.paths.cageSSHFile()+" -T cage-default")
 
 	// Work runs there with the environment's settings, its core in Super
 	// Cage's runtime folder.
@@ -139,7 +142,7 @@ func TestEntryHerdrRealCores(t *testing.T) {
 	}
 
 	// Memory with the line open and three terminals there.
-	results["inner_hop_ssh_rss_kb"] = entryChildRSS(t, os.Getpid(), sshExecutable())
+	results["inner_hop_ssh_rss_kb"] = entryChildRSS(t, os.Getpid(), "/usr/bin/ssh")
 	var listed []string
 	for _, p := range h.processes() {
 		listed = append(listed, fmt.Sprintf("%d kB %s", p.rss, p.args))
@@ -290,7 +293,8 @@ func newEntryHerdrCores(t *testing.T, f *entryFixture, source string) *entryHerd
 			t.Fatal(err)
 		}
 	}
-	h.ownerEnv = append(entryHerdrCoreEnv(h.ownerHome, filepath.Join(short, "o")), "PATH="+ownerBin+":/usr/bin:/bin:/usr/sbin:/sbin")
+	// ssh on the owner core's PATH is the shim (ssh_shim_test.go).
+	h.ownerEnv = append(entryHerdrCoreEnv(h.ownerHome, filepath.Join(short, "o")), testSSHPath(ownerBin+":/usr/bin:/bin:/usr/sbin:/sbin"))
 	// The owner's core runs ssh with the generated configuration, whose
 	// ProxyCommand is this test binary (TestEntryProxyHelper).
 	for _, value := range f.sshEnv() {
@@ -298,7 +302,7 @@ func newEntryHerdrCores(t *testing.T, f *entryFixture, source string) *entryHerd
 			h.ownerEnv = append(h.ownerEnv, value)
 		}
 	}
-	h.guestEnv = append(entryHerdrCoreEnv(h.guestHome, filepath.Join(short, "g")), "PATH="+filepath.Dir(h.guestCore)+":/usr/bin:/bin:/usr/sbin:/sbin")
+	h.guestEnv = append(entryHerdrCoreEnv(h.guestHome, filepath.Join(short, "g")), testSSHPath(filepath.Dir(h.guestCore)+":/usr/bin:/bin:/usr/sbin:/sbin"))
 	previous := diagnostics.Default()
 	diagnostics.SetDefault(diagnostics.New(h.diag))
 	t.Cleanup(func() {
