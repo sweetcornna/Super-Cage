@@ -211,6 +211,7 @@ func (s *Server) workbench(w http.ResponseWriter, r *http.Request, id string) {
 		s.confirmWorkspaceFault(id, workspace)
 	})
 	cacheStatic(proxy, r, w.Header())
+	entryHint(proxy, r)
 	proxy.ServeHTTP(writer, r.WithContext(ctx))
 }
 

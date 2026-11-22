@@ -34,6 +34,9 @@ export const TILES = {
   bleed: { inset: 0, side: 256, round: true }, // fills the canvas: Windows, Linux, favicons, PNG logos
   mac: { inset: 25, side: 206, round: true }, // 824/1024 tile with margin: macOS
   square: { inset: 0, side: 256, round: false }, // opaque square: iOS, apple-touch-icon
+  // Opaque square for the web manifest's "maskable" icon: the mark shrunk around the centre so all of it
+  // stays inside the circle of radius 40 % that Android may cut the icon to.
+  maskable: { inset: 0, side: 256, round: false, shrink: 0.82 },
 };
 export const ANDROID = { layer: 108, visible: 72, safe: 66 }; // dp
 
@@ -154,12 +157,13 @@ const elements = (shapes) => shapes.map((s) => '<path d="' + s.d + '" fill="' + 
 
 // App icon: ink tile, cream mark. The mark keeps its place in tile-ink.svg, scaled to the tile shape.
 export function tileSvg(masters, { small, tile, title = "" }) {
-  const { inset, side, round } = TILES[tile];
+  const { inset, side, round, shrink = 1 } = TILES[tile];
   const layout = small ? masters.tileSmall : masters.tile;
   const k = side / 256;
+  const ty = 128 + (layout.ty - 128) * shrink;
   const shapes = (small ? masters.smallDark : masters.fullDark).shapes;
   const rect = '<rect x="' + inset + '" y="' + inset + '" width="' + side + '" height="' + side + '"' + (round ? ' rx="' + fmt(layout.rx * k) + '"' : "") + ' fill="' + layout.fill + '"/>';
-  const group = '<g transform="translate(' + fmt(inset + 128 * k) + " " + fmt(inset + layout.ty * k) + ") scale(" + fmt5(layout.scale * k) + ') translate(-128 -128)">';
+  const group = '<g transform="translate(' + fmt(inset + 128 * k) + " " + fmt(inset + ty * k) + ") scale(" + fmt5(layout.scale * k * shrink) + ') translate(-128 -128)">';
   return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">\n' + (title ? "  <title>" + title + "</title>\n" : "") +
     "  " + rect + "\n  " + group + "\n" + elements(shapes).map((l) => "    " + l).join("\n") + "\n  </g>\n</svg>\n";
 }
@@ -273,6 +277,8 @@ export const PATHS = {
   catalog: "mobile/ios/CageMobile/Assets.xcassets",
   drawables: "mobile/android/res/drawable",
   mobileLogo: "mobile/assets/brand/logo.svg",
+  // The tenant portal's own icons (served by internal/tenant from its embedded copy).
+  portalIcons: "internal/tenant/portal-icons",
 };
 export const MAC_SIZES = [[16, "icon_16x16"], [32, "icon_16x16@2x"], [32, "icon_32x32"], [64, "icon_32x32@2x"], [128, "icon_128x128"], [256, "icon_128x128@2x"], [256, "icon_256x256"], [512, "icon_256x256@2x"], [512, "icon_512x512"], [1024, "icon_512x512@2x"]];
 export const WIN_SIZES = [16, 20, 24, 32, 40, 48, 64, 128, 256];
@@ -283,6 +289,10 @@ export const WEB_DIRS = [
   { dir: "ui/public", png: "cage.png", svg: "cage.svg", extra: ["ui/src/logo.png"] },
   { dir: "www/public", png: "cage-icon.png", svg: "cage-icon.svg", extra: [] },
 ];
+// Add to Home Screen (web manifest) icons for the web apps that are installed from a phone: the workbench
+// (ui/public, its manifest.webmanifest) and the portal (PATHS.portalIcons). 192 px and the 512 px logo for
+// "any", a 512 px opaque square for "maskable".
+export const MANIFEST_DIRS = ["ui/public", PATHS.portalIcons];
 
 // Adaptive icon placement: the tile-ink composition inside the 72 dp visible area of the 108 dp layer.
 export function androidLayout(masters) {
@@ -324,6 +334,7 @@ export function textOutputs(masters) {
   // Scalable SVGs: full mark for hicolor, small cut for favicons.
   put(join(PATHS.linuxIcons, "hicolor/scalable/apps", PATHS.linuxName + ".svg"), tileSvg(masters, { small: false, tile: "bleed", title: "Super Cage" }));
   for (const { dir, svg } of WEB_DIRS) put(join(dir, svg), tileSvg(masters, { small: true, tile: "bleed", title: "Super Cage" }));
+  put(join(PATHS.portalIcons, "icon.svg"), tileSvg(masters, { small: true, tile: "bleed", title: "Super Cage" }));
   return out;
 }
 
@@ -430,6 +441,16 @@ export async function rasterOutputs(masters, renderer) {
     out.set(join(dir, "apple-touch-icon.png"), touch);
     for (const file of extra) out.set(file, rounded.png);
   }
+  const icon192 = (await png({ px: 192, tile: "bleed", alpha: true })).png;
+  const maskable = await png({ px: 512, tile: "maskable", alpha: false });
+  expect("Maskable tile corner", pixel(maskable.image, 4, 4), [0x1f, 0x1e, 0x1d, 255]);
+  for (const dir of MANIFEST_DIRS) {
+    out.set(join(dir, "icon-192.png"), icon192);
+    out.set(join(dir, "icon-maskable-512.png"), maskable.png);
+  }
+  out.set(join(PATHS.portalIcons, "icon-512.png"), rounded.png);
+  out.set(join(PATHS.portalIcons, "favicon.ico"), faviconIco);
+  out.set(join(PATHS.portalIcons, "apple-touch-icon.png"), touch);
   return out;
 }
 

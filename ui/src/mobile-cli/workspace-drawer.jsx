@@ -1,5 +1,8 @@
 import React, { useEffect, useRef } from "react";
-import { Folder, FolderOpen, Globe2, LoaderCircle, LogOut, Monitor, Plus, Power, Settings, Sparkles, SquarePen, SquareTerminal } from "lucide-react";
+import { Folder, FolderOpen, Globe2, LayoutGrid, LoaderCircle, LogOut, Monitor, Plus, Power, Settings, Sparkles, SquarePen, SquareTerminal } from "lucide-react";
+import { backToPortal, chooseDesktop, portalFrame, useBackDismiss, webPhone } from "./web-shell.mjs";
+
+const modal = (dialog) => { try { return dialog.matches(":modal"); } catch { return false; } };
 import { Logo } from "./doodles";
 import { InlineSelect } from "./inline-select";
 import { SessionRow, sortSessions } from "./session-row";
@@ -67,13 +70,26 @@ export function ProjectTree({catalog, projectPath, sessionID, expanded, toggle, 
   </section>;
 }
 
-export function WorkspaceDrawer({open, active, name, tools = workspaceTools, coreTools = workspaceCoreTools, envTone, onHome, onClose, onTool, onExit, onSettings, nativePhone, children}) {
+export function WorkspaceDrawer({open, docked = false, active, name, tools = workspaceTools, coreTools = workspaceCoreTools, envTone, onHome, onClose, onTool, onExit, onSettings, nativePhone, children}) {
   const panel = useRef(null);
+  useBackDismiss(open && !docked, onClose);
   useEffect(() => {
     const dialog = panel.current;
     let frame;
     let timer;
-    if (open) {
+    if (docked) {
+      // Two panes: the panel stays beside the page, not over it.
+      if (dialog.open && modal(dialog)) dialog.close();
+      if (!dialog.open) {
+        // show() moves focus into the panel; beside the page, focus stays where it was.
+        const previous = document.activeElement;
+        dialog.show();
+        if (previous && previous !== document.body && previous.isConnected) previous.focus({ preventScroll: true });
+        else if (dialog.contains(document.activeElement)) document.activeElement.blur();
+      }
+      dialog.dataset.visible = "true";
+    } else if (open) {
+      if (dialog.open && !modal(dialog)) dialog.close();
       if (!dialog.open) dialog.showModal();
       frame = requestAnimationFrame(() => { frame = requestAnimationFrame(() => { dialog.dataset.visible = "true"; }); });
     } else if (dialog.open) {
@@ -82,11 +98,11 @@ export function WorkspaceDrawer({open, active, name, tools = workspaceTools, cor
       else timer = setTimeout(() => dialog.close(), 240);
     }
     return () => { cancelAnimationFrame(frame); clearTimeout(timer); };
-  }, [open]);
-  return <dialog className="workspace-drawer" ref={panel} aria-label="工作区侧栏"
-    onCancel={event => {event.preventDefault(); onClose();}}
+  }, [open, docked]);
+  return <dialog className={"workspace-drawer" + (docked ? " docked" : "")} ref={panel} aria-label="工作区侧栏"
+    onCancel={event => {event.preventDefault(); if (!docked) onClose();}}
     onClick={event => {
-      if (event.target !== panel.current) return;
+      if (docked || event.target !== panel.current) return;
       const rect = panel.current.getBoundingClientRect();
       if (event.clientX < rect.left || event.clientX >= rect.right || event.clientY < rect.top || event.clientY >= rect.bottom) onClose();
     }}>
@@ -100,7 +116,10 @@ export function WorkspaceDrawer({open, active, name, tools = workspaceTools, cor
       {children}
     </div>
     <footer className="drawer-footer"><button className="drawer-exit" type="button" onClick={onSettings}><Settings size={18}/>设置</button>
-      <a className="drawer-exit" href={nativePhone ? "cage://home" : "/"}
-      onClick={event => {if (onExit()) event.preventDefault();}}><LogOut size={18}/>退出</a></footer>
+      {webPhone ? <>
+        {portalFrame && <button className="drawer-exit" type="button" onClick={backToPortal}><LayoutGrid size={18}/>返回门户</button>}
+        <button className="drawer-exit" type="button" onClick={chooseDesktop}><Monitor size={18}/>电脑版</button>
+      </> : <a className="drawer-exit" href={nativePhone ? "cage://home" : "/"}
+      onClick={event => {if (onExit()) event.preventDefault();}}><LogOut size={18}/>退出</a>}</footer>
   </dialog>;
 }

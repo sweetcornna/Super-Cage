@@ -6,10 +6,13 @@
 // 然后在浏览器打开 http://cage.localhost:8787/
 
 import http from "node:http";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createPhoneFixture } from "./phone-fixture.mjs";
+import { createDesktopFixture } from "./desktop-fixture.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const STATIC = {
@@ -18,6 +21,21 @@ const STATIC = {
   "/app.mjs": ["app.mjs", "text/javascript; charset=utf-8"],
   "/styles.css": ["styles.css", "text/css; charset=utf-8"],
 };
+// The gateway serves these from its embedded copy (internal/tenant/portal_icons.go).
+const ICONS = join(HERE, "../../internal/tenant/portal-icons");
+const PORTAL_ICONS = {
+  "/favicon.ico": "image/x-icon", "/icon.svg": "image/svg+xml", "/apple-touch-icon.png": "image/png",
+  "/icon-192.png": "image/png", "/icon-512.png": "image/png", "/icon-maskable-512.png": "image/png",
+};
+const PORTAL_MANIFEST = JSON.stringify({
+  name: "Super Cage", short_name: "Super Cage", lang: "zh-CN", start_url: "/", scope: "/", display: "standalone",
+  background_color: "#faf9f5", theme_color: "#faf9f5",
+  icons: [
+    { src: "/icon-192.png", sizes: "192x192", type: "image/png", purpose: "any" },
+    { src: "/icon-512.png", sizes: "512x512", type: "image/png", purpose: "any" },
+    { src: "/icon-maskable-512.png", sizes: "512x512", type: "image/png", purpose: "maskable" },
+  ],
+});
 const USERNAME = /^[a-z0-9][a-z0-9._-]{2,31}$/;
 const SYSTEM_ID = /^[a-z0-9-]{1,32}$/;
 const SESSION_COOKIE = "cage_tenant_session";
@@ -91,7 +109,13 @@ export async function startMockServer({
   registrationOpen = true,
   uiDir = HERE,
   workbenchDir,
+  // Answer the phone UI's /api/mobile/* routes from phone-fixture.mjs and serve
+  // mobile.html at "/" when the browser chose the phone layout (cookie only:
+  // the user-agent rule belongs to the gateway and is tested in Go).
+  phoneFixture = false,
 } = {}) {
+  const phoneApi = phoneFixture ? createPhoneFixture() : null;
+  const desktopApi = phoneFixture ? createDesktopFixture() : null;
   const state = {
     users: new Map(), // username -> { id, username, salt, hash }
     sessions: new Map(), // token -> { id, userId, revoked }
@@ -250,12 +274,22 @@ export async function startMockServer({
     res.setHeader("X-Frame-Options", "DENY");
     res.setHeader(
       "Content-Security-Policy",
-      `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-src http://*.${portalHost}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
+      `default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; manifest-src 'self'; frame-src http://*.${portalHost}; base-uri 'none'; form-action 'self'; frame-ancestors 'none'`,
     );
+    if ((req.method === "GET" || req.method === "HEAD") && url.pathname === "/manifest.webmanifest") return send(res, 200, req.method === "HEAD" ? "" : PORTAL_MANIFEST, "application/manifest+json");
+    if ((req.method === "GET" || req.method === "HEAD") && PORTAL_ICONS[url.pathname]) {
+      const body = await readFile(join(ICONS, url.pathname.slice(1))).catch(() => null);
+      if (body) return send(res, 200, req.method === "HEAD" ? "" : body, PORTAL_ICONS[url.pathname]);
+    }
     if ((req.method === "GET" || req.method === "HEAD") && STATIC[url.pathname]) {
       const [name, type] = STATIC[url.pathname];
       const body = await readFile(join(uiDir, name));
-      return send(res, 200, req.method === "HEAD" ? "" : body, type);
+      // As the gateway does (internal/tenant/portal_static.go): gzip when accepted, never cached.
+      if (/\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
+        const packed = gzipSync(body, { level: 9 });
+        return send(res, 200, req.method === "HEAD" ? "" : packed, type, { "Content-Encoding": "gzip", Vary: "Accept-Encoding" });
+      }
+      return send(res, 200, req.method === "HEAD" ? "" : body, type, { Vary: "Accept-Encoding" });
     }
     if (!url.pathname.startsWith("/api/tenant/")) return problem(res, 404, "not_found", "未找到。");
     let body = {};
@@ -410,6 +444,12 @@ export async function startMockServer({
     const auth = vmAuth(req, id);
     if (!auth) return problem(res, 401, "unauthenticated", "需要从门户重新进入工作台。");
     if (url.pathname.startsWith("/api/client/virtual-machines")) return workbenchVMs(req, res, url.pathname, id, auth);
+    if (phoneApi && url.pathname.startsWith("/api/mobile/")) {
+      const input = req.method === "POST" ? await readJson(req).catch(() => ({})) : undefined;
+      const reply = phoneApi(req.method, url.pathname, input, url.search);
+      if (reply.status !== 200) return send(res, reply.status, reply.body, "text/plain; charset=utf-8");
+      return json(res, 200, reply.body);
+    }
     if (workbenchDir && req.method === "GET") {
       if (url.pathname === "/api/client/context") return json(res, 200, {
         mode: "local", connection_id: "local", server_platform: "linux",
@@ -417,19 +457,51 @@ export async function startMockServer({
       });
       if (url.pathname === "/api/account") return json(res, 200, { exists: true, unlocked: true, username: "fixture" });
       if (url.pathname === "/api/environment/initialization") return json(res, 200, { required: false });
+      // Event streams (diagnostics, browser events): a valid stream that asks for no early reconnect.
+      if (req.method === "GET" && url.pathname.startsWith("/api/") && url.pathname.endsWith("/events")) {
+        res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store" });
+        return res.end("retry: 600000\n\n");
+      }
+      const desktopReply = desktopApi?.(req.method, url.pathname);
+      if (desktopReply) return json(res, 200, desktopReply);
       if (url.pathname === "/api/status") return json(res, 200, { job: { running: false }, ready: false, projects: [] });
       if (url.pathname === "/api/browser/tabs") return json(res, 200, { tabs: [] });
       if (url.pathname.startsWith("/api/")) return json(res, 200, {});
 
-      const asset = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-      if (/^(?:assets\/[\w.-]+|cage\.(?:png|svg)|index\.html)$/.test(asset)) {
-        const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2" };
+      // The gateway's rule (internal/webentry): the layout cookie, else the browser's claim to be a phone.
+      const layout = parseCookies(req.headers.cookie)["cage-layout"];
+      const agent = String(req.headers["user-agent"] || "");
+      const hint = String(req.headers["sec-ch-ua-mobile"] || "");
+      const phoneAgent = hint === "?1" || (hint !== "?0" && !agent.includes("iPad") &&
+        (/iPhone|iPod/.test(agent) || (agent.includes("Android") ? agent.includes("Mobile") : agent.includes("Mobi"))));
+      const phone = layout === "phone" || layout === "phone-auto" || (layout !== "desktop" && phoneAgent);
+      const root = phoneApi && phone ? "mobile.html" : "index.html";
+      const asset = url.pathname === "/" ? root : url.pathname.slice(1);
+      if (/^(?:assets\/[\w.-]+|cage\.(?:png|svg)|(?:index|mobile)\.html|favicon\.ico|apple-touch-icon\.png|manifest\.webmanifest|entry-guard\.js|icon-[\w-]+\.png)$/.test(asset)) {
+        const types = { html: "text/html", js: "text/javascript", css: "text/css", png: "image/png", svg: "image/svg+xml", woff2: "font/woff2", ico: "image/x-icon", webmanifest: "application/manifest+json" };
         const type = types[asset.split(".").at(-1)];
         if (type) {
-          const file = await readFile(join(workbenchDir, asset)).catch(() => null);
+          let file = await readFile(join(workbenchDir, asset)).catch(() => null);
           if (!file) return problem(res, 404, "not_found", "未找到。");
+          // A workbench that can serve the phone UI marks its desktop document at "/" (static_assets.go).
+          const offered = phoneApi && url.pathname === "/" && asset === "index.html";
+          if (offered) file = Buffer.from(String(file).replace("<head>", '<head><meta name="cage-phone-entry" content="available">'));
           res.setHeader("Content-Security-Policy", `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: blob:; base-uri 'none'; form-action 'self'; ${ancestors}`);
-          if (asset === "index.html") state.served.push({ vmId: id, userId: auth.session.userId });
+          if (asset === "index.html" || url.pathname === "/") state.served.push({ vmId: id, userId: auth.session.userId, document: asset });
+          // Cache and encode as the workbench does (internal/workbench/static_assets.go, through the
+          // gateway): hashed assets are immutable, the rest revalidates by ETag; .br companions
+          // are served when accepted. Keeps load measurements against this mock realistic.
+          const hashed = /^assets\/(?:[^/]+\/)*[^/]+-[A-Za-z0-9_-]{8}(?:\.[A-Za-z0-9]+)+$/.test(asset);
+          const etag = `"${createHash("sha256").update(file).digest("hex").slice(0, 32)}"`;
+          res.setHeader("Cache-Control", hashed ? "private, max-age=31536000, immutable" : "no-cache");
+          res.setHeader("ETag", etag);
+          if (url.pathname === "/") res.setHeader("Vary", "Cookie, User-Agent, Sec-CH-UA-Mobile");
+          if (req.headers["if-none-match"] === etag) { res.writeHead(304); return res.end(); }
+          const brotli = !offered && /\bbr\b/.test(String(req.headers["accept-encoding"] || "")) ? await readFile(join(workbenchDir, asset + ".br")).catch(() => null) : null;
+          if (brotli) {
+            res.setHeader("Vary", [res.getHeader("Vary"), "Accept-Encoding"].filter(Boolean).join(", "));
+            return send(res, 200, brotli, type, { "Content-Encoding": "br" });
+          }
           return send(res, 200, file, type);
         }
       }

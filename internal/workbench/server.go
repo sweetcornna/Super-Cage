@@ -44,6 +44,7 @@ type Server struct {
 	browserViews                                     displayViewDemand
 	desktopStatus                                    desktopStatusCache
 	scienceLast                                      claudeScienceLast
+	scienceHost                                      scienceHost
 	agentNativeQueue                                 agentNativeQueue
 	macSetupProjectsChecked                          time.Time
 	macSetupProjectsAttempt                          time.Time
@@ -308,6 +309,10 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 	s.controlPublished = true
 	if !workload {
 		defer os.Remove(filepath.Join(profile, "control.json"))
+	} else {
+		// Off (the default) starts nothing.
+		s.syncScienceFront()
+		defer s.stopScienceFront()
 	}
 	serverErrors := store.Stream("http", "error")
 	defer serverErrors.Close()
@@ -510,6 +515,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/claude-desktop/{action}", s.claudeDesktopAction)
 	mux.HandleFunc("GET /api/claude-science", s.claudeScienceStatus)
 	mux.HandleFunc("POST /api/claude-science/{action}", s.claudeScienceAction)
+	mux.HandleFunc("GET /api/claude-science/host-render", s.scienceHostRenderRead)
 	if s.macosGuest != nil {
 		mux.HandleFunc("POST /api/macos/first-setup", s.macOSLoginWindow)
 		mux.HandleFunc("POST /api/macos/login", s.macOSLoginWindow)
@@ -533,7 +539,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/terminals/{id}/metadata", s.terminalSessionMetadata)
 	mux.HandleFunc("GET /api/terminals/{id}/stream", s.terminalStream)
 	web, _ := fs.Sub(assets, "web")
-	mux.Handle("GET /", newStaticHandler(web))
+	mux.Handle("GET /", newEntryStaticHandler(web, s.phoneEntry, s.phoneEntryAvailable))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin, err := url.Parse(s.origin)
 		if err != nil || r.Host != origin.Host {
@@ -544,7 +550,8 @@ func (s *Server) handler() http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
+		frames, checks := s.scienceDocumentSources(r)
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://"+origin.Host+checks+"; img-src 'self' data: blob:; media-src 'self' blob:; font-src 'self'; object-src 'none'; frame-src "+frames+"; base-uri 'none'; form-action 'self'; frame-ancestors 'none'")
 		if (r.Method != "GET" && r.Method != "HEAD") || strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			if r.Header.Get("Origin") != s.origin {
 				http.Error(w, "Origin refused", 403)
@@ -607,6 +614,9 @@ func (s *Server) handler() http.Handler {
 		}
 		if s.macosGuest != nil && (!macOSWorkbenchRoute(r.URL.Path) || s.macSetupPending() && !macOSSetupRoute(r.URL.Path)) {
 			http.Error(w, "此功能尚未接入 macOS 客机", http.StatusConflict)
+			return
+		}
+		if s.scienceEntryRefuses(w, r) {
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/mobile/") {
@@ -796,6 +806,7 @@ func (s *Server) proposed(w http.ResponseWriter, r *http.Request) (savedProfile,
 	input.TransferAllowUnclean = s.preferences.TransferAllowUnclean
 	input.Clock12Hour = s.preferences.Clock12Hour
 	input.BrowserHomeURL = browserHomeURL(s.preferences)
+	input.ScienceHostRender = s.preferences.ScienceHostRender
 	s.mu.Unlock()
 	if !readJSON(w, r, &input) {
 		return savedProfile{}, false
@@ -848,6 +859,8 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 	s.launch(w, kind, func() error {
 		s.mu.Lock()
 		v.Preferences.BrowserHomeURL = s.preferences.BrowserHomeURL
+		// Changed only through POST /api/claude-science/host-render.
+		v.Preferences.ScienceHostRender = s.preferences.ScienceHostRender
 		s.mu.Unlock()
 		return s.apply(v, true)
 	})

@@ -2,7 +2,9 @@ import { useEffect } from "react";
 import "./icon-hints.css";
 
 // One delegated hint covers both workbench surfaces, including controls rendered later.
-export function IconHints() {
+// focusVisibleOnly: hint on focus only when the focus is visible (keyboard), not when a tap or a closing dialog
+// moved it (the phone UI in a phone browser).
+export function IconHints({ focusVisibleOnly = false } = {}) {
   useEffect(() => {
     const hint = document.createElement("div");
     hint.className = "icon-hint";
@@ -70,7 +72,11 @@ export function IconHints() {
       hovering = null;
       if (focused) show(focused); else hide();
     }
-    function focus(event) { focused = candidate(event.target); if (focused) show(focused); }
+    function focus(event) {
+      if (focusVisibleOnly && !event.target.matches?.(":focus-visible")) return;
+      focused = candidate(event.target);
+      if (focused) show(focused);
+    }
     function blur(event) { if (focused === event.target) { focused = null; if (hovering) show(hovering); else hide(); } }
     function down(event) {
       if (event.pointerType !== "touch") return;
@@ -119,6 +125,6 @@ export function IconHints() {
       window.removeEventListener("resize", dismiss);
       hint.remove();
     };
-  }, []);
+  }, [focusVisibleOnly]);
   return null;
 }

@@ -24,6 +24,11 @@
   --button-ink: #faf9f5;
   --shadow: 0 1px 2px #1f1e1d0a, 0 8px 28px #1f1e1d10;
   --radius-card: 18px;
+  /* Safe-area insets in one place, so a test can stand in for a notch (ui/scripts/mobile-web-matrix.mjs). */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -44,7 +49,7 @@ button:disabled { opacity: .48; cursor: default; }
   height: 100vh; height: min(100dvh, var(--mobile-height, 100dvh)); overflow: hidden;
   background: var(--paper);
 }
-.mobile-app:not(.native-phone) { padding: env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+.mobile-app:not(.native-phone) { padding: var(--safe-top) var(--safe-right) 0 var(--safe-left); }
 .mobile-app.native-phone { --safe-bottom: 0px; }
 .topbar {
   position: relative; z-index: 3;
