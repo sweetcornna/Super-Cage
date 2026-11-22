@@ -57,8 +57,10 @@ const (
 	entryHandshakeTimeout = 20 * time.Second
 	entryHopWaitDelay     = 2 * time.Second
 	// entryCutGrace is how long a cut waits for terminal sessions to write
-	// their reset before it closes the connection.
-	entryCutGrace = 250 * time.Millisecond
+	// their reset before it closes the connection (R3-3). Guest output stops
+	// at the cut; a client that is behind gets this long to take in the
+	// frame already on its way, the reset and the notice.
+	entryCutGrace = 2 * time.Second
 	// entryOperationWait bounds how long a new terminal waits for another
 	// terminal's creation or a monitor round to release the operation lock.
 	entryOperationWait     = 10 * time.Second
