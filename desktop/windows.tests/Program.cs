@@ -154,6 +154,26 @@ assertions = 0;
         Check(ScienceFrame.Forget(journalData, [second]) && !File.Exists(ScienceFrame.JournalPath(journalData)), "an empty journal stays on disk");
         File.WriteAllText(ScienceFrame.JournalPath(journalData), "{\"framed\":[{\"origin\":\"http://localhost:1\",\"site\":\"x\"},{\"origin\":\"" + origin + "\",\"site\":\"http://localhost\"}]}");
         Check(ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(origin, "http://localhost")]), "a journal entry that is no session origin was kept");
+
+        // The start's sweep (SweepJournal): what it cleared is forgotten; once
+        // the window went on without it (late), it clears nothing more and the
+        // journal stays for the next start.
+        var sweptOrigins = new List<string>();
+        ScienceFrame.Record(journalData, second, "http://localhost");
+        ScienceFrame.SweepJournal(journalData, (framedOrigin, framedSite) => { sweptOrigins.Add(framedOrigin); return Task.FromResult(framedOrigin == origin); }, CancellationToken.None).Wait();
+        Check(sweptOrigins.SequenceEqual([origin, second]) && ScienceFrame.Journal(journalData).SequenceEqual([new ScienceFrame.Framed(second, "http://localhost")]),
+            "the sweep forgot an origin it did not clear, or kept one it cleared");
+        using (var late = new CancellationTokenSource())
+        {
+            var hung = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            ScienceFrame.Record(journalData, origin, "http://localhost");
+            var lateCalls = 0;
+            var lateSweep = ScienceFrame.SweepJournal(journalData, (_, _) => { lateCalls++; return hung.Task; }, late.Token);
+            late.Cancel();
+            hung.SetResult(true);
+            Check(lateSweep.Wait(TimeSpan.FromSeconds(5)) && lateCalls == 1 && ScienceFrame.Journal(journalData).Count == 2,
+                "a sweep the window stopped waiting for went on clearing or forgot what it cleared");
+        }
         File.Delete(ScienceFrame.JournalPath(journalData));
 
         // The calls and the policy are the ones the Go tests prove in headless Chromium.

@@ -304,6 +304,26 @@ internal static partial class ScienceFrame
         return WriteJournal(userDataFolder, framed.Where(item => !gone.Contains(item.Origin)).ToList());
     }
 
+    // SweepJournal is the start's sweep (ScienceFrameHost.Sweep): clear
+    // (one origin and its site; true once its storage is cleared) runs for
+    // each origin the journal names, and what it cleared is forgotten. Once
+    // late is cancelled (the window went on without waiting for the sweep,
+    // MainWindow) it clears nothing more and forgets nothing: the journal
+    // stays for the next start, and no origin the new WebView frames
+    // meanwhile is cleared under it.
+    public static async Task SweepJournal(string userDataFolder, Func<string, string, Task<bool>> clear, CancellationToken late)
+    {
+        var framed = Journal(userDataFolder);
+        if (framed.Count == 0) return;
+        var cleared = new List<string>();
+        foreach (var item in framed)
+        {
+            if (late.IsCancellationRequested) return;
+            if (await clear(item.Origin, item.Site)) cleared.Add(item.Origin);
+        }
+        if (!late.IsCancellationRequested) Forget(userDataFolder, cleared);
+    }
+
     private static bool WriteJournal(string userDataFolder, List<Framed> framed)
     {
         var path = JournalPath(userDataFolder);

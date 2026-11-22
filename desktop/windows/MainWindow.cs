@@ -26,6 +26,8 @@ internal sealed class MainWindow : Form
     // Smoke only (CAGE_SMOKE_SCIENCE=retry): the first launch holds its reply
     // while the smoke retries the window (SmokeRetry).
     private bool smokeSlowLaunch;
+    // The start's journal sweep once took too long: said once (Initialize).
+    private bool sweepLateReported;
     private bool completingSmoke;
     private string smokePhase = "starting";
     // Smoke only: what the Claude Science part of a smoke test recorded
@@ -264,8 +266,21 @@ internal sealed class MainWindow : Form
                 webFailed = true; science = null; Error("工作台显示进程已退出。后台任务保留，可重试连接。");
             };
             // What a killed or crashed window's Claude Science frame stored
-            // (N6); without a journal, one existence check.
-            await ScienceFrameHost.Sweep(core, Path.Combine(Backend.Root, "webview2"));
+            // (N6); without a journal, one existence check. A sweep that takes
+            // longer than a few seconds (a DevTools call that never returns)
+            // does not hold up the window: it stops, the journal stays for the
+            // next start, and the diagnostics say so once.
+            var late = new CancellationTokenSource();
+            try { await ScienceFrameHost.Sweep(core, data, late.Token).WaitAsync(TimeSpan.FromSeconds(5)); }
+            catch (TimeoutException)
+            {
+                late.Cancel();
+                if (!sweepLateReported)
+                {
+                    sweepLateReported = true;
+                    _ = Backend.Report("Claude Science journal sweep took longer than 5 s at the window's start; the window went on and the journal stays for the next start.");
+                }
+            }
             if (!generation.IsCurrent(turn)) return;
             science = arguments == null ? null : new ScienceFrameHost(core, Backend.Root, Path.Combine(Backend.Root, "webview2"), reason =>
                 Script("window.dispatchEvent(new CustomEvent('cage-science-frame',{detail:{error:" + JsonSerializer.Serialize(reason) + "}}));"),

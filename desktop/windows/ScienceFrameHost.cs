@@ -400,11 +400,12 @@ internal sealed class ScienceFrameHost
         ScienceFrame.Forget(data, cleared);
     }
 
-    private static async Task<bool> Clear(CoreWebView2 core, string framedOrigin, string site)
+    private static async Task<bool> Clear(CoreWebView2 core, string framedOrigin, string site, CancellationToken late = default)
     {
         if (site.Length == 0) return false;
         foreach (var call in ScienceFrame.ClearOrigin(framedOrigin, site))
         {
+            if (late.IsCancellationRequested) return false;
             try { await core.CallDevToolsProtocolMethodAsync(call.Method, call.Params.ToJsonString()); }
             catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException) { return false; }
         }
@@ -414,15 +415,9 @@ internal sealed class ScienceFrameHost
     // Sweep runs at every start of the WebView, with or without the
     // switches: the origins a killed or crashed window framed and never
     // cleared are cleared now. Without a journal it is one existence check.
-    public static async Task Sweep(CoreWebView2 core, string data)
-    {
-        var framed = ScienceFrame.Journal(data);
-        if (framed.Count == 0) return;
-        var cleared = new List<string>();
-        foreach (var item in framed)
-            if (await Clear(core, item.Origin, item.Site)) cleared.Add(item.Origin);
-        ScienceFrame.Forget(data, cleared);
-    }
+    // Once late is cancelled it stops (ScienceFrame.SweepJournal).
+    public static Task Sweep(CoreWebView2 core, string data, CancellationToken late) =>
+        ScienceFrame.SweepJournal(data, (origin, site) => Clear(core, origin, site, late), late);
 
     private async Task Send(string session, ScienceFrame.Call call)
     {
