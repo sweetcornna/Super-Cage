@@ -19,6 +19,9 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
     let touchTimer;
     let longPressed = null;
 
+    const labelOf = (element) => element.getAttribute("title") || element.getAttribute("aria-label")
+      || element.querySelector("img[alt]")?.getAttribute("alt") || element.querySelector(".status-label")?.textContent;
+
     function candidate(node) {
       const element = node instanceof Element ? node.closest('button, a[href], [role="button"], [role="img"][aria-label], svg[aria-label]') : null;
       if (!element || element.closest(".icon-hint")) return null;
@@ -27,11 +30,12 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
       if (!isImage) {
         const clone = element.cloneNode(true);
         clone.querySelectorAll('svg, img, [aria-hidden="true"], .sr-only, .visually-hidden').forEach(child => child.remove());
+        // A status bar label that the layout folds into its icon (touch.css) is not text.
+        if (element.querySelector(".status-label")?.offsetWidth <= 1) clone.querySelector(".status-label").remove();
         if (clone.textContent.trim()) return null;
         if (!element.querySelector('svg, img, [aria-hidden="true"]')) return null;
       }
-      const label = element.getAttribute("title") || element.getAttribute("aria-label") || element.querySelector("img[alt]")?.getAttribute("alt");
-      return label?.trim() ? element : null;
+      return labelOf(element)?.trim() ? element : null;
     }
 
     function hide() {
@@ -48,7 +52,7 @@ export function IconHints({ focusVisibleOnly = false } = {}) {
       hide();
       current = element;
       savedTitle = element.getAttribute("title");
-      hint.textContent = savedTitle || element.getAttribute("aria-label") || element.querySelector("img[alt]")?.getAttribute("alt");
+      hint.textContent = savedTitle || labelOf(element);
       if (savedTitle !== null) {
         if (!element.hasAttribute("aria-label")) { element.setAttribute("aria-label", savedTitle); temporaryLabel = true; }
         element.removeAttribute("title");

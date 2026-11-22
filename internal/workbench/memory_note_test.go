@@ -62,7 +62,7 @@ func TestRecoveryWaitsWhileTheBrowserIsHeldAtItsLimit(t *testing.T) {
 	}
 	e := s.safety.Explanation
 	if e == nil || e.State != networkWaitingMemory || !e.MemoryShort || e.RecheckAt == nil ||
-		!strings.Contains(e.Reason, "隔离浏览器占用的内存超过了环境能分给它的上限") {
+		!strings.Contains(e.Reason, "隔离浏览器内存已到上限（约 2 GB）") || e.DeadlineMs != e.RecheckAt.UnixMilli() {
 		t.Fatalf("explanation while waiting: %+v", e)
 	}
 	if advice := joinedAdvice(e.Advice); !strings.Contains(advice, "关闭或刷新占用内存较多的标签页") || !strings.Contains(advice, "可以把内存调到 6 GB") {
@@ -112,7 +112,7 @@ func TestUnconfirmedBrowserReadExplainsTheHeldBrowser(t *testing.T) {
 			}
 			e := s.safety.Explanation
 			if e == nil || e.State != networkUnconfirmed || !e.MemoryShort ||
-				!strings.HasPrefix(e.Reason, "隔离浏览器占用的内存超过了环境能分给它的上限") || !strings.Contains(e.Reason, "无法读取浏览器时区和语言") {
+				!strings.HasPrefix(e.Reason, "隔离浏览器内存已到上限（约 2 GB），") || !strings.Contains(e.Reason, "读不到它的时区和语言") {
 				t.Fatalf("explanation: %+v", e)
 			}
 			if advice := joinedAdvice(e.Advice); !strings.Contains(advice, tc.advice) || strings.Contains(advice, tc.notAdvice) {
@@ -138,14 +138,14 @@ func TestMemoryNoteReadsTheAllocator(t *testing.T) {
 		{"short at a manual maximum: the allocator's own advice",
 			cage.ResourceStatus{ObservedAt: now, Guest: guest, Pressure: true, Short: true, LimitedBy: "maximum", Maximum: 4 * testGiB, Possible: 6 * testGiB,
 				Advice: &cage.ResourceAdvice{Message: "环境内存已用满手动设置的 4 GB。改为自动（推荐）后可以调到 6 GB，需要重启环境。", MemoryBytes: 6 * testGiB, RestartRequired: true}},
-			memorySizing{applies: true, manual: true}, memoryCauseEnvironment, "环境内存不足（可用约 300 MB，共 4.0 GB）",
+			memorySizing{applies: true, manual: true}, memoryCauseEnvironment, "环境内存不足（共 4.0 GB）",
 			[]string{"改为自动（推荐）后可以调到 6 GB"}, "调高内存上限"},
 		{"short, held by the machine",
 			cage.ResourceStatus{ObservedAt: now, Guest: guest, Short: true, LimitedBy: "machine", Maximum: 6 * testGiB, Possible: 6 * testGiB},
 			linux, memoryCauseEnvironment, "环境内存不足", []string{"这台机器暂时没有更多内存可给环境"}, "调到"},
 		{"browser held at its limit, automatic gives more",
 			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 4 * testGiB, Possible: 6 * testGiB},
-			linux, memoryCauseBrowser, "隔离浏览器占用的内存超过了环境能分给它的上限",
+			linux, memoryCauseBrowser, "隔离浏览器内存已到上限（约 2 GB）",
 			[]string{"关闭或刷新占用内存较多的标签页", "可以把内存调到 6 GB"}, "结束环境里不需要的程序"},
 		{"browser held, manual allocation",
 			cage.ResourceStatus{ObservedAt: now, Guest: guest, BrowserPressure: true, Classes: held, Maximum: 4 * testGiB, Possible: 6 * testGiB},

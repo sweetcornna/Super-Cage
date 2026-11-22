@@ -17,6 +17,8 @@ export async function createWorkbench({
   cliRequest,
   beforeNavigate,
   launchOptions = {},
+  // Extra browser-context options (a touch tablet: hasTouch, isMobile).
+  contextOptions = {},
   startupFailure = false,
   waitForReady = true,
   initialization = { required: false },
@@ -30,7 +32,7 @@ export async function createWorkbench({
     process.env.CAGE_PLAYWRIGHT_MODULE || "playwright",
   );
   const browser = await engines[process.env.CAGE_TEST_BROWSER || "chromium"].launch({ headless: true, executablePath: process.env.CAGE_TEST_BROWSER_PATH, ...launchOptions });
-  const context = await browser.newContext({ viewport, recordVideo, deviceScaleFactor });
+  const context = await browser.newContext({ viewport, recordVideo, deviceScaleFactor, ...contextOptions });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));

@@ -58,6 +58,10 @@ function networkExplanation(value, mode, now, gate) {
   // The unconfirmed lease is the gate's own: its remaining time when the
   // server sent it, else lease_until as before.
   const leaseUntil = value.state === "unconfirmed" && Number.isFinite(gate?.lease_end) ? gate.lease_end : at(value.lease_until);
+  // A newer server's stable sentences plus the one moment they count down to
+  // (deadline_ms, unix milliseconds). The unconfirmed lease keeps the gate's
+  // own clock reading.
+  const deadline = Number.isFinite(value.deadline_ms) ? leaseUntil ?? value.deadline_ms : null;
   return {
     state: value.state,
     reason: typeof value.reason === "string" ? value.reason : "",
@@ -69,6 +73,7 @@ function networkExplanation(value, mode, now, gate) {
     recheckInSeconds: seconds(recheckAt),
     leaseUntil,
     leaseEndsInSeconds: seconds(leaseUntil),
+    deadline,
   };
 }
 
@@ -109,12 +114,37 @@ export function countdownText(seconds) {
   return rest ? `约 ${minutes} 分 ${rest} 秒后` : `约 ${minutes} 分钟后`;
 }
 
+// What the recheck waits for, as the next sentence names it.
+const MEMORY_SUBJECTS = { environment: "环境内存", browser: "浏览器内存" };
+
+// The next-step sentence for a state that has a deadline, as [before, timer,
+// after]: the one live countdown sits in the middle. Other states, and the
+// time after the deadline, show the server's own sentence (no parts).
+function nextParts(explanation, seconds) {
+  const when = countdownText(seconds).replace("约 ", "");
+  switch (explanation.state) {
+    case "waiting_memory":
+      return [`${MEMORY_SUBJECTS[explanation.memoryCause] || "内存"}回落后会自动重检并恢复联网，最迟 `, when, "。"];
+    case "recheck_scheduled":
+      return ["将在 ", when, "自动重检，通过后恢复联网。"];
+    case "unconfirmed":
+      return ["监测恢复后会自动延长联网许可，否则外网将在 ", when, "自动暂停。"];
+  }
+}
+
 export function explanationView(explanation, now = Date.now()) {
   if (!explanation) return null;
   const kind = EXPLAINED[explanation.state] || EXPLAINED.check_required;
-  const at = kind.countdown === "lease" ? explanation.leaseUntil : kind.countdown === "recheck" ? explanation.recheckAt : null;
-  const seconds = at === null || at === undefined ? null : Math.max(0, Math.ceil((at - now) / 1000));
+  const secondsTo = (at) => (at === null || at === undefined ? null : Math.max(0, Math.ceil((at - now) / 1000)));
+  // A newer server's explanation carries its deadline: the reason is the
+  // server's stable sentence and the next step one sentence with the single
+  // live countdown in it. An older server's text and countdown stay as they were.
+  const stable = explanation.deadline != null;
+  const at = stable ? null : kind.countdown === "lease" ? explanation.leaseUntil : kind.countdown === "recheck" ? explanation.recheckAt : null;
+  const seconds = secondsTo(at);
   const when = countdownText(seconds);
+  const left = stable ? secondsTo(explanation.deadline) : 0;
+  const parts = left > 0 ? nextParts(explanation, left) : null;
   const countdown = seconds === null ? null : {
     at, seconds,
     text: kind.countdown === "lease"
@@ -129,7 +159,9 @@ export function explanationView(explanation, now = Date.now()) {
     label: kind.label,
     title: explanation.state === "waiting_memory" && MEMORY_TITLES[explanation.memoryCause] || kind.title,
     reason: explanation.reason,
-    next: explanation.next,
+    next: parts ? parts.join("") : explanation.next,
+    // [before, timer, after]: an older server's sentence, then its countdown text.
+    nextParts: parts || [countdown ? explanation.next + " " : explanation.next, countdown?.text],
     advice: explanation.advice.map((text) => ({ text, action: adviceAction(text) })),
     memoryShort: explanation.memoryShort,
     memoryCause: explanation.memoryCause || "",

@@ -37,6 +37,7 @@
   :root .workspace-sidebar .sidebar-tab > .sidebar-session,
   .text-button,
   .quiet-button,
+  .workspace-tab-menu button,
   :root .settings-page .settings-sidebar nav button {
     min-height: 44px;
   }
@@ -77,6 +78,36 @@
   .sidebar-tab,
   .browser-tab {
     -webkit-touch-callout: none;
+  }
+  /* More browser tabs than fit at a readable width (workspace-tabs.jsx): the strip scrolls sideways under a
+     finger; a drag on a tab pans it instead of carrying the tab. */
+  .browser-tabs.scrolls {
+    overflow: auto hidden;
+    scrollbar-width: none;
+  }
+  .browser-tabs.scrolls .browser-tab {
+    touch-action: pan-x;
+  }
+}
+
+/* A status bar under 1150 px (a tablet held upright, or on its side beside the sidebar) shows icons only: the
+   longest exit address, gate label, sync message and the time zone need that much room. The words stay in the
+   accessibility tree and become the tooltip (a long press; icon-hints.jsx). */
+@media (pointer: coarse) and (hover: none) {
+  .status-bar {
+    container-type: inline-size;
+  }
+  @container (max-width: 1150px) {
+    .status-bar > button > .status-label {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+    }
+    .status-bar > button:has(> .status-label) {
+      min-width: 44px;
+    }
   }
 }
 

@@ -82,6 +82,12 @@ export function WorkspaceTabs({
   const [query, setQuery] = useState("");
   const [width, setWidth] = useState(0);
   const pointer = useRef(null);
+  const press = useRef(0);
+  // Until when the click that ends a long press is ignored (it would land on the menu's backdrop).
+  const settle = useRef(0);
+  // Under a finger the sidebar's rows scroll and the browser tabs may too, so a drag cannot reorder them:
+  // a long press on a row opens a menu to move it, and tabs keep a readable width and scroll sideways
+  // (touch.css).
   const suppressClick = useRef(false);
   const trigger = useRef();
   const list = useRef();
@@ -95,17 +101,19 @@ export function WorkspaceTabs({
   }, [horizontal]);
   const gap = tabs.length > 20 ? 1 : 4;
   const available = Math.max(0, width - gap * Math.max(0, tabs.length - 1));
-  const regularWidth = Math.min(220, available / Math.max(1, tabs.length));
+  const minTab = horizontal && matchMedia("(pointer: coarse) and (hover: none)").matches ? 156 : 0;
+  const regularWidth = Math.max(minTab, Math.min(220, available / Math.max(1, tabs.length)));
   const activeWidth =
     tabs.length > 1 && tabs.some((tab) => tab.id === active)
       ? Math.min(220, Math.max(regularWidth, Math.min(160, available * 0.4)))
       : regularWidth;
   const otherWidth = Math.max(
-    0,
+    minTab,
     (available - activeWidth) / Math.max(1, tabs.length - 1),
   );
   const tabWidth = (id) =>
     id === active ? activeWidth : Math.min(220, otherWidth);
+  const scrolls = minTab > 0 && tabs.length * (minTab + gap) - gap > width;
   const matchingTabs = tabs.filter((tab) =>
     `${tabName(tab, saved)} ${tab.url || ""}`
       .toLowerCase()
@@ -115,6 +123,8 @@ export function WorkspaceTabs({
     ? !busy && openingSession !== tab.cli_session_id && !tab.sessionRunningElsewhere
     : ready || tab.kind === "terminal");
   const finishDrag = (commit, event) => {
+    clearTimeout(press.current);
+    settle.current = Math.min(settle.current, performance.now() + 400);
     const current = pointer.current;
     pointer.current = null;
     setDrag(null);
@@ -159,6 +169,15 @@ export function WorkspaceTabs({
       id: tab.id, startX: event.clientX, startY: event.clientY,
       items, group, order: items.map(item => item.id), moved: false,
     };
+    clearTimeout(press.current);
+    if (!horizontal && !vertical && event.pointerType === "touch") {
+      const row = event.currentTarget.firstElementChild;
+      press.current = setTimeout(() => {
+        if (!pointer.current || pointer.current.moved) return;
+        settle.current = Infinity;
+        openMenu(tab, row, true);
+      }, 450);
+    }
     (event.target.closest("button") || event.currentTarget).setPointerCapture(event.pointerId);
   };
   const moveDrag = (event) => {
@@ -212,6 +231,17 @@ export function WorkspaceTabs({
       ),
     });
   };
+  // The tab's menu under its button; order: only the move up / down choices (a long press on a sidebar row).
+  const openMenu = (tab, button, order) => {
+    trigger.current = button;
+    const rect = button.getBoundingClientRect();
+    setMenu({
+      tab,
+      order,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
+      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
+    });
+  };
   const showMenu = (tab, event) => {
     event.preventDefault();
     if (!horizontal && !vertical) {
@@ -219,20 +249,14 @@ export function WorkspaceTabs({
       event.currentTarget.parentElement.querySelector(".terminal-row-actions button:not(:disabled)")?.focus();
       return;
     }
-    trigger.current = event.currentTarget;
-    const rect = event.currentTarget.getBoundingClientRect();
-    setMenu({
-      tab,
-      left: Math.max(8, Math.min(rect.left, window.innerWidth - 224)),
-      top: Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 152)),
-    });
+    openMenu(tab, event.currentTarget);
   };
   useEffect(() => {
-    if (horizontal) return;
+    if (horizontal && !scrolls) return;
     list.current
       ?.querySelector('[aria-selected="true"]')
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
-  }, [active, horizontal, tabs.length]);
+  }, [active, horizontal, scrolls, tabs.length]);
   useEffect(() => {
     if (!menu && !allOpen) return;
     const dismiss = (event) => {
@@ -254,10 +278,17 @@ export function WorkspaceTabs({
       document.removeEventListener("click", outside, true);
     };
   }, [menu, allOpen]);
+  const at = menu?.order ? tabs.findIndex((tab) => tab.id === menu.tab.id) : -1;
   const actions = menu && (
     <div className="menu workspace-tab-menu"
       style={{ top: menu.top, left: menu.left }}
-      role="menu" aria-label="标签操作">
+      role="menu" aria-label={menu.order ? "调整顺序" : "标签操作"}>
+      {menu.order ? [["上移", -1], ["下移", 1]].map(([text, step]) => (
+        <button key={step} role="menuitem" disabled={!tabs[at + step]}
+          onClick={() => { setMenu(null); onReorder(menu.tab.id, tabs[at + step].id); }}>
+          {text}
+        </button>
+      )) : <>
               <button
                 role="menuitem"
                 onClick={() => {
@@ -299,6 +330,7 @@ export function WorkspaceTabs({
                 <X size={15} />
                 关闭标签<kbd>{shortcut("⌘W")}</kbd>
               </button>
+      </>}
     </div>
   );
   return (
@@ -310,7 +342,7 @@ export function WorkspaceTabs({
         aria-orientation={horizontal ? "horizontal" : "vertical"}
         className={
           horizontal || vertical
-            ? `browser-tabs ${vertical ? "browser-tabs-vertical" : ""} ${drag ? "is-dragging" : ""}`
+            ? `browser-tabs ${vertical ? "browser-tabs-vertical" : ""} ${drag ? "is-dragging" : ""} ${scrolls ? "scrolls" : ""}`
             : "sidebar-tabs"
         }
         style={
@@ -334,6 +366,12 @@ export function WorkspaceTabs({
           const openError = tab.historySession && sessionOpenError?.id === tab.cli_session_id ? sessionOpenError.message : "";
           const ownerChip = !horizontal && !vertical && ownerChips[tab.sessionOwner];
           const errorID = `session-open-error-${tab.cli_session_id}`;
+          // The row's chip: the account (the provider is in the mark, so the label
+          // is the account alone), or where an ssh terminal came from.
+          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.claudeLabel.replace(/^Codex · /, "") }
+            : tab.origin?.kind === "ssh" ? { text: `来自 ${tab.origin.device}${tab.origin.kept ? " · 已保留" : ""}`,
+              title: tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束" } : null;
+          const chipElement = chip && <small className="claude-tab-profile" title={chip.title}>{chip.text}</small>;
           return (
             <React.Fragment key={tab.id}>
             <div
@@ -357,7 +395,7 @@ export function WorkspaceTabs({
                 if (pointer.current) finishDrag(false);
               }}
               onClickCapture={(event) => {
-                if (suppressClick.current) {
+                if (suppressClick.current || performance.now() < settle.current) {
                   event.preventDefault();
                   event.stopPropagation();
                   suppressClick.current = false;
@@ -417,11 +455,11 @@ export function WorkspaceTabs({
                 <TabIcon kind={tab.kind} favicon={tab.favicon} size={15}
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
                   provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
-                <span>{title}</span>
-                {/* A phone or external row names its owner instead; the account is in the label and tooltip. */}
-                {tab.claudeLabel && !ownerChip && <small className="claude-tab-profile">{tab.claudeLabel}</small>}
-                {tab.origin?.kind === "ssh" && !tab.claudeLabel && !ownerChip &&
-                  <small className="claude-tab-profile" title={tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束"}>来自 {tab.origin.device}{tab.origin.kept ? " · 已保留" : ""}</small>}
+                {/* A phone or external row names its owner instead; the account is in the label and tooltip.
+                    In the sidebar the title and the chip share one line: a chip that does not fit whole is not shown (cli-sessions.css). */}
+                {chip && !horizontal && !vertical
+                  ? <i className="session-text"><span>{title}</span>{chipElement}</i>
+                  : <><span>{title}</span>{chipElement}</>}
                 {saved[tab.id]?.pinned && <Pin size={11} className="tab-pin" />}
                 {ownerChip && <small className="chip session-owner-chip">{ownerChip.label}</small>}
                 {!horizontal && !vertical && (opening
@@ -520,7 +558,7 @@ export function WorkspaceTabs({
       {menu &&
         createPortal(
           <>
-            <div className="menu-dismiss" onClick={() => setMenu(null)} />
+            <div className="menu-dismiss" onClick={() => { if (performance.now() >= settle.current) setMenu(null); }} />
             {actions}
           </>,
           document.body,

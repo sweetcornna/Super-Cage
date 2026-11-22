@@ -5,7 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/containerenv"
@@ -53,7 +56,10 @@ func (s *Server) pendingRecoveryLocked() (networkRecovery, bool) {
 }
 
 // Called with s.mu held. Reuse the ordinary network status text on every
-// platform; no independent timer or cached permission is introduced.
+// platform; no independent timer or cached permission is introduced. The text
+// carries no countdown: it is read on every status poll, and a number that
+// changes with each read would change the status every time. Clients that count
+// down use the explanation's deadline_ms.
 func (s *Server) networkRecoveryMessageLocked(now time.Time) string {
 	r, pending := s.pendingRecoveryLocked()
 	if !pending {
@@ -70,12 +76,11 @@ func (s *Server) networkRecoveryMessageLocked(now time.Time) string {
 		return "自动重检正在等待环境就绪"
 	}
 	if now.Before(r.Next) {
-		seconds := (r.Next.Sub(now) + time.Second - 1) / time.Second
-		return fmt.Sprintf("自动重检将在 %d 秒后尝试", seconds)
+		return "自动重检稍后进行"
 	}
 	if !r.pressureSince.IsZero() {
-		if left := r.pressureSince.Add(recoveryPressureWait).Sub(now); left > 0 {
-			return fmt.Sprintf("环境内存不足，自动重检最多再等待 %d 秒，之后仍会进行", (left+time.Second-1)/time.Second)
+		if r.pressureSince.Add(recoveryPressureWait).After(now) {
+			return "环境内存不足，自动重检会等内存回落，最迟 " + durationWords(recoveryPressureWait) + "内也会进行"
 		}
 		return "环境内存仍不足，自动重检即将进行"
 	}
@@ -325,7 +330,9 @@ func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing mem
 	switch {
 	case (status.Pressure || status.Short) && fresh:
 		note.Short, note.Cause = true, memoryCauseEnvironment
-		note.Reason = fmt.Sprintf("环境内存不足（可用约 %s，共 %s）", humanBytes(status.Guest.Available), humanBytes(status.Guest.Total))
+		// The size only: what is free changes with every reading, and the
+		// reason is shown as it is until the situation itself changes.
+		note.Reason = fmt.Sprintf("环境内存不足（共 %s）", humanBytes(status.Guest.Total))
 	case status.Pressure && status.Error != "":
 		// A starving guest also fails to answer the resource probe; keep its
 		// last pressured reading rather than report the memory as fine.
@@ -334,8 +341,8 @@ func memoryNote(status cage.ResourceStatus, err error, now time.Time, sizing mem
 	case status.BrowserPressure && fresh:
 		note.Short, note.Cause = true, memoryCauseBrowser
 		note.Reason = "隔离浏览器内存紧张"
-		if browserHeld(status) {
-			note.Reason = "隔离浏览器占用的内存超过了环境能分给它的上限"
+		if limit := browserHeldLimit(status); limit > 0 {
+			note.Reason = "隔离浏览器内存已到上限（约 " + memoryGB(limit) + "）"
 		}
 	case status.HostPressure:
 		note.Short, note.Cause = true, memoryCauseMachine
@@ -369,16 +376,20 @@ const browserHeldSlack = 64 << 20
 // limit: its class stalls (browser_pressure, a 1 % stall) while its use has
 // reached the soft limit, where the kernel throttles it. A browser that
 // stalls below its limit is short of memory like the rest of the guest.
-func browserHeld(status cage.ResourceStatus) bool {
+func browserHeld(status cage.ResourceStatus) bool { return browserHeldLimit(status) > 0 }
+
+// browserHeldLimit is the soft limit the browser is held at, or 0 when it is
+// not held.
+func browserHeldLimit(status cage.ResourceStatus) uint64 {
 	if !status.BrowserPressure {
-		return false
+		return 0
 	}
 	for _, class := range status.Classes {
-		if class.Name == "browser" {
-			return class.High > 0 && class.Current+browserHeldSlack >= class.High
+		if class.Name == "browser" && class.High > 0 && class.Current+browserHeldSlack >= class.High {
+			return class.High
 		}
 	}
-	return false
+	return 0
 }
 
 // sizingAdvice is the allocator's own sentence about more memory when it
@@ -459,26 +470,57 @@ const (
 )
 
 // networkExplanation says why networking is closed or at risk and what will
-// happen next, in the product's words. Times are absolute; clients count down.
+// happen next, in the product's words. reason and next are stable sentences:
+// they hold no countdown, so the status says the same thing on every read until
+// the situation changes. The time is deadline_ms (unix milliseconds) beside the
+// older RFC 3339 recheck_at and lease_until; clients count down to it
+// themselves.
 type networkExplanation struct {
-	State       string     `json:"state"`
-	Reason      string     `json:"reason"`
-	Next        string     `json:"next"`
+	State  string `json:"state"`
+	Reason string `json:"reason"`
+	Next   string `json:"next"`
+	// DeadlineMs is the one moment the explanation counts down to: the
+	// automatic recheck (waiting_memory, recheck_scheduled) or the end of the
+	// unconfirmed lease (unconfirmed). Absent when no time is promised.
+	DeadlineMs  int64      `json:"deadline_ms,omitempty"`
 	RecheckAt   *time.Time `json:"recheck_at,omitempty"`
 	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
 	MemoryShort bool       `json:"memory_short"`
 	// MemoryCause says what is short when memory_short is set: environment,
 	// browser (held at its limit) or machine. Additive; older clients ignore it.
-	MemoryCause string    `json:"memory_cause,omitempty"`
-	Advice      []string  `json:"advice,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	MemoryCause string   `json:"memory_cause,omitempty"`
+	Advice      []string `json:"advice,omitempty"`
+	// UpdatedAt is when the explanation last changed, not when it was last
+	// recomputed.
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // refreshNetworkExplanationLocked recomputes safety.Explanation from the
 // current state. Called with s.mu held on every network transition and every
-// monitor and recovery round, so the stored value is at most a round old.
+// monitor and recovery round (and by the phone's environment read), so the
+// stored value is at most a round old. An unchanged explanation keeps its
+// value and its updated_at: nothing a client compares may change between
+// two reads that say the same.
 func (s *Server) refreshNetworkExplanationLocked(now time.Time) {
-	s.safety.Explanation = s.networkExplanationLocked(now)
+	next := s.networkExplanationLocked(now)
+	if prev := s.safety.Explanation; prev != nil && next != nil && sameExplanation(prev, next) {
+		return
+	}
+	s.safety.Explanation = next
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+// sameExplanation compares everything but updated_at.
+func sameExplanation(a, b *networkExplanation) bool {
+	return a.State == b.State && a.Reason == b.Reason && a.Next == b.Next && a.DeadlineMs == b.DeadlineMs &&
+		sameTime(a.RecheckAt, b.RecheckAt) && sameTime(a.LeaseUntil, b.LeaseUntil) &&
+		a.MemoryShort == b.MemoryShort && a.MemoryCause == b.MemoryCause && slices.Equal(a.Advice, b.Advice)
 }
 
 func (s *Server) networkExplanationLocked(now time.Time) *networkExplanation {
@@ -492,7 +534,7 @@ func (s *Server) networkExplanationLocked(now time.Time) *networkExplanation {
 	}
 	e := &networkExplanation{MemoryShort: memory.Short, MemoryCause: memory.Cause, Advice: memory.Advice, UpdatedAt: now.UTC()}
 	if s.networkPaused {
-		e.State, e.Reason, e.Next, e.Advice = networkPausedState, "外网已手动暂停", "离线终端和文件仍可使用；重新检测通过后恢复联网。", nil
+		e.State, e.Reason, e.Next, e.Advice = networkPausedState, "外网已手动暂停，离线终端和文件仍可使用。", "重新检测通过后恢复联网。", nil
 		e.MemoryShort, e.MemoryCause = false, ""
 		return e
 	}
@@ -505,45 +547,41 @@ func (s *Server) networkExplanationLocked(now time.Time) *networkExplanation {
 		if d == nil {
 			return nil
 		}
-		// The lease's end as the gate times it, shown on today's wall clock.
-		until := now.Add(d.Deadline.Sub(now)).UTC()
-		e.State, e.LeaseUntil = networkUnconfirmed, &until
-		e.Reason = withMemoryReason(memory, "联网监测暂时"+unconfirmedStage(d.Stage))
-		e.Next = "外网暂时保持开放，但联网许可没有延长。系统会继续重试；许可到期前仍无法确认时，外网会自动暂停并安排完整重检。"
+		// The lease's end as the gate times it, shown on today's wall clock
+		// and in whole seconds (never later than the gate's): the same lease
+		// says the same time on every read.
+		until := now.Add(d.Deadline.Sub(now)).UTC().Truncate(time.Second)
+		e.State, e.LeaseUntil, e.DeadlineMs = networkUnconfirmed, &until, until.UnixMilli()
+		e.Reason = sentence(withMemoryReason(memory, "安全检查暂时"+unreadClause(d.Stage, memory)+"，现有联网许可没有延长"))
+		e.Next = "监测恢复后会自动延长联网许可；许可到期前仍无法确认，外网会自动暂停并重检。"
 		return e
 	}
 	if s.proxyNetworkLost {
-		e.State, e.Reason = networkRecheckScheduled, reason
-		e.Next = "外网暂停中。电脑的网络恢复后，会自动重新连接代理并重新检测。"
+		e.State, e.Reason = networkRecheckScheduled, sentence(reason)
+		e.Next = "电脑的网络恢复后，会自动重新连接代理并重新检测。"
 		return e
 	}
 	if r, pending := s.pendingRecoveryLocked(); pending {
 		// A temporary failure: the memory shortage is its likely cause.
-		e.Reason = withMemoryReason(memory, reason)
+		e.Reason = closedReason(memory, reason)
 		job := s.jobs.snapshot()
 		switch {
 		case job.Running && job.Kind == "network-recovery":
-			e.State, e.Next = networkRechecking, "正在执行自动完整重检，通过后自动恢复联网。"
+			e.State, e.Next = networkRechecking, "正在自动重检，通过后恢复联网。"
 		case job.Running:
-			e.State, e.Next = networkRecheckScheduled, "外网暂停中。自动完整重检会在当前操作完成后进行，通过后自动恢复联网。"
+			e.State, e.Next = networkRecheckScheduled, "自动重检会在当前操作完成后进行，通过后恢复联网。"
 		case !s.ready:
-			e.State, e.Next = networkRecheckScheduled, "外网暂停中。自动完整重检会在环境就绪后进行，通过后自动恢复联网。"
+			e.State, e.Next = networkRecheckScheduled, "自动重检会在环境就绪后进行，通过后恢复联网。"
 		case !r.pressureSince.IsZero():
-			at := r.pressureSince.Add(recoveryPressureWait)
-			if at.Before(now) {
-				at = now
-			}
-			at = at.UTC()
-			e.State, e.RecheckAt = networkWaitingMemory, &at
-			e.Next = "外网暂停中。自动完整重检正在等待内存压力缓解，最迟" + roughWait(at.Sub(now)) + "也会进行，通过后自动恢复联网。"
+			// The deadline stays as it is once it has passed; clients count
+			// down to zero and no further.
+			at := r.pressureSince.Add(recoveryPressureWait).UTC()
+			e.State, e.RecheckAt, e.DeadlineMs = networkWaitingMemory, &at, at.UnixMilli()
+			e.Next = memorySubject(memory.Cause) + "内存回落后会自动重检并恢复联网，最迟 " + durationWords(recoveryPressureWait) + "内也会重检。"
 		default:
-			at := r.Next
-			if at.Before(now) {
-				at = now
-			}
-			at = at.UTC()
-			e.State, e.RecheckAt = networkRecheckScheduled, &at
-			e.Next = "外网暂停中。自动完整重检将在" + roughWait(at.Sub(now)) + "进行，通过后自动恢复联网。"
+			at := r.Next.UTC()
+			e.State, e.RecheckAt, e.DeadlineMs = networkRecheckScheduled, &at, at.UnixMilli()
+			e.Next = "稍后会自动重检，通过后恢复联网。"
 		}
 		return e
 	}
@@ -554,26 +592,80 @@ func (s *Server) networkExplanationLocked(now time.Time) *networkExplanation {
 	}
 	if gate.Report != nil && (gate.Reason == gateLeaseExpired || s.windowsGuest != nil && gate.Reason == windowsPacketDisconnectedReason) {
 		// The monitor schedules the recheck on its next round.
-		e.State, e.Reason = networkRecheckScheduled, withMemoryReason(memory, reason)
-		e.Next = "外网暂停中。马上安排自动完整重检，通过后自动恢复联网。"
+		e.State, e.Reason = networkRecheckScheduled, closedReason(memory, reason)
+		e.Next = "马上安排自动重检，通过后恢复联网。"
 		return e
 	}
 	// No automatic recheck is scheduled. Memory stays in memory_short and
 	// advice; the reason is the closure's own cause.
-	e.State, e.Reason = networkCheckRequired, reason
+	e.State, e.Reason = networkCheckRequired, sentence(reason)
 	e.Next = "外网保持关闭，目前没有安排自动重检。处理上述问题后请重新检测。"
 	return e
 }
 
-// roughWait words a wait that clients also show as a countdown; the stored
-// text may be a monitor round old.
-func roughWait(d time.Duration) string {
-	switch {
-	case d < 5*time.Second:
-		return "片刻后"
-	case d < 90*time.Second:
-		return fmt.Sprintf("约 %d 秒后", (int(d.Seconds())+4)/5*5)
-	default:
-		return fmt.Sprintf("约 %d 分钟后", int(math.Round(d.Minutes())))
+// sentence ends text as a sentence; empty stays empty.
+func sentence(text string) string {
+	if text == "" {
+		return ""
 	}
+	if last, _ := utf8.DecodeLastRuneInString(text); strings.ContainsRune("。！？.!?", last) {
+		return text
+	}
+	return text + "。"
+}
+
+// unconfirmedStages are the reads a monitoring round can fail to complete
+// (unconfirmedStage words each one).
+var unconfirmedStages = []string{"exit_ip", "browser_settings", ""}
+
+// unreadClause says what a monitoring round could not read. After a memory
+// reason that names the isolated browser, "它" stands for the browser.
+func unreadClause(stage string, memory memorySnapshot) string {
+	switch stage {
+	case "exit_ip":
+		return "确认不了出口"
+	case "browser_settings":
+		if memory.Short && memory.Cause == memoryCauseBrowser {
+			return "读不到它的时区和语言"
+		}
+		return "读不到浏览器的时区和语言"
+	}
+	return "读不到系统的时区和语言"
+}
+
+// closedReason is the sentence for a closed gate: the memory shortage that
+// likely caused it, then the cause the gate was closed for. A lease that ran
+// out unconfirmed (noteExpiredDeferral) says what the check could not read;
+// any other reason is the closure's own words.
+func closedReason(memory memorySnapshot, raw string) string {
+	text := raw
+	for _, stage := range unconfirmedStages {
+		if raw == "联网许可到期前仍"+unconfirmedStage(stage)+"，外网已暂停" {
+			text = "安全检查" + unreadClause(stage, memory) + "，所以暂时关闭了外网"
+			break
+		}
+	}
+	return sentence(withMemoryReason(memory, text))
+}
+
+// memorySubject is what the next sentence waits for: "浏览器内存回落后…".
+func memorySubject(cause string) string {
+	switch cause {
+	case memoryCauseBrowser:
+		return "浏览器"
+	case memoryCauseEnvironment:
+		return "环境"
+	case memoryCauseMachine:
+		return "这台机器的"
+	}
+	return ""
+}
+
+// durationWords words a bound that is the same on every read: "1 分钟",
+// "45 秒".
+func durationWords(d time.Duration) string {
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d 分钟", int(d/time.Minute))
+	}
+	return fmt.Sprintf("%d 秒", int(math.Ceil(d.Seconds())))
 }

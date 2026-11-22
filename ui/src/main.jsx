@@ -1985,7 +1985,7 @@ function App() {
             <span className="status-divider" />
             <button onClick={() => openSettings("network")}>
               <MapPin size={12} />
-              <span>
+              <span className="status-label">
                 {status.network_error
                   ? "出口待确认"
                   : status.location || status.safety?.exit_ip
@@ -2039,7 +2039,7 @@ function App() {
               title="停止并重新启动当前环境"
             >
               <RotateCcw size={12} />
-              <span>重启环境</span>
+              <span className="status-label">重启环境</span>
             </button>
             <button
               onClick={stop}
@@ -2049,7 +2049,7 @@ function App() {
               title="停止当前环境"
             >
               <Power size={12} />
-              <span>停止环境</span>
+              <span className="status-label">停止环境</span>
             </button>
           </footer>
         </div>

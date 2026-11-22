@@ -206,7 +206,10 @@ func (s *Server) currentNetworkErrorLocked() string {
 	now := time.Now()
 	reason := s.networkErrorLocked()
 	if d := s.activeDeferralLocked(now); d != nil {
-		notice := fmt.Sprintf("仍无法确认时，外网将在 %d 秒后暂停并自动安排完整重检", int((d.Deadline.Sub(now)+time.Second-1)/time.Second))
+		// No countdown here: this text is read on every status poll and must
+		// say the same thing until the situation changes (the explanation's
+		// deadline_ms carries the time).
+		notice := "联网许可到期前仍无法确认时，外网会自动暂停并安排完整重检"
 		if reason == "" {
 			return notice
 		}

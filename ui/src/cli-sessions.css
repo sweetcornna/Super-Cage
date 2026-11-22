@@ -13,6 +13,12 @@
    title (the tooltip and the unpin action still say both); the live dot stays. */
 .sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) :is(.session-owner-chip, .tab-pin) { display: none; }
 .sidebar-tab:has(.session-owner-chip):is(:hover, :focus-within, :has([aria-expanded="true"])) .session-activity { margin-left: auto; }
+/* The title and the account chip share one line, one line high: a chip that does not
+   fit whole wraps out of sight instead of being cut mid-word, and the title keeps
+   the room (workspace-tabs.jsx; ellipsis only for a title that is too long itself). */
+.sidebar-tab .session-text { display: flex; flex-wrap: wrap; align-items: center; align-content: flex-start; flex: 0 1 auto; min-width: 0; column-gap: 7px; height: 1.5em; overflow: hidden; font-style: normal; line-height: 1.5; }
+.sidebar-tab .session-text > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-tab .session-text > .claude-tab-profile { flex: none; max-width: none; overflow: visible; text-overflow: clip; }
 /* A Codex session row's account label ("Codex · 工作") gives way the same way;
    the pane header and the row's tooltip still name the account. Plain Codex
    terminal and login tabs keep theirs. */

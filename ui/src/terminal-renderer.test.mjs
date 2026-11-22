@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  browserEngine, createTerminalRenderer, readTerminalRendererChoice, terminalRendererKey, wantsWebgl, webglLetterSpacing,
+  browserEngine, codexLaunchRefused, createTerminalRenderer, readTerminalRendererChoice, terminalLastLine, terminalRendererKey, wantsWebgl, webglLetterSpacing,
 } from "./terminal-renderer.mjs";
 
 const storage = (value) => ({ getItem: (key) => key === terminalRendererKey ? value : null });
@@ -132,4 +132,21 @@ test("the setting or a missing WebGL2 keeps the DOM renderer, and a disposed vie
   await settle();
   assert.equal(gone.kind, "dom");
   assert.equal(loads, 1);
+});
+
+test("the last line a terminal drew is the refusal's reason", () => {
+  const lines = ["", "$ codex", "会话账号已变化，请重新读取会话列表", "  ", ""];
+  const buffer = { length: lines.length, getLine: (index) => ({ translateToString: () => lines[index] }) };
+  assert.equal(terminalLastLine(buffer), "会话账号已变化，请重新读取会话列表", "the last line with text");
+  assert.equal(terminalLastLine({ length: 0, getLine: () => undefined }), "");
+  assert.equal(terminalLastLine(undefined), "");
+});
+
+test("a refused Codex launch is not an ordinary close", () => {
+  const ended = (fields) => ({ cli_session_provider: "codex", closed: true, exit_code: 75, ...fields });
+  assert.equal(codexLaunchRefused(ended()), true);
+  assert.equal(codexLaunchRefused(ended({ exit_code: 0 })), false, "Codex quit on its own");
+  assert.equal(codexLaunchRefused(ended({ exit_code: undefined })), false, "an older server sends no status");
+  assert.equal(codexLaunchRefused(ended({ closed: false })), false, "only an ended terminal");
+  assert.equal(codexLaunchRefused(ended({ cli_session_provider: "" })), false, "a Claude or plain terminal ending with 75 is its own business");
 });

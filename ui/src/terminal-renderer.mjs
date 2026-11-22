@@ -159,3 +159,15 @@ function watchPixelRatio(callback) {
   arm();
   return () => query?.removeEventListener("change", changed);
 }
+
+// A Codex launch the guest refused ends its terminal with exit status 75
+// (codex_sessions.py LAUNCH_REFUSED, reported as exit_code by the terminal list); the
+// pane's note then says it did not open and quotes the last line the launch drew.
+export const codexLaunchRefused = (tab) => tab.cli_session_provider === "codex" && tab.closed === true && tab.exit_code === 75;
+
+// The last line a terminal drew, from its buffer (xterm's buffer.active).
+export function terminalLastLine(buffer) {
+  let text = "";
+  for (let index = buffer?.length ?? 0; index-- > 0 && !text;) text = buffer.getLine(index)?.translateToString(true).trim() ?? "";
+  return text;
+}
