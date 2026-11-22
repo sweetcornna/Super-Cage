@@ -38,6 +38,8 @@ type entryConn struct {
 	epoch context.Context
 	// flush holds a cut back until terminal sessions wrote their reset.
 	flush entryFlush
+	// stalled: a write to the client waited entryWriteTimeout (R3-4).
+	stalled atomic.Bool
 	// What the connection runs now, for the status line.
 	shells, execs, sftps atomic.Int32
 	channels             atomic.Int32

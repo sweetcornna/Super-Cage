@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
@@ -49,13 +50,25 @@ import (
 // variable for tests.
 var entryWrapperTimeout = 20 * time.Second
 
+// entryWriteTimeout bounds one write to the client. A write that waits
+// longer is a client that stopped reading (ssh suspended with ~^Z): the
+// connection ends as if the owner hung up, and its terminals are kept
+// (R3-4). A variable for tests.
+var entryWriteTimeout = terminalWriteTimeout
+
+// errEntryStalled is the cause of a connection cut because the client
+// stopped reading.
+var errEntryStalled = errors.New("the ssh client took no output for the write timeout")
+
 const (
 	entryMaxChannels      = 8
 	entryHandshakeTimeout = 20 * time.Second
 	entryHopWaitDelay     = 2 * time.Second
 	// entryCutGrace is how long a cut waits for terminal sessions to write
-	// their reset before it closes the connection.
-	entryCutGrace = 250 * time.Millisecond
+	// their reset before it closes the connection (R3-3). Guest output stops
+	// at the cut; a client that is behind gets this long to take in the
+	// frame already on its way, the reset and the notice.
+	entryCutGrace = 2 * time.Second
 	// entryOperationWait bounds how long a new terminal waits for another
 	// terminal's creation or a monitor round to release the operation lock.
 	entryOperationWait     = 10 * time.Second
@@ -318,7 +331,14 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ws.Close()
-	s.entryServe(conn, newEntryWSConn(ws), record, signer)
+	transport := newEntryWSConn(ws)
+	transport.stalled = func() {
+		if !conn.stalled.Swap(true) {
+			diagnostics.Log("info", "entry", "an ssh connection ended: the client took no output for "+entryWriteTimeout.String()+"; its terminals are kept")
+		}
+		conn.cancel(errEntryStalled)
+	}
+	s.entryServe(conn, transport, record, signer)
 }
 
 // entryServe runs the SSH server of one connection until it ends or is cut.
@@ -605,6 +625,7 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 		program.Add(1)
 		go func() {
 			defer program.Done()
+			defer entryGuard(channel, pty != nil)
 			run()
 		}()
 	}
@@ -1083,6 +1104,12 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		settings, _ = localterm.LoadSettings(paths.ComputerDir)
 	}
 	presence, output := entryWindow(settings)
+	// An internal error in either direction ends this session only (R3-2):
+	// its window gets the exit reset, the controller and the connection's
+	// other sessions go on.
+	run, stopRun := context.WithCancel(ctx)
+	defer stopRun()
+	var failed atomic.Bool
 	// The peer exists before the subscription, so queries in live output
 	// are counted for this window from the first byte.
 	peer := session.openPeer(entryViewerID(), false)
@@ -1092,7 +1119,32 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	subscription := session.subscribe()
 	defer subscription.Close()
 	outputDone := make(chan struct{})
+	var outputOnce sync.Once
+	endOutput := func() { outputOnce.Do(func() { close(outputDone) }) }
+	defer func() {
+		if r := recover(); r != nil {
+			endOutput()
+			entryLogPanic("output", r)
+			cols, _ := view.size()
+			_, _ = channel.Write(entryPanicEnd(output, int(min(cols, 1<<16-1))))
+			entryExitStatus(channel, 255)
+			_ = channel.Close()
+			session.mu.Lock()
+			kept := session.kept || session.released
+			session.mu.Unlock()
+			if !kept {
+				s.terminals.remove(session.id)
+			}
+		}
+	}()
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				entryLogPanic("input", r)
+				failed.Store(true)
+				stopRun()
+			}
+		}()
 		send := func(data []byte) bool {
 			if len(data) == 0 {
 				return true
@@ -1103,7 +1155,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			}
 			return input == "" || session.enqueueInputWait(ctx, input, outputDone) == nil
 		}
-		if len(typed) > 0 && !send(presence.note(typed, output.filter.GuestFocus)) {
+		if len(typed) > 0 && !send(entryNote(presence, typed, output.filter.GuestFocus)) {
 			return
 		}
 		entryReadInput(channel, presence, output.filter.GuestFocus, send)
@@ -1112,10 +1164,10 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	// continue what the client's window shows.
 	session.showQueries(peer, subscription.History)
 	out := append([]byte(termfilter.TitlePush), entryFocusOn...)
-	out = output.frame(out, subscription.History, true, rejoin)
+	out = entryFrame(output, out, subscription.History, true, rejoin)
 	ended := false
 	_, err := channel.Write(out)
-	for err == nil && ctx.Err() == nil {
+	for err == nil && run.Err() == nil {
 		batch := subscription.next(terminalFrameLimit)
 		if len(batch.Data) > 0 {
 			if batch.Resync {
@@ -1123,7 +1175,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 				// viewer that resumes gets it.
 				session.showQueries(peer, batch.Data)
 			}
-			out = output.frame(out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
+			out = entryFrame(output, out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
 			_, err = channel.Write(out)
 			continue
 		}
@@ -1132,19 +1184,24 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			break
 		}
 		select {
-		case <-ctx.Done():
+		case <-run.Done():
 		case <-subscription.Wake():
 			continue
 		}
 		break
 	}
-	close(outputDone)
-	locked := !ended && conn.epoch.Err() != nil
+	endOutput()
+	locked := !ended && !failed.Load() && conn.epoch.Err() != nil
 	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
 	// already: then it ends, and says so (entryKeepOnLock decides which).
 	full := locked && !s.entryKeepOnLock(conn.epoch, session)
+	if !ended && !failed.Load() && !locked && conn.stalled.Load() {
+		// The client stopped reading: a hang-up that keeps the terminal,
+		// within entryKeptLimit (R3-4). Nothing reaches that client any more.
+		_ = s.entryKeep(session)
+	}
 	session.mu.Lock()
-	kept := session.kept
+	kept := session.kept || session.released
 	session.mu.Unlock()
 	cols, _ := view.size()
 	// The exit reset on every way out; nothing from the guest follows it.
@@ -1152,6 +1209,8 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	tail := output.filter.End(nil, int(min(cols, 1<<16-1)))
 	switch cause := context.Cause(conn.ctx); {
 	case ended:
+	case failed.Load():
+		tail = append(tail, entryInternalError...)
 	case full:
 		tail = append(tail, "\r\nSuper Cage 已锁定："+errEntryKeptFull().Error()+"，这个终端随连接结束。\r\n"...)
 	case locked:
@@ -1175,12 +1234,68 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	}
 }
 
+// entryFrame and entryNote are an ssh terminal's output and input steps,
+// variables so that a test can make one fail (R3-2).
+var (
+	entryFrame = (*entryOutput).frame
+	entryNote  = (*entryPresence).note
+)
+
+// entryInternalError is the line after the exit reset when an internal
+// error ended the session.
+const entryInternalError = "\r\nSuper Cage：内部错误，这个连接的终端已结束。\r\n"
+
+// entryLogPanic records an internal error that ended one session, with
+// where it happened.
+func entryLogPanic(where string, r any) {
+	stack := debug.Stack()
+	if len(stack) > 4<<10 {
+		stack = stack[:4<<10]
+	}
+	diagnostics.Log("error", "entry", fmt.Sprintf("an ssh session's %s ended on an internal error: %v\n%s", where, r, stack))
+}
+
+// entryPanicEnd is the exit reset after an internal error: the window's
+// own filter's, or a fresh one's should that fail too.
+func entryPanicEnd(output *entryOutput, cols int) (tail []byte) {
+	defer func() {
+		if recover() != nil {
+			tail = termfilter.New(termfilter.Options{}).End(nil, cols)
+		}
+		tail = append(tail, entryInternalError...)
+	}()
+	return output.filter.End(nil, cols)
+}
+
+// entryGuard ends one session on an internal error outside its terminal's
+// own loop (a rejoin offer, a hop, a refusal), not the controller: it
+// logs, gives a terminal the exit reset and closes the channel.
+func entryGuard(channel ssh.Channel, terminal bool) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	entryLogPanic("session", r)
+	if terminal {
+		_, _ = channel.Write(append(termfilter.New(termfilter.Options{}).End(nil, 0), entryInternalError...))
+	}
+	entryExitStatus(channel, 255)
+	_ = channel.Close()
+}
+
 // entryWSConn carries one byte stream in binary WebSocket messages.
 type entryWSConn struct {
 	ws              *websocket.Conn
 	readMu, writeMu sync.Mutex
 	reader          io.Reader
+	closing         sync.Once
+	// stalled, when set, hears of a write that waited entryWriteTimeout.
+	stalled func()
 }
+
+// entryCloseLinger bounds how long a closed connection waits for the
+// client to answer its WebSocket close.
+const entryCloseLinger = time.Second
 
 func newEntryWSConn(ws *websocket.Conn) *entryWSConn {
 	ws.SetReadLimit(1 << 20)
@@ -1219,14 +1334,33 @@ func (c *entryWSConn) Read(p []byte) (int, error) {
 func (c *entryWSConn) Write(p []byte) (int, error) {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	_ = c.ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
+	_ = c.ws.SetWriteDeadline(time.Now().Add(entryWriteTimeout))
 	if err := c.ws.WriteMessage(websocket.BinaryMessage, p); err != nil {
+		if timeout := net.Error(nil); errors.As(err, &timeout) && timeout.Timeout() && c.stalled != nil {
+			c.stalled()
+		}
 		return 0, err
 	}
 	return len(p), nil
 }
 
-func (c *entryWSConn) Close() error                       { return c.ws.Close() }
+// Close ends the stream with a WebSocket close and goes on reading until the
+// client answers it, for at most entryCloseLinger; the TCP connection closes
+// when the reading ends (entrySSH). A socket closed with the client's window
+// adjustments still arriving answers them with a reset, and the client's
+// system then drops what it had not read yet: the last frame, the exit reset
+// and the notice of a cut.
+func (c *entryWSConn) Close() error {
+	c.closing.Do(func() {
+		deadline := time.Now().Add(entryCloseLinger)
+		_ = c.ws.SetReadDeadline(deadline)
+		go func() {
+			_ = c.ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""), deadline)
+		}()
+	})
+	return nil
+}
+
 func (c *entryWSConn) LocalAddr() net.Addr                { return c.ws.LocalAddr() }
 func (c *entryWSConn) RemoteAddr() net.Addr               { return c.ws.RemoteAddr() }
 func (c *entryWSConn) SetDeadline(t time.Time) error      { return nil }

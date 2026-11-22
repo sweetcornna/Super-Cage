@@ -293,6 +293,7 @@ func (s *Server) entryOff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.entry.registry.cutAll(errEntryOff)
+	s.entryUnkeepAll()
 	s.entryCancelWrapper()
 	if err := entryRemoveClient(paths, entryEnvironmentID(s.profile)); err != nil {
 		requestError(w, errors.New("本机终端已关闭，但 ssh 配置没能全部移除："+err.Error()))

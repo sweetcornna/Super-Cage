@@ -24,6 +24,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/controlwire"
 	"github.com/sylvinus/agent-vm/internal/entryproxy"
 )
 
@@ -374,6 +375,12 @@ func (f *entryFixture) call(method, path string, input, output any) error {
 // dial opens the entry with cage entry proxy's own code (entryproxy.Dial
 // and Relay) and starts an SSH client on it with key.
 func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
+	return f.dialThrough(key, nil)
+}
+
+// dialThrough dials with the client's end of the relay passed through wrap,
+// which also gets the proxy's WebSocket.
+func (f *entryFixture) dialThrough(key ssh.Signer, wrap func(ws *controlwire.Conn, conn net.Conn) net.Conn) (*ssh.Client, error) {
 	ws, line, err := entryproxy.Dial(context.Background(), f.s.configPath, f.computer.ID, agentSameBuild)
 	if err != nil {
 		return nil, err
@@ -385,6 +392,9 @@ func (f *entryFixture) dial(key ssh.Signer) (*ssh.Client, error) {
 	}
 	conn, relayed := net.Pipe()
 	go entryproxy.Relay(context.Background(), ws, relayed, relayed)
+	if wrap != nil {
+		conn = wrap(ws, conn)
+	}
 	config := &ssh.ClientConfig{User: "whoever", Auth: []ssh.AuthMethod{ssh.PublicKeys(key)}, HostKeyCallback: ssh.FixedHostKey(f.hostKey), Timeout: 10 * time.Second}
 	client, channels, requests, err := ssh.NewClientConn(conn, "cage-test", config)
 	if err != nil {
