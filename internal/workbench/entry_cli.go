@@ -61,6 +61,10 @@ func entryCall(ctx context.Context, configPath, method, path string, input, outp
 	return nil
 }
 
+// entryTerminalNote is what the help says of sessions with a terminal; the
+// settings page says the same (local-entry-state.mjs, unfilteredNote).
+const entryTerminalNote = "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤，剪贴板写入按设置 › 本机终端里的选择；拖入的图片不上传，按文字粘贴。"
+
 const entryUsageCommands = `用法：
   cage entry on [环境]             在这台电脑上开启这个环境的本机终端
   cage entry off [环境]            关闭，并立即断开所有本机连接
@@ -77,11 +81,7 @@ const entryUsageCommands = `用法：
 // entryUsage is the help; it says exactly which sessions are filtered (N3 of
 // the second review).
 func entryUsage() string {
-	terminal := "带终端的会话（ssh、ssh -t）会被拒绝：这一版还没有终端输出过滤。\n"
-	if entryNewOutputFilter != nil {
-		terminal = "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端，环境的输出经过和窗口里一样的过滤。\n"
-	}
-	return entryUsageCommands + terminal +
+	return entryUsageCommands + entryTerminalNote + "\n" +
 		"不带终端的命令（ssh 主机 命令、ssh -T）、scp、sftp 和 rsync 原样传送环境的字节，不经过滤：\n" +
 		"环境里的程序可以借这些输出向你的终端发送控制字符。带终端的子系统（ssh -t -s）一律不接受。\n"
 }

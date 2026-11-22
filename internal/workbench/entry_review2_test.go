@@ -226,26 +226,19 @@ func TestEntryRefusesSubsystemOnAPty(t *testing.T) {
 	}
 }
 
-// N3: the help says exactly what is filtered, with and without the filter.
+// N3: the help says exactly what is filtered: sessions with a terminal go
+// through cage attach's filter, the others pass the environment's bytes.
 func TestEntryHelpSaysExactlyWhatIsFiltered(t *testing.T) {
-	previous := entryNewOutputFilter
-	t.Cleanup(func() { entryNewOutputFilter = previous })
-	for _, filtered := range []bool{false, true} {
-		entryNewOutputFilter = nil
-		if filtered {
-			entryNewOutputFilter = func(bool) entryOutputFilter { return &entryRecordingFilter{} }
+	var stderr strings.Builder
+	EntryMain(nil, filepath.Join(t.TempDir(), "config.json"), nil, io.Discard, &stderr)
+	text := stderr.String()
+	for _, want := range []string{"ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s", "和 cage attach 一样的过滤", "拖入的图片不上传"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("no %q in\n%s", want, text)
 		}
-		var stderr strings.Builder
-		EntryMain(nil, filepath.Join(t.TempDir(), "config.json"), nil, io.Discard, &stderr)
-		text := stderr.String()
-		for _, want := range []string{"ssh -T", "scp", "sftp", "rsync", "不经过滤", "ssh -t -s"} {
-			if !strings.Contains(text, want) {
-				t.Errorf("filter %v: no %q in\n%s", filtered, want, text)
-			}
-		}
-		if filtered != strings.Contains(text, "经过和窗口里一样的过滤") || filtered == strings.Contains(text, "会被拒绝") {
-			t.Errorf("filter %v:\n%s", filtered, text)
-		}
+	}
+	if strings.Contains(text, "会被拒绝") {
+		t.Errorf("the help still says terminal sessions are refused:\n%s", text)
 	}
 }
 

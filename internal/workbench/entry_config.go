@@ -47,11 +47,6 @@ const (
 	entryHostKey      = "host_ed25519"
 	entryClientDir    = "super-cage"
 	entryRevokedFile  = "revoked.json"
-	// entrySettingsFile is cage attach's per-computer settings file
-	// (internal/localterm on branch local-terminal-attach). The entry only
-	// reads it; replace entryLoadLocalSettings with localterm.LoadSettings
-	// once that package is merged.
-	entrySettingsFile = "local-terminal.json"
 )
 
 // entryPaths are the places on this computer the entry reads and writes.
@@ -383,23 +378,6 @@ func entryWriteFile(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return os.Rename(f.Name(), path)
-}
-
-// entryLocalSettings are the owner's per-computer choices that the entry's
-// terminal sessions follow. The defaults are what Cage's web terminal does:
-// image paste and drop upload, and OSC 52 clipboard writes (never reads).
-type entryLocalSettings struct {
-	ImageUpload    bool `json:"image_upload"`
-	ClipboardWrite bool `json:"clipboard_write"`
-}
-
-func entryLoadLocalSettings(paths entryPaths) entryLocalSettings {
-	settings := entryLocalSettings{ImageUpload: true, ClipboardWrite: true}
-	data, err := os.ReadFile(filepath.Join(paths.ComputerDir, entrySettingsFile))
-	if err != nil || len(data) > 64<<10 || json.Unmarshal(data, &settings) != nil {
-		return entryLocalSettings{ImageUpload: true, ClipboardWrite: true}
-	}
-	return settings
 }
 
 // --- the owner's ssh client configuration ---

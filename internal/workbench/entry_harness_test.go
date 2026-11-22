@@ -226,48 +226,6 @@ type entryFixture struct {
 	computer entryComputer
 	device   ssh.Signer
 	hostKey  ssh.PublicKey
-	// filters are the stand-in escape filters terminal sessions used.
-	filtersMu sync.Mutex
-	filters   []*entryRecordingFilter
-}
-
-// entryRecordingFilter stands in for internal/termfilter: it drops the OSC 52
-// query the real filter drops, passes the rest, and records how the endpoint
-// drove it ("live N", "replay N", "abort").
-type entryRecordingFilter struct {
-	mu     sync.Mutex
-	replay bool
-	events []string
-}
-
-func (r *entryRecordingFilter) Append(dst, src []byte) []byte {
-	r.mu.Lock()
-	kind := "live"
-	if r.replay {
-		kind = "replay"
-	}
-	r.events = append(r.events, fmt.Sprintf("%s %d", kind, len(src)))
-	r.mu.Unlock()
-	return append(dst, bytes.ReplaceAll(src, []byte("\x1b]52;c;?\x07"), nil)...)
-}
-
-func (r *entryRecordingFilter) SetReplay(on bool) {
-	r.mu.Lock()
-	r.replay = on
-	r.mu.Unlock()
-}
-
-func (r *entryRecordingFilter) Abort(dst []byte) []byte {
-	r.mu.Lock()
-	r.events = append(r.events, "abort")
-	r.mu.Unlock()
-	return dst
-}
-
-func (r *entryRecordingFilter) log() []string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]string(nil), r.events...)
 }
 
 // entryTestController is agentTestController with symlinks resolved, so the
@@ -354,17 +312,6 @@ func newEntryFixture(t *testing.T, guest bool) *entryFixture {
 		t.Fatal(err)
 	}
 	s.entry.install = func(context.Context) error { f.installs.Add(1); return nil }
-	// Terminal sessions need the escape filter (design 5.7); a recording
-	// stand-in takes the place of internal/termfilter here.
-	previousFilter := entryNewOutputFilter
-	entryNewOutputFilter = func(bool) entryOutputFilter {
-		filter := &entryRecordingFilter{}
-		f.filtersMu.Lock()
-		f.filters = append(f.filters, filter)
-		f.filtersMu.Unlock()
-		return filter
-	}
-	t.Cleanup(func() { entryNewOutputFilter = previousFilter })
 	workspace := s.environmentDir()
 	if err := os.MkdirAll(workspace, 0o700); err != nil {
 		t.Fatal(err)

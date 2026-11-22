@@ -480,7 +480,7 @@ func entryCutKeeping(t *testing.T, f *entryFixture, fire func(), kept bool) time
 		elapsed := at.Sub(start)
 		// Every cut lets the terminal session reset the client's terminal
 		// first (design 5.7, as cage attach does).
-		entryAwait(t, 2*time.Second, "the terminal reset before the cut", func() bool { return strings.Contains(shell.text(), entryResetSequence) })
+		entryAwait(t, 2*time.Second, "the terminal reset before the cut", func() bool { return strings.Contains(shell.text(), entryExitReset) })
 		if kept {
 			if listed := entrySSHTerminals(f.s); len(listed) != 1 || listed[0]["closed"] == true {
 				t.Fatalf("the terminal did not stay: %v", listed)

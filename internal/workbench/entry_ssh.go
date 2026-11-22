@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -21,8 +22,11 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/ssh"
 
+	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/localterm"
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // The Cage entry endpoint (design 5.4): an SSH server that runs on one
@@ -33,8 +37,7 @@ import (
 //   - session channels (at most entryMaxChannels per connection):
 //       pty + shell/exec  -> a Cage terminal (listed, on the phone, the
 //                            same launcher, the 12-terminal limit), its
-//                            output through the escape filter; refused
-//                            while no filter is plugged in;
+//                            output through cage attach's escape filter;
 //       exec, shell        -> the guest's run script over Cage's own hop;
 //       subsystem sftp     -> the guest's sftp-server over the same hop;
 //       Herdr's connect line -> refused until step 3 brings its filter.
@@ -57,7 +60,6 @@ const (
 	entryOperationWait     = 10 * time.Second
 	entryServerVersion     = "SSH-2.0-SuperCage"
 	entryHerdrRefusal      = "Super Cage：本机终端还不能接入 Herdr，需要更新 Super Cage 到支持 Herdr 的版本。"
-	entryNoFilterRefusal   = "Super Cage：这个版本的本机终端还不能打开带终端的会话（ssh -t），需要更新 Super Cage。不带终端的命令、scp、sftp 和 rsync 可以使用。"
 	entryLockedNotice      = "Super Cage 已锁定：这个终端仍在运行。在应用中解锁后，用 ssh -t 重新接入，或在 Super Cage 里打开它。"
 	entryTerminalLimitText = "已有 12 个终端：先关闭一个"
 )
@@ -78,50 +80,11 @@ type entryService struct {
 	kept entryKeptCheck
 }
 
-// entryTitlePush and entryResetSequence are cage attach's TitlePush and
-// ResetSequence (internal/attach, branch local-terminal-attach 13e74a2),
-// written the same way around an ssh terminal session: the title saved
-// before the first output, the local terminal returned to what a shell
-// expects at the end. Use those constants once that branch is merged.
-const (
-	entryTitlePush     = "\x1b[22;0t"
-	entryResetSequence = "\x18\x1b\\" + // abort a sequence or string in progress, end a string
-		"\x1b[?2026l" + // end a synchronized update
-		"\x1b7\x1b[?1049l\x1b[r\x1b8" + // main screen, whole-screen scroll region, cursor kept
-		"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?1016l" + // every mouse mode
-		"\x1b[?1004l\x1b[?2004l\x1b[?2048l\x1b[?2031l" + // focus, bracketed paste, in-band resize, colour scheme reports
-		"\x1b[<99u" + // pop every kitty keyboard level
-		"\x1b[?1l\x1b[?66l\x1b>" + // normal cursor keys and keypad
-		"\x1b[?7h\x1b[?45l\x1b[4l\x1b[20l" + // wrap, reverse wrap, insert and new line modes
-		"\x1b(B\x1b)B\x0f" + // US ASCII in G0 and G1, G0 in use
-		"\x1b[m\x1b[0 q\x1b[?25h" + // character attributes, cursor style, visible cursor
-		"\x1b]104\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07" + // palette and dynamic colours
-		"\x1b[23;0t" // the title and icon name entryTitlePush saved
-)
-
-// entryOutputFilter is the escape filter of design 5.7 for one terminal
-// session (internal/termfilter, branch local-terminal-attach). Until it is
-// plugged in, the endpoint refuses shell and exec on every channel with a
-// pty (entrySession), so no guest output reaches a terminal application
-// through it unfiltered. *termfilter.Filter has these methods (checked
-// against origin/local-terminal-attach 13e74a2); to plug it in:
-//
-//	entryNewOutputFilter = func(clipboardWrite bool) entryOutputFilter {
-//		return termfilter.New(termfilter.Options{ClipboardWrite: clipboardWrite})
-//	}
-type entryOutputFilter interface {
-	Append(dst, src []byte) []byte
-	// SetReplay marks the bytes that follow as history the owner may have
-	// seen: they only draw.
-	SetReplay(on bool)
-	// Abort ends an unfinished string and forgets the filter's state.
-	Abort(dst []byte) []byte
-}
-
-// entryNewOutputFilter returns the filter of one terminal session, or nil.
-// HOOK(termfilter): nil until internal/termfilter is merged; nil refuses
-// every session with a pty.
-var entryNewOutputFilter func(clipboardWrite bool) entryOutputFilter
+// entryFocusOn turns on focus reports in the ssh client's terminal, as cage
+// attach does in its window (attach.focusOn): they tell whether the owner is
+// at that window. They are the viewer's: the program gets them only if it
+// asked for them too.
+const entryFocusOn = "\x1b[?1004h"
 
 func (s *Server) entryPaths() (entryPaths, error) {
 	if s.entry.paths != nil {
@@ -511,21 +474,128 @@ func entryHerdrLine(command string) bool {
 	return (strings.Contains(command, "herdr-core") || entryHerdrName.MatchString(command)) && entryHerdrConnect.MatchString(command)
 }
 
-// entryFrame appends one batch of terminal output as the ssh client gets
-// it. After a gap (a re-join, or output the client fell behind on and lost)
-// the filter forgets what it was in the middle of, the client's terminal is
-// reset, and the batch only draws (replay), as cage attach does.
-func entryFrame(out []byte, filter entryOutputFilter, data []byte, gap bool) []byte {
-	if !gap {
-		return filter.Append(out, data)
+// entryOutput is one ssh window's side of the escape filter, written the way
+// cage attach writes its window (attach.writeOutput, restart, flushLocked).
+// Only the goroutine that writes the window's output uses it.
+type entryOutput struct {
+	filter    *termfilter.Filter
+	resets    int  // the filter's Resets, to turn focus reports on again
+	focusOwed bool // focus reports to turn back on after a reset
+}
+
+// frame appends one batch as the ssh client gets it. replay marks history
+// the owner may have seen elsewhere: it only draws, its queries, clipboard
+// writes and notifications already acted. restart is output that does not
+// continue what the window shows (a re-join, or history past what the
+// client received): what the last bytes left open is ended and the window
+// cleared first, with the soft reset, not ESC c, which would erase the
+// owner's scrollback.
+func (o *entryOutput) frame(out, data []byte, replay, restart bool) []byte {
+	if restart {
+		// Focus reports go back on at once, as attach's restart flushes.
+		out = append(append(o.filter.Abort(out), termfilter.ClearReset...), entryFocusOn...)
+		o.focusOwed = false
 	}
-	out = filter.Abort(out)
-	out = append(out, "\x1bc"...)
-	filter.SetReplay(true)
-	out = filter.Append(out, data)
-	filter.SetReplay(false)
+	o.filter.SetReplay(replay)
+	out = o.filter.Append(out, data)
+	o.filter.SetReplay(false)
+	if resets := o.filter.Resets(); resets != o.resets {
+		// A full or soft reset turned focus reports off as well.
+		o.resets, o.focusOwed = resets, true
+	}
+	// Nothing of the window's own goes inside a clipboard write the program
+	// left open.
+	if o.focusOwed && !o.filter.Streaming() {
+		out, o.focusOwed = append(out, entryFocusOn...), false
+	}
 	return out
 }
+
+// entryPresence says whether the owner is at the ssh client's window, for
+// clipboard writes: cage attach's rule (attach.ownerHere). The window
+// reports focus once entryFocusOn turned that on; in an application that
+// never reports focus, a write passes within attach.ClipboardWindow of the
+// owner's last key or mouse input in that window. A write that arrives
+// otherwise is dropped, not kept for later.
+type entryPresence struct {
+	focus     atomic.Int32 // entryFocusUnknown, entryFocusIn or entryFocusOut
+	lastInput atomic.Int64 // when the owner last typed or used the mouse (Unix ns)
+	inPaste   bool         // the input goroutine's: inside a bracketed paste
+}
+
+const (
+	entryFocusUnknown int32 = iota
+	entryFocusIn
+	entryFocusOut
+)
+
+const (
+	entryPasteStart = "\x1b[200~"
+	entryPasteEnd   = "\x1b[201~"
+)
+
+func (p *entryPresence) here() bool {
+	switch p.focus.Load() {
+	case entryFocusIn:
+		return true
+	case entryFocusOut:
+		return false
+	}
+	last := p.lastInput.Load()
+	return last != 0 && time.Since(time.Unix(0, last)) < attach.ClipboardWindow
+}
+
+// note reads the client's input as cage attach reads its window's
+// (attach.noteInput): focus reports set the state and reach the program only
+// when it asked for them (guestFocus); keys, pastes and mouse buttons mark
+// the owner as here; pointer motion and answers to queries do not.
+func (p *entryPresence) note(data []byte, guestFocus func() bool) []byte {
+	out := make([]byte, 0, len(data))
+	owner := false
+	for i := 0; i < len(data); {
+		if p.inPaste {
+			owner = true
+			end := bytes.Index(data[i:], []byte(entryPasteEnd))
+			if end < 0 {
+				out = append(out, data[i:]...)
+				break
+			}
+			end += len(entryPasteEnd)
+			out = append(out, data[i:i+end]...)
+			i += end
+			p.inPaste = false
+			continue
+		}
+		n, kind, _ := termfilter.NextInput(data[i:])
+		unit := data[i : i+n]
+		i += n
+		switch kind {
+		case termfilter.InputFocusIn, termfilter.InputFocusOut:
+			state := entryFocusIn
+			if kind == termfilter.InputFocusOut {
+				state = entryFocusOut
+			}
+			p.focus.Store(state)
+			if !guestFocus() {
+				continue
+			}
+		case termfilter.InputKey:
+			owner = true
+			p.inPaste = string(unit) == entryPasteStart
+		case termfilter.InputMouse:
+			owner = true
+		}
+		out = append(out, unit...)
+	}
+	if owner {
+		p.lastInput.Store(time.Now().UnixNano())
+	}
+	return out
+}
+
+// entryViewerID is the viewer identity of one ssh window, of its own kind
+// beside cage attach's "attach-" (terminalViewerPattern).
+func entryViewerID() string { return "ssh-" + randomToken()[:24] }
 
 func entryExitStatus(channel ssh.Channel, status int) {
 	if status < 0 || status > 255 {
@@ -624,19 +694,6 @@ func (s *Server) entrySession(conn *entryConn, incoming ssh.NewChannel) {
 				continue
 			}
 			if pty != nil {
-				if entryNewOutputFilter == nil {
-					// Fail closed (design 5.7): without the escape filter no
-					// guest output reaches a terminal application. Refusing
-					// pty-req would not do: OpenSSH then asks for a shell
-					// without a pty.
-					conn.refuse("pty-unfiltered")
-					start(func() {
-						_, _ = io.WriteString(channel, entryNoFilterRefusal+"\r\n")
-						entryExitStatus(channel, 1)
-						_ = channel.Close()
-					})
-					continue
-				}
 				view := &entryTerminalView{cols: pty.Cols, rows: pty.Rows}
 				resize = view.resize
 				request := *pty
@@ -836,43 +893,39 @@ func entryCommandScript(workspace, command string) string {
 	return "cd " + shellescape.Quote(workspace) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lc " + shellescape.Quote(command)
 }
 
-// entryResize applies the ssh client's window size.
-// HOOK(viewers): after local-terminal-attach is merged, give the ssh viewer a
-// peer (openPeer) and use peerInput/peerResize like terminalStream, so the
-// size owner rules hold for it too.
-func entryResize(session *terminalSession, cols, rows uint16) {
-	if validTerminalSize(cols, rows) {
-		_ = session.file.Resize(cols, rows)
-	}
-}
-
 // entryTerminalView is the client's window and, once chosen, the terminal a
-// pty session shows. window-change requests arrive before the terminal
-// exists while the session offers to re-join one.
+// pty session shows with its viewer peer. window-change requests arrive
+// before the terminal exists while the session offers to re-join one. Sizes
+// apply by the viewer rules (peerResize), as for cage attach: a re-joined
+// terminal takes this window's size only when no other window decides it.
 type entryTerminalView struct {
 	mu         sync.Mutex
 	cols, rows uint32
 	session    *terminalSession
+	peer       *terminalPeer
 }
 
 func (v *entryTerminalView) resize(cols, rows uint32) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.cols, v.rows = cols, rows
-	if v.session != nil && cols < 1<<16 && rows < 1<<16 {
-		entryResize(v.session, uint16(cols), uint16(rows))
-	}
+	v.applyLocked()
 }
 
-// show makes session the one the client's size applies to; a re-joined
-// terminal takes this client's size at once.
-func (v *entryTerminalView) show(session *terminalSession, resize bool) {
+// show makes session, seen through peer, the one the client's size applies
+// to; nil stops that.
+func (v *entryTerminalView) show(session *terminalSession, peer *terminalPeer) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.session = session
-	if resize && v.cols < 1<<16 && v.rows < 1<<16 {
-		entryResize(session, uint16(v.cols), uint16(v.rows))
+	v.session, v.peer = session, peer
+	v.applyLocked()
+}
+
+func (v *entryTerminalView) applyLocked() {
+	if v.session == nil || v.cols >= 1<<16 || v.rows >= 1<<16 || !validTerminalSize(uint16(v.cols), uint16(v.rows)) {
+		return
 	}
+	_ = v.session.peerResize(v.peer, uint16(v.cols), uint16(v.rows))
 }
 
 func (v *entryTerminalView) size() (uint32, uint32) {
@@ -916,8 +969,7 @@ func (s *Server) entryTerminal(ctx context.Context, conn *entryConn, channel ssh
 		}
 		session = created
 	}
-	view.show(session, rejoin)
-	s.entryRunTerminal(ctx, conn, channel, session, rejoin, typed)
+	s.entryRunTerminal(ctx, conn, channel, view, session, rejoin, typed)
 }
 
 // entryWaitingTerminals are this device's ssh terminals that run without an
@@ -1025,12 +1077,17 @@ func entryPrintable(text string, limit int) string {
 // a lock keeps it (F4 of the review): the work goes on, and after the
 // owner unlocks, a new ssh -t offers to re-join it.
 //
-// Every byte from the guest goes through the escape filter. Before the first
-// output the client's title is saved; when the session ends or is cut, the
-// filter's open string is ended and the client's terminal is reset
-// (entryResetSequence) before the exit status, as cage attach leaves a
-// window. A cut waits up to entryCutGrace for that (conn.flush).
-func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel ssh.Channel, session *terminalSession, rejoin bool, typed []byte) {
+// The channel is a window as cage attach's is, with the same escape filter
+// and settings (the per-computer local-terminal.json): the title is saved
+// before the first output, every byte from the guest goes through the
+// filter, history only draws, and every way out (the program ends, the
+// owner hangs up, a cut by off, revoke or a closing Super Cage, a lock)
+// writes the filter's exit reset (End) before Super Cage's own last line
+// and the exit status. A cut waits up to entryCutGrace for that
+// (conn.flush). It is a viewer of its own identity under the viewer rules:
+// answers to queries pass only from the size owner, typing takes the size.
+// Dropped images are not uploaded over ssh: pastes reach the program as text.
+func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel ssh.Channel, view *entryTerminalView, session *terminalSession, rejoin bool, typed []byte) {
 	conn.shells.Add(1)
 	defer conn.shells.Add(-1)
 	conn.flush.begin()
@@ -1043,19 +1100,39 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		session.sshViewers--
 		session.mu.Unlock()
 	}()
-	paths, _ := s.entryPaths()
-	filter := entryNewOutputFilter(entryLoadLocalSettings(paths).ClipboardWrite)
+	settings := localterm.DefaultSettings()
+	if paths, err := s.entryPaths(); err == nil {
+		settings, _ = localterm.LoadSettings(paths.ComputerDir)
+	}
+	presence := &entryPresence{}
+	output := &entryOutput{filter: termfilter.New(termfilter.Options{ClipboardWrite: settings.ClipboardWrite, ClipboardNow: presence.here})}
+	// The peer exists before the subscription, so queries in live output
+	// are counted for this window from the first byte.
+	peer := session.openPeer(entryViewerID(), false)
+	defer session.closePeer(peer)
+	view.show(session, peer)
+	defer view.show(nil, nil)
 	subscription := session.subscribe()
 	defer subscription.Close()
 	outputDone := make(chan struct{})
 	go func() {
-		if len(typed) > 0 && session.enqueueInputWait(ctx, string(typed), outputDone) != nil {
+		send := func(data []byte) bool {
+			if data = presence.note(data, output.filter.GuestFocus); len(data) == 0 {
+				return true
+			}
+			input, err := session.peerInput(peer, string(data))
+			if err != nil {
+				return false
+			}
+			return input == "" || session.enqueueInputWait(ctx, input, outputDone) == nil
+		}
+		if len(typed) > 0 && !send(typed) {
 			return
 		}
 		buffer := make([]byte, 32<<10)
 		for {
 			n, err := channel.Read(buffer)
-			if n > 0 && session.enqueueInputWait(ctx, string(buffer[:n]), outputDone) != nil {
+			if n > 0 && !send(buffer[:n]) {
 				return
 			}
 			if err != nil {
@@ -1063,21 +1140,23 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			}
 		}
 	}()
-	// The history of a new terminal is output nobody saw yet; a re-joined
-	// one's is a gap.
-	out := []byte(entryTitlePush)
-	out = entryFrame(out, filter, subscription.History, rejoin)
-	ended, gone := false, false
-	if _, err := channel.Write(out); err != nil {
-		gone = true
-	}
-	for !gone && ctx.Err() == nil {
+	// History only draws, as in cage attach; a re-joined terminal's does not
+	// continue what the client's window shows.
+	session.showQueries(peer, subscription.History)
+	out := append([]byte(termfilter.TitlePush), entryFocusOn...)
+	out = output.frame(out, subscription.History, true, rejoin)
+	ended := false
+	_, err := channel.Write(out)
+	for err == nil && ctx.Err() == nil {
 		batch := subscription.next(terminalFrameLimit)
 		if len(batch.Data) > 0 {
-			out = entryFrame(out[:0], filter, batch.Data, batch.Resync && batch.Reset)
-			if _, err := channel.Write(out); err != nil {
-				gone = true
+			if batch.Resync {
+				// The client fell behind: the kept history again, as a
+				// viewer that resumes gets it.
+				session.showQueries(peer, batch.Data)
 			}
+			out = output.frame(out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
+			_, err = channel.Write(out)
 			continue
 		}
 		if batch.Done {
@@ -1099,7 +1178,10 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	session.mu.Lock()
 	kept := session.kept
 	session.mu.Unlock()
-	tail := append(filter.Abort(nil), entryResetSequence...)
+	cols, _ := view.size()
+	// The exit reset on every way out; nothing from the guest follows it.
+	// To a client that is gone the write fails, which costs nothing.
+	tail := output.filter.End(nil, int(min(cols, 1<<16-1)))
 	switch cause := context.Cause(conn.ctx); {
 	case ended:
 	case full:
@@ -1111,9 +1193,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 			tail = append(tail, "\r\nSuper Cage："+refusal.Message+"\r\n"...)
 		}
 	}
-	if !gone {
-		_, _ = channel.Write(tail)
-	}
+	_, _ = channel.Write(tail)
 	if ended {
 		code := session.exitStatus()
 		if code < 0 {

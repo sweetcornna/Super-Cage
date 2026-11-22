@@ -97,14 +97,10 @@ type entryStatusView struct {
 	Revoked     bool              `json:"revoked"`
 	Devices     []entryDeviceView `json:"devices"`
 	// Herdr is offered only once its filter exists (step 3).
-	Herdr    bool               `json:"herdr"`
-	Settings entryLocalSettings `json:"settings"`
-	Error    string             `json:"error,omitempty"`
+	Herdr bool   `json:"herdr"`
+	Error string `json:"error,omitempty"`
 	// Unreached names the environments a revocation could not reach.
 	Unreached []string `json:"unreached,omitempty"`
-	// PTYSessions is what happens to a session with a terminal: "filtered"
-	// once the escape filter exists, "refused" until then.
-	PTYSessions string `json:"pty_sessions"`
 	// Kept are the kept ssh terminals of this environment, at most
 	// KeptLimit, each with 结束 on the page.
 	Kept      []entryKeptView `json:"kept"`
@@ -119,17 +115,13 @@ func entryUnreachedNote(names []string) string {
 
 // entryView reads everything the page shows and writes nothing.
 func (s *Server) entryView() entryStatusView {
-	view := entryStatusView{Supported: s.macosGuest == nil && s.windowsGuest == nil, Environment: entryEnvironmentID(s.profile), Name: entryEnvironmentName(s.profile), Devices: []entryDeviceView{}, PTYSessions: "refused"}
-	if entryNewOutputFilter != nil {
-		view.PTYSessions = "filtered"
-	}
+	view := entryStatusView{Supported: s.macosGuest == nil && s.windowsGuest == nil, Environment: entryEnvironmentID(s.profile), Name: entryEnvironmentName(s.profile), Devices: []entryDeviceView{}}
 	view.Kept, view.KeptLimit = s.entryKeptViews(), entryKeptLimit
 	paths, err := s.entryPaths()
 	if err != nil {
 		view.Error = err.Error()
 		return view
 	}
-	view.Settings = entryLoadLocalSettings(paths)
 	st, err := entryLoadState(s.profile)
 	if err != nil {
 		view.Error = err.Error()

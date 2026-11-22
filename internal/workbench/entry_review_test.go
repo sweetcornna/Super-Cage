@@ -22,6 +22,7 @@ import (
 
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/host"
+	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
 
 // Tests for the findings of the security review of the local SSH entry
@@ -55,33 +56,25 @@ func entryShellExit(t *testing.T, s *entryShell) int {
 	return -1
 }
 
-// F1: while no escape filter is plugged in, a session with a pty never runs:
-// shell and exec are answered with a plain message and status 1. Refusing
-// pty-req instead would not do: OpenSSH then asks for a shell without one.
-func TestEntryRefusesTerminalSessionsWithoutFilter(t *testing.T) {
+// F1, now that the escape filter is in: a session with a pty is a Super
+// Cage terminal whose output goes through cage attach's filter. A clipboard
+// read and the guest's own focus-report switch never reach the client; a
+// title does. The system ssh with -tt gets the command's status.
+func TestEntryTerminalSessionsAreFiltered(t *testing.T) {
 	f := newEntryFixture(t, true)
 	f.on()
-	entryNewOutputFilter = nil
-	for _, command := range []string{"", "printf 'RAN=%s\\n' yes"} {
-		shell := entryOpenShell(t, f.client(), 100, 30, command)
-		status := entryShellExit(t, shell)
-		if status != 1 || !strings.Contains(shell.text(), "需要更新 Super Cage") {
-			t.Fatalf("command %q: status %d, output %q", command, status, shell.text())
-		}
+	shell := entryOpenShell(t, f.client(), 100, 30, "printf 'A\\033]52;c;?\\007B\\033[?1004hC\\033]2;entry-title\\007D\\n'; exit 3")
+	if status := entryShellExit(t, shell); status != 3 {
+		t.Fatalf("status %d", status)
 	}
-	if listed := entrySSHTerminals(f.s); len(listed) != 0 {
-		t.Fatalf("a terminal was opened: %v", listed)
+	text := shell.text()
+	if !strings.Contains(text, "ABC\x1b]2;entry-title\x07D\r\n") || strings.Contains(text, "\x1b]52;c;?") || strings.Count(text, entryFocusOn) != 1 {
+		t.Fatalf("output %q", text)
 	}
-	for _, line := range f.guest.commands() {
-		if strings.Contains(line, "RAN=") {
-			t.Fatalf("the guest ran %q", line)
-		}
-	}
-	// The system ssh with -tt: the same refusal, nothing run.
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	out, stderr, code := entryCombined(f.systemSSH(ctx, f.paths.clientFile(), "-tt", "cage-default", "printf 'RAN=%s\\n' yes"))
-	if code != 1 || !strings.Contains(out+stderr, "需要更新 Super Cage") || strings.Contains(out, "RAN=yes") {
+	out, stderr, code := entryCombined(f.systemSSH(ctx, f.paths.clientFile(), "-tt", "cage-default", "printf 'RAN=%s\\033]52;c;?\\007\\n' yes; exit 4"))
+	if code != 4 || !strings.Contains(out, "RAN=yes") || strings.Contains(out, "\x1b]52;c;?") {
 		t.Fatalf("ssh -tt: %d %q %q", code, out, stderr)
 	}
 }
@@ -97,7 +90,7 @@ func TestEntryTerminalSavesTitleAndResetsAtTheEnd(t *testing.T) {
 		t.Fatalf("status %d", status)
 	}
 	text := shell.text()
-	if !strings.HasPrefix(text, entryTitlePush) || !strings.HasSuffix(text, entryResetSequence) || !strings.Contains(text, "DONE") {
+	if !strings.HasPrefix(text, termfilter.TitlePush+entryFocusOn) || !strings.HasSuffix(text, entryExitReset) || !strings.Contains(text, "DONE") {
 		t.Fatalf("output %q", text)
 	}
 }
@@ -122,7 +115,7 @@ func TestEntryLockKeepsTheTerminalAndOffersToRejoin(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("the lock did not cut the connection")
 	}
-	if text := shell.text(); !strings.Contains(text, entryResetSequence) || !strings.Contains(text, "已锁定") {
+	if text := shell.text(); !strings.Contains(text, entryExitReset) || !strings.Contains(text, "已锁定") {
 		t.Fatalf("no reset or message before the cut: %q", text[max(0, len(text)-400):])
 	}
 	listed := entrySSHTerminals(f.s)
@@ -178,22 +171,8 @@ func TestEntryCutResetsABusyTerminal(t *testing.T) {
 			case <-time.After(3 * time.Second):
 				t.Fatalf("%s did not end the connection", event)
 			}
-			entryAwait(t, 2*time.Second, "the reset", func() bool { return strings.Contains(shell.text(), entryResetSequence) })
+			entryAwait(t, 2*time.Second, "the reset", func() bool { return strings.Contains(shell.text(), entryExitReset) })
 		})
-	}
-}
-
-// F9: replayed history and output after a gap go through the filter in
-// replay mode after an abort and a clean screen; live output does not.
-func TestEntryFrameResetsTheFilterAtGaps(t *testing.T) {
-	filter := &entryRecordingFilter{}
-	live := entryFrame(nil, filter, []byte("live"), false)
-	gap := entryFrame(nil, filter, []byte("after a gap"), true)
-	if string(live) != "live" || string(gap) != "\x1bcafter a gap" {
-		t.Fatalf("frames %q %q", live, gap)
-	}
-	if got := strings.Join(filter.log(), ","); got != "live 4,abort,replay 11" {
-		t.Fatalf("filter driven as %s", got)
 	}
 }
 
