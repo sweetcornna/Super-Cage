@@ -130,8 +130,13 @@ type desktopGateway struct {
 	localFor        func(string) (DesktopLocalController, error)
 	generation      string
 	active, pending *desktopTarget
-	closed          bool
-	departing       bool
+	// left are local views this run left for another local view, by VM:
+	// their controllers stay unlocked while the app runs, and close suspends
+	// them with their own sessions, since quitting the app counts as lock
+	// for each environment's ssh entry.
+	left      map[string]*desktopTarget
+	closed    bool
+	departing bool
 }
 
 func newDesktopGateway(profile string, local DesktopLocalController) *remoteGateway {
@@ -433,6 +438,18 @@ func (d *desktopGateway) commitLocked(ctx context.Context, in switchRequest) err
 	d.mu.Lock()
 	d.generation, d.active, d.pending = t.id, t, nil
 	d.mu.Unlock()
+	if back := d.left[targetLocalVMID(t)]; back != nil {
+		delete(d.left, targetLocalVMID(t))
+		back.close()
+	}
+	if old != nil && old.mode == "local" && t.mode == "local" && old.state().State == "connected" {
+		if d.left == nil {
+			d.left = map[string]*desktopTarget{}
+		}
+		d.left[targetLocalVMID(old)].close()
+		d.left[targetLocalVMID(old)] = old
+		return nil
+	}
 	old.close()
 	return nil
 }
@@ -506,6 +523,15 @@ func (d *desktopGateway) close() {
 		_ = suspendLocalView(ctx, t)
 		cancel()
 	}
+	for _, t := range d.left {
+		if t.state().State == "connected" {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			_ = suspendLocalView(ctx, t)
+			cancel()
+		}
+		t.close()
+	}
+	d.left = nil
 	d.clearSelection()
 }
 
