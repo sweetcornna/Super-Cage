@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
 
 // Claude Science phase 2a, workbench side: when host rendering is on, the
@@ -31,7 +32,8 @@ import (
 // checks of /api; errors are plain Chinese text):
 //
 //	GET /api/claude-science -> host_render (scienceHostRenderState):
-//	  available / unavailable_code ("platform" | "client" | "guest") /
+//	  available / unavailable_code ("platform" | "unverified" | "client" |
+//	  "guest") /
 //	  unavailable_reason, enabled, running, error, audit_note, and the
 //	  front's refused / blocked / audit / session / signin fields. The
 //	  front port is never in it: the Windows shell reads it from control.json.
@@ -59,11 +61,45 @@ import (
 // scienceHostOS is where host rendering may run (tests replace it).
 var scienceHostOS = runtime.GOOS
 
+// scienceHostVerified lists the platforms (GOOS values, comma separated)
+// where host rendering has run a real Claude Science session in the real
+// window. The switch is offered nowhere else, whatever frame contract the
+// window answers: the pane hides it (unavailable_code "unverified"), turning
+// it on is refused, and a stored "on" is treated as off (syncScienceFront
+// says why in the log).
+//
+// It is empty: no real session has run in the real window yet. A build for
+// that run lifts the gate without a code change:
+//
+//	go build -ldflags "-X github.com/sylvinus/agent-vm/internal/workbench.scienceHostVerified=windows" ./cmd/cage
+//
+// After a successful run the platform is written here, in a reviewed commit.
+var scienceHostVerified = ""
+
+// scienceHostRenderVerified reports whether the gate is lifted for goos.
+func scienceHostRenderVerified(goos string) bool {
+	if goos == "" {
+		return false
+	}
+	for _, platform := range strings.Split(scienceHostVerified, ",") {
+		if strings.TrimSpace(platform) == goos {
+			return true
+		}
+	}
+	return false
+}
+
+// scienceLog notes what the server decided on its own (tests replace it).
+var scienceLog = diagnostics.Log
+
 type scienceHost struct {
 	mu    sync.Mutex
 	front *scienceFront
 	err   string
 	stop  context.CancelFunc
+	// unverified: the log has said once that a stored "on" is treated
+	// as off in this build (scienceHostVerified).
+	unverified sync.Once
 	// vmRunning replaces Server.vmRunning in tests.
 	vmRunning func() bool
 }
@@ -83,6 +119,7 @@ const (
 	scienceReasonHostPlatform = "本机渲染目前只在 Windows 版 Super Cage 窗口中提供：只有它的网页组件能把页面的时区、语言和浏览器标识换成环境的。"
 	scienceReasonHostClient   = "本机渲染只能在这台电脑的 Super Cage 窗口中使用；浏览器、手机和远程连接继续使用隔离浏览器。"
 	scienceReasonHostGuest    = "这个环境不能运行 Claude Science。"
+	scienceReasonUnverified   = "本机渲染还没有在真实的 Windows 窗口中验证过，这个版本暂不提供。"
 )
 
 // scienceHostPlatform: what this workbench process allows regardless of the
@@ -91,6 +128,8 @@ func (s *Server) scienceHostPlatform() (string, string) {
 	switch {
 	case scienceHostOS != "windows":
 		return "platform", scienceReasonHostPlatform
+	case !scienceHostRenderVerified(scienceHostOS):
+		return "unverified", scienceReasonUnverified
 	case s.desktopEntry || s.clientOnly:
 		return "client", scienceReasonHostClient
 	case s.windowsGuest != nil || s.macosGuest != nil || scienceHostArch != "amd64":
@@ -124,7 +163,8 @@ func (s *Server) scienceHostRender(r *http.Request) *scienceHostRenderState {
 	state.UnavailableCode, state.UnavailableReason = s.scienceHostAvailability(r)
 	state.Available = state.UnavailableCode == ""
 	s.mu.Lock()
-	state.Enabled = s.preferences.ScienceHostRender
+	// A stored "on" this build does not offer is off (scienceHostVerified).
+	state.Enabled = s.preferences.ScienceHostRender && state.UnavailableCode != "unverified"
 	s.mu.Unlock()
 	s.scienceHost.mu.Lock()
 	front, startErr := s.scienceHost.front, s.scienceHost.err
@@ -148,6 +188,11 @@ func (s *Server) syncScienceFront() {
 	enabled, closing := s.preferences.ScienceHostRender, s.closing
 	s.mu.Unlock()
 	code, _ := s.scienceHostPlatform()
+	if enabled && code == "unverified" {
+		s.scienceHost.unverified.Do(func() {
+			scienceLog("warn", "claude-science", "host rendering is stored on, but this build does not offer it on "+scienceHostOS+" (scienceHostVerified is empty): treated as off")
+		})
+	}
 	want := enabled && code == "" && !closing
 	h := &s.scienceHost
 	h.mu.Lock()
