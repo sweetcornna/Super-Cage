@@ -74,6 +74,8 @@ type Server struct {
 	account                                          *localAccount
 	identity                                         ControllerIdentity
 	guestManifest                                    *cage.GuestManifest
+	clients                                          clientPresence // last good presence reading (client_presence.go)
+	clientsTracked                                   bool           // set for a Linux-guest workload, the only one that reads presence
 	guestUpdateRequired                              bool
 	macComponentsChecked                             bool
 	guestUpdateError                                 string
@@ -264,6 +266,10 @@ func serve(configPath string, clientOnly bool, fullConfigPath string) (returned 
 			// Preserve the original density of profiles saved before this setting.
 			s.preferences.BalancedDisplay = false
 			_ = json.Unmarshal(b, &s.preferences)
+		}
+		if s.macosGuest == nil && s.windowsGuest == nil {
+			s.clientsTracked = true
+			s.clients = loadClientPresence(profile)
 		}
 		if !s.storageRecoveryStatus().Required {
 			if err = s.prepareEnvironment(); err != nil {
@@ -773,6 +779,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		"safety": s.safetyViewLocked(time.Now()), "environment_update_required": s.guestUpdateRequired, "environment_update_error": s.guestUpdateError,
 		"terminals_revision": terminals,
 	}
+	s.clientPresenceViewLocked(view)
 	if s.windowsGuest != nil {
 		view["guest_system"] = guestos.Windows11
 		if s.windowsGuest.Remote() {

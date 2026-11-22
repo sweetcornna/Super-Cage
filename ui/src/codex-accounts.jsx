@@ -8,8 +8,9 @@ import { QuotaClock, QuotaWindow, UsageNote, useUsageCheck } from "./claude-acco
 import { codexAccountName, codexActiveCounts, codexQuotaView, codexWindowLabel } from "./codex-accounts-state.mjs";
 import "./claude-accounts.css";
 
-// Ordinary reads never start an upstream usage query.
-export function useCodexAccounts() {
+// Ordinary reads never start an upstream usage query. enabled is false where
+// Codex is absent (codexSurfaces): nothing is read then.
+export function useCodexAccounts(enabled = true) {
   const [registry, setRegistry] = useState(null);
   const [error, setError] = useState("");
   const generation = useRef(0);
@@ -36,7 +37,11 @@ export function useCodexAccounts() {
       else if (visiblePanel) polling.current = false;
     }
   }, []);
-  useEffect(() => { load(); return () => { generation.current++; }; }, [load]);
+  useEffect(() => {
+    if (!enabled) return;
+    load();
+    return () => { generation.current++; };
+  }, [load, enabled]);
   return { accounts: registry?.accounts ?? null, detected: registry?.detected,
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,

@@ -223,3 +223,34 @@ test("the user's retry asks at once; an action's refresh keeps the 1 s spacing",
   assert.equal(h.inFlight().length, 1);
   list.stop();
 });
+
+test("the providers follow Codex presence: another set drops the held request and its revision", async () => {
+  const h = harness();
+  const list = createSessionList({ ...h.env, providers: "claude" });
+  list.start();
+  await h.advance(0);
+  assert.deepEqual(query(h.calls[0]), { providers: "claude" });
+  answer(h.calls[0], { sessions: [], notice: "", revision: rev(1) });
+  await h.advance(1000);
+  assert.deepEqual(query(h.calls[1]), { providers: "claude", after: rev(1), wait: "25" });
+  list.setProviders("claude");
+  await h.flush();
+  assert.equal(h.calls[1].aborted, undefined, "the same set changes nothing");
+  list.setProviders("claude,codex");
+  await h.flush();
+  assert.equal(h.calls[1].aborted, true);
+  await h.advance(1000);
+  assert.equal(h.inFlight().length, 1);
+  assert.deepEqual(query(h.calls[2]), { providers: "claude,codex" }, "a fresh list, without the old revision");
+  answer(h.calls[2], { sessions: [{ id: "c", provider: "codex" }], notice: "", revision: rev(2) });
+  await h.flush();
+  assert.equal(list.getSnapshot().sessions.length, 1);
+  list.stop();
+  list.setProviders("claude");
+  await h.advance(5000);
+  assert.equal(h.calls.length, 3, "a stopped list asks for nothing");
+  list.start();
+  await h.advance(0);
+  assert.deepEqual(query(h.calls[3]), { providers: "claude" });
+  list.stop();
+});

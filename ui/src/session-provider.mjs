@@ -11,8 +11,8 @@ export const CODEX = "codex";
 // ignores the parameter and lists Claude sessions as before.
 export const SESSION_PROVIDERS = "claude,codex";
 
-export function sessionListPath({ archived = false, after = "", wait = 0 } = {}) {
-  const query = new URLSearchParams({ providers: SESSION_PROVIDERS });
+export function sessionListPath({ archived = false, after = "", wait = 0, providers = SESSION_PROVIDERS } = {}) {
+  const query = new URLSearchParams({ providers });
   if (archived) query.set("archived", "true");
   if (after) query.set("after", after);
   if (after && wait > 0) query.set("wait", String(wait));

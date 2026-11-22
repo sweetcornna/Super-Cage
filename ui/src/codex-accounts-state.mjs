@@ -7,6 +7,37 @@ export function codexTerminalSupported(system) {
   return !NATIVE_GUESTS.has(system || "");
 }
 
+// Codex surfaces follow presence (/status "clients" and "clients_unknown",
+// design 2.3, choice C): shown when a codex program was found, and as before
+// while nothing is known. "pending" is the window before its first /status:
+// it shows nothing and asks for nothing yet.
+export function codexPresence(status) {
+  if (!status) return "pending";
+  if (status.clients_unknown === true) return "unknown";
+  return Array.isArray(status.clients) && status.clients.includes("codex") ? "present" : "absent";
+}
+
+// /status reports presence only for a controller that says so once per
+// connection: capability "clients" in its connection manifest. A window the
+// workload serves itself (direct, or a tenant VM's own page) has no manifest
+// and is that same build. Anything else, an older remote host or local
+// controller included, is no evidence: presence is unknown there.
+export function presenceReported(context) {
+  const manifest = context?.connection?.manifest;
+  if (manifest) return manifest.capabilities?.clients === true;
+  return context?.mode === "local" && !context.desktop_gateway && !context.client_only;
+}
+
+// menu: the 新建 row; link: 账号管理 in the sidebar; accounts: the
+// /codex-accounts read; providers: what the session lists ask for. A macOS
+// or Windows guest is never read: unknown, so as before (and no 新建 row).
+export function codexSurfaces(status, system, context) {
+  const presence = status && (!codexTerminalSupported(system) || !presenceReported(context)) ? "unknown" : codexPresence(status);
+  const shown = presence === "present" || presence === "unknown";
+  return { presence, menu: shown && codexTerminalSupported(system), link: shown, accounts: shown,
+    providers: presence === "absent" ? "claude" : "claude,codex" };
+}
+
 // Codex reports each window's length; label it like the Claude panel's 5h/7d.
 export function codexWindowLabel(minutes, slot = "primary") {
   if (!Number.isInteger(minutes) || minutes <= 0) return slot === "secondary" ? "长周期" : "短周期";

@@ -44,6 +44,7 @@ func (s *Server) mobileTerminalKinds() []string {
 	kinds := []string{"shell"}
 	s.mu.Lock()
 	command := claudeTerminalCommand(s.preferences)
+	codex := s.codexOfferedLocked()
 	s.mu.Unlock()
 	switch {
 	case s.windowsGuest != nil && s.windowsGuest.Remote():
@@ -51,7 +52,7 @@ func (s *Server) mobileTerminalKinds() []string {
 	default:
 		kinds = append(kinds, "claude")
 	}
-	if s.codexGuestSupported() {
+	if codex {
 		kinds = append(kinds, "codex")
 	}
 	return kinds

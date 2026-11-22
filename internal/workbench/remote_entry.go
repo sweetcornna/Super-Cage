@@ -76,10 +76,16 @@ func (s *Server) remoteManifest(w http.ResponseWriter, r *http.Request) {
 	if _, err := os.Stat(filepath.Join(s.profile, "container.json")); err == nil {
 		kind = "container"
 	}
+	capabilities := map[string]bool{"projects_browse": true, "client_project_share": runtime.GOOS == "linux" && kind == "container", "terminal": true,
+		"browser": true, "desktop": true, "audio": true}
+	// "clients": this controller's /status reports the optional clients'
+	// presence (client_presence.go). Without it a window reads presence as
+	// unknown, so an older controller keeps the Codex surfaces as before.
+	if s.clientsTracked {
+		capabilities["clients"] = true
+	}
 	jsonReply(w, RemoteEntry{APIProtocol: remoteAPIProtocol, InstanceID: s.instanceID,
-		Version: version.Version, Platform: runtime.GOOS, Runtime: kind, Origin: s.origin,
-		Capabilities: map[string]bool{"projects_browse": true, "client_project_share": runtime.GOOS == "linux" && kind == "container", "terminal": true,
-			"browser": true, "desktop": true, "audio": true}})
+		Version: version.Version, Platform: runtime.GOOS, Runtime: kind, Origin: s.origin, Capabilities: capabilities})
 }
 
 // errServerControllerOutdated is errControllerOutdated on a server, where
