@@ -40,6 +40,12 @@ type Options struct {
 	// ClipboardNow, when set, is asked as each clipboard write arrives: the
 	// write passes only while it says the owner is at this window.
 	ClipboardNow func() bool
+	// KeepScrollback drops what would erase the local window's scrollback
+	// (CSI 3 J, CSI ? 3 J), and a full reset (ESC c) then clears only the
+	// screen. By default they pass, as over ssh: Ink-based programs such as
+	// Claude Code erase the scrollback on every full redraw, and without
+	// it the window piles up stale copies of the screen.
+	KeepScrollback bool
 	// OnQuery, when set, hears of every query the output holds that a
 	// terminal application answers (Cage's web terminal included), whether
 	// or not it passes: the server uses it to know which input is an
@@ -401,13 +407,14 @@ func (f *Filter) escape(dst []byte, b byte) []byte {
 	}
 	switch {
 	case f.n == 2 && b == 'c':
-		// A full reset would also erase the owner's scrollback (and in
-		// kitty the window's colour schemes): a soft reset that clears the
-		// screen keeps reset and tput reset useful.
+		// A full reset would also reset the window's own settings (in
+		// kitty its colour schemes): a soft reset that clears the screen,
+		// and the scrollback unless it is kept, keeps reset and tput reset
+		// useful.
 		f.resets++
 		f.focus.Store(false)
 		f.n = 0
-		return append(dst, ClearReset...)
+		return f.Clear(dst)
 	case f.n == 2 && b == 'H':
 		f.left.tabs = true
 	}

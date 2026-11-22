@@ -20,6 +20,7 @@ import { nativeInput } from "./native-input.mjs";
 import { createDisplaySettings, displayDensity } from "./display-density.mjs";
 import { DownloadManager } from "./browser-downloads.mjs";
 import { UploadManager, uploadLimit } from "./browser-uploads.mjs";
+import { applyPendingReset, cancelReset, diskCacheBytes, requestReset, resetStatus } from "./browser-data-profile.mjs";
 import { createHash, timingSafeEqual } from "node:crypto";
 
 const config = JSON.parse(
@@ -71,6 +72,8 @@ function isBrowserTab(target) {
     !auditExclusions.has(target.targetId) && !auditExclusions.has(target.url);
 }
 
+// A reset requested through /data takes effect here, before Chromium starts.
+applyPendingReset("/home/cage-browser", process.env.CAGE_LANGUAGE || "en-US");
 const flags = [
   `--load-extension=${splitDirectory}`,
   "--user-data-dir=/home/cage-browser/profile",
@@ -87,6 +90,7 @@ const flags = [
   "--disable-quic",
   "--disable-session-crashed-bubble",
   "--window-size=1440,900",
+  `--disk-cache-size=${diskCacheBytes("/home/cage-browser")}`,
   ...(displaySettings.available ? [] : [`--force-device-scale-factor=${displayScale}`]),
   `--lang=${process.env.CAGE_LANGUAGE || "en-US"}`,
   `--accept-lang=${process.env.CAGE_LANGUAGE || "en-US"}`,
@@ -872,7 +876,7 @@ function pasteImage(png) {
 const tailnet = createTailnetClient();
 void tailnet.restore().catch(() => {});
 process.once("exit", () => tailnet.close());
-let phoneBrowser;
+let phoneBrowser, browserData;
 const server = http.createServer(async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Content-Type", "application/json");
@@ -981,6 +985,29 @@ const server = http.createServer(async (req, res) => {
     if (req.url === "/upload-cancel") { uploads.cancel(input.id); res.end('{"ok":true}'); return; }
     if (req.url === "/download-retry") {
       res.end(JSON.stringify(downloads.retry(input.id)));
+      return;
+    }
+    if (req.url === "/data") {
+      const resetId = typeof input.id === "string" && /^[\w-]{1,64}$/.test(input.id) ? input.id : "";
+      if (input.mode === "reset") {
+        // Chromium cannot drop its own running profile: restart it (systemd
+        // restarts the controller after a non-zero exit) on a fresh one. A
+        // Chromium that acknowledges the close but does not exit is stopped.
+        requestReset("/home/cage-browser", resetId);
+        res.end('{"ok":true,"restarting":true}');
+        setTimeout(() => {
+          void cdp("Browser.close").catch(() => process.exit(1));
+          setTimeout(() => { try { chrome.kill("SIGKILL"); } catch {} setTimeout(() => process.exit(1), 2000).unref(); }, 20_000).unref();
+        }, 200);
+        return;
+      }
+      if (input.mode === "reset-status") { res.end(JSON.stringify(resetStatus("/home/cage-browser", resetId))); return; }
+      if (input.mode === "reset-cancel") { cancelReset("/home/cage-browser", resetId); res.end('{"ok":true}'); return; }
+      const { BrowserData } = await import("./browser-data.mjs");
+      browserData ??= new BrowserData({ cdp, control: splitController, session, tabs: () => [...targets.values()],
+        active: () => activeId, queue: mutate, privateContext: () => privateBrowser.context, downloads,
+        profile: "/home/cage-browser/profile" });
+      res.end(JSON.stringify(await browserData.request(input)));
       return;
     }
     if (req.url === "/audit") {

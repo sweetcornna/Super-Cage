@@ -1590,9 +1590,9 @@ func TestAttachEndsAPasteCutByAReconnect(t *testing.T) {
 }
 
 // A reconnect that cannot resume (the history moved past what this window
-// shows) ends what the window was in, then starts from a clean screen
-// without a full reset, which would erase the owner's scrollback; focus
-// reports come back on after it.
+// shows) ends what the window was in, then starts from a clean screen as
+// the filter turns a full reset (soft reset, screen and scrollback
+// cleared), not with ESC c itself; focus reports come back on after it.
 func TestAttachRestartsAfterTrimmedHistoryKeepingScrollback(t *testing.T) {
 	s := attachController(t, nil)
 	session := startChild(t, s, "report")
@@ -1617,10 +1617,10 @@ func TestAttachRestartsAfterTrimmedHistoryKeepingScrollback(t *testing.T) {
 	}
 	release()
 	out := a.waitFor("flood-done", 1)
-	if !strings.Contains(out, "QUFB!\x07"+termfilter.ClearReset+"\x1b[?1004h") {
+	if !strings.Contains(out, "QUFB!\x07"+termfilter.ClearReset+"\x1b[3J\x1b[?1004h") {
 		t.Fatalf("not restarted with the clipboard write spoiled: %q", out[max(0, strings.Index(out, "QUFB!")-8):min(len(out), strings.Index(out, "QUFB!")+200)])
 	}
 	if strings.Contains(out, "\x1bc") {
-		t.Fatal("a full reset erased the owner's scrollback")
+		t.Fatal("a full reset reached the window")
 	}
 }

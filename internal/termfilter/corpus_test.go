@@ -33,7 +33,6 @@ var corpusDropped = map[string][]string{
 	"pico": {},
 	"ink": {
 		"\x1b[>1u", "\x1b[<u", // kitty keyboard: not in xterm.js
-		"\x1b[3J",                    // erase scrollback: the owner's, not the program's
 		"\x1b[?1004h", "\x1b[?1004l", // focus reports
 	},
 	"crossterm": {

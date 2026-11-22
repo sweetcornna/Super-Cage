@@ -146,20 +146,10 @@ func TestCountsAreBounded(t *testing.T) {
 	}
 }
 
-// The owner's scrollback stays: erasing it is dropped, and a full reset
-// becomes a soft reset that clears the screen.
-func TestScrollbackIsKept(t *testing.T) {
-	for _, in := range []string{esc + "[3J", esc + "[03J", esc + "[?3J"} {
-		if got := filterAll(t, Options{}, false, "a"+in+"b"); got != "ab" {
-			t.Errorf("%q passed: %q", in, got)
-		}
-	}
-	for _, in := range []string{esc + "[J", esc + "[2J", esc + "[1J", esc + "[?2J"} {
-		if got := filterAll(t, Options{}, false, in); got != in {
-			t.Errorf("%q dropped: %q", in, got)
-		}
-	}
-	f := New(Options{})
+// A full reset becomes a soft reset that clears the screen (the
+// scrollback: TestScrollbackClearPassesUnlessKept).
+func TestFullResetBecomesASoftReset(t *testing.T) {
+	f := New(Options{KeepScrollback: true})
 	if got := string(f.Append(nil, []byte("a"+esc+"cb"))); got != "a"+ClearReset+"b" || f.Resets() != 1 {
 		t.Fatalf("%q, %d resets", got, f.Resets())
 	}
