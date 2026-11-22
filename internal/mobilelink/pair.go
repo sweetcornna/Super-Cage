@@ -83,9 +83,15 @@ func AcceptPair(ctx context.Context, p PairCode, hostToken string, host *remotel
 	if err != nil {
 		return err
 	}
+	return enrollPhone(ctx, conn, save)
+}
+
+// enrollPhone is today's QR / long-code exchange after the TLS handshake: the
+// phone sends its hardware key pin and receives the saved pairing.
+func enrollPhone(ctx context.Context, conn *tls.Conn, save func(string) (PairedHost, error)) error {
 	defer pairDeadline(ctx, conn)()
 	var pin string
-	if err = json.NewDecoder(io.LimitReader(conn, 256)).Decode(&pin); err != nil || !pairPin(pin) {
+	if err := json.NewDecoder(io.LimitReader(conn, 256)).Decode(&pin); err != nil || !pairPin(pin) {
 		return errors.New("手机身份无效")
 	}
 	record, err := save(pin)

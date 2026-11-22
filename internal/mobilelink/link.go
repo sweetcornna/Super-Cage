@@ -72,8 +72,14 @@ func relayNetworkError(ctx context.Context, err error) error {
 	return retryableError{errors.New("could not connect to relay")}
 }
 
+// relayStatus is an unexpected relay HTTP status. A 409 on room creation means
+// the lookup hash is taken (see NewDeviceInvite).
+type relayStatus int
+
+func (s relayStatus) Error() string { return fmt.Sprintf("relay returned HTTP %d", int(s)) }
+
 func relayHTTPError(status int, missingIsTransient bool) error {
-	err := fmt.Errorf("relay returned HTTP %d", status)
+	err := error(relayStatus(status))
 	if status == http.StatusConflict || status == http.StatusTooManyRequests || status == http.StatusRequestTimeout ||
 		status >= 500 || (missingIsTransient && status == http.StatusNotFound) {
 		return retryableError{err}
