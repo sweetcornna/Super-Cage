@@ -493,6 +493,10 @@ internal sealed class MainWindow : Form
         // CoreWebView2.WebMessageReceived is top-document only. Frame messages
         // have a separate CoreWebView2Frame event, which this host never handles.
         if (!UpdatePolicy.IsWorkbench(e.Source, expectedPort)) return;
+        // The reply goes to the WebView that asked. A restart (Initialize)
+        // can replace it while the request is pending; the new one's
+        // document never sent it, and its CoreWebView2 may not exist yet.
+        var view = web;
         string id = "";
         try
         {
@@ -693,13 +697,18 @@ internal sealed class MainWindow : Form
                 case "quitNow": result = true; allowQuit = true; BeginInvoke(Close); break;
                 default: throw new InvalidDataException("未知原生操作");
             }
-            if (!web.IsDisposed) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id, result }));
+            Reply(view, JsonSerializer.Serialize(new { id, result }));
         }
         catch (Exception error)
         {
             _ = Backend.Report(error.ToString());
-            if (id.Length != 0 && !IsDisposed && !web.IsDisposed) web.CoreWebView2.PostWebMessageAsJson(JsonSerializer.Serialize(new { id, error = error.Message }));
+            if (id.Length != 0) Reply(view, JsonSerializer.Serialize(new { id, error = error.Message }));
         }
+    }
+
+    private void Reply(WebView2 view, string json)
+    {
+        if (!IsDisposed && view == web && !view.IsDisposed && view.CoreWebView2 is { } core) core.PostWebMessageAsJson(json);
     }
 
     // Smoke only: the pane's requests (ui/src/claude-science.jsx), as the
