@@ -384,8 +384,12 @@ internal sealed class MainWindow : Form
                 if (SmokeScience == "on" && webArguments == null && ScienceFrame.Arguments(Backend.Root) != null)
                 {
                     smokeRestart = System.Diagnostics.Stopwatch.StartNew();
-                    // Not awaited: the reply races the WebView's end.
-                    smokeScience["restart"] = await SmokeEvaluate("void window.webkit.messageHandlers.cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {}); 'sent'");
+                    smokeScience["restart"] = "requested";
+                    // Neither the script nor the bridge's reply is awaited:
+                    // both race the end of this WebView. The smoke completes
+                    // when the reloaded one is ready.
+                    _ = web.CoreWebView2.ExecuteScriptAsync("void window.webkit.messageHandlers.cage.postMessage({action:'scienceFrame',op:'restart'}).catch(() => {})")
+                        .ContinueWith(task => _ = task.Exception, TaskScheduler.Default);
                     return;
                 }
             }
