@@ -261,6 +261,7 @@ type attacher struct {
 	streaming bool // the last output left a clipboard write open
 	focusOwed bool // focus reports to turn back on after a reset
 	bellOwed  bool // a bell to ring
+	left      bool // the window was reset for leaving: nothing follows
 
 	restore   func() // the local terminal's mode before the attach
 	leaveOnce sync.Once
@@ -420,6 +421,9 @@ func (a *attacher) noteInput(data []byte) []byte {
 			a.inPaste = string(unit) == attachPasteStart
 		case termfilter.InputMouse:
 			owner = true
+		case termfilter.InputMotion:
+			// The pointer passing over the window: not a sign the owner
+			// is at it.
 		}
 		out = append(out, unit...)
 	}
@@ -448,6 +452,9 @@ func connectionID(id string) bool {
 func (a *attacher) bell() {
 	a.outMu.Lock()
 	defer a.outMu.Unlock()
+	if a.left {
+		return
+	}
 	if a.streaming {
 		a.bellOwed = true
 		return
@@ -464,7 +471,12 @@ func (a *attacher) leave() {
 		if a.tty.Size != nil {
 			cols, _, _ = a.tty.Size()
 		}
+		// After the reset nothing is written: no output still arriving, no
+		// focus reports or bell the attach owed.
+		a.outMu.Lock()
+		a.left = true
 		_, _ = a.tty.Out.Write(a.filter.End(nil, cols))
+		a.outMu.Unlock()
 		if a.restore != nil {
 			a.restore()
 		}
@@ -983,9 +995,12 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 				// shows: start from a clean screen, after ending what the
 				// last bytes left open.
 				// Not a full reset: that would erase the owner's scrollback.
+				a.outMu.Lock()
 				a.buf = append(a.filter.Abort(a.buf[:0]), termfilter.ClearReset...)
 				a.focusOwed = true
-				if err := a.writeOwn(); err != nil {
+				err := a.flushLocked()
+				a.outMu.Unlock()
+				if err != nil {
 					return err
 				}
 			}
@@ -996,11 +1011,12 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 	}
 }
 
-// writeOwn writes filtered output, then, unless it left a clipboard write
-// open, what the attach owes the window itself.
-func (a *attacher) writeOwn() error {
-	a.outMu.Lock()
-	defer a.outMu.Unlock()
+// flushLocked writes filtered output, then, unless it left a clipboard
+// write open, what the attach owes the window itself. Caller holds outMu.
+func (a *attacher) flushLocked() error {
+	if a.left {
+		return nil
+	}
 	a.streaming = a.filter.Streaming()
 	if !a.streaming {
 		if a.focusOwed {
@@ -1021,6 +1037,10 @@ func (a *attacher) writeOwn() error {
 // only draws: its queries, clipboard writes and notifications already acted.
 func (a *attacher) writeOutput(data []byte) error {
 	a.offset += uint64(len(data))
+	// The filter is used under outMu: leave may end it from another
+	// goroutine.
+	a.outMu.Lock()
+	defer a.outMu.Unlock()
 	for len(data) > 0 {
 		n := len(data)
 		if a.replay > 0 {
@@ -1037,7 +1057,7 @@ func (a *attacher) writeOutput(data []byte) error {
 			a.replay -= n
 		}
 		data = data[n:]
-		if err := a.writeOwn(); err != nil {
+		if err := a.flushLocked(); err != nil {
 			return err
 		}
 	}

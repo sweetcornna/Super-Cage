@@ -88,6 +88,16 @@ func TestAttachChild(t *testing.T) {
 		case strings.Contains(chunk, "?clip-open"):
 			// A clipboard write the program never finishes.
 			fmt.Print("clip-open-shown\r\n\x1b]52;c;" + strings.Repeat("QUFB", 64))
+		case strings.Contains(chunk, "?clip-flood"):
+			// A clipboard write left open, then more output than the
+			// history keeps.
+			fmt.Print("clip-open-shown\r\n\x1b]52;c;" + strings.Repeat("QUFB", 64))
+			time.Sleep(300 * time.Millisecond)
+			line := strings.Repeat("y", 78) + "\r\n"
+			for i := 0; i < (terminalHistoryLimit+(64<<10))/len(line); i++ {
+				os.Stdout.WriteString(line)
+			}
+			fmt.Print("flood-done\r\n")
 		case strings.Contains(chunk, "?dropped"):
 			// DA2, in-band resize reports and focus reports.
 			fmt.Print("\x1b[>c\x1b[?2048h\x1b[?1004hdropped-shown\r\n")
@@ -1576,5 +1586,41 @@ func TestAttachEndsAPasteCutByAReconnect(t *testing.T) {
 	out := a.waitFor("kept\"", 1)
 	if strings.Contains(out, "bbb") || !strings.Contains(out, "\\x1b[201~") {
 		t.Fatalf("the cut paste was not ended, or its rest arrived: %q", out[max(0, len(out)-300):])
+	}
+}
+
+// A reconnect that cannot resume (the history moved past what this window
+// shows) ends what the window was in, then starts from a clean screen
+// without a full reset, which would erase the owner's scrollback; focus
+// reports come back on after it.
+func TestAttachRestartsAfterTrimmedHistoryKeepingScrollback(t *testing.T) {
+	s := attachController(t, nil)
+	session := startChild(t, s, "report")
+	release, streams := holdResume(t)
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	a.typeText("?clip-flood")
+	a.waitFor(strings.Repeat("QUFB", 64), 1)
+	_ = streams()[0].NetConn().Close()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		session.mu.Lock()
+		done := bytes.Contains(session.history, []byte("flood-done"))
+		session.mu.Unlock()
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the program never finished its output")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	release()
+	out := a.waitFor("flood-done", 1)
+	if !strings.Contains(out, "QUFB!\x07"+termfilter.ClearReset+"\x1b[?1004h") {
+		t.Fatalf("not restarted with the clipboard write spoiled: %q", out[max(0, strings.Index(out, "QUFB!")-8):min(len(out), strings.Index(out, "QUFB!")+200)])
+	}
+	if strings.Contains(out, "\x1bc") {
+		t.Fatal("a full reset erased the owner's scrollback")
 	}
 }
