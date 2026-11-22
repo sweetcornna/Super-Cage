@@ -165,7 +165,7 @@ v0.1.14 及更早版本的归档名以 `Cage-Tenant-` 开头，例如 `Cage-Tena
 
 **iPhone**（iOS 17 或更新）通过 TestFlight 分发。
 
-TestFlight 公开链接：即将提供
+TestFlight 公开链接：<https://testflight.apple.com/join/qCbA6gMQ>（Apple 测试版审核通过后生效）
 
 **Android**（8.0 或更新，arm64）：发布页暂不提供 APK，可以按[移动端说明](mobile/README.md#android-构建与签名)用 `bash mobile/build.sh android` 自己构建。
 
