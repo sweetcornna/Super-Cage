@@ -221,9 +221,13 @@ func TestAgentClientAdmission(t *testing.T) {
 // become progress, its result the job's state and a fresh presence read.
 func TestAgentClientJobRunsTheInstaller(t *testing.T) {
 	var script string
-	s := agentClientServer(t, true, func(sc string, out io.Writer) error {
+	var s *Server
+	var mid *SetupProgress
+	s = agentClientServer(t, true, func(sc string, out io.Writer) error {
 		script = sc
-		_, _ = io.WriteString(out, "CAGE_AGENT_PROGRESS check 0 0\nCAGE_AGENT_PROGRESS download 0 124436451\nCAGE_AGENT_PROGRESS download 62218225 124436451\n正在下载 Codex 0.171.0（约 119 MB）…\nCAGE_AGENT_PROGRESS done 0 0\nCAGE_AGENT_DONE codex 0.171.0\n")
+		_, _ = io.WriteString(out, "CAGE_AGENT_PROGRESS check 0 0\nCAGE_AGENT_PROGRESS download 0 124436451\nCAGE_AGENT_PROGRESS download 62218225 124436451\n正在下载 Codex 0.171.0（约 119 MB）…\n")
+		mid = s.jobs.snapshot().SetupProgress
+		_, _ = io.WriteString(out, "CAGE_AGENT_PROGRESS done 0 0\nCAGE_AGENT_DONE codex 0.171.0\n")
 		return nil
 	}, "agent-clients/1 present=codex receipts=codex\n")
 	w := request(s, "POST", "/api/agents/codex/install", s.origin, "{}", true)
@@ -236,8 +240,11 @@ func TestAgentClientJobRunsTheInstaller(t *testing.T) {
 		t.Fatalf("%+v", started)
 	}
 	job := waitAgentJob(t, s)
-	if job.Error != "" || job.Message != "已完成" || job.SetupProgress == nil || job.SetupProgress.Phase != "agent" || job.SetupProgress.Operation != "done" {
+	if job.Error != "" || job.Message != "已完成" || job.SetupProgress != nil {
 		t.Fatalf("job: %+v %+v", job, job.SetupProgress)
+	}
+	if mid == nil || mid.Phase != "agent" || mid.Operation != "download" || mid.Label != "下载" || mid.Received == nil || *mid.Received != 62218225 || mid.Total != 124436451 {
+		t.Fatalf("progress during the job: %+v", mid)
 	}
 	for _, want := range []string{"AGENT_ACTION=install\n", "AGENT_ID=codex\n", "cage_download_tool", "super-cage-agent-launcher"} {
 		if !strings.Contains(script, want) {
@@ -391,13 +398,80 @@ func TestAgentClientVerifyRead(t *testing.T) {
 			t.Errorf("accepted %q", line)
 		}
 	}
-	probe := agentGuestProbe(entries, agents.ARM64)
-	if bash, err := exec.LookPath("bash"); err == nil {
-		cmd := exec.Command(bash, "-n")
-		cmd.Stdin = strings.NewReader(probe)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("the verify probe does not parse: %v %s\n%s", err, out, probe)
+}
+
+// The verify probe as the guest runs it, against a tree like the
+// installer's: one entry in place, one drifted, one never installed.
+func TestAgentClientVerifyProbeInBash(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	python, perr := exec.LookPath("python3")
+	if err != nil || perr != nil {
+		t.Skip("bash or python3 unavailable")
+	}
+	root := t.TempDir()
+	home, bin, lib, state := filepath.Join(root, "home"), filepath.Join(root, "bin"), filepath.Join(root, "lib"), filepath.Join(root, "state")
+	for _, dir := range []string{filepath.Join(home, ".local/bin"), bin, filepath.Join(lib, "codex/0.171.0"), filepath.Join(lib, "antigravity-cli/1.5.14"), state} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
 		}
+	}
+	write := func(path, body string, mode os.FileMode) {
+		if err := os.WriteFile(path, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// GNU stat -c %i:%s:%Y, as on the guest.
+	write(filepath.Join(bin, "stat"), "#!/bin/sh\n[ \"$1 $2\" = '-L -c' ] || exit 2\nexec '"+python+"' -c 'import os, sys; s = os.stat(sys.argv[1]); print(\"%d:%d:%d\" % (s.st_ino, s.st_size, int(s.st_mtime)))' \"$4\"\n", 0o755)
+	codexEntry := filepath.Join(lib, "codex/0.171.0/codex-aarch64-unknown-linux-musl")
+	write(codexEntry, "#!/bin/sh\n", 0o755)
+	write(filepath.Join(lib, "antigravity-cli/1.5.14/antigravity"), "#!/bin/sh\n", 0o755)
+	for id, version := range map[string]string{"codex": "0.171.0", "antigravity-cli": "1.5.14"} {
+		if err := os.Symlink(version, filepath.Join(lib, id, "current")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(filepath.Join(state, "codex.stat"), statKeyOf(t, codexEntry)+"\n", 0o644)
+	write(filepath.Join(state, "codex.json"), "{}", 0o644)
+	write(filepath.Join(home, ".local/bin/codex"), "#!/bin/sh\n", 0o755)
+	cmd := exec.Command(bash, "-c", agentGuestProbe(mustAgents(t), agents.ARM64, lib, state))
+	cmd.Env = []string{"HOME=" + home, "PATH=" + bin + ":/usr/bin:/bin"}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 2 || lines[0] != "agent-clients/1 present=codex receipts=codex" {
+		t.Fatalf("%q", out)
+	}
+	installed, free, ok := parseAgentGuest(lines[1], mustAgents(t))
+	if !ok || free <= 0 || installed["codex"] != (agentInstalled{version: "0.171.0", state: "ok"}) ||
+		installed["antigravity-cli"] != (agentInstalled{version: "1.5.14", state: "drifted"}) || len(installed) != 2 {
+		t.Fatalf("%q: %v %d %v", lines[1], installed, free, ok)
+	}
+}
+
+// statKeyOf is what the installer records for an entry: GNU stat's
+// %i:%s:%Y.
+func statKeyOf(t *testing.T, path string) string {
+	t.Helper()
+	out, err := exec.Command("python3", "-I", "-c", "import os, sys; s = os.stat(sys.argv[1]); print('%d:%d:%d' % (s.st_ino, s.st_size, int(s.st_mtime)))", path).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// Neither a paired phone's room nor any /api/mobile route reaches these
+// routes (design S12): a phone has no session cookie for them.
+func TestAgentClientRoutesAreNotPhoneRoutes(t *testing.T) {
+	for _, path := range []string{"/api/agents", "/api/agents/codex/install", "/api/agents/cancel"} {
+		if phoneRoomRoute(path) {
+			t.Errorf("%s is a phone room route", path)
+		}
+	}
+	s := testServer(t)
+	if w := request(s, "POST", "/api/agents/codex/install", s.origin, "{}", false); w.Code != 401 {
+		t.Fatalf("without the window's session: %d", w.Code)
 	}
 }
 

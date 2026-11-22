@@ -263,6 +263,14 @@ test user's: it cannot make root's files.
 
 ## First real-guest run: the list (keep current)
 
+0. Codex is still hidden, so the run needs a development build started with the switch on. Only a version
+   with `-dev` lists or installs hidden entries, and only when the process serving the window has
+   `CAGE_AGENTS_HIDDEN=1` in its environment; a release build refuses them at the route and in `ScriptInput`.
+   For example `make cage VERSION="$(tr -d '\r\n' < VERSION)-dev.agents"`, then start that `cage` with
+   `CAGE_AGENTS_HIDDEN=1`. A `-dev` version is a prerelease, so the build will report the release of
+   the same number as an update and stamps the guest manifest's `app_version` differently; neither
+   matters for the run. A hidden client installed from such a build gets 404 on remove from a release
+   build; remove it before switching back.
 1. Paused at the version check: owner and mode of the stage folder and its tree (all root's). After install:
    `find /usr/local/lib/agent-clients /var/lib/agent-clients -not -user root`, `-perm /7000`, `-type f -links +1`
    all print nothing.
@@ -271,7 +279,8 @@ test user's: it cannot make root's files.
    `/tmp/agent-clients.*` folders visible during a job (decides how much F1 mattered; it is fixed either way).
 4. `findmnt /tmp`; peak memory and tmpfs use during the 124 MB download; the install time.
 5. Real `timeout`: a client that sleeps 30 s fails at about 8-10 s; a client whose child calls `setsid` and
-   holds stdout does not hold the job (output goes to a file). `ulimit -f 64` cuts a loud client.
+   holds stdout does not hold the job (output goes to a file). `ulimit -f 64` cuts a loud client;
+   real `codex --version` with a fresh HOME passes under `ulimit -f 64` and the 8 s limit.
 6. From a fake client: `/proc/$PPID/environ` (the `timeout` process) has no proxy entry; a launched
    client's environment has no `CAGE_*` variable and no credential.
 7. Two real jobs at once: the second gets `busy` (409 at the route; `busy` from the lock if one came another way).
@@ -287,5 +296,6 @@ test user's: it cannot make root's files.
 13. Codex reads `/etc/codex/config.toml` and uses the system `bwrap`; `/usr/local/bin` is on the PATH the
     Codex helpers see over SSH.
 14. The full install, already-up-to-date, update and remove sequence under bash 5.2 and Python 3.13, with the
-    log kept; the job's progress in the window (`setup_progress`, phase `agent`).
+    log kept; the job's progress in the window (`setup_progress`, phase `agent`) during the job and none
+    once it ends.
 15. `POST /api/agents/codex/install` from `cage agent` is refused (`native_transport_required`).

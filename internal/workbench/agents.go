@@ -447,6 +447,9 @@ func (s *Server) runAgentJob(e agents.Entry, action agents.Action, removeData bo
 	}
 	job := s.jobs.execution()
 	job.setSetupProgress(&SetupProgress{Phase: "agent", Operation: "check", Label: agentPhaseLabels["check"]})
+	// A finished job carries no progress: the window reads progress on a
+	// finished job as an environment install.
+	defer job.setSetupProgress(nil)
 	s.setMessage(map[agents.Action]string{agents.Install: "正在添加 ", agents.Update: "正在更新 ", agents.Remove: "正在移除 "}[action] + e.Name + "，可在操作详情查看进度…")
 	out := &agentOutput{id: e.ID, next: job}
 	err = s.withToolsNetworkMonitor(func() error {
@@ -489,20 +492,21 @@ func (s *Server) refreshAgentPresence() {
 const agentGuestMarker = "agent-guest/1"
 
 // agentGuestProbe is the presence line plus one line of versions, in one
-// guest read. Ids, entries and paths come from the catalog, quoted.
-func agentGuestProbe(entries []agents.Entry, arch agents.Arch) string {
+// guest read. Ids, entries and paths come from the catalog, quoted; lib and
+// state are /usr/local/lib/agent-clients and /var/lib/agent-clients.
+func agentGuestProbe(entries []agents.Entry, arch agents.Arch, lib, state string) string {
 	var b strings.Builder
-	b.WriteString(clientPresenceProbe(clientReceiptDir) + "\n")
+	b.WriteString(clientPresenceProbe(state) + "\n")
 	b.WriteString("f=$(df -Pk \"$HOME\" 2>/dev/null | awk 'NR==2 {print $4}'); printf '" + agentGuestMarker + " free_kb=%s' \"$f\"\n")
 	for _, e := range entries {
 		a, ok := e.Artifact(arch)
 		if !e.Optional() || !ok || a.Entry == "" {
 			continue
 		}
-		dir := "/usr/local/lib/agent-clients/" + e.ID
-		b.WriteString("if v=$(readlink " + shellescape.Quote(dir+"/current") + " 2>/dev/null); then " +
-			"k=$(stat -L -c %i:%s:%Y " + shellescape.Quote(dir+"/current/"+a.Entry) + " 2>/dev/null); " +
-			"s=; read -r s < " + shellescape.Quote("/var/lib/agent-clients/"+e.ID+".stat") + " 2>/dev/null; " +
+		dir, sidecar := shellescape.Quote(lib+"/"+e.ID), shellescape.Quote(state+"/"+e.ID+".stat")
+		b.WriteString("if v=$(readlink " + dir + "/current 2>/dev/null); then " +
+			"k=$(stat -L -c %i:%s:%Y " + dir + "/current/" + shellescape.Quote(a.Entry) + " 2>/dev/null); " +
+			"s=; if [ -r " + sidecar + " ]; then read -r s < " + sidecar + " || s=; fi; " +
 			"if [ -n \"$k\" ] && [ \"$k\" = \"$s\" ]; then t=ok; else t=drifted; fi; " +
 			"printf ' %s=%s:%s' " + shellescape.Quote(e.ID) + " \"$v\" \"$t\"; fi\n")
 	}
@@ -541,7 +545,7 @@ func (s *Server) readAgentGuest(ctx context.Context, entries []agents.Entry) {
 	if !ok {
 		return
 	}
-	out, err := agentGuestRead(s, ctx, agentGuestProbe(entries, arch))
+	out, err := agentGuestRead(s, ctx, agentGuestProbe(entries, arch, "/usr/local/lib/agent-clients", clientReceiptDir))
 	if err != nil {
 		return
 	}
