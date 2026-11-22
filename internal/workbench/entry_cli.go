@@ -64,7 +64,8 @@ func entryCall(ctx context.Context, configPath, method, path string, input, outp
 }
 
 // entryTerminalNote is what the help says of sessions with a terminal; the
-// settings page says the same (local-entry-state.mjs, unfilteredNote).
+// settings page says it in two lines (local-entry-state.mjs, unfilteredNote)
+// and links the guide, which says it in full (docs/guide/local-terminal.md).
 const entryTerminalNote = "带终端的会话（ssh、ssh -t）是一个 Super Cage 终端：环境的输出经过和 cage attach 一样的过滤，剪贴板写入按设置 › 本机终端里的选择；拖入的图片不上传，按文字粘贴。"
 
 const entryUsageCommands = `用法：
