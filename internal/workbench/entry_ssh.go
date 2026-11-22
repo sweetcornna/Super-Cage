@@ -87,10 +87,12 @@ type entryService struct {
 	mu sync.Mutex
 	// wrapper is the guest's run script install, with its own lock.
 	wrapper entryWrapper
-	// Test seams: injected paths, the guest's run script and its install.
-	paths   *entryPaths
-	runPath string
-	install func(context.Context) error
+	// Test seams: injected paths, the guest's run script and its install,
+	// and how long Herdr's idle check waits (entryHerdrIdleAfter if 0).
+	paths          *entryPaths
+	runPath        string
+	install        func(context.Context) error
+	herdrIdleAfter time.Duration
 	// kept is the idle check of kept ssh terminals.
 	kept entryKeptCheck
 	// herdr holds the delay after Herdr lines the environment ended at once.

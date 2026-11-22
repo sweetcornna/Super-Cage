@@ -38,10 +38,11 @@ import (
 // is refused: its bridge carries its own protocol, which this filter does not
 // read (design R4).
 
+// entryHerdrIdleAfter is how long a core waits after its last line before
+// the idle check (design 5.5); tests set entryService.herdrIdleAfter.
+const entryHerdrIdleAfter = 10 * time.Minute
+
 var (
-	// entryHerdrIdleAfter is how long a core waits after its last line
-	// before the idle check (design 5.5); a variable for tests.
-	entryHerdrIdleAfter = 10 * time.Minute
 	// entryHerdrShortLine: a line the environment ends sooner than this
 	// delays the device's next one (design 5.4, C2).
 	entryHerdrShortLine  = 5 * time.Second
@@ -279,10 +280,14 @@ func (s *Server) entryHerdrIdle(session string) {
 	if closing || !s.vmRunning() {
 		return
 	}
+	after := entryHerdrIdleAfter
+	if s.entry.herdrIdleAfter > 0 {
+		after = s.entry.herdrIdleAfter
+	}
+	seconds := strconv.Itoa(max(1, int(after/time.Second)))
 	go func() {
 		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
 		defer cancel()
-		seconds := strconv.Itoa(max(1, int(entryHerdrIdleAfter/time.Second)))
 		cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", s.entryRunScript("herdr-idle", session, seconds))
 		cmd.WaitDelay = entryHopWaitDelay
 		if out, err := cmd.CombinedOutput(); err != nil {
