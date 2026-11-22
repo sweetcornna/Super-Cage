@@ -615,6 +615,11 @@ func TestDevicesShareTheSurfacesAndTellTheGuestNothing(t *testing.T) {
 				t.Fatal("A's held read ran on after B took the browser")
 			}
 		}
+		if surface == "browser" {
+			if reply := call(clientA, "GET", "/api/mobile/browser/"+idA+"/frame?after="+strings.Repeat("0", 32)+"&wait=5000", ""); reply.Status != http.StatusGone {
+				t.Fatalf("the former holder's held read: %d %s", reply.Status, reply.Body)
+			}
+		}
 		for _, op := range []string{"frame", "close"} {
 			method, body := "POST", "{}"
 			if op == "frame" {
@@ -664,5 +669,62 @@ func TestDevicesShareTheSurfacesAndTellTheGuestNothing(t *testing.T) {
 		if strings.Contains(saw, secret) {
 			t.Fatalf("the guest learned %q", secret)
 		}
+	}
+}
+
+// A migrated phone that reports its model writes it through to the phone file
+// of earlier versions, in that file's own shape, so an older version after a
+// rollback shows it and the next start of this one changes nothing.
+func TestDevicesLegacyPhoneReportWritesThrough(t *testing.T) {
+	rig := newDeviceRig(t, relay.Config{})
+	identity, err := remotelink.NewIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]byte, 32)
+	seed[0] = 2
+	host, err := remotelink.IdentityFromKey(ed25519.NewKeyFromSeed(seed))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lookup, err := lookupToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := `{"Seed":"` + base64.StdEncoding.EncodeToString(seed) + `","Pin":"` + identity.Pin + `","Relay":"` + rig.relay + `","Lookup":"` + lookup + `","Admin":""}`
+	if err := os.WriteFile(rig.s.phoneFile(), []byte(fixture), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.s.restoreDevices(); err != nil {
+		t.Fatal(err)
+	}
+	migrated := onlyDevice(t, rig.s)
+	phone := &testDevice{identity: identity, host: mobilelink.PairedHost{Version: 1, Relay: rig.relay, HostPin: host.Pin, Lookup: lookup}}
+	client := rig.connect(t, phone)
+	if reply, err := client.Do(rig.ctx, "POST", "/api/mobile/device", []byte(`{"platform":"android","model":"Google Pixel 9 Pro"}`)); err != nil || reply.Status != 200 {
+		t.Fatalf("report: %+v %v", reply, err)
+	}
+	var written map[string]json.RawMessage
+	data, err := os.ReadFile(rig.s.phoneFile())
+	if err != nil || json.Unmarshal(data, &written) != nil {
+		t.Fatalf("phone file: %v", err)
+	}
+	var original map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(fixture), &original); err != nil {
+		t.Fatal(err)
+	}
+	for key, value := range original {
+		if string(written[key]) != string(value) {
+			t.Fatalf("phone file %s changed: %s → %s", key, value, written[key])
+		}
+	}
+	var device map[string]string
+	if json.Unmarshal(written["device"], &device) != nil || len(device) != 2 || device["platform"] != "android" || device["model"] != "Google Pixel 9 Pro" || len(written) != len(original)+1 {
+		t.Fatalf("phone file after the report: %s", data)
+	}
+	again := loadDevices(rig.s.devicesFile(), rig.s.phoneFile(), time.Now())
+	if again.write || again.unreadable != nil || again.legacy != nil || len(again.devices) != 1 || again.devices[0].ID != migrated.ID ||
+		again.devices[0].Name != "Google Pixel 9 Pro" || again.devices[0].Platform != "android" || !again.devices[0].Legacy {
+		t.Fatalf("next start: %+v", again)
 	}
 }

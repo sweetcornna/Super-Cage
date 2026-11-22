@@ -1,11 +1,14 @@
 package workbench
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -95,6 +98,20 @@ func joinStateForTest(t *testing.T, s *Server, wait string) deviceJoinView {
 	return view
 }
 
+// joinStateAfter waits until the join leaves state from. Like the dialog it
+// reads at once, then holds a read only while the state is still from.
+func joinStateAfter(t *testing.T, s *Server, from string) deviceJoinView {
+	t.Helper()
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); {
+		if view := joinStateForTest(t, s, "0"); view.State != from {
+			return view
+		}
+		joinStateForTest(t, s, "5")
+	}
+	t.Fatalf("the join stayed in %s", from)
+	return deviceJoinView{}
+}
+
 func shortCodeJoinerForTest(t *testing.T, relayOrigin string) *Server {
 	t.Helper()
 	s := testServer(t)
@@ -129,12 +146,24 @@ func TestJoinedComputerByShortCode(t *testing.T) {
 	if w := deviceRequest(host, "POST", "/api/devices/invite/approve", `{"check":"`+request.Request.Check+`"}`, deviceCall{}); w.Code != 200 {
 		t.Fatalf("允许: HTTP %d %s", w.Code, w.Body.String())
 	}
-	view := joinStateForTest(t, s, "10")
-	if view.State != "joined" || !joinedComputerID.MatchString(view.ID) || view.Name != "家里的 Mac mini" {
-		t.Fatalf("after 允许: %+v", view)
+	// 允许 saves nothing on either side: this window confirms the number too.
+	asked := joinStateAfter(t, s, "approval")
+	if asked.State != "confirm" || asked.Check != joined.view.Check {
+		t.Fatalf("after 允许: %+v", asked)
 	}
-	if hostView := hostInviteForTest(t, host, "0"); hostView.State != "joined" || hostView.Device == nil {
-		t.Fatalf("host after 允许: %+v", hostView)
+	if computers, _ := s.loadJoinedComputers(); len(computers) != 0 || hostDeviceCount(host) != 0 {
+		t.Fatalf("saved before the joiner confirmed: %d here, %d on the host", len(computers), hostDeviceCount(host))
+	}
+	if hostView := hostInviteForTest(t, host, "0"); hostView.State != "confirming" {
+		t.Fatalf("host while the joiner confirms: %+v", hostView)
+	}
+	w := deviceRequest(s, "POST", "/api/client/devices/join/confirm", `{"check":"`+asked.Check+`"}`, deviceCall{})
+	var view deviceJoinView
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil || view.State != "joined" || !joinedComputerID.MatchString(view.ID) || view.Name != "家里的 Mac mini" {
+		t.Fatalf("一致: HTTP %d %s", w.Code, w.Body.String())
+	}
+	if hostView := hostInviteForTest(t, host, "5"); hostView.State != "joined" || hostView.Device == nil {
+		t.Fatalf("host after the joiner confirmed: %+v", hostView)
 	}
 	record := readPrivateJoined(t, s)
 	if len(record.Computers) != 1 || record.Computers[0].ID != view.ID {
@@ -159,7 +188,7 @@ func TestJoinByShortCodeRefusalsAndCancel(t *testing.T) {
 
 	// Window only, like every joining-side route.
 	for _, call := range []deviceCall{{agent: true}, {untrusted: true}} {
-		for _, request := range [][3]string{{"POST", "/api/client/devices/join", `{"code":"4821 9037"}`}, {"GET", "/api/client/devices/join", ""}, {"DELETE", "/api/client/devices/join", ""}} {
+		for _, request := range [][3]string{{"POST", "/api/client/devices/join", `{"code":"4821 9037"}`}, {"GET", "/api/client/devices/join", ""}, {"DELETE", "/api/client/devices/join", ""}, {"POST", "/api/client/devices/join/confirm", `{"check":"1234"}`}, {"POST", "/api/client/devices/join/reject", "{}"}} {
 			if w := deviceRequest(s, request[0], request[1], request[2], call); w.Code != http.StatusForbidden {
 				t.Fatalf("%s %s %+v: HTTP %d", request[0], request[1], call, w.Code)
 			}
@@ -167,6 +196,9 @@ func TestJoinByShortCodeRefusalsAndCancel(t *testing.T) {
 	}
 	if joinerHits.Load() != 0 {
 		t.Fatal("refused joins reached the relay")
+	}
+	if w := deviceRequest(s, "POST", "/api/client/devices/join/confirm", `{"check":"1234"}`, deviceCall{}); w.Code != http.StatusConflict {
+		t.Fatalf("一致 with no join: HTTP %d", w.Code)
 	}
 
 	// 拒绝 on the host.
@@ -229,10 +261,102 @@ func TestJoinByShortCodeRefusalsAndCancel(t *testing.T) {
 			t.Fatalf("%s: a cancelled join was saved", stop)
 		}
 	}
-	host.phones.mu.Lock()
-	count := len(host.phones.devices)
-	host.phones.mu.Unlock()
-	if count != 0 {
+	if count := hostDeviceCount(host); count != 0 {
 		t.Fatalf("host enrolled %d refused or cancelled joiners", count)
 	}
+}
+
+func hostDeviceCount(host *Server) int {
+	host.phones.mu.Lock()
+	defer host.phones.mu.Unlock()
+	return len(host.phones.devices)
+}
+
+// The joining window confirms the check number before anything is saved. A
+// host that knows the code and approves at once (a relay that read the code
+// can do that) gets nothing without this person's click on the number the
+// real host never showed.
+func TestJoinByShortCodeNeedsTheJoinersConfirmation(t *testing.T) {
+	saved := mobilelink.DeviceApprovalTimeout
+	mobilelink.DeviceApprovalTimeout = 3 * time.Second
+	t.Cleanup(func() { mobilelink.DeviceApprovalTimeout = saved })
+	relayOrigin, _ := deviceTestRelay(t)
+	s := shortCodeJoinerForTest(t, relayOrigin)
+
+	t.Run("forged approval", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(cancel)
+		forger, err := remotelink.NewIdentity()
+		if err != nil {
+			t.Fatal(err)
+		}
+		invite, err := mobilelink.NewDeviceInvite(ctx, relayOrigin, "", forger)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var planted atomic.Int32
+		outcome := make(chan error, 1)
+		go func() {
+			outcome <- mobilelink.AcceptDevice(ctx, invite, forger, func(context.Context, mobilelink.DeviceRequest) bool { return true }, func(mobilelink.DeviceRequest, mobilelink.PairedHost) error {
+				planted.Add(1)
+				return nil
+			})
+		}()
+		joined := joinByCodeForTest(t, s, invite.Code)
+		if joined.code != 200 || len(joined.view.Check) != 4 {
+			t.Fatalf("join: HTTP %d %s", joined.code, joined.body)
+		}
+		view := joinStateAfter(t, s, "approval")
+		if view.State != "confirm" || view.Check != joined.view.Check {
+			t.Fatalf("after the forged 允许: %+v", view)
+		}
+		wrong := view.Check[:3] + string(rune('0'+(view.Check[3]-'0'+1)%10))
+		if w := deviceRequest(s, "POST", "/api/client/devices/join/confirm", `{"check":"`+wrong+`"}`, deviceCall{}); w.Code != http.StatusConflict || !strings.Contains(w.Body.String(), "核对数字不一致") {
+			t.Fatalf("一致 with another number: HTTP %d %s", w.Code, w.Body.String())
+		}
+		if view := joinStateForTest(t, s, "0"); view.State != "confirm" {
+			t.Fatalf("a wrong number ended the question: %+v", view)
+		}
+		// No click: the question times out and nothing is saved anywhere.
+		if view = joinStateAfter(t, s, "confirm"); view.State != "failed" || !strings.Contains(view.Error, "没有及时确认") {
+			t.Fatalf("no click: %+v", view)
+		}
+		select {
+		case err := <-outcome:
+			if !errors.Is(err, mobilelink.ErrDeviceNotConfirmed) {
+				t.Fatalf("forger: %v", err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatal("the forger still waits")
+		}
+		if computers, _ := s.loadJoinedComputers(); len(computers) != 0 || planted.Load() != 0 {
+			t.Fatalf("saved without a click: %d here, %d planted", len(computers), planted.Load())
+		}
+	})
+
+	t.Run("不一致", func(t *testing.T) {
+		host := deviceTestHost(t, relayOrigin)
+		joined := joinByCodeForTest(t, s, shortCodeForTest(t, host))
+		if joined.code != 200 || joined.view.State != "approval" {
+			t.Fatalf("join: HTTP %d %s", joined.code, joined.body)
+		}
+		request := hostRequestForTest(t, host)
+		if w := deviceRequest(host, "POST", "/api/devices/invite/approve", `{"check":"`+request.Request.Check+`"}`, deviceCall{}); w.Code != 200 {
+			t.Fatalf("允许: HTTP %d %s", w.Code, w.Body.String())
+		}
+		if view := joinStateAfter(t, s, "approval"); view.State != "confirm" {
+			t.Fatalf("after 允许: %+v", view)
+		}
+		w := deviceRequest(s, "POST", "/api/client/devices/join/reject", "{}", deviceCall{})
+		var view deviceJoinView
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil || view.State != "failed" || !strings.Contains(view.Error, "核对数字不一致") {
+			t.Fatalf("不一致: HTTP %d %s", w.Code, w.Body.String())
+		}
+		if hostView := hostInviteForTest(t, host, "5"); hostView.State != "failed" || !strings.Contains(hostView.Error, "没有确认核对数字") {
+			t.Fatalf("host after 不一致: %+v", hostView)
+		}
+		if computers, _ := s.loadJoinedComputers(); len(computers) != 0 || hostDeviceCount(host) != 0 {
+			t.Fatalf("saved after 不一致: %d here, %d on the host", len(computers), hostDeviceCount(host))
+		}
+	})
 }

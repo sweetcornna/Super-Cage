@@ -269,6 +269,14 @@ func (s *Server) phoneFrameStream(call *phoneCall, w http.ResponseWriter, r *htt
 	hold := min(q.Wait, phoneFrameMaxHold)
 	var superseded <-chan struct{}
 	if hold > 0 {
+		// A device that does not hold the surface must not end the holder's wait.
+		state.op.Lock()
+		taken := state.session != nil && state.session.holder != call.device
+		state.op.Unlock()
+		if taken {
+			http.Error(w, call.surface.label()+"已在另一台设备打开", http.StatusGone)
+			return
+		}
 		var end func()
 		superseded, end = state.hold.begin()
 		defer end()

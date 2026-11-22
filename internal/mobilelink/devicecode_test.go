@@ -210,11 +210,14 @@ func (f *deviceFixture) serve(ctx context.Context, decide func(context.Context, 
 			f.asked = append(f.asked, request)
 			f.mu.Unlock()
 			return decide(ctx, request)
-		}, func(request DeviceRequest) (PairedHost, error) {
+		}, func(request DeviceRequest, record PairedHost) error {
+			if record.Version != 1 || record.Relay != f.relay.URL || record.HostPin != f.host.Pin || !validCapability(record.Lookup) {
+				f.t.Errorf("host saves %+v", record)
+			}
 			f.mu.Lock()
 			f.saved = append(f.saved, request)
 			f.mu.Unlock()
-			return PairedHost{Version: 1, Relay: f.relay.URL, HostPin: f.host.Pin, Lookup: freshLookupForTest()}, nil
+			return nil
 		})
 	}()
 	// The room is found only once the host's socket has joined it.
@@ -238,8 +241,13 @@ func (f *deviceFixture) counts() (int, int) {
 	return len(f.asked), len(f.saved)
 }
 
+// redeem joins with code; the joiner's person confirms whatever number shows.
 func (f *deviceFixture) redeem(ctx context.Context, code string, check func(string)) (PairedHost, error) {
-	return RedeemDeviceCode(ctx, code, f.relay.URL, f.joiner, DeviceHello{Name: "MacBook Air", Platform: "darwin"}, check)
+	return f.redeemWith(ctx, code, check, func(context.Context, string) bool { return true })
+}
+
+func (f *deviceFixture) redeemWith(ctx context.Context, code string, check func(string), confirm func(context.Context, string) bool) (PairedHost, error) {
+	return RedeemDeviceCode(ctx, code, f.relay.URL, f.joiner, DeviceHello{Name: "MacBook Air", Platform: "darwin"}, check, confirm)
 }
 
 func receive[T any](t *testing.T, ch <-chan T) T {
@@ -266,7 +274,13 @@ func TestDeviceCodeJoinsThroughOneRoomOnce(t *testing.T) {
 			return false
 		}
 	})
-	record, err := f.redeem(ctx, FormatDeviceCode(inv.Code), func(check string) { shown <- check })
+	record, err := f.redeemWith(ctx, FormatDeviceCode(inv.Code), func(check string) { shown <- check }, func(_ context.Context, check string) bool {
+		// The host has said 允许 but saves nothing before this click.
+		if _, saved := f.counts(); saved != 0 {
+			t.Error("host saved before the joiner confirmed")
+		}
+		return true
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +438,7 @@ func TestDeviceCodeSecondJoinerExpiryAndCancel(t *testing.T) {
 		go func() { _, err := f.redeem(ctx, inv.Code, nil); first <- err }()
 		receive(t, asked)
 		other, _ := remotelink.NewIdentity()
-		if _, err := RedeemDeviceCode(ctx, inv.Code, f.relay.URL, other, DeviceHello{"Second", "linux"}, nil); !errors.Is(err, ErrDeviceCodeUnknown) {
+		if _, err := RedeemDeviceCode(ctx, inv.Code, f.relay.URL, other, DeviceHello{"Second", "linux"}, nil, func(context.Context, string) bool { return true }); !errors.Is(err, ErrDeviceCodeUnknown) {
 			t.Fatalf("second joiner while the first waits: %v", err)
 		}
 		close(release)
@@ -440,12 +454,23 @@ func TestDeviceCodeSecondJoinerExpiryAndCancel(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		inv, done := f.serve(ctx, func(context.Context, DeviceRequest) bool { return true })
-		time.Sleep(time.Until(inv.Expires) + 100*time.Millisecond)
+		// The code ends at its own whole second; the host leaves the room then.
+		if err := receive(t, done); !errors.Is(err, ErrDeviceCodeExpired) || time.Now().Before(inv.Expires) {
+			t.Fatalf("host after expiry: %v", err)
+		}
+		lookup, _, err := deviceCodeKeys(ctx, inv.Code, f.relay.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for start := time.Now(); ; time.Sleep(5 * time.Millisecond) {
+			if _, err := LookupRoom(ctx, f.relay.URL, lookup); errors.Is(err, ErrNoInvitation) {
+				break
+			} else if time.Since(start) > 2*time.Second {
+				t.Fatal("room outlived the code:", err)
+			}
+		}
 		if _, err := f.redeem(ctx, inv.Code, nil); !errors.Is(err, ErrDeviceCodeUnknown) {
 			t.Fatalf("expired code: %v", err)
-		}
-		if err := receive(t, done); !errors.Is(err, ErrDeviceCodeExpired) {
-			t.Fatalf("host after expiry: %v", err)
 		}
 	})
 	t.Run("dialog closed", func(t *testing.T) {
@@ -500,10 +525,19 @@ func TestDeviceCodeCollisionPicksNewCode(t *testing.T) {
 	}
 }
 
+// middleOutcome is what a relay in the middle got: the host's answer, whether
+// the joiner ever told it its name, and (with forge) the joiner's answer to a
+// forged 允许 (nil would mean a planted pairing).
+type middleOutcome struct {
+	host    error
+	heard   bool
+	planted error
+}
+
 // relayInTheMiddle replaces the carrying of the joiner's connection: the relay
 // terminates the joiner's TLS as a host and opens its own to the real host as
 // a joiner, proving key to both. With forge it then approves the joiner itself.
-func relayInTheMiddle(h *hostileRelay, key []byte, forge bool, hostAnswer chan<- error) {
+func relayInTheMiddle(h *hostileRelay, key []byte, forge bool, outcome chan<- middleOutcome) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.client = func(w http.ResponseWriter, r *http.Request) {
@@ -514,13 +548,13 @@ func relayInTheMiddle(h *hostileRelay, key []byte, forge bool, hostAnswer chan<-
 		upstream, status, err := h.dial(r.URL.Path, r.Header.Get("Authorization"))
 		if err != nil {
 			http.Error(w, "connection unavailable", status)
-			hostAnswer <- err
+			outcome <- middleOutcome{host: err}
 			return
 		}
 		defer upstream.Close()
 		joinerWS, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
-			hostAnswer <- err
+			outcome <- middleOutcome{host: err}
 			return
 		}
 		defer joinerWS.Close()
@@ -541,11 +575,14 @@ func relayInTheMiddle(h *hostileRelay, key []byte, forge bool, hostAnswer chan<-
 				}
 			}
 		}
-		hostAnswer <- err
+		result := middleOutcome{host: err, heard: legA != nil, planted: errors.New("no forged approval")}
 		if legA != nil && forge {
 			payload, _ := json.Marshal(PairedHost{Version: 1, Relay: h.URL, HostPin: self.Pin, Lookup: freshLookupForTest()})
-			_ = legA.Approve(ctx, payload)
+			if result.planted = legA.Approve(ctx, payload); result.planted == nil {
+				result.planted = legA.AwaitConfirm(ctx)
+			}
 		}
+		outcome <- result
 	}
 }
 
@@ -557,13 +594,19 @@ func TestDeviceCodeHostileRelay(t *testing.T) {
 		inv, done := f.serve(ctx, func(context.Context, DeviceRequest) bool { return true })
 		guess := make([]byte, 32)
 		_, _ = rand.Read(guess)
-		answer := make(chan error, 1)
+		answer := make(chan middleOutcome, 1)
 		relayInTheMiddle(f.relay, guess, true, answer)
 		if _, err := f.redeem(ctx, inv.Code, nil); !errors.Is(err, ErrDeviceCodeFailed) {
 			t.Fatalf("joiner through a relay without the code: %v", err)
 		}
-		if err := receive(t, answer); !errors.Is(err, remotelink.ErrPairFailed) {
-			t.Fatalf("relay toward the host: %v", err)
+		got := receive(t, answer)
+		if !errors.Is(got.host, remotelink.ErrPairFailed) {
+			t.Fatalf("relay toward the host: %v", got.host)
+		}
+		// The joiner checked the relay's host proof first and said nothing:
+		// no name, no platform, only the key in its TLS certificate.
+		if got.heard {
+			t.Fatal("the joiner spoke to a relay without the code")
 		}
 		if err := receive(t, done); !errors.Is(err, ErrDeviceCodeFailed) {
 			t.Fatalf("host: %v", err)
@@ -722,12 +765,13 @@ func relayWithTheCodeForTest(t *testing.T) (string, string) {
 	f := newDeviceFixture(t, 0)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	shown := make(chan string, 1)
-	var hostCheck string
+	// Each person compares their own screen with the other computer's.
+	joinerShows, hostShows := make(chan string, 1), make(chan string, 1)
+	var hostCheck, joinerCheck string
 	inv, done := f.serve(ctx, func(ctx context.Context, request DeviceRequest) bool {
-		hostCheck = request.Check
+		hostShows <- request.Check
 		select {
-		case check := <-shown:
+		case check := <-joinerShows:
 			return check == request.Check
 		case <-ctx.Done():
 			return false
@@ -737,28 +781,66 @@ func relayWithTheCodeForTest(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer := make(chan error, 1)
+	answer := make(chan middleOutcome, 1)
 	relayInTheMiddle(f.relay, key, true, answer)
-	var joinerCheck string
-	record, err := f.redeem(ctx, inv.Code, func(check string) { joinerCheck = check; shown <- check })
+	record, err := f.redeemWith(ctx, inv.Code, func(check string) { joinerCheck = check; joinerShows <- check }, func(ctx context.Context, check string) bool {
+		select {
+		case hostCheck = <-hostShows:
+			return check == hostCheck
+		case <-ctx.Done():
+			return false
+		}
+	})
 	hostErr := receive(t, done)
-	relayErr := receive(t, answer)
+	got := receive(t, answer)
 	if hostCheck == joinerCheck {
 		return hostCheck, joinerCheck
 	}
-	if !errors.Is(hostErr, ErrDeviceRejected) || !errors.Is(relayErr, remotelink.ErrPairRejected) {
-		t.Fatalf("host %v, relay %v", hostErr, relayErr)
+	if !errors.Is(hostErr, ErrDeviceRejected) || !errors.Is(got.host, remotelink.ErrPairRejected) {
+		t.Fatalf("host %v, relay %v", hostErr, got.host)
 	}
 	if asked, saved := f.counts(); asked != 1 || saved != 0 {
 		t.Fatalf("asked %d saved %d", asked, saved)
 	}
-	// Residual: the joiner trusts whoever proved the code. Here that is the
-	// relay's own key, never the host's, so it has no link to the host.
-	if err != nil || record.HostPin == f.host.Pin {
-		t.Fatalf("joiner after a forged approval: %+v %v", record, err)
+	// The relay forged 允许 toward the joiner; its person saw a number the host
+	// never showed and did not confirm, so nothing was planted.
+	if !errors.Is(err, ErrDeviceNotConfirmed) || record != (PairedHost{}) || !errors.Is(got.planted, remotelink.ErrPairRejected) {
+		t.Fatalf("joiner after a forged approval: %+v %v; relay: %v", record, err, got.planted)
 	}
-	t.Logf("joiner accepted the relay's forged approval and pinned the relay's key, not the host's")
 	return hostCheck, joinerCheck
+}
+
+// A host that says 允许 without a person comparing (here: a relay or anyone
+// who knows the code, approving at once) still plants nothing on the joiner
+// unless the joiner's person confirms the number.
+func TestDeviceCodeJoinerConfirms(t *testing.T) {
+	saved := DeviceApprovalTimeout
+	DeviceApprovalTimeout = 300 * time.Millisecond
+	defer func() { DeviceApprovalTimeout = saved }()
+	for _, test := range []struct {
+		name    string
+		confirm func(context.Context, string) bool
+	}{
+		{"no click", func(ctx context.Context, _ string) bool { <-ctx.Done(); return true }},
+		{"numbers differ", func(context.Context, string) bool { return false }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newDeviceFixture(t, 0)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			inv, done := f.serve(ctx, func(context.Context, DeviceRequest) bool { return true })
+			record, err := f.redeemWith(ctx, inv.Code, nil, test.confirm)
+			if !errors.Is(err, ErrDeviceNotConfirmed) || record != (PairedHost{}) {
+				t.Fatalf("joiner: %+v %v", record, err)
+			}
+			if err := receive(t, done); !errors.Is(err, ErrDeviceNotConfirmed) {
+				t.Fatalf("host: %v", err)
+			}
+			if _, saved := f.counts(); saved != 0 {
+				t.Fatal("host saved a joiner that did not confirm")
+			}
+		})
+	}
 }
 
 func TestParseDeviceCode(t *testing.T) {

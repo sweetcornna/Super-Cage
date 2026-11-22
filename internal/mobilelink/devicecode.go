@@ -63,6 +63,7 @@ var (
 	ErrDeviceCodeUsed        = errors.New("配对码已被使用")
 	ErrDeviceJoinerLeft      = errors.New("对方已取消加入")
 	ErrDeviceCodeExpired     = errors.New("配对码已过期，请重新生成")
+	ErrDeviceNotConfirmed    = errors.New("加入的设备没有确认核对数字，没有添加")
 	errDeviceCodeFormat      = errors.New("请输入 8 位数字配对码")
 )
 
@@ -188,8 +189,10 @@ func NewDeviceInvite(ctx context.Context, origin, admin string, host *remotelink
 			clear(confirm)
 			return nil, err
 		}
+		// The code carries whole seconds and expires at that second, for the
+		// QR (PairCode.identity) and the short code alike.
 		return &DeviceInvite{
-			Code: code, Pair: pair, Raw: raw, Manual: "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: room.ExpiresAt,
+			Code: code, Pair: pair, Raw: raw, Manual: "CAGE-" + base64.RawURLEncoding.EncodeToString([]byte(raw)), Expires: time.Unix(pair.Expires, 0),
 			origin: origin, hostToken: room.HostToken, confirm: confirm,
 		}, nil
 	}
@@ -221,20 +224,21 @@ type DeviceHello struct {
 // the code's 2-minute life: AcceptDevice applies inv.Expires itself up to the
 // joiner's proof, because once both seats are taken the relay no longer does,
 // and a stalling relay must not buy time to search the code. The approval
-// then gets its own bound (60 s).
+// and the joiner's confirmation then get their own bounds.
 //
 // A cage-remote/1 peer is today's QR or long code: today's exchange, no
-// approval, save(DeviceRequest{Pin}). A cage-pair/1 peer must prove the code;
-// approve is called with a context that ends at the approval bound and
-// returns true for 允许 (the context also ends when the joiner leaves); then
-// save, and the record goes back under the host's proof of the code.
-func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Identity, approve func(context.Context, DeviceRequest) bool, save func(DeviceRequest) (PairedHost, error)) error {
+// approval, save(DeviceRequest{Pin}, record). A cage-pair/1 peer must prove
+// the code; approve is called with a context that ends at the approval bound
+// or when the joiner leaves, and returns true for 允许. The record then goes to
+// the joiner under the host's proof of the code, and save runs only once the
+// joiner's person has confirmed the same check number. record is the pairing
+// the joiner keeps (a fresh lookup token, as today).
+func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Identity, approve func(context.Context, DeviceRequest) bool, save func(DeviceRequest, PairedHost) error) error {
 	if inv == nil || host == nil || approve == nil || save == nil {
 		return errors.New("device invite, host identity and callbacks required")
 	}
 	defer clear(inv.confirm)
-	// The QR's temporary key. Its expiry is inv.Expires, applied below to the
-	// second (PairCode.Expires is whole seconds).
+	// The QR's temporary key. Its expiry is inv.Expires, applied below.
 	if len(inv.Pair.Seed) != ed25519.SeedSize {
 		return errors.New("配对码无效或已过期")
 	}
@@ -242,6 +246,11 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 	if err != nil {
 		return err
 	}
+	lookup, err := freshLookupToken()
+	if err != nil {
+		return err
+	}
+	record := PairedHost{Version: 1, Relay: inv.origin, HostPin: host.Pin, Lookup: lookup}
 	codeCtx, cancel := context.WithDeadline(ctx, inv.Expires)
 	defer cancel()
 	ws, err := join(codeCtx, inv.origin, inv.Pair.Room, "host", inv.hostToken)
@@ -258,7 +267,7 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 	}
 	defer conn.NetConn().Close()
 	if conn.ConnectionState().NegotiatedProtocol == remotelink.Protocol {
-		return enrollPhone(codeCtx, conn, func(pin string) (PairedHost, error) { return save(DeviceRequest{Pin: pin}) })
+		return enrollPhone(codeCtx, conn, func(pin string) (PairedHost, error) { return record, save(DeviceRequest{Pin: pin}, record) })
 	}
 	pending, err := remotelink.ConfirmJoiner(codeCtx, conn, host, inv.confirm)
 	clear(inv.confirm)
@@ -282,8 +291,7 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 	}
 	select {
 	case <-pending.Left():
-		// The joiner gave up (closed its dialog, locked, timed out): enrolling
-		// it now would leave a device nobody holds the key of.
+		// The joiner gave up (closed its dialog, locked, timed out).
 		return ErrDeviceJoinerLeft
 	default:
 	}
@@ -297,23 +305,46 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 		_ = pending.Refuse(reply, reason)
 		return result
 	}
-	record, err := save(request)
-	if err != nil {
-		_ = pending.Refuse(reply, remotelink.ErrPairFailed)
-		return err
-	}
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return err
 	}
-	return pending.Approve(reply, payload)
+	if err := pending.Approve(reply, payload); err != nil {
+		return err
+	}
+	// The joiner's person compares the number too; only then is it saved, so
+	// a joiner that declines or never answers leaves nothing behind here.
+	confirmed, stopConfirm := context.WithTimeout(ctx, DeviceApprovalTimeout+15*time.Second)
+	defer stopConfirm()
+	if err := pending.AwaitConfirm(confirmed); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, remotelink.ErrPairFailed) {
+			return ErrDeviceCodeFailed
+		}
+		return fmt.Errorf("%w: %w", ErrDeviceNotConfirmed, err)
+	}
+	return save(request, record)
+}
+
+func freshLookupToken() (string, error) {
+	var token [32]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(token[:]), nil
 }
 
 // RedeemDeviceCode joins the host showing code. identity is this device's own
 // key; the host records its pin from the TLS session. check is called with the
 // four-digit number as soon as both screens can show it; the call then waits
-// for the host's 允许 (the approval bound plus 15 seconds).
-func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity *remotelink.Identity, hello DeviceHello, check func(string)) (PairedHost, error) {
+// for the host's 允许 (the approval bound plus 15 seconds). With 允许, confirm
+// asks this side's person whether the host showed the same number (its
+// context ends at the approval bound). Only true returns the pairing, and only
+// then does the host save it: a relay that knows the code and forges 允许
+// plants nothing unless the person confirms a number the host never showed.
+func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity *remotelink.Identity, hello DeviceHello, check func(string), confirm func(context.Context, string) bool) (PairedHost, error) {
 	var none PairedHost
 	code, err := ParseDeviceCode(code)
 	if err != nil {
@@ -322,14 +353,14 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 	if !ValidRelayOrigin(selectedRelay) {
 		return none, errors.New("中继地址无效，请检查自建中继地址")
 	}
-	if identity == nil || !remotelink.ValidPairName(hello.Name) || !slices.Contains(remotelink.PairPlatforms, hello.Platform) {
+	if identity == nil || confirm == nil || !remotelink.ValidPairName(hello.Name) || !slices.Contains(remotelink.PairPlatforms, hello.Platform) {
 		return none, errors.New("设备名称或平台无效")
 	}
-	lookup, confirm, err := deviceCodeKeys(ctx, code, selectedRelay)
+	lookup, key, err := deviceCodeKeys(ctx, code, selectedRelay)
 	if err != nil {
 		return none, err
 	}
-	defer clear(confirm)
+	defer clear(key)
 	room, err := LookupRoom(ctx, selectedRelay, lookup)
 	if errors.Is(err, ErrNoInvitation) {
 		return none, ErrDeviceCodeUnknown
@@ -351,7 +382,7 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 		return none, err
 	}
 	defer conn.NetConn().Close()
-	pending, err := remotelink.JoinHost(codeCtx, conn, identity, confirm, hello.Name, hello.Platform)
+	pending, err := remotelink.JoinHost(codeCtx, conn, identity, key, hello.Name, hello.Platform)
 	if err != nil {
 		return none, deviceError(err)
 	}
@@ -373,6 +404,23 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 	if decoder.Decode(&record) != nil || decoder.Decode(new(any)) != io.EOF || record.Version != 1 ||
 		record.HostPin != pending.HostPin || record.Relay != selectedRelay || !validCapability(record.Lookup) {
 		return none, errors.New("电脑未完成配对，请重新获取配对码")
+	}
+	asked, stopAsking := context.WithTimeout(ctx, DeviceApprovalTimeout)
+	same := confirm(asked, pending.Check)
+	expired := asked.Err() != nil
+	stopAsking()
+	reply, done := context.WithTimeout(ctx, 10*time.Second)
+	defer done()
+	if !same || expired {
+		reason := remotelink.ErrPairRejected
+		if expired {
+			reason = remotelink.ErrPairTimedOut
+		}
+		_ = pending.Refuse(reply, reason)
+		return none, ErrDeviceNotConfirmed
+	}
+	if err := pending.Confirm(reply); err != nil {
+		return none, err
 	}
 	return record, nil
 }

@@ -263,6 +263,30 @@ func pinOf(digest [32]byte) string {
 	return "sha256:" + base64.StdEncoding.EncodeToString(digest[:])
 }
 
+// hostProof is the host's first message: it proves the code before the
+// joiner says anything about itself.
+func (b pairBinding) hostProof(key []byte) []byte {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("cage-pair/1 host-proof\x00"))
+	mac.Write(b.exporter[:])
+	mac.Write(b.host[:])
+	mac.Write(b.joiner[:])
+	return mac.Sum(nil)
+}
+
+// joinerConfirm is the joiner's last message: its person saw the same check
+// number, so the host may save it.
+func (b pairBinding) joinerConfirm(key, record []byte) []byte {
+	digest := sha256.Sum256(record)
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte("cage-pair/1 joiner-confirm\x00"))
+	mac.Write(b.exporter[:])
+	mac.Write(b.joiner[:])
+	mac.Write(b.host[:])
+	mac.Write(digest[:])
+	return mac.Sum(nil)
+}
+
 func (b pairBinding) joinerMAC(key []byte) []byte {
 	mac := hmac.New(sha256.New, key)
 	mac.Write([]byte("cage-pair/1 joiner\x00"))
@@ -320,7 +344,7 @@ func ValidPairName(name string) bool {
 }
 
 // pairMessage is one frame of the confirmation exchange. Each step accepts
-// exactly its own fields (hello, nonce, result, refusal).
+// exactly its own fields (proof, hello, nonce, result, confirmation, refusal).
 type pairMessage struct {
 	Version  int    `json:"v,omitempty"`
 	MAC      string `json:"mac,omitempty"`
@@ -387,6 +411,19 @@ func decode32(value string) ([32]byte, bool) {
 	return out, true
 }
 
+// proof is a frame that carries only a MAC: the host's proof of the code
+// and the joiner's confirmation.
+func (m pairMessage) proof() ([32]byte, error) {
+	if m != (pairMessage{MAC: m.MAC}) {
+		return [32]byte{}, errPairMessage
+	}
+	mac, ok := decode32(m.MAC)
+	if !ok {
+		return mac, errPairMessage
+	}
+	return mac, nil
+}
+
 func (m pairMessage) hello() (mac, commit [32]byte, err error) {
 	if m.Version != 1 || m.Nonce != "" || m.Record != "" || m.Error != "" ||
 		!ValidPairName(m.Name) || !slices.Contains(PairPlatforms, m.Platform) {
@@ -423,7 +460,7 @@ func (m pairMessage) result() (mac [32]byte, record []byte, err error) {
 	return mac, []byte(m.Record), nil
 }
 
-// refusal returns the host's refusal when m is one, and nil otherwise.
+// refusal returns the other side's refusal when m is one, and nil otherwise.
 func (m pairMessage) refusal() error {
 	if m.Error == "" || m != (pairMessage{Error: m.Error}) {
 		return nil
@@ -476,23 +513,30 @@ type JoinRequest struct {
 	Check    string
 }
 
-// HostPairing waits for the person's 允许 or 拒绝. It must end with exactly one
-// Approve or Refuse; the caller closes the connection.
+// HostPairing waits for the person's 允许 or 拒绝, then for the joiner's
+// person to confirm the same check number. It ends with Refuse, or with
+// Approve and AwaitConfirm; the caller closes the connection.
 type HostPairing struct {
 	Request JoinRequest
 	conn    *tls.Conn
 	key     []byte
 	binding pairBinding
-	left    chan struct{}
+	record  []byte
+	// The joiner's next frame, read as soon as it arrives: before the host's
+	// answer it means the joiner left; after Approve it is its confirmation.
+	next    chan struct{}
+	peer    pairMessage
+	peerErr error
 }
 
 // Left is closed when the joiner leaves before the host's answer: its
 // connection ends, or it sends anything at all. The approval should end then.
-func (h *HostPairing) Left() <-chan struct{} { return h.left }
+func (h *HostPairing) Left() <-chan struct{} { return h.next }
 
-// ConfirmJoiner checks the joiner's proof of the code and runs the
-// commit-then-reveal exchange for the check number. key is the code's
-// confirmation key. Any failure is final for this code.
+// ConfirmJoiner proves the code to the joiner first, then checks the joiner's
+// proof and runs the commit-then-reveal exchange for the check number. key is
+// the code's confirmation key. Any failure is final for this code and closes
+// the connection.
 func ConfirmJoiner(ctx context.Context, conn *tls.Conn, identity *Identity, key []byte) (*HostPairing, error) {
 	if len(key) != sha256.Size {
 		return nil, errors.New("pairing key must be 32 bytes")
@@ -505,15 +549,13 @@ func ConfirmJoiner(ctx context.Context, conn *tls.Conn, identity *Identity, key 
 	request, err := confirmJoiner(conn, key, binding)
 	release()
 	if err != nil {
+		_ = conn.NetConn().Close()
 		return nil, pairStepError(ctx, err)
 	}
-	h := &HostPairing{Request: request, conn: conn, key: bytes.Clone(key), binding: binding, left: make(chan struct{})}
-	// The joiner sends nothing more. A read ends only when it leaves, or when
-	// the caller closes the connection after answering.
+	h := &HostPairing{Request: request, conn: conn, key: bytes.Clone(key), binding: binding, next: make(chan struct{})}
 	go func() {
-		var b [1]byte
-		_, _ = conn.Read(b[:])
-		close(h.left)
+		h.peer, h.peerErr = readPairMessage(conn)
+		close(h.next)
 	}()
 	return h, nil
 }
@@ -525,6 +567,12 @@ func confirmJoiner(rw io.ReadWriter, key []byte, binding pairBinding) (request J
 			request, err = JoinRequest{}, ErrPairFailed
 		}
 	}()
+	// The host speaks first and proves the code: a joiner that finds no valid
+	// proof says nothing, so a relay without the code learns at most the
+	// joiner's key from the TLS handshake.
+	if err := writePairMessage(rw, pairMessage{MAC: encode32(binding.hostProof(key))}); err != nil {
+		return request, err
+	}
 	m, err := readPairMessage(rw)
 	if err != nil {
 		return request, err
@@ -566,8 +614,40 @@ func (h *HostPairing) Approve(ctx context.Context, record []byte) error {
 	}
 	release := pairWatch(ctx, h.conn)
 	defer release()
+	h.record = bytes.Clone(record)
 	mac := h.binding.hostMAC(h.key, record)
 	return pairStepError(ctx, writePairMessage(h.conn, pairMessage{MAC: encode32(mac), Record: string(record)}))
+}
+
+// AwaitConfirm waits, after Approve, for the joiner's person to confirm the
+// check number. nil means the joiner confirmed this session's record; its
+// refusal is ErrPairRejected or ErrPairTimedOut. Save the device only on nil.
+func (h *HostPairing) AwaitConfirm(ctx context.Context) error {
+	if h.record == nil {
+		return errors.New("approve before awaiting the confirmation")
+	}
+	release := pairWatch(ctx, h.conn)
+	defer release()
+	select {
+	case <-h.next:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if h.peerErr != nil {
+		return pairStepError(ctx, h.peerErr)
+	}
+	return h.confirmed(h.peer)
+}
+
+func (h *HostPairing) confirmed(m pairMessage) error {
+	if refused := m.refusal(); refused != nil {
+		return refused
+	}
+	mac, err := m.proof()
+	if err != nil || !hmac.Equal(mac[:], h.binding.joinerConfirm(h.key, h.record)) {
+		return ErrPairFailed
+	}
+	return nil
 }
 
 // Refuse tells the joiner why it was not added: ErrPairRejected,
@@ -579,17 +659,22 @@ func (h *HostPairing) Refuse(ctx context.Context, reason error) error {
 }
 
 // JoinerPairing is a joiner whose check number can be shown. HostPin is the
-// host key seen in this session; it is trusted only once Await succeeds.
+// host key seen in this session. Await returns the host's approved record;
+// it is trusted only once this side's person confirmed the check number
+// (Confirm), or dropped (Refuse).
 type JoinerPairing struct {
 	Check   string
 	HostPin string
 	conn    *tls.Conn
 	key     []byte
 	binding pairBinding
+	record  []byte
 }
 
-// JoinHost proves the code to the host and runs the commit-then-reveal
-// exchange. key is the code's confirmation key.
+// JoinHost checks the host's proof of the code, then proves the code itself
+// and runs the commit-then-reveal exchange. key is the code's confirmation
+// key. It sends nothing (no name, no platform) unless the host's proof is
+// valid. Any failure closes the connection.
 func JoinHost(ctx context.Context, conn *tls.Conn, identity *Identity, key []byte, name, platform string) (*JoinerPairing, error) {
 	if len(key) != sha256.Size {
 		return nil, errors.New("pairing key must be 32 bytes")
@@ -605,12 +690,24 @@ func JoinHost(ctx context.Context, conn *tls.Conn, identity *Identity, key []byt
 	check, err := joinHost(conn, key, binding, name, platform)
 	release()
 	if err != nil {
+		_ = conn.NetConn().Close()
 		return nil, pairStepError(ctx, err)
 	}
 	return &JoinerPairing{Check: check, HostPin: pinOf(binding.host), conn: conn, key: bytes.Clone(key), binding: binding}, nil
 }
 
 func joinHost(rw io.ReadWriter, key []byte, binding pairBinding, name, platform string) (string, error) {
+	first, err := readPairMessage(rw)
+	if err != nil {
+		return "", err
+	}
+	if refused := first.refusal(); refused != nil {
+		return "", refused
+	}
+	proof, err := first.proof()
+	if err != nil || !hmac.Equal(proof[:], binding.hostProof(key)) {
+		return "", ErrPairFailed
+	}
 	var nonce [32]byte
 	if _, err := io.ReadFull(pairRand, nonce[:]); err != nil {
 		return "", err
@@ -657,5 +754,25 @@ func (j *JoinerPairing) result(m pairMessage) ([]byte, error) {
 	if err != nil || !hmac.Equal(mac[:], j.binding.hostMAC(j.key, record)) {
 		return nil, ErrPairFailed
 	}
+	j.record = bytes.Clone(record)
 	return record, nil
+}
+
+// Confirm tells the host that this side's person saw the same check number,
+// so the host saves the device. Call it only after Await returned a record.
+func (j *JoinerPairing) Confirm(ctx context.Context) error {
+	if j.record == nil {
+		return errors.New("no approved record to confirm")
+	}
+	release := pairWatch(ctx, j.conn)
+	defer release()
+	return pairStepError(ctx, writePairMessage(j.conn, pairMessage{MAC: encode32(j.binding.joinerConfirm(j.key, j.record))}))
+}
+
+// Refuse tells the host that this side's person did not confirm the check
+// number: ErrPairRejected (the numbers differ) or ErrPairTimedOut.
+func (j *JoinerPairing) Refuse(ctx context.Context, reason error) error {
+	release := pairWatch(ctx, j.conn)
+	defer release()
+	return pairStepError(ctx, writePairMessage(j.conn, pairMessage{Error: refusalCode(reason)}))
 }

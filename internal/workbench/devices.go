@@ -66,7 +66,7 @@ type deviceKeepAwake struct {
 type deviceInvite struct {
 	cancel  context.CancelFunc
 	expires time.Time
-	state   string // waiting, request, joined, rejected, failed, expired
+	state   string // waiting, request, confirming, joined, rejected, failed, expired
 	device  string // the id of the device that joined
 	changed chan struct{}
 	// request is the device that proved the short code and waits for 允许
@@ -687,6 +687,7 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 		requestError(w, errors.New("无法生成二维码"))
 		return
 	}
+	// offer.Expires is the code's own whole second (mobilelink.NewDeviceInvite).
 	p.mu.Lock()
 	invite.expires = offer.Expires
 	p.mu.Unlock()
@@ -710,7 +711,7 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 				return false
 			}
 		}
-		err := mobilelink.AcceptDevice(ctx, offer, host, approve, func(request mobilelink.DeviceRequest) (mobilelink.PairedHost, error) {
+		err := mobilelink.AcceptDevice(ctx, offer, host, approve, func(request mobilelink.DeviceRequest, paired mobilelink.PairedHost) error {
 			pin := request.Pin
 			// Commit trust in the same unlocked account epoch that issued the
 			// code. A lock or logout must not race the on-disk enrollment.
@@ -718,15 +719,10 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 			defer s.account.mu.Unlock()
 			p.mu.Lock()
 			defer p.mu.Unlock()
-			var result mobilelink.PairedHost
 			if ctx.Err() != nil || p.closed || p.invite != invite || p.unreadable || len(p.devices) >= deviceLimit {
-				return result, errors.New("配对已结束")
+				return errors.New("配对已结束")
 			}
-			lookup, err := lookupToken()
-			if err != nil {
-				return result, err
-			}
-			record := deviceRecord{ID: newDeviceID(), Kind: "phone", AddedAt: time.Now().UTC().Truncate(time.Second), Seed: key.Seed(), Relay: origin, Pin: pin, Admin: input.Admin, Lookup: lookup}
+			record := deviceRecord{ID: newDeviceID(), Kind: "phone", AddedAt: time.Now().UTC().Truncate(time.Second), Seed: key.Seed(), Relay: origin, Pin: pin, Admin: input.Admin, Lookup: paired.Lookup}
 			if request.ShortCode && devicePlatform(request.Platform) {
 				// What the person approved; the device's first report may
 				// change the name only.
@@ -740,16 +736,16 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 				records = append(records, d.deviceRecord)
 			}
 			if err := writeDevicesFile(s.devicesFile(), append(records, record)); err != nil {
-				return result, err
+				return err
 			}
 			s.attachDeviceLocked(record)
 			p.inviteStateLocked(invite, "joined", record.ID)
 			p.status = "手机已配对"
-			return mobilelink.PairedHost{Version: 1, Relay: origin, HostPin: host.Pin, Lookup: record.Lookup}, nil
+			return nil
 		})
 		p.mu.Lock()
 		defer p.mu.Unlock()
-		if p.invite == invite && (invite.state == "waiting" || invite.state == "request") {
+		if p.invite == invite && (invite.state == "waiting" || invite.state == "request" || invite.state == "confirming") {
 			invite.request, invite.answer = nil, nil
 			state, reason := inviteOutcome(ctx, invite, err)
 			invite.reason = reason
@@ -765,7 +761,7 @@ func (s *Server) inviteDevice(w http.ResponseWriter, r *http.Request) {
 }
 
 // inviteOutcome names how a code ended without a device joining. The relay
-// ends a waiting room at the same time the code expires.
+// ends a waiting room when the code expires, or just after.
 func inviteOutcome(ctx context.Context, invite *deviceInvite, err error) (state, reason string) {
 	switch {
 	case errors.Is(err, mobilelink.ErrDeviceRejected):
@@ -776,6 +772,8 @@ func inviteOutcome(ctx context.Context, invite *deviceInvite, err error) (state,
 		return "failed", err.Error()
 	case errors.Is(err, mobilelink.ErrDeviceCodeExpired):
 		return "expired", ""
+	case errors.Is(err, mobilelink.ErrDeviceNotConfirmed):
+		return "failed", "对方没有确认核对数字，没有添加。"
 	case ctx.Err() != nil || !time.Now().Before(invite.expires):
 		return "expired", ""
 	}
@@ -804,6 +802,11 @@ func (s *Server) answerInvite(allow bool) http.HandlerFunc {
 		}
 		invite.answer <- allow
 		invite.answer = nil
+		if allow {
+			// The other computer's person now confirms the same number;
+			// nothing is saved before that.
+			p.inviteStateLocked(invite, "confirming", "")
+		}
 		p.mu.Unlock()
 		jsonReply(w, map[string]bool{"ok": true})
 	}
@@ -825,7 +828,7 @@ func (s *Server) inviteState(w http.ResponseWriter, r *http.Request) {
 	p := &s.phones
 	p.mu.Lock()
 	var changed chan struct{}
-	if p.invite != nil && (p.invite.state == "waiting" || p.invite.state == "request") && wait > 0 {
+	if p.invite != nil && (p.invite.state == "waiting" || p.invite.state == "request" || p.invite.state == "confirming") && wait > 0 {
 		changed = p.invite.changed
 	}
 	p.mu.Unlock()

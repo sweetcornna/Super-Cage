@@ -66,7 +66,11 @@ func TestPairConfirmsCodeAndAgreesOnCheck(t *testing.T) {
 			return
 		}
 		pending <- p
-		hostErr <- p.Approve(ctx, record)
+		if err := p.Approve(ctx, record); err != nil {
+			hostErr <- err
+			return
+		}
+		hostErr <- p.AwaitConfirm(ctx)
 	}()
 	j, err := JoinHost(ctx, joined, joiner, key, "MacBook Air", "darwin")
 	if err != nil {
@@ -83,8 +87,80 @@ func TestPairConfirmsCodeAndAgreesOnCheck(t *testing.T) {
 	if err != nil || !bytes.Equal(got, record) {
 		t.Fatalf("record %q, %v", got, err)
 	}
+	// The host saves only after this side's person confirmed the number.
+	select {
+	case err := <-hostErr:
+		t.Fatalf("host finished before the joiner confirmed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := j.Confirm(ctx); err != nil {
+		t.Fatal(err)
+	}
 	if err := <-hostErr; err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A peer without the code (a relay that terminates TLS) gets no valid host
+// proof past the joiner: the joiner says nothing, not even its name.
+func TestPairJoinerSaysNothingWithoutTheHostsProof(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	joiner, relay := identityForTest(t), identityForTest(t)
+	joined, accepted := pairSessionForTest(t, ctx, joiner, relay)
+	binding, err := bindPair(accepted, relay, true)
+	must(t, err)
+	must(t, writePairMessage(accepted, pairMessage{MAC: encode32(binding.hostProof(pairKeyForTest(t)))}))
+	if _, err := JoinHost(ctx, joined, joiner, pairKeyForTest(t), "MacBook Air", "darwin"); !errors.Is(err, ErrPairFailed) {
+		t.Fatalf("joiner after a wrong host proof: %v", err)
+	}
+	must(t, accepted.SetReadDeadline(time.Now().Add(2*time.Second)))
+	if m, err := readPairMessage(accepted); err == nil {
+		t.Fatalf("the joiner spoke after a wrong host proof: %+v", m)
+	}
+}
+
+// After 允许 the host saves only on the joiner's confirmation of this session.
+func TestPairHostWaitsForTheJoinersConfirmation(t *testing.T) {
+	joiner, host, key := identityForTest(t), identityForTest(t), pairKeyForTest(t)
+	for _, test := range []struct {
+		name string
+		end  func(context.Context, *JoinerPairing) error
+		want error
+	}{
+		{"numbers differ", func(ctx context.Context, j *JoinerPairing) error { return j.Refuse(ctx, ErrPairRejected) }, ErrPairRejected},
+		{"no click", func(ctx context.Context, j *JoinerPairing) error { return nil }, context.DeadlineExceeded},
+		{"forged confirmation", func(ctx context.Context, j *JoinerPairing) error {
+			j.key = make([]byte, 32)
+			return j.Confirm(ctx)
+		}, ErrPairFailed},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			joined, accepted := pairSessionForTest(t, ctx, joiner, host)
+			hostErr := make(chan error, 1)
+			go func() {
+				p, err := ConfirmJoiner(ctx, accepted, host, key)
+				if err == nil {
+					err = p.Approve(ctx, []byte(`{"version":1}`))
+				}
+				if err == nil {
+					wait, stop := context.WithTimeout(ctx, 300*time.Millisecond)
+					defer stop()
+					err = p.AwaitConfirm(wait)
+				}
+				hostErr <- err
+			}()
+			j, err := JoinHost(ctx, joined, joiner, key, "Pixel", "android")
+			must(t, err)
+			_, err = j.Await(ctx)
+			must(t, err)
+			must(t, test.end(ctx, j))
+			if err := <-hostErr; !errors.Is(err, test.want) {
+				t.Fatalf("host: %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 
@@ -206,6 +282,11 @@ func TestPairRevealMustMatchCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if m, err := readPairMessage(joined); err != nil {
+		t.Fatal(err)
+	} else if proof, err := m.proof(); err != nil || encode32(proof[:]) != encode32(binding.hostProof(key)) {
+		t.Fatal("no valid host proof first:", m)
+	}
 	committed, revealed := make([]byte, 32), make([]byte, 32)
 	revealed[0] = 1
 	commit := pairCommit(committed)
@@ -320,8 +401,13 @@ func relayInTheMiddleForTest(t *testing.T) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Session B first: the relay commits to its joiner nonce and learns the
-	// host's number X.
+	// Session B first: the host proves the code to the relay (which can check
+	// it), the relay commits to its joiner nonce and learns the host's number X.
+	if m, err := readPairMessage(relayB); err != nil {
+		t.Fatal(err)
+	} else if proof, err := m.proof(); err != nil || encode32(proof[:]) != encode32(bindingB.hostProof(key)) {
+		t.Fatal("host proof missing on session B")
+	}
 	relayNonce := make([]byte, 32)
 	commit := pairCommit(relayNonce)
 	must(t, writePairMessage(relayB, pairMessage{Version: 1, MAC: encode32(bindingB.joinerMAC(key)), Commit: encode32(commit[:]), Name: "MacBook Air", Platform: "darwin"}))
@@ -332,8 +418,10 @@ func relayInTheMiddleForTest(t *testing.T) (string, string) {
 	if p == nil || p.Request != (JoinRequest{Name: "MacBook Air", Platform: "darwin", Pin: relay.Pin, Check: checkNumber(hostDigest)}) {
 		t.Fatal("host state does not match the relay's view")
 	}
-	// Session A: the joiner has committed to its nonce. The relay grinds its
-	// own nonce toward X under its best guess of the hidden joiner nonce.
+	// Session A: the relay proves the code to the joiner, which then commits to
+	// its nonce. The relay grinds its own nonce toward X under its best guess
+	// of the hidden joiner nonce.
+	must(t, writePairMessage(relayA, pairMessage{MAC: encode32(bindingA.hostProof(key))}))
 	m, err := readPairMessage(relayA)
 	must(t, err)
 	_, joinerCommit, err := m.hello()
@@ -367,6 +455,21 @@ func relayInTheMiddleForTest(t *testing.T) (string, string) {
 	m, err = readPairMessage(relayB)
 	if err != nil || !errors.Is(m.refusal(), ErrPairRejected) {
 		t.Fatalf("relay received %+v, %v from the host", m, err)
+	}
+	// The relay forges an approval toward the joiner (it has the code). The
+	// joiner's person sees its own number differ from the host's and refuses:
+	// nothing is confirmed, so nothing is saved on either side.
+	forged := []byte(`{"version":1,"host_pin":"relay"}`)
+	must(t, writePairMessage(relayA, pairMessage{MAC: encode32(bindingA.hostMAC(key, forged)), Record: string(forged)}))
+	if record, err := j.Await(ctx); err != nil || !bytes.Equal(record, forged) {
+		t.Fatalf("joiner and a forged approval: %q %v", record, err)
+	}
+	if j.Check != p.Request.Check {
+		must(t, j.Refuse(ctx, ErrPairRejected))
+		m, err = readPairMessage(relayA)
+		if err != nil || !errors.Is(m.refusal(), ErrPairRejected) {
+			t.Fatalf("relay received %+v, %v from the joiner", m, err)
+		}
 	}
 	return p.Request.Check, j.Check
 }
@@ -454,11 +557,16 @@ func FuzzPairMessage(f *testing.F) {
 	}
 	nonce := encode32(make([]byte, 32))
 	f.Add(seed(pairMessage{Version: 1, MAC: encode32(binding.joinerMAC(key)), Commit: nonce, Name: "A", Platform: "darwin"}, pairMessage{Nonce: nonce}))
-	f.Add(seed(pairMessage{Nonce: nonce}, pairMessage{MAC: nonce, Record: `{"version":1}`}))
+	f.Add(seed(pairMessage{MAC: encode32(binding.hostProof(key))}, pairMessage{Nonce: nonce}, pairMessage{MAC: nonce, Record: `{"version":1}`}))
+	f.Add(seed(pairMessage{MAC: nonce}))
 	f.Add(seed(pairMessage{Error: "rejected"}))
 	f.Add([]byte{0, 2, '{', '}'})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		if m, err := readPairMessage(bytes.NewReader(data)); err == nil {
+			_, _ = m.proof()
+			if (&HostPairing{key: key, binding: binding, record: []byte(`{"version":1}`)}).confirmed(m) == nil {
+				t.Fatalf("host accepted fuzzed bytes as the joiner's confirmation: %+v", m)
+			}
 			_, _, _ = m.hello()
 			_, _ = m.nonce()
 			_, _, _ = m.result()

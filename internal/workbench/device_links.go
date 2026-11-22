@@ -134,12 +134,18 @@ type deviceJoin struct {
 	cancel  context.CancelFunc
 	changed chan struct{} // closed and replaced on every change
 	view    deviceJoinView
+	// answer takes this window's 一致 / 不一致 once the other computer said
+	// 允许 (state confirm); declined records 不一致 for the message.
+	answer   chan bool
+	declined bool
 }
 
 // deviceJoinView is what the window sees of a short-code join. State is
-// "finding", "approval" (Check is the number both screens show), "joined"
-// (ID and Name of the saved computer) or "failed" (Error); "none" when no
-// join has run since the last cancel.
+// "finding", "approval" (Check is the number both screens show, waiting for
+// 允许 there), "confirm" (允许 arrived: this window must confirm the same
+// number before anything is saved), "joined" (ID and Name of the saved
+// computer) or "failed" (Error); "none" when no join has run since the last
+// cancel.
 type deviceJoinView struct {
 	State string `json:"state"`
 	Check string `json:"check,omitempty"`
@@ -295,6 +301,8 @@ func (s *Server) clientDevicesRequest(w http.ResponseWriter, r *http.Request, pa
 	case r.Method == http.MethodDelete && path == "devices/join":
 		s.devices.cancelJoin()
 		jsonReply(w, map[string]bool{"ok": true})
+	case r.Method == http.MethodPost && (path == "devices/join/confirm" || path == "devices/join/reject"):
+		s.answerJoin(w, r, path == "devices/join/confirm")
 	case r.Method == http.MethodPost && joinedComputerID.MatchString(id) && action == "open":
 		s.openJoinedComputer(w, r, id)
 	case r.Method == http.MethodPost && joinedComputerID.MatchString(id) && action == "close":
@@ -476,6 +484,24 @@ func (s *Server) joinComputerByCode(w http.ResponseWriter, r *http.Request, unlo
 		}
 		host, err := mobilelink.RedeemDeviceCode(ctx, code, relay, identity, hello, func(check string) {
 			d.updateJoin(j, deviceJoinView{State: "approval", Check: check})
+		}, func(asked context.Context, check string) bool {
+			// 允许 arrived. Nothing is saved, here or there, until this
+			// window confirms the same number the other computer shows.
+			answer := make(chan bool, 1)
+			d.mu.Lock()
+			if d.join != j {
+				d.mu.Unlock()
+				return false
+			}
+			j.answer = answer
+			d.mu.Unlock()
+			d.updateJoin(j, deviceJoinView{State: "confirm", Check: check})
+			select {
+			case same := <-answer:
+				return same
+			case <-asked.Done():
+				return false
+			}
 		})
 		if err == nil {
 			var record joinedComputer
@@ -485,7 +511,17 @@ func (s *Server) joinComputerByCode(w http.ResponseWriter, r *http.Request, unlo
 			}
 		}
 		diagnostics.Log("warn", "devices", "join by code failed: "+err.Error())
-		d.updateJoin(j, deviceJoinView{State: "failed", Error: codeJoinFailure(err)})
+		message := codeJoinFailure(err)
+		if errors.Is(err, mobilelink.ErrDeviceNotConfirmed) {
+			d.mu.Lock()
+			declined := j.declined
+			d.mu.Unlock()
+			message = "没有及时确认核对数字，没有加入，也没有保存任何内容。"
+			if declined {
+				message = "两台电脑的核对数字不一致，没有加入，也没有保存任何内容。"
+			}
+		}
+		d.updateJoin(j, deviceJoinView{State: "failed", Error: message})
 	}()
 	select {
 	case <-changed:
@@ -500,12 +536,49 @@ func (s *Server) joinComputerByCode(w http.ResponseWriter, r *http.Request, unlo
 	jsonReply(w, view)
 }
 
+// answerJoin is POST /api/client/devices/join/confirm {check} (一致) and
+// POST /api/client/devices/join/reject (不一致) once the other computer said
+// 允许. confirm must name the number this window shows; a different number is
+// refused and the question stays open. The reply is the join's next state.
+func (s *Server) answerJoin(w http.ResponseWriter, r *http.Request, same bool) {
+	var input struct {
+		Check string `json:"check"`
+	}
+	if !readJSON(w, r, &input, 1024) {
+		return
+	}
+	d := &s.devices
+	d.mu.Lock()
+	j := d.join
+	if j == nil || j.view.State != "confirm" || j.answer == nil {
+		d.mu.Unlock()
+		http.Error(w, "没有等待确认的加入", http.StatusConflict)
+		return
+	}
+	if same && input.Check != j.view.Check {
+		d.mu.Unlock()
+		http.Error(w, "核对数字不一致：只有两台电脑显示相同的数字时才能确认", http.StatusConflict)
+		return
+	}
+	j.answer <- same
+	j.answer, j.declined = nil, !same
+	changed := j.changed
+	d.mu.Unlock()
+	select {
+	case <-changed:
+	case <-r.Context().Done():
+	case <-time.After(15 * time.Second):
+	}
+	view, _ := d.joinView()
+	jsonReply(w, view)
+}
+
 // joinComputerState is the held read of the short-code join: with wait=N
 // (at most 25 seconds) it answers when the state changes.
 func (s *Server) joinComputerState(w http.ResponseWriter, r *http.Request) {
 	view, changed := s.devices.joinView()
 	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
-	if wait = min(max(wait, 0), 25); wait > 0 && changed != nil && (view.State == "finding" || view.State == "approval") {
+	if wait = min(max(wait, 0), 25); wait > 0 && changed != nil && (view.State == "finding" || view.State == "approval" || view.State == "confirm") {
 		timer := time.NewTimer(time.Duration(wait) * time.Second)
 		defer timer.Stop()
 		select {

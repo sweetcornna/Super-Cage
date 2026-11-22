@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -32,8 +33,12 @@ func (rig *deviceRig) mintShort(t *testing.T) (string, string) {
 }
 
 // redeemShort joins with the 8 digits as another computer does, with its own
-// key. The check number goes to checks.
+// key. The check number goes to checks; its person confirms the number.
 func (rig *deviceRig) redeemShort(code string, checks chan<- string) (*testDevice, error) {
+	return rig.redeemShortWith(code, checks, func(context.Context, string) bool { return true })
+}
+
+func (rig *deviceRig) redeemShortWith(code string, checks chan<- string, confirm func(context.Context, string) bool) (*testDevice, error) {
 	identity, err := remotelink.NewIdentity()
 	if err != nil {
 		return nil, err
@@ -42,7 +47,7 @@ func (rig *deviceRig) redeemShort(code string, checks chan<- string) (*testDevic
 		if checks != nil {
 			checks <- check
 		}
-	})
+	}, confirm)
 	return &testDevice{identity: identity, host: host}, err
 }
 
@@ -100,9 +105,13 @@ type redeemed struct {
 }
 
 func (rig *deviceRig) redeemShortAsync(code string, checks chan<- string) <-chan redeemed {
+	return rig.redeemShortAsyncWith(code, checks, func(context.Context, string) bool { return true })
+}
+
+func (rig *deviceRig) redeemShortAsyncWith(code string, checks chan<- string, confirm func(context.Context, string) bool) <-chan redeemed {
 	done := make(chan redeemed, 1)
 	go func() {
-		d, err := rig.redeemShort(code, checks)
+		d, err := rig.redeemShortWith(code, checks, confirm)
 		done <- redeemed{d, err}
 	}()
 	return done
@@ -113,8 +122,11 @@ func (rig *deviceRig) redeemShortAsync(code string, checks chan<- string) <-chan
 func TestDevicesShortCodeApproval(t *testing.T) {
 	rig := newDeviceRig(t, relay.Config{})
 	short, _ := rig.mintShort(t)
-	checks := make(chan string, 1)
-	done := rig.redeemShortAsync(short, checks)
+	checks, asked, confirmed := make(chan string, 1), make(chan string, 1), make(chan bool, 1)
+	done := rig.redeemShortAsyncWith(short, checks, func(_ context.Context, check string) bool {
+		asked <- check
+		return <-confirmed
+	})
 	shown := received(t, checks)
 	view := rig.settled(t)
 	if view.State != "request" || view.Request == nil || *view.Request != (struct{ Name, Platform, Check string }{"MacBook Air", "darwin", shown}) {
@@ -138,6 +150,14 @@ func TestDevicesShortCodeApproval(t *testing.T) {
 	if w := rig.window("POST", "/api/devices/invite/approve", approve); w.Code != http.StatusOK {
 		t.Fatalf("允许: HTTP %d %s", w.Code, w.Body.String())
 	}
+	// 允许 alone saves nothing: the joiner's person confirms the number first.
+	if check := received(t, asked); check != shown {
+		t.Fatalf("joiner asked to confirm %s, showed %s", check, shown)
+	}
+	if view := rig.inviteView(t, "0"); view.State != "confirming" || rig.deviceCount() != 0 {
+		t.Fatalf("after 允许, before the joiner confirmed: %+v, %d devices", view, rig.deviceCount())
+	}
+	confirmed <- true
 	result := received(t, done)
 	if result.err != nil {
 		t.Fatal(result.err)
@@ -145,7 +165,7 @@ func TestDevicesShortCodeApproval(t *testing.T) {
 	if w := rig.window("POST", "/api/devices/invite/approve", approve); w.Code != http.StatusConflict {
 		t.Fatalf("a second 允许: HTTP %d", w.Code)
 	}
-	if view := rig.settled(t, "waiting", "request"); view.State != "joined" || view.Device == nil || view.Device.Name != "MacBook Air" {
+	if view := rig.settled(t, "waiting", "request", "confirming"); view.State != "joined" || view.Device == nil || view.Device.Name != "MacBook Air" {
 		t.Fatalf("after 允许: %+v", view)
 	}
 	paired := rig.device(t, result.device)
@@ -176,6 +196,23 @@ func TestDevicesShortCodeRefusals(t *testing.T) {
 		}
 		if view := rig.settled(t, "waiting", "request"); view.State != "rejected" || rig.deviceCount() != 0 {
 			t.Fatalf("after 拒绝: %+v, %d devices", view, rig.deviceCount())
+		}
+	})
+	t.Run("joiner sees another number", func(t *testing.T) {
+		rig := newDeviceRig(t, relay.Config{})
+		short, _ := rig.mintShort(t)
+		checks := make(chan string, 1)
+		done := rig.redeemShortAsyncWith(short, checks, func(context.Context, string) bool { return false })
+		shown := received(t, checks)
+		rig.settled(t)
+		if w := rig.window("POST", "/api/devices/invite/approve", `{"check":"`+shown+`"}`); w.Code != http.StatusOK {
+			t.Fatalf("允许: HTTP %d", w.Code)
+		}
+		if result := received(t, done); !errors.Is(result.err, mobilelink.ErrDeviceNotConfirmed) {
+			t.Fatalf("joiner: %v", result.err)
+		}
+		if view := rig.settled(t, "waiting", "request", "confirming"); view.State != "failed" || !strings.Contains(view.Error, "没有确认核对数字") || rig.deviceCount() != 0 {
+			t.Fatalf("after the joiner declined: %+v, %d devices", view, rig.deviceCount())
 		}
 	})
 	t.Run("no answer", func(t *testing.T) {
@@ -239,8 +276,9 @@ func TestDevicesShortCodeRefusals(t *testing.T) {
 		if w := rig.window("POST", "/api/devices/invite/approve", `{"check":"`+shown+`"}`); w.Code != http.StatusOK {
 			t.Fatalf("允许: HTTP %d", w.Code)
 		}
-		if result := received(t, first); result.err != nil || rig.deviceCount() != 1 {
-			t.Fatalf("first joiner: %v, %d devices", result.err, rig.deviceCount())
+		// The host saves once the joiner's confirmation arrives.
+		if result, view := received(t, first), rig.settled(t, "waiting", "request", "confirming"); result.err != nil || view.State != "joined" || rig.deviceCount() != 1 {
+			t.Fatalf("first joiner: %v, %+v, %d devices", result.err, view, rig.deviceCount())
 		}
 	})
 	t.Run("code shown by another host", func(t *testing.T) {
