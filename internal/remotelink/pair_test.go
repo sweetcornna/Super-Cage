@@ -68,12 +68,12 @@ func TestPairConfirmsCodeAndAgreesOnCheck(t *testing.T) {
 		pending <- p
 		hostErr <- p.Approve(ctx, record)
 	}()
-	j, err := JoinHost(ctx, joined, joiner, key, "MacBook Air", "macos")
+	j, err := JoinHost(ctx, joined, joiner, key, "MacBook Air", "darwin")
 	if err != nil {
 		t.Fatal(err)
 	}
 	p := <-pending
-	if p.Request != (JoinRequest{Name: "MacBook Air", Platform: "macos", Pin: joiner.Pin, Check: j.Check}) {
+	if p.Request != (JoinRequest{Name: "MacBook Air", Platform: "darwin", Pin: joiner.Pin, Check: j.Check}) {
 		t.Fatalf("host saw %+v, joiner check %s", p.Request, j.Check)
 	}
 	if len(j.Check) != 4 || strings.Trim(j.Check, "0123456789") != "" || j.HostPin != host.Pin {
@@ -306,7 +306,7 @@ func relayInTheMiddleForTest(t *testing.T) (string, string) {
 	}()
 	joinerSide := make(chan *JoinerPairing, 1)
 	go func() {
-		j, err := JoinHost(ctx, joinedA, joiner, key, "MacBook Air", "macos")
+		j, err := JoinHost(ctx, joinedA, joiner, key, "MacBook Air", "darwin")
 		if err != nil {
 			t.Error("joiner refused the relay's valid proof:", err)
 		}
@@ -324,12 +324,12 @@ func relayInTheMiddleForTest(t *testing.T) (string, string) {
 	// host's number X.
 	relayNonce := make([]byte, 32)
 	commit := pairCommit(relayNonce)
-	must(t, writePairMessage(relayB, pairMessage{Version: 1, MAC: encode32(bindingB.joinerMAC(key)), Commit: encode32(commit[:]), Name: "MacBook Air", Platform: "macos"}))
+	must(t, writePairMessage(relayB, pairMessage{Version: 1, MAC: encode32(bindingB.joinerMAC(key)), Commit: encode32(commit[:]), Name: "MacBook Air", Platform: "darwin"}))
 	hostNonce := readNonceForTest(t, relayB)
 	must(t, writePairMessage(relayB, pairMessage{Nonce: encode32(relayNonce)}))
 	hostDigest := bindingB.checkDigest(hostNonce[:], relayNonce)
 	p := <-hostSide
-	if p == nil || p.Request != (JoinRequest{Name: "MacBook Air", Platform: "macos", Pin: relay.Pin, Check: checkNumber(hostDigest)}) {
+	if p == nil || p.Request != (JoinRequest{Name: "MacBook Air", Platform: "darwin", Pin: relay.Pin, Check: checkNumber(hostDigest)}) {
 		t.Fatal("host state does not match the relay's view")
 	}
 	// Session A: the joiner has committed to its nonce. The relay grinds its
@@ -453,7 +453,7 @@ func FuzzPairMessage(f *testing.F) {
 		return out.Bytes()
 	}
 	nonce := encode32(make([]byte, 32))
-	f.Add(seed(pairMessage{Version: 1, MAC: encode32(binding.joinerMAC(key)), Commit: nonce, Name: "A", Platform: "macos"}, pairMessage{Nonce: nonce}))
+	f.Add(seed(pairMessage{Version: 1, MAC: encode32(binding.joinerMAC(key)), Commit: nonce, Name: "A", Platform: "darwin"}, pairMessage{Nonce: nonce}))
 	f.Add(seed(pairMessage{Nonce: nonce}, pairMessage{MAC: nonce, Record: `{"version":1}`}))
 	f.Add(seed(pairMessage{Error: "rejected"}))
 	f.Add([]byte{0, 2, '{', '}'})
@@ -478,7 +478,7 @@ func FuzzPairMessage(f *testing.F) {
 			t.Fatal("host accepted fuzzed bytes as a proof of the code")
 		}
 		peer.Reader = bytes.NewReader(data)
-		if _, err := joinHost(peer, key, binding, "A", "macos"); err == nil {
+		if _, err := joinHost(peer, key, binding, "A", "darwin"); err == nil {
 			j := &JoinerPairing{key: key, binding: binding}
 			if m, err := readPairMessage(peer); err == nil {
 				if record, err := j.result(m); err == nil {

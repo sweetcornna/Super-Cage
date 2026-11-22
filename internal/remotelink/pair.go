@@ -53,8 +53,9 @@ var pairRefusals = map[string]error{"failed": ErrPairFailed, "rejected": ErrPair
 // pairRand supplies the commit-then-reveal nonces. Tests replace it.
 var pairRand io.Reader = rand.Reader
 
-// PairPlatforms are the platform names a joining device may report.
-var PairPlatforms = []string{"macos", "windows", "linux", "android", "ios"}
+// PairPlatforms are the platforms a joining device may report, as Go names
+// them (runtime.GOOS), like the device report on a link.
+var PairPlatforms = []string{"darwin", "windows", "linux", "android", "ios"}
 
 // AcceptAfterJoin is ServerAfterJoin for a room that both today's QR or long
 // code and a short code reach. The client's ALPN chooses the configuration:
@@ -475,7 +476,12 @@ type HostPairing struct {
 	conn    *tls.Conn
 	key     []byte
 	binding pairBinding
+	left    chan struct{}
 }
+
+// Left is closed when the joiner leaves before the host's answer: its
+// connection ends, or it sends anything at all. The approval should end then.
+func (h *HostPairing) Left() <-chan struct{} { return h.left }
 
 // ConfirmJoiner checks the joiner's proof of the code and runs the
 // commit-then-reveal exchange for the check number. key is the code's
@@ -494,7 +500,15 @@ func ConfirmJoiner(ctx context.Context, conn *tls.Conn, identity *Identity, key 
 	if err != nil {
 		return nil, pairStepError(ctx, err)
 	}
-	return &HostPairing{Request: request, conn: conn, key: bytes.Clone(key), binding: binding}, nil
+	h := &HostPairing{Request: request, conn: conn, key: bytes.Clone(key), binding: binding, left: make(chan struct{})}
+	// The joiner sends nothing more. A read ends only when it leaves, or when
+	// the caller closes the connection after answering.
+	go func() {
+		var b [1]byte
+		_, _ = conn.Read(b[:])
+		close(h.left)
+	}()
+	return h, nil
 }
 
 func confirmJoiner(rw io.ReadWriter, key []byte, binding pairBinding) (request JoinRequest, err error) {

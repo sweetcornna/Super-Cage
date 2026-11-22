@@ -60,6 +60,7 @@ var (
 	ErrDeviceApprovalTimeout = errors.New("对方没有在 60 秒内允许，请重新获取配对码")
 	ErrDeviceCodeUnknown     = errors.New("配对码不对、已过期或已被使用")
 	ErrDeviceCodeUsed        = errors.New("配对码已被使用")
+	ErrDeviceJoinerLeft      = errors.New("对方已取消加入")
 	errDeviceCodeFormat      = errors.New("请输入 8 位数字配对码")
 )
 
@@ -223,8 +224,8 @@ type DeviceHello struct {
 // A cage-remote/1 peer is today's QR or long code: today's exchange, no
 // approval, save(DeviceRequest{Pin}). A cage-pair/1 peer must prove the code;
 // approve is called with a context that ends at the approval bound and
-// returns true for 允许; then save, and the record goes back under the host's
-// proof of the code.
+// returns true for 允许 (the context also ends when the joiner leaves); then
+// save, and the record goes back under the host's proof of the code.
 func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Identity, approve func(context.Context, DeviceRequest) bool, save func(DeviceRequest) (PairedHost, error)) error {
 	if inv == nil || host == nil || approve == nil || save == nil {
 		return errors.New("device invite, host identity and callbacks required")
@@ -255,11 +256,25 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 	}
 	request := DeviceRequest{ShortCode: true, Pin: pending.Request.Pin, Name: pending.Request.Name, Platform: pending.Request.Platform, Check: pending.Request.Check}
 	decide, stop := context.WithTimeout(ctx, deviceApprovalTimeout)
+	go func() {
+		select {
+		case <-pending.Left():
+			stop()
+		case <-decide.Done():
+		}
+	}()
 	allowed := approve(decide, request)
 	expired := decide.Err() != nil
 	stop()
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	select {
+	case <-pending.Left():
+		// The joiner gave up (closed its dialog, locked, timed out): enrolling
+		// it now would leave a device nobody holds the key of.
+		return ErrDeviceJoinerLeft
+	default:
 	}
 	reply, done := context.WithTimeout(ctx, 10*time.Second)
 	defer done()

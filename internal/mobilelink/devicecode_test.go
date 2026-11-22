@@ -239,7 +239,7 @@ func (f *deviceFixture) counts() (int, int) {
 }
 
 func (f *deviceFixture) redeem(ctx context.Context, code string, check func(string)) (PairedHost, error) {
-	return RedeemDeviceCode(ctx, code, f.relay.URL, f.joiner, DeviceHello{Name: "MacBook Air", Platform: "macos"}, check)
+	return RedeemDeviceCode(ctx, code, f.relay.URL, f.joiner, DeviceHello{Name: "MacBook Air", Platform: "darwin"}, check)
 }
 
 func receive[T any](t *testing.T, ch <-chan T) T {
@@ -279,7 +279,7 @@ func TestDeviceCodeJoinsThroughOneRoomOnce(t *testing.T) {
 	f.mu.Lock()
 	saved := f.saved
 	f.mu.Unlock()
-	if len(saved) != 1 || !saved[0].ShortCode || saved[0].Pin != f.joiner.Pin || saved[0].Name != "MacBook Air" || saved[0].Platform != "macos" || len(saved[0].Check) != 4 {
+	if len(saved) != 1 || !saved[0].ShortCode || saved[0].Pin != f.joiner.Pin || saved[0].Name != "MacBook Air" || saved[0].Platform != "darwin" || len(saved[0].Check) != 4 {
 		t.Fatalf("host saved %+v", saved)
 	}
 	// One use: the code, a retyped code and the QR of the same room are dead.
@@ -382,6 +382,34 @@ func TestDeviceCodeApprovalOutcomes(t *testing.T) {
 				t.Fatalf("asked %d saved %d", asked, saved)
 			}
 		})
+	}
+}
+
+func TestDeviceCodeJoinerLeavesDuringApproval(t *testing.T) {
+	f := newDeviceFixture(t, 0)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	asked, ended := make(chan struct{}), make(chan struct{})
+	inv, done := f.serve(ctx, func(ctx context.Context, _ DeviceRequest) bool {
+		close(asked)
+		<-ctx.Done()
+		close(ended)
+		return true
+	})
+	leave, stop := context.WithCancel(ctx)
+	joined := make(chan error, 1)
+	go func() { _, err := f.redeem(leave, inv.Code, nil); joined <- err }()
+	receive(t, asked)
+	stop()
+	if err := receive(t, joined); !errors.Is(err, context.Canceled) {
+		t.Fatalf("joiner: %v", err)
+	}
+	receive(t, ended)
+	if err := receive(t, done); !errors.Is(err, ErrDeviceJoinerLeft) {
+		t.Fatalf("host: %v", err)
+	}
+	if _, saved := f.counts(); saved != 0 {
+		t.Fatal("host enrolled a joiner that had left")
 	}
 }
 
@@ -506,7 +534,7 @@ func relayInTheMiddle(h *hostileRelay, key []byte, forge bool, hostAnswer chan<-
 		connB, err := remotelink.PairClient(ctx, upstream, self)
 		if err == nil {
 			var legB *remotelink.JoinerPairing
-			if legB, err = remotelink.JoinHost(ctx, connB, self, key, name, "macos"); err == nil {
+			if legB, err = remotelink.JoinHost(ctx, connB, self, key, name, "darwin"); err == nil {
 				var record []byte
 				if record, err = legB.Await(ctx); err == nil {
 					err = fmt.Errorf("relay obtained the host's record %s", record)

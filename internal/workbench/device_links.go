@@ -28,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -49,6 +50,9 @@ const (
 	deviceLinkRest         = 5 * time.Minute
 	deviceLockRecheck      = 2 * time.Second
 	deviceDefaultName      = "另一台电脑"
+	// deviceJoinLimit bounds a short-code join: the code's life plus the
+	// other computer's approval (design §4.2).
+	deviceJoinLimit = 3 * time.Minute
 )
 
 var (
@@ -119,6 +123,29 @@ type deviceLinks struct {
 	unlockedAt time.Time
 	// Tests shorten these; zero means the constants above.
 	restAfter, recheck time.Duration
+	// join is the short-code join in progress, or its outcome until the next
+	// join; guarded by mu.
+	join *deviceJoin
+}
+
+// deviceJoin is one short-code join. The window follows it with a held
+// GET /api/client/devices/join; nothing runs for it once it has ended.
+type deviceJoin struct {
+	cancel  context.CancelFunc
+	changed chan struct{} // closed and replaced on every change
+	view    deviceJoinView
+}
+
+// deviceJoinView is what the window sees of a short-code join. State is
+// "finding", "approval" (Check is the number both screens show), "joined"
+// (ID and Name of the saved computer) or "failed" (Error); "none" when no
+// join has run since the last cancel.
+type deviceJoinView struct {
+	State string `json:"state"`
+	Check string `json:"check,omitempty"`
+	ID    string `json:"id,omitempty"`
+	Name  string `json:"name,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
 func (s *Server) joinedComputersPath() string { return filepath.Join(s.profile, joinedComputersFile) }
@@ -263,6 +290,11 @@ func (s *Server) clientDevicesRequest(w http.ResponseWriter, r *http.Request, pa
 		s.listJoinedComputers(w)
 	case r.Method == http.MethodPost && path == "devices/join":
 		s.joinComputer(w, r)
+	case r.Method == http.MethodGet && path == "devices/join":
+		s.joinComputerState(w, r)
+	case r.Method == http.MethodDelete && path == "devices/join":
+		s.devices.cancelJoin()
+		jsonReply(w, map[string]bool{"ok": true})
 	case r.Method == http.MethodPost && joinedComputerID.MatchString(id) && action == "open":
 		s.openJoinedComputer(w, r, id)
 	case r.Method == http.MethodPost && joinedComputerID.MatchString(id) && action == "close":
@@ -318,7 +350,8 @@ func (s *Server) joinComputer(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &input, 16<<10) {
 		return
 	}
-	if _, status, err := s.deviceUnlocked(r.Context()); err != nil {
+	unlocked, status, err := s.deviceUnlocked(r.Context())
+	if err != nil {
 		http.Error(w, err.Error(), status)
 		return
 	}
@@ -327,15 +360,20 @@ func (s *Server) joinComputer(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	codeRelay, err := mobilelink.PairCodeRelay(input.Code)
-	if err != nil {
-		requestError(w, errors.New("请粘贴那台电脑在“添加设备”里显示的配对码"))
-		return
-	}
 	relay := s.deviceRelaySetting()
-	if codeRelay != relay {
-		http.Error(w, fmt.Sprintf("这个配对码使用中继 %s，这台电脑设置的是 %s。请在设置里选择同一个中继，再加入。", relayDisplay(codeRelay), relayDisplay(relay)), http.StatusConflict)
-		return
+	// Eight digits are the short code; anything else is today's long code,
+	// which names its relay.
+	short, shortErr := mobilelink.ParseDeviceCode(input.Code)
+	if shortErr != nil {
+		codeRelay, err := mobilelink.PairCodeRelay(input.Code)
+		if err != nil {
+			requestError(w, errors.New("请输入那台电脑在“添加设备”里显示的 8 位数字，或粘贴配对码"))
+			return
+		}
+		if codeRelay != relay {
+			http.Error(w, fmt.Sprintf("这个配对码使用中继 %s，这台电脑设置的是 %s。请在设置里选择同一个中继，再加入。", relayDisplay(codeRelay), relayDisplay(relay)), http.StatusConflict)
+			return
+		}
 	}
 	d := &s.devices
 	d.mu.Lock()
@@ -359,6 +397,10 @@ func (s *Server) joinComputer(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
+	if shortErr == nil {
+		s.joinComputerByCode(w, r, unlocked, short, relay, name, key, identity)
+		return
+	}
 	// The other computer saves its side as soon as it answers. Finish and
 	// save this side even if the window gives up waiting; the code's own
 	// expiry still bounds the exchange.
@@ -375,23 +417,156 @@ func (s *Server) joinComputer(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	var raw [16]byte
-	if _, err := rand.Read(raw[:]); err != nil {
+	record, err := s.saveJoinedComputer(name, host, key)
+	if err != nil {
 		requestError(w, err)
 		return
 	}
+	jsonReply(w, map[string]string{"id": record.ID, "name": record.Name})
+}
+
+func (s *Server) saveJoinedComputer(name string, host mobilelink.PairedHost, key ed25519.PrivateKey) (joinedComputer, error) {
+	var raw [16]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return joinedComputer{}, err
+	}
 	record := joinedComputer{ID: hex.EncodeToString(raw[:]), Name: name, Relay: host.Relay, HostPin: host.HostPin, Lookup: host.Lookup, Seed: key.Seed(), AddedAt: time.Now().UTC()}
+	d := &s.devices
 	d.mu.Lock()
 	computers, err := s.loadJoinedComputers()
 	if err == nil {
 		err = s.saveJoinedComputers(append(computers, record))
 	}
 	d.mu.Unlock()
-	if err != nil {
-		requestError(w, err)
+	return record, err
+}
+
+// joinComputerByCode joins with the other computer's 8-digit code (design
+// §4.2): the room is found by the code, both computers prove it inside the
+// TLS session, and the other computer's person clicks 允许 after comparing a
+// four-digit check number. This reply carries that number as soon as both
+// screens can show it ({state:"approval", check}); the wait for 允许 goes on
+// here, and the window follows it with GET /api/client/devices/join?wait=25.
+// The device key is proven by the TLS session. A lock, a new join or
+// DELETE /api/client/devices/join cancels it.
+func (s *Server) joinComputerByCode(w http.ResponseWriter, r *http.Request, unlocked context.Context, code, relay, name string, key ed25519.PrivateKey, identity *remotelink.Identity) {
+	ctx, cancel := context.WithTimeout(unlocked, deviceJoinLimit)
+	j := &deviceJoin{cancel: cancel, changed: make(chan struct{}), view: deviceJoinView{State: "finding"}}
+	d := &s.devices
+	d.mu.Lock()
+	if d.closed {
+		d.mu.Unlock()
+		cancel()
+		http.Error(w, "Super Cage 正在退出", http.StatusServiceUnavailable)
 		return
 	}
-	jsonReply(w, map[string]string{"id": record.ID, "name": record.Name})
+	previous := d.join
+	d.join = j
+	changed := j.changed
+	if previous != nil {
+		previous.cancel()
+		close(previous.changed)
+	}
+	d.mu.Unlock()
+	go func() {
+		defer cancel()
+		hello := mobilelink.DeviceHello{Name: deviceSelfName(), Platform: runtime.GOOS}
+		if !remotelink.ValidPairName(hello.Name) {
+			hello.Name = "Super Cage"
+		}
+		host, err := mobilelink.RedeemDeviceCode(ctx, code, relay, identity, hello, func(check string) {
+			d.updateJoin(j, deviceJoinView{State: "approval", Check: check})
+		})
+		if err == nil {
+			var record joinedComputer
+			if record, err = s.saveJoinedComputer(name, host, key); err == nil {
+				d.updateJoin(j, deviceJoinView{State: "joined", ID: record.ID, Name: record.Name})
+				return
+			}
+		}
+		diagnostics.Log("warn", "devices", "join by code failed: "+err.Error())
+		d.updateJoin(j, deviceJoinView{State: "failed", Error: codeJoinFailure(err)})
+	}()
+	select {
+	case <-changed:
+	case <-r.Context().Done():
+	case <-time.After(30 * time.Second):
+	}
+	view, _ := d.joinView()
+	if view.State == "failed" {
+		http.Error(w, view.Error, http.StatusConflict)
+		return
+	}
+	jsonReply(w, view)
+}
+
+// joinComputerState is the held read of the short-code join: with wait=N
+// (at most 25 seconds) it answers when the state changes.
+func (s *Server) joinComputerState(w http.ResponseWriter, r *http.Request) {
+	view, changed := s.devices.joinView()
+	wait, _ := strconv.Atoi(r.URL.Query().Get("wait"))
+	if wait = min(max(wait, 0), 25); wait > 0 && changed != nil && (view.State == "finding" || view.State == "approval") {
+		timer := time.NewTimer(time.Duration(wait) * time.Second)
+		defer timer.Stop()
+		select {
+		case <-changed:
+		case <-timer.C:
+		case <-r.Context().Done():
+		}
+		view, _ = s.devices.joinView()
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	jsonReply(w, view)
+}
+
+func (d *deviceLinks) joinView() (deviceJoinView, <-chan struct{}) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.join == nil {
+		return deviceJoinView{State: "none"}, nil
+	}
+	return d.join.view, d.join.changed
+}
+
+// updateJoin records a change of j unless a newer join or a cancel replaced it.
+func (d *deviceLinks) updateJoin(j *deviceJoin, view deviceJoinView) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.join != j {
+		return
+	}
+	j.view = view
+	close(j.changed)
+	j.changed = make(chan struct{})
+}
+
+// cancelJoin stops a short-code join and forgets its state.
+func (d *deviceLinks) cancelJoin() {
+	d.mu.Lock()
+	j := d.join
+	d.join = nil
+	if j != nil {
+		close(j.changed)
+	}
+	d.mu.Unlock()
+	if j != nil {
+		j.cancel()
+	}
+}
+
+// codeJoinFailure names the usual causes in the joining window's words.
+func codeJoinFailure(err error) string {
+	switch {
+	case errors.Is(err, mobilelink.ErrDeviceCodeUnknown):
+		return "没有找到这个配对码：请核对数字，并确认两台电脑使用同一个中继。"
+	case errors.Is(err, mobilelink.ErrDeviceCodeUsed):
+		return "配对码已被使用，请在那台电脑上重新生成。"
+	case errors.Is(err, context.Canceled):
+		return "已取消加入。"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "等待超时，请在那台电脑上重新生成配对码。"
+	}
+	return joinFailure(err)
 }
 
 func relayDisplay(relay string) string {
@@ -609,6 +784,7 @@ func (d *deviceLinks) closeAll() {
 	for _, link := range links {
 		link.close()
 	}
+	d.cancelJoin()
 }
 
 // shutdown closes every link for good, when the process stops.
@@ -685,16 +861,21 @@ func (l *deviceLink) serve(w http.ResponseWriter, r *http.Request) {
 // device list. A host released before device lists accepts only phones and
 // refuses this; the link works the same either way.
 func (l *deviceLink) report() {
-	name, _ := os.Hostname()
-	name = strings.TrimSuffix(strings.TrimSpace(name), ".local")
-	if name == "" || len(name) > 160 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
-		name = "Super Cage"
-	}
-	body, err := json.Marshal(mobilelink.DeviceInfo{Platform: runtime.GOOS, Model: name})
+	body, err := json.Marshal(mobilelink.DeviceInfo{Platform: runtime.GOOS, Model: deviceSelfName()})
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(l.ctx, 5*time.Second)
 	defer cancel()
 	_, _ = l.client.Do(ctx, http.MethodPost, "/api/mobile/device", body)
+}
+
+// deviceSelfName is this computer's name as other computers list it.
+func deviceSelfName() string {
+	name, _ := os.Hostname()
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".local")
+	if name == "" || len(name) > 160 || !utf8.ValidString(name) || strings.ContainsFunc(name, unicode.IsControl) {
+		name = "Super Cage"
+	}
+	return name
 }
