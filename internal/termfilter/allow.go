@@ -120,8 +120,8 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 			return len(params) == 0
 		case 'T': // scroll down; five parameters start mouse highlight tracking
 			return count(params, ';') == 0
-		case 'J': // erase in display, but not the owner's scrollback (3)
-			return firstParam(params) != 3
+		case 'J': // erase in display; the scrollback (3) unless it is kept
+			return firstParam(params) != 3 || !f.opts.KeepScrollback
 		case 'g': // tab clear
 			f.left.tabs = true
 		}
@@ -130,8 +130,8 @@ func (f *Filter) allowCSI(body []byte, final byte) bool {
 		switch final {
 		case 'h', 'l':
 			return f.privateModes(params, final)
-		case 'J': // selective erase, but not the scrollback (3)
-			return firstParam(params) != 3
+		case 'J': // selective erase; the scrollback (3) unless it is kept
+			return firstParam(params) != 3 || !f.opts.KeepScrollback
 		case 'K':
 			return true
 		case 'n': // cursor position report

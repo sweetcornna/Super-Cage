@@ -52,21 +52,47 @@ const (
 // knowing what the program in the Cage terminal did: cage attach --reset
 // writes it after an attach that could not reset (killed). It sets only
 // defaults, so it is harmless when nothing was changed, but it also resets
-// the owner's palette and cursor style; End resets those only when the
-// guest changed them.
-const ResetSequence = resetStart + resetScreen + resetCursorStyle + cursorVisible + resetProtection +
-	resetPalette + endLink + titlePop
+// the owner's palette, cursor style and blink, and tab stops up to column
+// 256, and ends a progress report and a command mark; End resets those only
+// when the guest changed them.
+const ResetSequence = resetStart + resetScreen + defaultTabStops + resetCursorStyle + cursorVisible + resetBlink +
+	resetProtection + resetPalette + endLink + endProgress + endCommand + titlePop
 
-// ClearReset is what the filter writes for a full reset (ESC c): a soft
-// reset, spelled out as well for an emulator without one, the main screen,
-// mouse and paste modes off, and a cleared screen with the cursor home. A
-// full reset would also erase the owner's scrollback, and in kitty the
-// window's colour schemes. Everything in it passes the filter.
+// ClearReset is what the filter writes for a full reset (ESC c), with the
+// scrollback erase unless it is kept (Clear): a soft reset, spelled out as
+// well for an emulator without one, the main screen, mouse and paste modes
+// off, and a cleared screen with the cursor home. A full reset would also
+// reset the window's own settings, in kitty its colour schemes. Everything
+// in it passes the filter.
 const ClearReset = "\x1b[!p" + // DECSTR
 	"\x1b[?2026l\x1b[?1049l\x1b[r" + // no synchronized update, the main screen, a whole-screen region
 	"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l" + // mouse, bracketed paste
-	"\x1b[?1l\x1b>\x1b[?7h\x1b[4l\x1b(B\x1b[m\x1b[?25h" + // cursor keys, keypad, wrap, insert, G0, attributes, cursor
+	"\x1b[?1l\x1b>\x1b[?7h\x1b[4l\x1b[20l" + // cursor keys, keypad, wrap, insert and new line modes
+	"\x1b(B\x1b)B\x0f\x1b[m\x1b[?25h" + // US ASCII in G0 and G1, G0 in use, attributes, cursor
 	"\x1b[H\x1b[2J"
+
+// eraseScrollback erases the window's scrollback (Options.KeepScrollback).
+const eraseScrollback = "\x1b[3J"
+
+// defaultTabStops sets a tab stop every 8 columns up to 256, the cursor
+// kept: appendTabStops for a window whose width is not known.
+const defaultTabStops = "\x1b7\x1b[3g" +
+	"\x1b[9G\x1bH\x1b[17G\x1bH\x1b[25G\x1bH\x1b[33G\x1bH\x1b[41G\x1bH\x1b[49G\x1bH\x1b[57G\x1bH\x1b[65G\x1bH" +
+	"\x1b[73G\x1bH\x1b[81G\x1bH\x1b[89G\x1bH\x1b[97G\x1bH\x1b[105G\x1bH\x1b[113G\x1bH\x1b[121G\x1bH\x1b[129G\x1bH" +
+	"\x1b[137G\x1bH\x1b[145G\x1bH\x1b[153G\x1bH\x1b[161G\x1bH\x1b[169G\x1bH\x1b[177G\x1bH\x1b[185G\x1bH\x1b[193G\x1bH" +
+	"\x1b[201G\x1bH\x1b[209G\x1bH\x1b[217G\x1bH\x1b[225G\x1bH\x1b[233G\x1bH\x1b[241G\x1bH\x1b[249G\x1bH" +
+	"\x1b8"
+
+// Clear appends what the filter writes for a full reset (ESC c): ClearReset
+// and, unless KeepScrollback, the scrollback erase. A program relaying the
+// stream writes it when the output it relays starts over.
+func (f *Filter) Clear(dst []byte) []byte {
+	dst = append(dst, ClearReset...)
+	if f.opts.KeepScrollback {
+		return dst
+	}
+	return append(dst, eraseScrollback...)
+}
 
 // End returns what to write to the local terminal when the stream ends: it
 // spoils a string the application is inside (a clipboard write streaming
@@ -79,10 +105,12 @@ func (f *Filter) End(dst []byte, cols int) []byte {
 	left := f.left
 	f.left = leftState{}
 	dst = append(f.Abort(dst), resetStart...)
+	dst = append(dst, resetScreen...)
 	if left.tabs {
+		// After leaving the alternate screen: kitty keeps tab stops per
+		// screen.
 		dst = appendTabStops(dst, cols)
 	}
-	dst = append(dst, resetScreen...)
 	if left.cursorStyle {
 		dst = append(dst, resetCursorStyle...)
 	}

@@ -63,7 +63,7 @@ type Options struct {
 	FilterReport func(report string)
 }
 
-const attachUsage = "用法：cage attach [--terminal ID | --new shell|claude|codex | --resume 会话ID] [--project 路径] [--claude-account ID | --codex-account ID] [--connection ID|current] [--observe] [--config 路径]"
+const attachUsage = "用法：cage attach [--terminal ID | --new shell|claude|codex | --resume 会话ID] [--project 路径] [--claude-account ID | --codex-account ID] [--connection ID|current] [--observe] [--keep-scrollback] [--config 路径]"
 
 // Config is what one cage attach was asked to do.
 type Config struct {
@@ -82,6 +82,10 @@ type Config struct {
 	// Reset only writes ResetSequence (--reset): the launch script runs it
 	// after an attach that may not have reset the window itself.
 	Reset bool
+	// KeepScrollback keeps the program from erasing this window's
+	// scrollback (--keep-scrollback, by hand only): termfilter's
+	// Options.KeepScrollback.
+	KeepScrollback bool
 }
 
 // TTY is the local terminal. The real one is a raw-mode tty; tests use
@@ -165,6 +169,7 @@ func ParseArgs(args []string) (Config, error) {
 	flags.BoolVar(&cfg.Observe, "observe", false, "")
 	flags.BoolVar(&cfg.FilterStats, "filter-stats", false, "")
 	flags.BoolVar(&cfg.Reset, "reset", false, "")
+	flags.BoolVar(&cfg.KeepScrollback, "keep-scrollback", false, "")
 	if err := flags.Parse(args); err != nil || flags.NArg() > 1 {
 		return cfg, errors.New(attachUsage)
 	}
@@ -322,7 +327,7 @@ func Run(ctx context.Context, cfg Config, tty TTY, options Options) Exit {
 		return Exit{1, "无法确认正在运行的 Super Cage 的版本。"}
 	}
 	a.settings, _ = localterm.LoadSettings(filepath.Dir(cfg.ConfigPath))
-	a.filter = termfilter.New(termfilter.Options{ClipboardWrite: a.settings.ClipboardWrite, ClipboardNow: a.ownerHere})
+	a.filter = termfilter.New(termfilter.Options{ClipboardWrite: a.settings.ClipboardWrite, ClipboardNow: a.ownerHere, KeepScrollback: a.cfg.KeepScrollback})
 	a.viewer = attachViewerID()
 	if exit, ok := a.connectController(ctx); !ok {
 		return exit
@@ -1004,13 +1009,12 @@ func (a *attacher) readStream(ws *controlwire.Conn) error {
 	}
 }
 
-// restart ends what the window was in and clears it, for output that does
-// not continue what it shows. Not a full reset: that would erase the
-// owner's scrollback.
+// restart ends what the window was in and clears it, as the filter turns a
+// full reset, for output that does not continue what it shows.
 func (a *attacher) restart() error {
 	a.outMu.Lock()
 	defer a.outMu.Unlock()
-	a.buf = append(a.filter.Abort(a.buf[:0]), termfilter.ClearReset...)
+	a.buf = a.filter.Clear(a.filter.Abort(a.buf[:0]))
 	a.focusOwed = true
 	return a.flushLocked()
 }
