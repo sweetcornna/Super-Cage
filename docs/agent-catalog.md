@@ -9,6 +9,8 @@ catalog for it. Every other client is optional: the person adds it in 设置 →
 - **Outside the guest revision.** Nothing of the catalog, and nothing an install job sends, goes into a file the guest
   revision hashes (`internal/cage/guest.go`, `guestRevision`).
 - **Admins restrict, never add.** A tenant server may allow or deny entries by id; nobody adds recipes at run time.
+- **Installed by one reviewed script.** How a job installs, updates and removes an entry, and what it leaves in
+  the guest: `docs/agent-install.md`.
 
 ## Statuses
 
