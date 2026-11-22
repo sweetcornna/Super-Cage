@@ -41,7 +41,7 @@ async function startAgent() {
   await writeFile(join(directory, "browser-agent.mjs"), adapted);
   await writeFile(join(directory, "control.json"), JSON.stringify({ token, workspace: directory }));
   await writeFile(join(directory, "homepage.json"), JSON.stringify({ url: "about:blank" }));
-  const agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"] });
+  const agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, BREAKPAD_DUMP_LOCATION: join(directory, "Crashpad") } });
   let output = "", stderr = "", port = 0;
   agent.stdout.on("data", chunk => { output += chunk; port = Number(output.match(/PORT=(\d+)/)?.[1] ?? 0); });
   agent.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-4000); });

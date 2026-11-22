@@ -84,7 +84,7 @@ export async function createDataController({ headless = true, extension } = {}) 
   };
   const start = async () => {
     control = ""; stderr = "";
-    agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CAGE_LANGUAGE: "zh-CN" } });
+    agent = spawn(process.execPath, [join(directory, "browser-agent.mjs")], { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, CAGE_LANGUAGE: "zh-CN", BREAKPAD_DUMP_LOCATION: join(directory, "Crashpad") } });
     let output = "";
     agent.stdout.on("data", chunk => { output += chunk; const match = output.match(/PORT=(\d+)/); if (match) control = "http://127.0.0.1:" + match[1]; });
     agent.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-4000); });
