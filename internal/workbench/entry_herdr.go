@@ -244,7 +244,8 @@ func entryHerdrSummary(counts map[string]int) string {
 	}
 	parts := make([]string, 0, len(counts))
 	for kind, n := range counts {
-		parts = append(parts, kind+"="+strconv.Itoa(n))
+		// The log would take "terminal.send" for a host name and hide it.
+		parts = append(parts, strings.ReplaceAll(kind, ".", "_")+"="+strconv.Itoa(n))
 	}
 	slices.Sort(parts)
 	return "; " + strings.Join(parts, ", ")

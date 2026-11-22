@@ -38,6 +38,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 )
@@ -116,6 +117,9 @@ type Link struct {
 	helloFramed bool
 	pending     map[string]streamKind // owner calls whose reply opens a stream
 	streams     map[uint32]*stream
+	// closing are streams the owner closed: the guest's core answers with
+	// a CLOSE of its own, which passes; nothing else on them does.
+	closing map[uint32]bool
 
 	framed     atomic.Bool // the guest answered a framed hello
 	ownerEnded atomic.Bool
@@ -140,7 +144,7 @@ type stream struct {
 
 // New returns a link that writes toward the guest with toGuest.
 func New(opts Options, toGuest io.Writer) *Link {
-	return &Link{opts: opts, toGuest: toGuest, pending: map[string]streamKind{}, streams: map[uint32]*stream{}}
+	return &Link{opts: opts, toGuest: toGuest, pending: map[string]streamKind{}, streams: map[uint32]*stream{}, closing: map[uint32]bool{}}
 }
 
 func (l *Link) count(event string) {
@@ -306,8 +310,11 @@ func (l *Link) ownerFrame(channel uint32, kind byte, payload []byte) {
 	}
 	l.mu.Lock()
 	s := l.streams[channel]
-	if kind == KindClose {
+	if kind == KindClose && s != nil {
 		delete(l.streams, channel)
+		if len(l.closing) < MaxStreams {
+			l.closing[channel] = true
+		}
 	}
 	l.mu.Unlock()
 	if s == nil || s.presence == nil {
@@ -390,8 +397,23 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 		}
 		l.mu.Lock()
 		s := l.streams[channel]
+		answer := s == nil && kind == KindClose && l.closing[channel]
 		l.mu.Unlock()
 		switch {
+		case answer:
+			if size > MaxClose {
+				return ErrProtocol
+			}
+			payload := make([]byte, size)
+			if _, err := io.ReadFull(r, payload); err != nil {
+				return eofIsUnexpected(err)
+			}
+			l.mu.Lock()
+			delete(l.closing, channel)
+			l.mu.Unlock()
+			if _, err := toOwner.Write(frame(channel, KindClose, plainReason(payload))); err != nil {
+				return err
+			}
 		case s == nil:
 			l.count("dropped:unannounced")
 			if _, err := io.CopyN(io.Discard, r, int64(size)); err != nil {
@@ -434,6 +456,7 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 				l.mu.Lock()
 				delete(l.streams, channel)
 				l.mu.Unlock()
+				payload = plainReason(payload)
 			}
 			if _, err := toOwner.Write(frame(channel, kind, payload)); err != nil {
 				return err
@@ -449,6 +472,20 @@ func (l *Link) Down(guest io.Reader, toOwner io.Writer) error {
 	}
 }
 
+// plainReason keeps the printable text of a CLOSE frame's reason: the
+// owner's hc may print it on a terminal.
+func plainReason(reason []byte) []byte {
+	out := reason[:0]
+	for len(reason) > 0 {
+		r, n := utf8.DecodeRune(reason)
+		if r >= 0x20 && r != 0x7f && (r < 0x80 || r > 0x9f) && r != utf8.RuneError {
+			out = append(out, reason[:n]...)
+		}
+		reason = reason[n:]
+	}
+	return out
+}
+
 // creditBack gives the guest the credit for bytes the owner will not see.
 func (l *Link) creditBack(channel uint32, s *stream, removed int64) error {
 	s.debt += removed
@@ -456,6 +493,7 @@ func (l *Link) creditBack(channel uint32, s *stream, removed int64) error {
 		return nil
 	}
 	give := s.debt - s.credited
+	l.count("stream:filtered")
 	for give > 0 {
 		n := min(give, int64(^uint32(0)))
 		var payload [4]byte
@@ -563,6 +601,7 @@ func (l *Link) open(channel uint32, kind streamKind) {
 		return
 	}
 	l.streams[channel] = s
+	delete(l.closing, channel)
 }
 
 func (l *Link) writeGuest(data []byte) error {

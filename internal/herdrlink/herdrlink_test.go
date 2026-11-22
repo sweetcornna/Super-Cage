@@ -5,7 +5,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -322,6 +324,35 @@ func TestStreamsAreFilteredAndCreditedBack(t *testing.T) {
 	await(t, "credit back", r.toGuest, func([]byte) bool { return credited(r.guestFrames(), 3) == removed })
 	if credited(r.guestFrames(), 1) != 0 {
 		t.Fatal("events were credited though nothing was removed")
+	}
+}
+
+// A CLOSE from the owner is answered by one from the guest's core; that
+// answer passes, nothing else on the closed stream does, and a reason keeps
+// only its printable text.
+func TestClosesAreAnsweredAndPlain(t *testing.T) {
+	r := framedRig(t, Options{})
+	r.owner(Frame(3, KindClose, nil))
+	r.owner(call(8, "server.status", "{}"))
+	await(t, "owner frames at the guest", r.toGuest, func(b []byte) bool { return strings.Contains(string(b), "server.status") })
+	r.guest(Frame(3, KindData, []byte("late")))
+	r.guest(Frame(3, KindClose, []byte("bye \x1b]52;c;aGk=\x07\u009b2J ok")))
+	r.guest(Frame(3, KindClose, []byte("again")))
+	r.guest(Frame(9, KindClose, []byte("never opened")))
+	r.guest(Frame(1, KindClose, []byte("events \x07end")))
+	r.guest(Frame(0, KindData, []byte("{\"jsonrpc\":\"2.0\",\"id\":8,\"result\":{}}")))
+	await(t, "the status reply", r.toOwner, func(b []byte) bool { return strings.Contains(string(b), "\"id\":8") })
+	var closes []string
+	for _, f := range r.ownerFrames() {
+		if f.kind == KindClose {
+			closes = append(closes, fmt.Sprintf("%d:%s", f.channel, f.payload))
+		}
+		if f.channel == 3 && f.kind == KindData {
+			t.Fatalf("data after the owner's close: %q", f.payload)
+		}
+	}
+	if want := []string{"3:bye ]52;c;aGk=2J ok", "1:events end"}; !slices.Equal(closes, want) {
+		t.Fatalf("closes at the owner: %q, want %q", closes, want)
 	}
 }
 
