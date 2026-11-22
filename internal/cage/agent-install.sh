@@ -16,8 +16,8 @@
 # shellcheck disable=SC2154 # AGENT_* are the job's input.
 set -euo pipefail
 
-# Fixed places. Tests rewrite these lines in a copy of the script; nothing
-# here comes from the environment.
+# Fixed places. Tests rewrite these lines in a copy of the script; no other
+# variable of the environment than the job's HOME decides a path.
 agent_lib=/usr/local/lib/agent-clients
 agent_state=/var/lib/agent-clients
 agent_bin=/usr/local/bin
@@ -25,6 +25,7 @@ agent_runtime=/usr/local/bin/client_runtime.py
 agent_proc=/proc
 agent_python=/usr/bin/python3
 agent_etc=/etc
+agent_tmp_root=/tmp
 agent_cache_root="$HOME/.cache/cage/downloads"
 
 agent_say() { printf '%s\n' "$*"; }
@@ -1091,7 +1092,7 @@ agent_remove() {
 }
 
 agent_check_input
-agent_tmp="$(mktemp -d "${TMPDIR:-/tmp}/agent-clients.XXXXXX")"
+agent_tmp="$(mktemp -d "$agent_tmp_root/agent-clients.XXXXXX")"
 agent_stage=''
 agent_locked=0
 trap agent_cleanup EXIT

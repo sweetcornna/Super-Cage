@@ -187,3 +187,10 @@ the test home's `.curlrc` connects them to a local server; the environment is bu
   `codex-cli 0.171.0` for `--version` under `env -i` and starts through `client_runtime.py`.
 - Codex reads `/etc/codex/config.toml`; `bubblewrap` from apt through the job's proxy.
 - `/usr/local/bin` is on the PATH the Codex helpers see over SSH (design 15).
+- The script under the guest's bash 5.2 and Python 3.13 (the Mac ran bash 3.2 and Python 3.15).
+- Real `sha256sum`/`sha512sum --check --status` inside `cage_download_tool` (wrapped `shasum` here) and real
+  `flock` contention between two jobs (the busy case used a stand-in).
+- A download of 8 MB or more, which takes `tool-download.py`'s multi-connection path, through the job's proxy,
+  with the progress filter (the test files are smaller, so only the single-connection path ran).
+- The `gone` code depends on curl printing `returned error: 404` (or 410) for `--fail`; checked here with
+  macOS curl only.

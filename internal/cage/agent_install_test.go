@@ -288,6 +288,7 @@ func (r *agentRig) compose(input string, rewrites ...[2]string) string {
 		{"agent_proc=/proc\n", "agent_proc=" + r.proc + "\n"},
 		{"agent_python=/usr/bin/python3\n", "agent_python=" + r.python + "\n"},
 		{"agent_etc=/etc\n", "agent_etc=" + r.etc + "\n"},
+		{"agent_tmp_root=/tmp\n", "agent_tmp_root=" + filepath.Join(r.root, "tmp") + "\n"},
 	}, rewrites...)
 	for _, rewrite := range rewrites {
 		if strings.Count(script, rewrite[0]) != 1 {
@@ -395,7 +396,9 @@ func agentTarGz(t *testing.T, members ...tarMember) []byte {
 // The fake client writes its environment where the test can read it: at
 // --version (the verify step) and at a normal start (through the launcher).
 func (r *agentRig) clientBody(version string) string {
-	return "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  env >'" + r.root + "/verify-env'\n  echo 'codex-cli " + version + "'\n  exit 0\nfi\n" +
+	return "#!/bin/sh\nif [ \"$1\" = --version ]; then\n  env >'" + r.root + "/verify-env'\n" +
+		"  for fd in 8 9; do if (: >&$fd) 2>/dev/null; then echo \"fd $fd\" >>'" + r.root + "/verify-fds'; fi; done\n" +
+		"  echo 'codex-cli " + version + "'\n  exit 0\nfi\n" +
 		"env >'" + r.root + "/run-env'\nprintf '%s\\n' \"$@\" >'" + r.root + "/run-args'\n"
 }
 
@@ -654,6 +657,10 @@ func TestAgentInstallFromTLSServer(t *testing.T) {
 		if strings.Contains(strings.ToLower(key), "proxy") || strings.HasPrefix(key, "CAGE_") || strings.Contains(line, "proxy-secret") || key == "CURL_CA_BUNDLE" || key == "TEST_ROOT" {
 			t.Errorf("the verify step saw %s", line)
 		}
+	}
+	// Nor the job's lock descriptors: a client left running must not hold them.
+	if r.exists(filepath.Join(r.root, "verify-fds")) {
+		t.Errorf("the verify step inherited %s", r.read(filepath.Join(r.root, "verify-fds")))
 	}
 	for _, want := range []string{"HOME=" + r.home + "\n", "PATH=/usr/bin:/bin\n", "CODEX_TEST_SWITCH=off\n"} {
 		if !strings.Contains(verifyEnv, want) {
