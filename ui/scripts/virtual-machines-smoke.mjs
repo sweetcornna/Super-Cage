@@ -24,6 +24,8 @@ const { browser, page, errors } = await createWorkbench({
     }
     if (path === "/client/hosts") return route.fulfill({ json: { hosts: [] } });
     if (path === "/client/local/status") return route.fulfill({ json: { known: true } });
+    // This computer's own terminal settings and entry do not belong to an environment connection.
+    if (path.startsWith("/client/local-terminal") || path.startsWith("/client/local-entry")) return route.fulfill({ json: {} });
     assert.equal(route.request().headers()["x-cage-connection"], generation);
     if (path === endpoint && route.request().method() === "GET") {
       if (failList) {
