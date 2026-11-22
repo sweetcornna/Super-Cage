@@ -43,6 +43,12 @@ internal sealed class ChecksForm : Form
     // The session origins framed since auto-attach began: cleared once it
     // ends, as ScienceFrameHost.ClearFramed does.
     private readonly List<string> framed = [];
+    // The host case runs the shell's own ScienceFrameHost; the checks' driver
+    // then only records. ends are the POST /_cage/end requests it got.
+    private ScienceFrameHost? host;
+    private bool driverOff;
+    private string endSecret = "";
+    private readonly JsonArray ends = [];
     private LoopbackServer workbench = null!, labels = null!;
     public int ExitCode { get; private set; } = 1;
 
@@ -122,6 +128,16 @@ internal sealed class ChecksForm : Form
         var path = parts[0];
         var query = parts.Length > 1 ? parts[1] : "";
         if (path != "/report") lock (gate) requests.Add(Now + " " + request.Host + " " + request.Path);
+        if (label && path == ScienceFrame.EndPath && request.Method == "POST")
+        {
+            lock (gate) ends.Add(new JsonObject
+            {
+                ["t"] = Now, ["host"] = request.Host, ["secret_ok"] = request.Headers.GetValueOrDefault(ScienceFrame.EndSecretHeader, "") == endSecret,
+                ["label"] = request.Headers.GetValueOrDefault(ScienceFrame.EndLabelHeader, ""), ["origin"] = request.Headers.GetValueOrDefault("Origin", ""),
+                ["fetch_site"] = request.Headers.GetValueOrDefault("Sec-Fetch-Site", ""),
+            });
+            return new(204, "text/plain", "", new Dictionary<string, string> { [ScienceFrame.EndedHeader] = "complete" });
+        }
         if (path == "/report" && request.Method == "POST")
         {
             JsonObject? body = null;
@@ -134,7 +150,7 @@ internal sealed class ChecksForm : Form
             return new(204, "text/plain", "");
         }
         if (!label && path is "/" or "/next") return new(200, "text/html; charset=utf-8", Workbench);
-        if (label && path == "/") return new(200, "text/html; charset=utf-8", LabelPage(query, workbench.Port));
+        if (label && path is "/" or "/_cage/enter") return new(200, "text/html; charset=utf-8", LabelPage(query, workbench.Port));
         if (label && path == "/direct.js") return new(200, "text/javascript", Reporter + "new Worker('/nested.js'); loop('direct');");
         if (label && path == "/nested.js") return new(200, "text/javascript", Reporter + "loop('nested');");
         return new(404, "text/plain", "not found");
@@ -159,7 +175,8 @@ internal sealed class ChecksForm : Form
                 ("proxy", ProxyCase), ("remove", () => FrameCase("remove", "")), ("remove-busy", () => FrameCase("remove-busy", "busy")),
                 ("teardown", () => FrameCase("teardown", "")), ("move", () => FrameCase("move", "")), ("hung", () => FrameCase("hung", "")),
                 ("steady", () => FrameCase("steady", "")), ("storage", StorageCase), ("navigation", NavigationCase),
-                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase), ("kill-sweep", KillSweepCase),
+                ("frame-navigation", () => FrameCase("frame-navigation", "escape")), ("locale-twice", LocaleTwiceCase), ("two-labels", TwoLabelsCase),
+                ("host", HostCase), ("kill-sweep", KillSweepCase),
             })
             {
                 try { cases[name] = await run(); }
@@ -189,12 +206,19 @@ internal sealed class ChecksForm : Form
             try { foreach (var frame in e.FrameInfosForFailedProcess ?? []) frames.Add(new JsonObject { ["name"] = frame.Name, ["source"] = frame.Source }); }
             catch (Exception error) { frames.Add(error.GetType().Name); }
             Event("ProcessFailed", new JsonObject { ["process_kind"] = e.ProcessFailedKind.ToString(), ["reason"] = e.Reason.ToString(), ["exit_code"] = e.ExitCode, ["frames"] = frames });
+            // As MainWindow: a frame's process is the frame's business.
+            if (host != null && e.ProcessFailedKind == CoreWebView2ProcessFailedKind.FrameRenderProcessExited) host.FrameExited(e.FrameInfosForFailedProcess);
         };
         foreach (var method in new[] { "Target.attachedToTarget", "Target.detachedFromTarget", "Inspector.targetCrashed" })
             core.GetDevToolsProtocolEventReceiver(method).DevToolsProtocolEventReceived += (_, e) => Received(method, e);
         core.NavigationStarting += (_, e) =>
         {
             Event("NavigationStarting", new JsonObject { ["uri"] = e.Uri, ["navigation_kind"] = e.NavigationKind.ToString(), ["id"] = e.NavigationId, ["redirected"] = e.IsRedirected });
+            if (host != null)
+            {
+                if (host.Hold(e.Uri, e.NavigationKind == CoreWebView2NavigationKind.Reload)) { e.Cancel = true; held.Add(e.NavigationId); }
+                return;
+            }
             if (!holdNavigations) return;
             var ending = current;
             current = "";
@@ -213,7 +237,7 @@ internal sealed class ChecksForm : Form
         core.NavigationCompleted += (_, e) => Event("NavigationCompleted", new JsonObject { ["id"] = e.NavigationId, ["success"] = e.IsSuccess, ["status"] = e.WebErrorStatus.ToString(), ["held"] = held.Contains(e.NavigationId) });
         core.FrameNavigationStarting += (_, e) =>
         {
-            var allowed = e.Uri is "about:blank" or "about:srcdoc" || current.Length != 0 && Uri.TryCreate(e.Uri, UriKind.Absolute, out var url) && url.GetLeftPart(UriPartial.Authority) == current;
+            var allowed = driverOff || e.Uri is "about:blank" or "about:srcdoc" || current.Length != 0 && Uri.TryCreate(e.Uri, UriKind.Absolute, out var url) && url.GetLeftPart(UriPartial.Authority) == current;
             if (!allowed) e.Cancel = true;
             Event("FrameNavigationStarting", new JsonObject { ["uri"] = e.Uri, ["cancelled"] = !allowed });
         };
@@ -371,6 +395,81 @@ internal sealed class ChecksForm : Form
         return record;
     }
 
+    // HostCase runs the shell's own ScienceFrameHost (the window's code, with
+    // a control.json written here): prepare, attach, the frame, detach (the
+    // end, the crash, the removal), an unexpected frame exit, a held reload.
+    private async Task<JsonObject> HostCase()
+    {
+        var record = new JsonObject();
+        var start = Now;
+        var root = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(output))!, "root-" + Guid.NewGuid().ToString("N")[..8]);
+        Directory.CreateDirectory(root);
+        endSecret = Guid.NewGuid().ToString("N");
+        File.WriteAllText(Path.Combine(root, "control.json"), new JsonObject
+        {
+            ["port"] = 1, ["pid"] = Environment.ProcessId, ["science_port"] = labels.Port, ["science_identity"] = Identity.DeepClone(), ["science_end"] = endSecret,
+        }.ToJsonString());
+        var failedCalls = new JsonArray();
+        await LoadWorkbench("/");
+        driverOff = true;
+        host = new ScienceFrameHost(core, root, data, reason => { lock (gate) failedCalls.Add(Now + " " + reason); }, (uri, reload) => { if (reload) core.Reload(); else core.Navigate(uri); });
+        try
+        {
+            record["prepare"] = JsonSerializer.SerializeToNode(await host.Prepare());
+            var first = await HostFrame();
+            record["first"] = first;
+            record["journal_after_attach"] = ScienceFrame.Journal(data).Any(item => item.Origin == "http://" + first);
+            var teardown = Now;
+            record["teardown"] = teardown;
+            await host.Detach();
+            record["detach_returned_ms"] = Now - teardown;
+            record["journal_cleared"] = await Until(6000, () => !ScienceFrame.Journal(data).Any(item => item.Origin == "http://" + first));
+            record["first_reports"] = Summary(first, teardown);
+            var second = await HostFrame();
+            record["second"] = second;
+            string frame;
+            lock (gate) frame = frameSession;
+            var exit = Now;
+            record["exit"] = exit;
+            _ = core.CallDevToolsProtocolMethodForSessionAsync(frame, "Page.crash", "{}");
+            record["exit_told_pane"] = await Until(5000, () => { lock (gate) return failedCalls.Count > 0; });
+            await host.Detach();
+            await Until(6000, () => !ScienceFrame.Journal(data).Any(item => item.Origin == "http://" + second));
+            var third = await HostFrame();
+            record["third"] = third;
+            var reload = Now;
+            record["reload"] = reload;
+            await core.ExecuteScriptAsync("location.reload(); true");
+            record["reloaded"] = await Until(8000, () => Since(reload).Any(item => item?["kind"]?.GetValue<string>() == "NavigationCompleted" && item["success"]?.GetValue<bool>() == true));
+            record["third_reports"] = Summary(third, reload);
+        }
+        finally
+        {
+            host = null;
+            driverOff = false;
+            policy = new ScienceFrame.Policy();
+        }
+        lock (gate)
+        {
+            record["failed"] = failedCalls.DeepClone();
+            record["ends"] = new JsonArray(ends.Select(item => item!.DeepClone()).ToArray());
+        }
+        record["events"] = Since(start);
+        return record;
+    }
+
+    // HostFrame is the pane's attach and frame for a new label.
+    private async Task<string> HostFrame()
+    {
+        var name = Guid.NewGuid().ToString("N") + ".localhost:" + labels.Port;
+        var entry = "http://" + name + "/_cage/enter";
+        await host!.Attach(entry);
+        await core.ExecuteScriptAsync("(() => { const f = document.createElement('iframe'); f.dataset.scienceFrame = ''; f.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-forms'); f.style.cssText = 'width:300px;height:120px;border:0'; f.src = " +
+            JsonSerializer.Serialize(entry) + "; document.getElementById('pane').append(f); return true; })()");
+        await Until(10000, () => Reports(name).Any(report => report["from"]?.GetValue<string>() == "nested"));
+        return name;
+    }
+
     // TwoLabelsCase: two frames of two labels (two session origins) armed at
     // once: whether they share a renderer process (the locale override is
     // per process).
@@ -440,16 +539,11 @@ internal sealed class ChecksForm : Form
         web = new WebView2 { Dock = DockStyle.Fill };
         Controls.Add(web);
         await Start();
+        // As MainWindow.Initialize: the sweep runs before the first navigation.
+        var journal = ScienceFrame.Journal(data).Select(item => item.Origin).ToList();
+        await ScienceFrameHost.Sweep(core, data);
+        record["swept"] = new JsonArray(journal.Where(item => !ScienceFrame.Journal(data).Any(left => left.Origin == item)).Select(item => (JsonNode)item).ToArray());
         await LoadWorkbench("/");
-        var swept = new List<string>();
-        foreach (var item in ScienceFrame.Journal(data))
-        {
-            foreach (var call in ScienceFrame.ClearOrigin(item.Origin, item.Site))
-                await core.CallDevToolsProtocolMethodAsync(call.Method, call.Params.ToJsonString());
-            swept.Add(item.Origin);
-        }
-        ScienceFrame.Forget(data, swept);
-        record["swept"] = new JsonArray(swept.Select(item => (JsonNode)item).ToArray());
         record["journal_left"] = File.Exists(ScienceFrame.JournalPath(data));
         record["left"] = await ProbeStorage(host);
         record["control_left"] = await ProbeStorage(control);
@@ -571,6 +665,7 @@ internal sealed class ChecksForm : Form
         {
             await Task.Delay(ScienceFrame.ListEveryMilliseconds);
             if (!policy.Attached || !policy.Detaching) return;
+            var known = policy.PageFrames();
             var listed = new List<string>();
             try
             {
@@ -578,7 +673,7 @@ internal sealed class ChecksForm : Form
                 listed.AddRange((reply?["targetInfos"]?.AsArray() ?? []).Select(info => info?["targetId"]?.GetValue<string>() ?? ""));
             }
             catch (Exception) { continue; }
-            var actions = policy.Listed(listed);
+            var actions = policy.Listed(listed, known);
             if (actions.Count != 0) Event("policy listed", new JsonObject { ["actions"] = actions.Count });
             await Apply(actions, "");
         }
@@ -614,6 +709,8 @@ internal sealed class ChecksForm : Form
         var info = parameters?["targetInfo"] as JsonObject;
         var type = info?["type"]?.GetValue<string>() ?? "";
         Event(method, new JsonObject { ["parent"] = parent, ["session"] = session, ["type"] = type, ["url"] = info?["url"]?.GetValue<string>() });
+        if (parent.Length == 0 && type == "iframe") lock (gate) frameSession = session;
+        if (driverOff) return;
         switch (method)
         {
             case "Inspector.targetCrashed":
@@ -624,7 +721,6 @@ internal sealed class ChecksForm : Form
                 _ = Apply(policy.DetachedTarget(session), "");
                 return;
         }
-        if (parent.Length == 0 && type == "iframe") lock (gate) frameSession = session;
         _ = Apply(policy.AttachedTarget(parent, session, type, info?["targetId"]?.GetValue<string>() ?? ""), "");
     }
 
