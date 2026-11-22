@@ -35,6 +35,8 @@ export function normalizeAgents(payload) {
       arch: text(environment.arch),
       guestSystem: text(environment.guest_system),
       diskFreeMb: count(environment.disk_free_mb),
+      // False while presence has never been read: an entry without `present` is then unknown, not absent.
+      clientsKnown: environment.clients_known !== false,
     },
   };
 }
@@ -57,6 +59,8 @@ function normalizeEntry(raw) {
     unsupportedCode: text(raw.unsupported_code),
     unsupportedReason: text(raw.unsupported_reason),
     allowed: raw.allowed !== false,
+    operation: ["install", "update", "remove"].includes(raw.operation) ? raw.operation : "",
+    lastFailure: isObject(raw.last_failure) ? { code: text(raw.last_failure.code) || "failed", message: text(raw.last_failure.message) } : null,
     downloadMb: count(raw.download_mb),
     diskMb: count(raw.disk_mb),
     hosts: { install: list(hosts.install), signin: list(hosts.signin), run: list(hosts.run), telemetry: list(hosts.telemetry) },
@@ -83,18 +87,17 @@ export function agentJob(job) {
 }
 
 /**
- * The job to show for the section: the polled one, except in the moment between
- * accepting a request and the next /status poll (up to 5 s while nothing runs),
- * when the accepted job (local.jobId) or the refusal (local.error) stands in.
- * staleId is the job that had already ended when the section opened.
+ * The running job to show for the section: the polled one, except in the moment
+ * between accepting a request and the next /status poll (up to 5 s while nothing
+ * runs), when the accepted job (local.jobId) stands in; a refused request
+ * (local.error) shows as a failed job. A job that has ended is not a job here: its
+ * outcome is the entry's last_failure, read from the host's list.
  */
-export function currentJob(raw, local, staleId = "") {
-  // A job that was already over when the section opened is not this visit's news.
-  const polled = raw?.id && raw.id === staleId && !raw.running ? null : agentJob(raw);
-  if (!local) return polled;
-  if (local.error) return { operation: local.operation, id: local.id, running: false, error: local.error, canceled: false, progress: null, jobId: "" };
-  if (raw?.id && raw.id === local.jobId) return polled;
-  return { operation: local.operation, id: local.id, running: true, error: "", canceled: false, progress: null, jobId: local.jobId };
+export function currentJob(raw, local) {
+  const polled = agentJob(raw);
+  if (local?.error) return { operation: local.operation, id: local.id, running: false, error: local.error, canceled: false, progress: null, jobId: "" };
+  if (local && raw?.id !== local.jobId) return { operation: local.operation, id: local.id, running: true, error: "", canceled: false, progress: null, jobId: local.jobId };
+  return polled?.running ? polled : null;
 }
 
 /** A job of this section has just ended: refresh the list once (never by a timer). */
@@ -114,21 +117,33 @@ export const sizeLine = (entry) =>
 /** What the progress bar and its line say for a running job of this section. */
 export function progressView(job) {
   const progress = job.progress || {};
+  // The host's progress is {phase: "agent", operation: <the installer's step>, label, received?, total?}.
+  const step = progress.phase === "agent" ? text(progress.operation) : text(progress.phase);
   const label = text(progress.label);
   const received = Number.isFinite(progress.received) ? progress.received : null;
   const total = count(progress.total);
   const fraction = received !== null && total ? Math.max(0, Math.min(1, received / total)) : null;
   if (job.operation === "remove") return { fraction: null, text: "正在移除" };
-  if (fraction !== null && (progress.phase === "download" || label === "下载" || label.includes("下载"))) {
+  if (fraction !== null && (step === "download" || label === "下载")) {
     return { fraction, text: "正在下载 " + megabytes(received) + " / " + megabytes(total) + " MB" };
   }
-  const phase = label ? (label.startsWith("正在") ? label : "正在" + label) : job.operation === "update" ? "正在更新" : "正在准备";
+  // 未完成 is the step between the installer's last line and the end of a failed job.
+  const phase = step === "failed" ? "未完成" : label ? (label.startsWith("正在") ? label : "正在" + label) : job.operation === "update" ? "正在更新" : "正在准备";
   return { fraction, text: phase };
 }
 
 // Lines whose cause a retry cannot change (agent-install.sh, docs/agent-install.md):
 // the person's own install, a withdrawn entry, a pinned file the vendor removed,
 // another architecture, libc, namespaces or a keyring this environment lacks.
+// By code (the host's last_failure): a retry cannot change these.
+const NO_RETRY_CODES = new Set(["withdrawn", "arch", "libc", "keyring", "userns", "own-install", "gone", "input"]);
+/** A failed job as the host reports it ({code, message}): canceled is quiet, some codes have no retry. */
+export const failureOf = ({ code, message }) => ({
+  line: message || (code === "canceled" ? "已取消，已下载的部分会在下次继续使用。" : "操作未完成。"),
+  tone: code === "canceled" ? "muted" : "error",
+  retry: !NO_RETRY_CODES.has(code),
+});
+// A refused request has no code, only the host's sentence: judge by it.
 const NO_RETRY = [/自行安装/, /不再受 Super Cage 支持/, /已不再提供/, /固定版本适用于/, /需要 glibc|需要 musl/, /命名空间/, /密钥环/, /参数无效/];
 /** How a failed job's line is shown: canceled is not an error, and some lines have no retry. */
 export function failureView(line, canceled = false) {
@@ -146,34 +161,41 @@ const markOf = (entry) => {
   return builtin ? { builtin } : { monogram: monogram(entry) };
 };
 
+/** What a retry repeats when the operation that failed is not known (a failure from before this visit). */
+const fallbackOperation = (entry) => (!entry.present || entry.present.state === "drifted" ? "install" : entry.updateAvailable ? "update" : "remove");
+
 /**
- * One row. context: { environment, job (agentJob | null, any entry), anyJobRunning,
- * added (the id just added, for the one-time line) }.
+ * One row. context: { environment, job (currentJob, any entry), anyJobRunning,
+ * added (the id just added, for the one-time line), operations (id -> the
+ * operation asked for in this visit, for 重试) }.
  * actions: { id, label, kind: "secondary" | "ghost", disabled }; menu lists the
  * quiet actions behind ⋯.
  */
-export function rowFor(entry, { environment, job = null, anyJobRunning = false, added = "" }) {
+export function rowFor(entry, { environment, job = null, anyJobRunning = false, added = "", operations = {} }) {
   const base = { id: entry.id, name: entry.name, mark: markOf(entry), muted: false, bar: null, error: null, actions: [], menu: [], parts: [entry.vendor, entry.kind === "app" ? "应用" : "终端"].filter(Boolean), meta: "" };
   const mine = job && job.id === entry.id ? job : null;
   const idle = environment.running && !anyJobRunning;
   const act = (id, label, kind = "secondary") => ({ id, label, kind, disabled: !idle });
   const version = entry.present?.version || entry.pinnedVersion;
+  const quiet = entry.present?.by === "cage" ? [act("remove", "移除")] : [];
 
-  if (mine?.running) {
-    const view = progressView(mine);
+  // Running: this visit's job, or the host's word that one of this entry runs.
+  const operation = mine?.running ? mine.operation : entry.operation;
+  if (operation) {
+    const view = mine?.running ? progressView(mine) : { fraction: null, text: operation === "remove" ? "正在移除" : "正在准备" };
     return {
-      ...base, state: mine.operation === "remove" ? "removing" : "installing", meta: view.text, bar: mine.operation === "remove" ? null : { fraction: view.fraction },
+      ...base, state: operation === "remove" ? "removing" : "installing", meta: view.text, bar: operation === "remove" ? null : { fraction: view.fraction },
       parts: entry.present ? [version] : base.parts,
-      actions: mine.operation === "remove" ? [] : [{ id: "cancel", label: "取消", kind: "ghost", disabled: false }],
+      actions: operation === "remove" ? [] : [{ id: "cancel", label: "取消", kind: "ghost", disabled: false }],
     };
   }
-  // A failed add whose cause is the person's own install: the refreshed list already says so.
-  if (mine && (mine.error || mine.canceled) && !(mine.operation === "install" && entry.present?.by === "own")) {
-    const line = mine.error || "已取消，已下载的部分会在下次继续使用。";
-    const view = failureView(line, mine.canceled);
+  // Failed: a refused request of this visit, or the host's last_failure. The person's own
+  // install is no failure: the list already says so, and the row shows it.
+  const failure = mine?.error ? { ...failureView(mine.error), line: mine.error, operation: mine.operation } : entry.lastFailure ? { ...failureOf(entry.lastFailure), operation: operations[entry.id] || fallbackOperation(entry) } : null;
+  if (failure && entry.present?.by !== "own") {
     return {
-      ...base, state: "failed", parts: entry.present ? [version] : base.parts, error: { line, tone: view.tone },
-      actions: view.retry ? [act("retry:" + mine.operation, "重试")] : [],
+      ...base, state: "failed", parts: entry.present ? [version] : base.parts, error: { line: failure.line, tone: failure.tone },
+      actions: failure.retry ? [act("retry:" + failure.operation, "重试")] : [], menu: quiet,
     };
   }
   if (entry.status === "withdrawn") {

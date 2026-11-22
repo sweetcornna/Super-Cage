@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createWorkbench } from "./workbench-fixture.mjs";
-import { antigravity, codex, createAgents, entry, environment, failures, installAgents, job, progress, retryable } from "./other-clients-fixture.mjs";
+import { antigravity, codex, createAgents, environment, failures, installAgents, lastFailure, progress, retryable } from "./other-clients-fixture.mjs";
 
 const output = process.env.CAGE_SHOTS ? new URL("file://" + process.env.CAGE_SHOTS.replace(/\/?$/, "/")) : new URL("../../output/other-clients/", import.meta.url);
 await fs.mkdir(output, { recursive: true });
@@ -39,6 +39,7 @@ const gallery = [
     mono("crush", "Crush", "Cr", { vendor: "Charm", allowed: false }),
     mono("amp", "Amp", "Am", { vendor: "Sourcegraph", status: "withdrawn", present: present("0.9.0"), pinned_version: "0.9.0" }),
     mono("long", "一个名字特别长的编程客户端 Extended Edition for Teams", "Lo", { vendor: "某某科技（深圳）有限公司", download_mb: 1240, disk_mb: 3100 }),
+    mono("kimi", "Kimi CLI", "Ki", { vendor: "Moonshot", last_failure: lastFailure("disk") }),
   ],
 ];
 // The title's pieces (the separators are drawn by CSS).
@@ -123,7 +124,7 @@ async function run({ theme, viewport }) {
     assert.equal(await page.locator("fieldset.settings-fields .other-clients-page").count(), 0);
     const states = await page.locator(".other-client").evaluateAll((items) => items.map((item) => item.dataset.id + ":" + item.dataset.state));
     assert.deepEqual(states, ["codex:available", "antigravity-cli:available", "goose:installed", "aider:update", "qwen:drifted"]);
-    assert.equal(await rowOf(page, "codex").locator(".other-client-meta").innerText(), "下载约 124 MB，安装后约 310 MB");
+    assert.equal(await rowOf(page, "codex").locator(".other-client-meta").innerText(), "下载约 119 MB，安装后约 295 MB");
     assert.equal(await rowOf(page, "goose").locator(".other-client-meta").count(), 0);
     assert.equal(await rowOf(page, "aider").locator(".other-client-meta").innerText(), "有新版本 0.180.0");
     assert.equal(await rowOf(page, "qwen").locator(".other-client-meta").innerText(), "程序文件与安装时不同");
@@ -139,7 +140,7 @@ async function run({ theme, viewport }) {
     await reopenSection(page);
     assert.deepEqual(agentCalls().slice(2), ["?verify=1"]);
     const second = await page.locator(".other-client").evaluateAll((items) => items.map((item) => item.dataset.id + ":" + item.dataset.state));
-    assert.deepEqual(second, ["opencode:own", "warp:unsupported", "crush:not-allowed", "amp:withdrawn", "long:available"]);
+    assert.deepEqual(second, ["opencode:own", "warp:unsupported", "crush:not-allowed", "amp:withdrawn", "long:available", "kimi:failed"]);
     assert.deepEqual(await titleOf(rowOf(page, "opencode")), ["OpenCode", "已安装（自行安装）", "0.171.0"]);
     assert.equal(await rowOf(page, "opencode").getByRole("button").count(), 0, "an own install has no button");
     assert.equal(await rowOf(page, "warp").locator(".other-client-meta").innerText(), "macOS 客机暂不支持");
@@ -167,7 +168,7 @@ async function run({ theme, viewport }) {
     const facts = await dialog.locator(".other-clients-fact").evaluateAll((items) => items.map((item) => item.innerText.replace(/\s+/g, " ").trim()));
     assert.deepEqual(facts.map((text) => text.split(" ")[0]), ["来源", "占用", "联网", "遥测", "地区", "安装期间"]);
     assert.match(facts[0], /OpenAI 在 GitHub 发布的 0\.171\.0，已核对校验值/);
-    assert.match(facts[1], /下载约 124 MB，安装后约 310 MB（客机剩余 18\.2 GB）/);
+    assert.match(facts[1], /下载约 119 MB，安装后约 295 MB（客机剩余 18\.2 GB）/);
     assert.match(facts[2], /下载 github\.com · 登录 auth\.openai\.com、chatgpt\.com · 使用 chatgpt\.com、api\.openai\.com 等/);
     assert.match(facts[5], /不能新建终端（包括 Claude 终端），约一分钟。/);
     await dialog.getByText("展开查看全部").click();
@@ -183,47 +184,63 @@ async function run({ theme, viewport }) {
     await codexRow.getByRole("button", { name: "取消", exact: true }).waitFor();
     assert.deepEqual(model.calls.filter((call) => call.method === "POST").map((call) => [call.path, call.body]), [["/agents/codex/install", {}]]);
     const accepted = model.lastJob;
-    state.status.job = { ...accepted, running: true, setup_progress: progress("download", "下载", 34 * MB, 124 * MB) };
+    model.entries = [codex({ operation: "install" })];
+    state.status.job = { ...accepted, running: true, setup_progress: progress("download", "下载", 34 * MB, 119 * MB) };
     await pollNow(page);
-    await codexRow.getByText("正在下载 34 / 124 MB", { exact: true }).waitFor();
-    assert.equal(await codexRow.getByRole("progressbar").getAttribute("aria-valuenow"), "27");
-    // Single slot: the other rows wait.
+    await codexRow.getByText("正在下载 34 / 119 MB", { exact: true }).waitFor();
+    assert.equal(await codexRow.getByRole("progressbar").getAttribute("aria-valuenow"), "29");
     assert.equal(await rowOf(page, "codex").getByRole("button", { name: "取消" }).isEnabled(), true);
-    await page.getByText("另一个操作仍在进行，完成后可以继续。").count();
     await page.waitForTimeout(300);
     await shot(page, "installing");
+    // The job is no environment install: the home page does not say so, and the row is still there on return.
+    await closeSettings(page);
+    await page.waitForTimeout(600);
+    assert.equal(await page.getByText("正在安装 Super Cage 环境").count(), 0, "an agent job is not an environment install");
+    await openSettings(page);
+    await openSection(page);
+    await codexRow.getByText("正在下载 34 / 119 MB", { exact: true }).waitFor();
     state.status.job = { ...accepted, running: true, setup_progress: progress("verify", "验证", 0, 0) };
     await pollNow(page);
     await codexRow.getByText("正在验证", { exact: true }).waitFor();
     await codexRow.getByRole("button", { name: "取消", exact: true }).click();
     assert.deepEqual(model.calls.filter((call) => call.method === "POST").at(-1).body, { job: accepted.id });
-    // Canceled: not an error colour, 重试 offered.
+    // Canceled: the list is read again and says so; not an error colour, 重试 offered.
+    model.entries = [codex({ last_failure: lastFailure("canceled") })];
     state.status.job = { ...accepted, running: false, canceled: true, error: failures.canceled };
     await pollNow(page);
     await codexRow.getByText(failures.canceled, { exact: true }).waitFor();
     assert.ok(await codexRow.locator(".other-client-meta.muted").count());
     await codexRow.getByRole("button", { name: "重试", exact: true }).waitFor();
 
-    // Failed, each line of design 4.4.
-    let sequence = 0;
-    for (const [code, line] of Object.entries(failures)) {
+    // Failed, each code of design 4.4: the host's list carries it (last_failure), also when the section opens later.
+    for (const code of Object.keys(failures)) {
       if (code === "canceled") continue;
-      state.status.job = job("agent-install:codex", "fail-" + code + "-" + ++sequence, { running: false, error: line });
-      await pollNow(page);
-      await codexRow.getByText(line, { exact: true }).waitFor();
+      model.entries = [codex({ last_failure: lastFailure(code) })];
+      await reopenSection(page);
+      await codexRow.getByText(failures[code], { exact: true }).waitFor();
       assert.ok(await codexRow.locator(".other-client-meta.error").count(), code + " reads as an error");
       assert.equal(await codexRow.getByRole("button", { name: "重试", exact: true }).count(), retryable[code] ? 1 : 0, code + " retry");
       if ((theme === "light" && viewport.width === 1440) || ["digest", "own-install"].includes(code)) { await page.waitForTimeout(250); await shot(page, "failed-" + code); }
     }
-    // 重试 repeats the operation that failed.
-    state.status.job = job("agent-install:codex", "fail-retry", { running: false, error: failures.download });
+    // A job that fails while the section is open: the list is read again and shows it.
+    model.entries = [codex()];
+    await reopenSection(page);
+    await codexRow.getByRole("button", { name: "添加", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "添加", exact: true }).click();
+    await codexRow.getByRole("button", { name: "取消", exact: true }).waitFor();
+    const failing = model.lastJob;
+    model.entries = [codex({ last_failure: lastFailure("digest") })];
+    state.status.job = { ...failing, running: false, error: failures.digest, message: "添加 Codex失败" };
     await pollNow(page);
+    await codexRow.getByText(failures.digest, { exact: true }).waitFor();
+    // 重试 repeats the operation that was asked.
     await codexRow.getByRole("button", { name: "重试", exact: true }).click();
     assert.deepEqual(model.calls.filter((call) => call.method === "POST").at(-1).path, "/agents/codex/install");
     // It finishes: the list is read again (without verify) and the row is installed, once with its line.
     const before = agentCalls().length;
     const retry = model.lastJob;
-    state.status.job = { ...retry, running: true, setup_progress: progress("unpack", "解包", 150 * MB, 310 * MB) };
+    model.entries = [codex({ operation: "install" })];
+    state.status.job = { ...retry, running: true, setup_progress: progress("unpack", "解包", 150 * MB, 295 * MB) };
     await pollNow(page);
     await codexRow.getByText("正在解包", { exact: true }).waitFor();
     model.entries = [codex({ present: present() })];

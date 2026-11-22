@@ -214,7 +214,8 @@ function App() {
     terminal = !desktopOpen && current?.kind === "terminal",
     busy = Boolean(status?.job?.running),
     showHome = storageRecovery || !desktopOpen && (home || !status?.vm_running || !current);
-  const setupProgress = status?.job?.setup_progress && (busy || status.job.error);
+  // An optional client's install, update or removal reports progress too (phase "agent"): it is no environment install.
+  const setupProgress = status?.job?.setup_progress && status.job.setup_progress.phase !== "agent" && (busy || status.job.error);
   const sessionList = useCLISessions(Boolean(status && !busy && !storageRecovery && guestCapability(status, "claude-cli")), windowVisible, codexUI.providers);
   const sessionCapabilities = useSessionSnapshot(sessionList, (list) => list.capabilities);
   const sessionsHeld = useSessionSnapshot(sessionList, (list) => list.held);

@@ -80,7 +80,7 @@ func TestClaudePathHasNoOtherClientsGoroutine(t *testing.T) {
 	}
 	buffer := make([]byte, 1<<20)
 	stacks := string(buffer[:runtime.Stack(buffer, true)])
-	for _, marker := range []string{"internal/agents.", "workbench.(*Server).agent", "workbench.agentJob", "workbench.runAgent"} {
+	for _, marker := range []string{"internal/agents.", "workbench.(*Server).agent", "workbench.(*agentState)", "workbench.agent"} {
 		if strings.Contains(stacks, marker) {
 			t.Errorf("a goroutine of the optional clients exists on the Claude path: found %q", marker)
 		}

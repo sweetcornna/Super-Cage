@@ -75,8 +75,11 @@ export default function OtherClientsSection({ status }) {
   const [sending, setSending] = useState(false);
   const [added, setAdded] = useState("");
   const raw = status?.job;
-  const stale = useRef(raw && !raw.running ? raw.id || "" : "");
-  const job = currentJob(raw, local, stale.current);
+  const job = currentJob(raw, local);
+  // What each entry was last asked to do in this visit, for 重试.
+  const operations = useRef({});
+  const running = agentJob(raw);
+  if (running?.running) operations.current[running.id] = running.operation;
   const anyJobRunning = Boolean(raw?.running) || Boolean(local && !local.error);
 
   const load = useCallback((verify, signal) => api(AGENTS_PATH + (verify ? "?verify=1" : ""), undefined, undefined, {}, { signal })
@@ -114,9 +117,9 @@ export default function OtherClientsSection({ status }) {
     setSending(true);
     try {
       const result = await api(path, body);
-      if (action !== "cancel") { setAdded(""); setLocal(result?.id ? { id: entry.id, operation, jobId: result.id } : null); }
+      if (action !== "cancel") { operations.current[entry.id] = operation; setAdded(""); setLocal(result?.id ? { id: entry.id, operation, jobId: result.id } : null); }
     } catch (reason) {
-      if (action !== "cancel") setLocal({ id: entry.id, operation, error: reason.message });
+      if (action !== "cancel") { operations.current[entry.id] = operation; setLocal({ id: entry.id, operation, error: reason.message }); }
       else setError(reason.message);
     } finally { setSending(false); }
   };
@@ -132,8 +135,8 @@ export default function OtherClientsSection({ status }) {
   };
 
   const environment = data?.environment || { running: false };
-  const rows = (data?.entries || []).map((entry) => rowFor(entry, { environment, job, anyJobRunning, added }));
-  const mineRunning = Boolean(job?.running);
+  const rows = (data?.entries || []).map((entry) => rowFor(entry, { environment, job, anyJobRunning, added, operations: operations.current }));
+  const mineRunning = Boolean(job?.running) || (data?.entries || []).some((entry) => entry.operation);
   const line = data ? waitLine(environment, anyJobRunning, mineRunning) : "";
   return <div className="other-clients-page">
     <div className="section-title">

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  addDialog, agentJob, currentJob, failureView, formatMb, jobEnded, normalizeAgents, progressView, removeDialog, requestFor, rowFor, sizeLine, waitLine,
+  addDialog, agentJob, currentJob, failureOf, failureView, formatMb, jobEnded, normalizeAgents, progressView, removeDialog, requestFor, rowFor, sizeLine, waitLine,
 } from "./other-clients-state.mjs";
 
 const raw = (over = {}) => ({
@@ -24,7 +24,9 @@ test("hidden entries, Claude (with the environment) and an uninstalled withdrawn
 });
 
 test("the environment is read with safe defaults", () => {
-  assert.deepEqual(normalizeAgents({ agents: [] }).environment, { running: false, arch: "", guestSystem: "", diskFreeMb: 0 });
+  assert.deepEqual(normalizeAgents({ agents: [] }).environment, { running: false, arch: "", guestSystem: "", diskFreeMb: 0, clientsKnown: true });
+  assert.equal(normalizeAgents({ agents: [], environment: { clients_known: false, disk_free_mb: null } }).environment.clientsKnown, false);
+  assert.equal(normalizeAgents({ agents: [], environment: { clients_known: false, disk_free_mb: null } }).environment.diskFreeMb, 0);
   assert.equal(normalizeAgents({ agents: [], environment: { running: true, disk_free_mb: 5 } }).environment.diskFreeMb, 5);
 });
 
@@ -94,8 +96,9 @@ test("failed: the host's line verbatim, the error colour, 重试 for the same op
 
 test("a failed add that found the person's own install shows the own row, not the failure", () => {
   const line = "已经安装了 Codex（自行安装，/home/dev/.local/bin/codex），Super Cage 不会覆盖它。";
-  const own = row({ present: { by: "own", version: "0.171.0", state: "ok" } }, { job: agentJob({ kind: "agent-install:codex", running: false, error: line }) });
+  const own = row({ present: { by: "own", version: "0.171.0", state: "ok" }, last_failure: { code: "own-install", message: line } });
   assert.equal(own.state, "own");
+  assert.equal(row({ present: { by: "own", version: "0.171.0", state: "ok" } }, { job: agentJob({ kind: "agent-install:codex", running: false, error: line }) }).state, "own");
   // A failed repair or update keeps its line.
   assert.equal(row({ present: { by: "cage", version: "0.171.0", state: "drifted" } }, { job: agentJob({ kind: "agent-install:codex", running: false, error: "请先结束正在运行的 Codex 终端，再更新或修复。" }) }).state, "failed");
 });
@@ -107,26 +110,52 @@ test("the hosts open in full only when the line leaves something out", () => {
   assert.equal(addDialog(many, env).rows.find((item) => item.label === "联网").details.length, 2);
 });
 
-test("failure lines: canceled is quiet, and some lines have no retry", () => {
-  const cases = [
-    ["下载中断，已保存进度。重试会继续下载。", "error", true],
-    ["安装文件校验失败，已停止安装，原有版本保持不变。", "error", true],
-    ["OpenAI 已不再提供 Codex 0.171.0 的下载。请更新 Super Cage 以获取新的固定版本。", "error", false],
-    ["客机磁盘空间不足：需要 505 MB，当前只有 212 MB。", "error", true],
-    ["安装文件无法在这个客机运行，已停止安装，原有文件保持不变。", "error", true],
-    ["请先结束正在运行的 Codex 终端，再更新或修复。", "error", true],
-    ["已经安装了 Codex（自行安装，/home/dev/.local/bin/codex），Super Cage 不会覆盖它。", "error", false],
-    ["这个环境不允许普通用户创建命名空间，Codex 的沙箱无法运行，因此没有安装。", "error", false],
-    ["Codex 的固定版本适用于 amd64，这个客机的架构是 arm64，无法安装。", "error", false],
-    ["Codex 需要 glibc 2.31 或更高版本，这个客机是 2.28，无法安装。", "error", false],
-    ["Codex 已不再受 Super Cage 支持，无法添加或更新。", "error", false],
-    ["已取消，已下载的部分会在下次继续使用。", "muted", true],
-  ];
-  for (const [line, tone, retry] of cases) assert.deepEqual(failureView(line), { tone, retry }, line);
+test("the host's last_failure by code: the line verbatim, canceled is quiet, some codes have no retry", () => {
+  const lines = {
+    download: "下载中断，已保存进度。重试会继续下载。", digest: "安装文件校验失败，已停止安装，原有版本保持不变。",
+    gone: "OpenAI 已不再提供 Codex 0.171.0 的下载。请更新 Super Cage 以获取新的固定版本。", disk: "客机磁盘空间不足：需要 505 MB，当前只有 212 MB。",
+    verify: "安装文件无法在这个客机运行，已停止安装，原有文件保持不变。", "in-use": "请先结束正在运行的 Codex 终端，再更新或修复。",
+    "own-install": "已经安装了 Codex（自行安装，/home/dev/.local/bin/codex），Super Cage 不会覆盖它。", userns: "这个环境不允许普通用户创建命名空间，Codex 的沙箱无法运行，因此没有安装。",
+    arch: "Codex 的固定版本适用于 amd64，这个客机的架构是 arm64，无法安装。", libc: "Codex 需要 glibc 2.31 或更高版本，这个客机是 2.28，无法安装。",
+    withdrawn: "Codex 已不再受 Super Cage 支持，无法添加或更新。", canceled: "已取消，已下载的部分会在下次继续使用。", changed: "程序文件在安装时发生了变化。", failed: "添加 Codex失败",
+  };
+  const noRetry = new Set(["gone", "own-install", "userns", "arch", "libc", "withdrawn"]);
+  for (const [code, message] of Object.entries(lines)) {
+    const failed = row({ last_failure: { code, message } });
+    assert.equal(failed.state, "failed", code);
+    assert.deepEqual(failed.error, { line: message, tone: code === "canceled" ? "muted" : "error" }, code);
+    assert.equal(failed.actions.length, noRetry.has(code) ? 0 : 1, code + " retry");
+  }
+  assert.equal(failureOf({ code: "failed", message: "" }).line, "操作未完成。");
+  assert.equal(failureOf({ code: "canceled", message: "" }).line, "已取消，已下载的部分会在下次继续使用。");
+});
+
+test("a refused request has no code: its sentence decides", () => {
+  assert.deepEqual(failureView("另一个操作仍在进行，请稍候"), { tone: "error", retry: true });
+  assert.deepEqual(failureView("已经安装了 Codex（自行安装），Super Cage 不会覆盖它。"), { tone: "error", retry: false });
+  assert.deepEqual(failureView("已取消，已下载的部分会在下次继续使用。"), { tone: "muted", retry: true });
   assert.equal(failureView("x", true).tone, "muted");
-  const canceled = row({}, { job: agentJob({ kind: "agent-install:codex", running: false, error: "", canceled: true }) });
-  assert.equal(canceled.error.line, "已取消，已下载的部分会在下次继续使用。");
-  assert.equal(canceled.error.tone, "muted");
+});
+
+test("重试 repeats what was asked in this visit, else what the row's state suggests", () => {
+  const failure = { code: "download", message: "下载中断，已保存进度。重试会继续下载。" };
+  assert.equal(row({ last_failure: failure }).actions[0].id, "retry:install");
+  assert.equal(row({ last_failure: failure, present: { by: "cage", version: "0.170.0" }, update_available: true }).actions[0].id, "retry:update");
+  assert.equal(row({ last_failure: failure, present: { by: "cage", version: "0.171.0", state: "drifted" } }).actions[0].id, "retry:install");
+  assert.equal(row({ last_failure: failure, present: { by: "cage", version: "0.171.0" } }).actions[0].id, "retry:remove");
+  assert.equal(row({ last_failure: failure, present: { by: "cage", version: "0.171.0" } }, { operations: { codex: "update" } }).actions[0].id, "retry:update");
+  assert.deepEqual(row({ last_failure: failure, present: { by: "cage", version: "0.171.0" } }).menu.map((item) => item.id), ["remove"]);
+  assert.deepEqual(row({ last_failure: failure }).menu, []);
+});
+
+test("the host says a job of this entry runs: the row shows it even before the poll does", () => {
+  const installing = row({ operation: "install" }, { anyJobRunning: true });
+  assert.equal(installing.state, "installing");
+  assert.equal(installing.meta, "正在准备");
+  assert.equal(installing.bar.fraction, null);
+  assert.deepEqual(installing.actions.map((action) => action.id), ["cancel"]);
+  assert.equal(row({ operation: "remove", present: { by: "cage", version: "1" } }, { anyJobRunning: true }).state, "removing");
+  assert.equal(row({ operation: "bogus" }).state, "available");
 });
 
 test("installed: the version, remove behind the menu; the one-time line after an add", () => {
@@ -245,15 +274,27 @@ test("between accepting a request and the next poll the accepted job stands in; 
   const idle = { id: "old", kind: "start", running: false };
   assert.deepEqual(currentJob(idle, local), { operation: "install", id: "codex", running: true, error: "", canceled: false, progress: null, jobId: "j1" });
   assert.equal(currentJob({ id: "j1", kind: "agent-install:codex", running: true }, local).running, true);
-  assert.equal(currentJob({ id: "j1", kind: "agent-install:codex", running: false, error: "x" }, local).error, "x");
   assert.equal(currentJob(idle, null), null);
   const refused = currentJob(idle, { id: "codex", operation: "install", error: "另一个操作仍在进行，请稍候" });
   assert.deepEqual([refused.running, refused.error], [false, "另一个操作仍在进行，请稍候"]);
 });
 
-test("a job that was over when the section opened is not shown again", () => {
+test("a job that has ended is not a job here: its outcome is the entry's last_failure", () => {
   const over = { id: "j9", kind: "agent-install:codex", running: false, error: "下载中断，已保存进度。重试会继续下载。" };
-  assert.equal(currentJob(over, null, "j9"), null);
-  assert.equal(currentJob(over, null, "").error.length > 0, true);
-  assert.equal(currentJob({ ...over, id: "j10" }, null, "j9").id, "codex");
+  assert.equal(currentJob(over, null), null);
+  assert.equal(currentJob(over, { id: "codex", operation: "install", jobId: "j9" }), null);
+  assert.equal(currentJob({ id: "j10", kind: "start", running: true }, null), null);
+});
+
+test("the host's progress: phase agent, the installer's step in operation, bytes only for download and unpack", () => {
+  const download = agentJob({ id: "j", kind: "agent-install:codex", running: true, setup_progress: { phase: "agent", operation: "download", label: "下载", received: 34 * 1048576, total: 119 * 1048576, bytes_per_second: 2097152 } });
+  assert.equal(progressView(download).text, "正在下载 34 / 119 MB");
+  assert.ok(Math.abs(progressView(download).fraction - 34 / 119) < 1e-9);
+  const step = (operation, label, extra = {}) => progressView(agentJob({ kind: "agent-install:codex", running: true, setup_progress: { phase: "agent", operation, label, ...extra } })).text;
+  assert.equal(step("check", "检查环境"), "正在检查环境");
+  assert.equal(step("digest", "校验"), "正在校验");
+  assert.equal(step("unpack", "解包", { received: 5, total: 10 }), "正在解包");
+  assert.equal(step("verify", "验证"), "正在验证");
+  assert.equal(step("done", "完成"), "正在完成");
+  assert.equal(step("failed", "未完成"), "未完成");
 });
