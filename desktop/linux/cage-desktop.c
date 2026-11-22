@@ -843,7 +843,8 @@ static gboolean bridge_received(WebKitUserContentManager *manager, JSCValue *val
     } else if (!strcmp(name, "appReference")) {
         const char *kind = text_member(request, "kind");
         const char *uri = !strcmp(kind, "source") ? "https://github.com/sweetcornna/Super-Cage/commits/main"
-            : !strcmp(kind, "releases") ? "https://github.com/sweetcornna/Super-Cage/releases" : NULL;
+            : !strcmp(kind, "releases") ? "https://github.com/sweetcornna/Super-Cage/releases"
+            : !strcmp(kind, "local-terminal-guide") ? "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/local-terminal.md" : NULL;
         if (!uri) reply_error(reply, "未知的项目页面");
         else {
             GError *error = NULL;

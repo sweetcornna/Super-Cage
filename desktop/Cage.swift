@@ -445,6 +445,7 @@ final class CageApp: NSObject, NSApplicationDelegate, NSWindowDelegate, WKNaviga
             switch body["kind"] as? String {
             case "source": path = "commits/main"
             case "releases": path = "releases"
+            case "local-terminal-guide": path = "blob/main/docs/guide/local-terminal.md"
             default: replyHandler(nil,"未知的项目页面"); return
             }
             let opened = NSWorkspace.shared.open(URL(string: "https://github.com/sweetcornna/Super-Cage/" + path)!)

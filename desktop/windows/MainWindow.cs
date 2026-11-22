@@ -484,6 +484,7 @@ internal sealed class MainWindow : Form
                     var appReference = request.Text("kind") switch {
                         "source" => "https://github.com/sweetcornna/Super-Cage/commits/main",
                         "releases" => "https://github.com/sweetcornna/Super-Cage/releases",
+                        "local-terminal-guide" => "https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/local-terminal.md",
                         _ => throw new InvalidDataException("未知的项目页面")
                     };
                     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(appReference) { UseShellExecute = true });
