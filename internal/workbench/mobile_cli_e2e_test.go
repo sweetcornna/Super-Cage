@@ -319,7 +319,9 @@ func TestMobileCLIThroughRelayAndSSH(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		go func() { _ = mobilelink.ServeHost(ctx, r.URL, room.ID, room.HostToken, hostID, phoneID.Pin, b) }()
+		go func() {
+			_ = mobilelink.ServeHost(ctx, r.URL, room.ID, room.HostToken, hostID, phoneID.Pin, mobilelink.Opened(b))
+		}()
 		client, err := mobilelink.ConnectClient(ctx, r.URL, room.ID, room.ClientToken, phoneID, hostID.Pin)
 		if err != nil {
 			t.Fatal(err)

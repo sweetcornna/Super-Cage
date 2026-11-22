@@ -3,6 +3,7 @@ package mobilelink
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
@@ -46,9 +47,9 @@ var deviceCodeKDF = struct {
 // requests cannot stack 64 MiB allocations.
 var deviceCodeSlot = make(chan struct{}, 1)
 
-// deviceApprovalTimeout bounds the host's 允许 / 拒绝 once a joiner has proven
-// the code. The joiner waits 15 seconds longer for the answer.
-var deviceApprovalTimeout = 60 * time.Second
+// DeviceApprovalTimeout bounds the host's 允许 / 拒绝 once a joiner has proven
+// the code. The joiner waits 15 seconds longer for the answer. Tests shorten it.
+var DeviceApprovalTimeout = 60 * time.Second
 
 // newDeviceCode is replaced in tests to force a collision on the relay.
 var newDeviceCode = NewDeviceCode
@@ -61,6 +62,7 @@ var (
 	ErrDeviceCodeUnknown     = errors.New("配对码不对、已过期或已被使用")
 	ErrDeviceCodeUsed        = errors.New("配对码已被使用")
 	ErrDeviceJoinerLeft      = errors.New("对方已取消加入")
+	ErrDeviceCodeExpired     = errors.New("配对码已过期，请重新生成")
 	errDeviceCodeFormat      = errors.New("请输入 8 位数字配对码")
 )
 
@@ -231,7 +233,12 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 		return errors.New("device invite, host identity and callbacks required")
 	}
 	defer clear(inv.confirm)
-	temp, err := inv.Pair.identity()
+	// The QR's temporary key. Its expiry is inv.Expires, applied below to the
+	// second (PairCode.Expires is whole seconds).
+	if len(inv.Pair.Seed) != ed25519.SeedSize {
+		return errors.New("配对码无效或已过期")
+	}
+	temp, err := remotelink.IdentityFromKey(ed25519.NewKeyFromSeed(inv.Pair.Seed))
 	if err != nil {
 		return err
 	}
@@ -243,6 +250,10 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 	}
 	conn, err := remotelink.AcceptAfterJoin(codeCtx, ws, host, temp.Pin, true)
 	if err != nil {
+		if errors.Is(err, remotelink.ErrNoPeer) && ctx.Err() == nil {
+			// Nobody came before the code expired or the relay ended its room.
+			return fmt.Errorf("%w: %w", ErrDeviceCodeExpired, err)
+		}
 		return err
 	}
 	defer conn.NetConn().Close()
@@ -255,7 +266,7 @@ func AcceptDevice(ctx context.Context, inv *DeviceInvite, host *remotelink.Ident
 		return deviceError(err)
 	}
 	request := DeviceRequest{ShortCode: true, Pin: pending.Request.Pin, Name: pending.Request.Name, Platform: pending.Request.Platform, Check: pending.Request.Check}
-	decide, stop := context.WithTimeout(ctx, deviceApprovalTimeout)
+	decide, stop := context.WithTimeout(ctx, DeviceApprovalTimeout)
 	go func() {
 		select {
 		case <-pending.Left():
@@ -347,7 +358,7 @@ func RedeemDeviceCode(ctx context.Context, code, selectedRelay string, identity 
 	if check != nil {
 		check(pending.Check)
 	}
-	wait, stop := context.WithTimeout(ctx, deviceApprovalTimeout+15*time.Second)
+	wait, stop := context.WithTimeout(ctx, DeviceApprovalTimeout+15*time.Second)
 	defer stop()
 	raw, err := pending.Await(wait)
 	if err != nil {

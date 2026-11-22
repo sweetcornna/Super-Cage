@@ -97,6 +97,12 @@ const PhoneRoomHeader = "X-Cage-Phone-Room"
 
 func (b *Workbench) Close() { b.transport.CloseIdleConnections() }
 
+// Opened hands ServeHost a session opened beforehand. Closing it only drops
+// idle connections, so it serves the next link too.
+func Opened(b *Workbench) func() (*Workbench, error) {
+	return func() (*Workbench, error) { return b, nil }
+}
+
 // RoundTrip rebuilds requests in operations. This private transport receives
 // no caller-supplied headers and never follows redirects.
 type localTransport struct{ b *Workbench }

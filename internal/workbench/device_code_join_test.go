@@ -1,12 +1,8 @@
 package workbench
 
 import (
-	"context"
 	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"runtime"
 	"strings"
@@ -17,44 +13,47 @@ import (
 	"github.com/sylvinus/agent-vm/internal/remotelink"
 )
 
-// shortCodeHostForTest shows an 8-digit code on a host of today's build the
-// way the host side will (one room for the QR and the code, 允许 after the
-// check number) and pairs the joining computer as that host's phone. decide
-// plays the person at the host.
-func shortCodeHostForTest(t *testing.T, host *Server, relayOrigin string, decide func(context.Context, mobilelink.DeviceRequest) bool) (string, <-chan error) {
+// shortCodeForTest shows a code on host as the add-device dialog does and
+// returns its 8 digits.
+func shortCodeForTest(t *testing.T, host *Server) string {
 	t.Helper()
-	_, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
+	w := deviceRequest(host, "POST", "/api/devices/invite", "{}", deviceCall{})
+	var offer struct{ Short, Manual string }
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &offer) != nil || len(offer.Short) != mobilelink.DeviceCodeDigits || !strings.HasPrefix(offer.Manual, "CAGE-") {
+		t.Fatalf("host code: HTTP %d %s", w.Code, w.Body.String())
 	}
-	identity, err := remotelink.IdentityFromKey(key)
-	if err != nil {
-		t.Fatal(err)
+	return offer.Short
+}
+
+type hostInviteView struct {
+	State   string
+	Request *struct{ Name, Platform, Check string }
+	Device  *struct{ ID, Name string }
+	Error   string
+}
+
+func hostInviteForTest(t *testing.T, host *Server, wait string) hostInviteView {
+	t.Helper()
+	w := deviceRequest(host, "GET", "/api/devices/invite?wait="+wait, "", deviceCall{})
+	var view hostInviteView
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &view) != nil {
+		t.Fatalf("host invite: HTTP %d %s", w.Code, w.Body.String())
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	t.Cleanup(cancel)
-	invite, err := mobilelink.NewDeviceInvite(ctx, relayOrigin, "", identity)
-	if err != nil {
-		t.Fatal(err)
+	return view
+}
+
+// hostRequestForTest waits until the host shows a joiner's request. Like the
+// dialog it reads at once, then holds a read only while it is still waiting.
+func hostRequestForTest(t *testing.T, host *Server) hostInviteView {
+	t.Helper()
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if view := hostInviteForTest(t, host, "0"); view.State != "waiting" {
+			return view
+		}
+		hostInviteForTest(t, host, "5")
 	}
-	done := make(chan error, 1)
-	go func() {
-		done <- mobilelink.AcceptDevice(ctx, invite, identity, decide, func(request mobilelink.DeviceRequest) (mobilelink.PairedHost, error) {
-			var token [32]byte
-			if _, err := rand.Read(token[:]); err != nil {
-				return mobilelink.PairedHost{}, err
-			}
-			record := phoneRecord{Seed: key.Seed(), Relay: relayOrigin, Pin: request.Pin, Lookup: base64.RawURLEncoding.EncodeToString(token[:])}
-			host.phones.mu.Lock()
-			defer host.phones.mu.Unlock()
-			if err := writePrivate(host.phoneFile(), record); err != nil {
-				return mobilelink.PairedHost{}, err
-			}
-			host.attachPhone(record)
-			return mobilelink.PairedHost{Version: 1, Relay: relayOrigin, HostPin: identity.Pin, Lookup: record.Lookup}, nil
-		})
-	}()
-	return invite.Code, done
+	t.Fatal("the host never showed a request")
+	return hostInviteView{}
 }
 
 // joinByCodeForTest posts the code as a person types it. The host's socket
@@ -62,10 +61,15 @@ func shortCodeHostForTest(t *testing.T, host *Server, relayOrigin string, decide
 // found, so a miss is retried briefly.
 func joinByCodeForTest(t *testing.T, s *Server, code string) *httpResult {
 	t.Helper()
+	return joinByCodeTries(t, s, code, 10)
+}
+
+func joinByCodeTries(t *testing.T, s *Server, code string, retries int) *httpResult {
+	t.Helper()
 	body, _ := json.Marshal(map[string]string{"code": mobilelink.FormatDeviceCode(code), "name": "家里的 Mac mini"})
 	for try := 0; ; try++ {
 		w := deviceRequest(s, "POST", "/api/client/devices/join", string(body), deviceCall{})
-		if w.Code == http.StatusConflict && strings.Contains(w.Body.String(), "没有找到这个配对码") && try < 10 {
+		if w.Code == http.StatusConflict && strings.Contains(w.Body.String(), "没有找到这个配对码") && try < retries {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
@@ -102,43 +106,35 @@ func shortCodeJoinerForTest(t *testing.T, relayOrigin string) *Server {
 	return s
 }
 
-// A computer joins with the 8-digit code: its window gets the check number,
-// the host's person compares it and clicks 允许, and the joined computer opens
-// the host's phone surface. Host, joiner and relay in one process.
+// One process, two computers and a loopback relay: the host shows an
+// 8-digit code, the joining computer types it, both windows show the same
+// check number, the host's person clicks 允许, and the joined computer opens
+// the host's phone surface.
 func TestJoinedComputerByShortCode(t *testing.T) {
 	relayOrigin, _ := deviceTestRelay(t)
 	host := deviceTestHost(t, relayOrigin)
 	s := shortCodeJoinerForTest(t, relayOrigin)
-	shown := make(chan string, 1)
-	var asked mobilelink.DeviceRequest
-	code, hostDone := shortCodeHostForTest(t, host, relayOrigin, func(ctx context.Context, request mobilelink.DeviceRequest) bool {
-		asked = request
-		select {
-		case check := <-shown:
-			return check == request.Check
-		case <-ctx.Done():
-			return false
-		}
-	})
 	if view := joinStateForTest(t, s, "0"); view.State != "none" {
 		t.Fatalf("state before a join: %+v", view)
 	}
+	code := shortCodeForTest(t, host)
 	joined := joinByCodeForTest(t, s, code)
 	if joined.code != 200 || joined.view.State != "approval" || len(joined.view.Check) != 4 {
 		t.Fatalf("join by code: HTTP %d %s", joined.code, joined.body)
 	}
-	shown <- joined.view.Check
+	request := hostRequestForTest(t, host)
+	if request.State != "request" || request.Request == nil || request.Request.Check != joined.view.Check || request.Request.Platform != runtime.GOOS || request.Request.Name == "" {
+		t.Fatalf("host shows %+v, joiner shows %s", request, joined.view.Check)
+	}
+	if w := deviceRequest(host, "POST", "/api/devices/invite/approve", `{"check":"`+request.Request.Check+`"}`, deviceCall{}); w.Code != 200 {
+		t.Fatalf("允许: HTTP %d %s", w.Code, w.Body.String())
+	}
 	view := joinStateForTest(t, s, "10")
 	if view.State != "joined" || !joinedComputerID.MatchString(view.ID) || view.Name != "家里的 Mac mini" {
 		t.Fatalf("after 允许: %+v", view)
 	}
-	select {
-	case err := <-hostDone:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("host did not finish")
+	if hostView := hostInviteForTest(t, host, "0"); hostView.State != "joined" || hostView.Device == nil {
+		t.Fatalf("host after 允许: %+v", hostView)
 	}
 	record := readPrivateJoined(t, s)
 	if len(record.Computers) != 1 || record.Computers[0].ID != view.ID {
@@ -148,11 +144,9 @@ func TestJoinedComputerByShortCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	host.phones.mu.Lock()
-	hostRecord := host.phones.record
-	host.phones.mu.Unlock()
-	if hostRecord == nil || hostRecord.Pin != key.Pin || asked.Pin != key.Pin || asked.Platform != runtime.GOOS || asked.Name == "" {
-		t.Fatalf("host enrolled %+v after asking %+v", hostRecord, asked)
+	paired := onlyDevice(t, host)
+	if paired.Pin != key.Pin || paired.Kind != "computer" || paired.Platform != runtime.GOOS {
+		t.Fatalf("host enrolled %+v", paired.deviceRecord)
 	}
 	connection := openComputerForTest(t, s, view.ID)
 	sessionsThroughLink(t, s, connection)
@@ -176,38 +170,37 @@ func TestJoinByShortCodeRefusalsAndCancel(t *testing.T) {
 	}
 
 	// 拒绝 on the host.
-	code, hostDone := shortCodeHostForTest(t, host, relayOrigin, func(context.Context, mobilelink.DeviceRequest) bool { return false })
-	joined := joinByCodeForTest(t, s, code)
-	if joined.code != 200 || joined.view.State != "approval" {
+	code := shortCodeForTest(t, host)
+	if joined := joinByCodeForTest(t, s, code); joined.code != 200 || joined.view.State != "approval" {
 		t.Fatalf("join: HTTP %d %s", joined.code, joined.body)
+	}
+	hostRequestForTest(t, host)
+	if w := deviceRequest(host, "POST", "/api/devices/invite/reject", "{}", deviceCall{}); w.Code != 200 {
+		t.Fatalf("拒绝: HTTP %d %s", w.Code, w.Body.String())
 	}
 	if view := joinStateForTest(t, s, "10"); view.State != "failed" || view.Error != mobilelink.ErrDeviceRejected.Error() {
 		t.Fatalf("after 拒绝: %+v", view)
-	}
-	if err := <-hostDone; !errors.Is(err, mobilelink.ErrDeviceRejected) {
-		t.Fatalf("host: %v", err)
 	}
 	if computers, err := s.loadJoinedComputers(); err != nil || len(computers) != 0 {
 		t.Fatalf("a refused join was saved: %v %v", computers, err)
 	}
 
 	// A code no host shows.
-	wrong := "0000000" + string(rune('0'+(code[7]-'0'+1)%10))
-	if missed := joinByCodeForTest(t, s, wrong); missed.code != http.StatusConflict || !strings.Contains(missed.body, "没有找到这个配对码") {
+	code = shortCodeForTest(t, host)
+	wrong := code[:7] + string(rune('0'+(code[7]-'0'+1)%10))
+	if missed := joinByCodeTries(t, s, wrong, 0); missed.code != http.StatusConflict || !strings.Contains(missed.body, "没有找到这个配对码") {
 		t.Fatalf("wrong code: HTTP %d %s", missed.code, missed.body)
 	}
 
 	// The window closes the dialog, or this computer locks, while the host
-	// waits for its person: the join stops, the host's prompt ends (its person
-	// would click 允许 only after that), and nothing is saved on either side.
+	// waits for its person: the join stops, the host's request ends (its
+	// person could click 允许 only after that), and nothing is saved.
 	for _, stop := range []string{"dialog", "lock"} {
-		code, hostDone = shortCodeHostForTest(t, host, relayOrigin, func(ctx context.Context, _ mobilelink.DeviceRequest) bool {
-			<-ctx.Done()
-			return true
-		})
+		code := shortCodeForTest(t, host)
 		if joined := joinByCodeForTest(t, s, code); joined.view.State != "approval" {
 			t.Fatalf("%s: join: HTTP %d %s", stop, joined.code, joined.body)
 		}
+		request := hostRequestForTest(t, host)
 		waiting := make(chan deviceJoinView, 1)
 		go func() { waiting <- joinStateForTest(t, s, "10") }()
 		time.Sleep(50 * time.Millisecond)
@@ -226,16 +219,20 @@ func TestJoinByShortCodeRefusalsAndCancel(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("%s did not end the held read", stop)
 		}
-		select {
-		case err := <-hostDone:
-			if !errors.Is(err, mobilelink.ErrDeviceJoinerLeft) {
-				t.Fatalf("%s: host: %v", stop, err)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("%s: the host's prompt outlived the join", stop)
+		if view := hostInviteForTest(t, host, "5"); view.State != "failed" || view.Error != mobilelink.ErrDeviceJoinerLeft.Error() {
+			t.Fatalf("%s: host still asks: %+v", stop, view)
+		}
+		if w := deviceRequest(host, "POST", "/api/devices/invite/approve", `{"check":"`+request.Request.Check+`"}`, deviceCall{}); w.Code != http.StatusConflict {
+			t.Fatalf("%s: a late 允许: HTTP %d", stop, w.Code)
 		}
 		if computers, _ := s.loadJoinedComputers(); len(computers) != 0 {
 			t.Fatalf("%s: a cancelled join was saved", stop)
 		}
+	}
+	host.phones.mu.Lock()
+	count := len(host.phones.devices)
+	host.phones.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("host enrolled %d refused or cancelled joiners", count)
 	}
 }

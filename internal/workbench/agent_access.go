@@ -84,6 +84,13 @@ var agentWindowRoutes = []agentWindowRoute{
 	{"POST /api/terminals/{id}/keep", "Keeping a terminal open for the SSH entry is decided by the person in the desktop window.", "open_desktop"},
 	// A paired phone reports its own device.
 	{"POST /api/mobile/device", "Only a paired phone reports its own device details.", "mobile.get"},
+	// Adding a device (a phone or another computer) changes who can reach this
+	// computer, and the reply carries the code. Removing one and cancelling a
+	// code stay open (agentRoutes).
+	{"POST /api/devices/invite", "Adding a device changes who can reach this computer; codes are shown only in the desktop window.", "open_desktop"},
+	{"POST /api/devices/invite/approve", "Allowing a device to join changes who can reach this computer; the person decides in the desktop window.", "open_desktop"},
+	{"POST /api/devices/invite/reject", "Answering a device's request to join is done by the person in the desktop window.", "open_desktop"},
+	{"POST /api/mobile-pair", "Adding a device changes who can reach this computer; codes are shown only in the desktop window.", "open_desktop"},
 	// Opens Screen Sharing on this computer (open vnc://…).
 	{"POST /api/environment/macos-screen-sharing", "Screen Sharing opens on this computer only from the desktop window.", "open_desktop"},
 	// A recovery key resets the account password.
@@ -160,7 +167,7 @@ func agentBodyRefusal(rules []agentBodyRule, body []byte) *AgentError {
 
 // agentRoutes are the state-changing routes an agent may call: the
 // workbench's own work (environment, terminals, sessions, projects, guest
-// apps, accounts in the guest, network, vault, phone pairing) and the desktop
+// apps, accounts in the guest, network, vault, removing paired devices) and the desktop
 // chooser. Patterns are the registered ones; /api/client/ routes, which are
 // dispatched outside the mux, are listed with their concrete paths.
 var agentRoutes = []string{
@@ -185,7 +192,7 @@ var agentRoutes = []string{
 	"POST /api/clipboard/copy", "POST /api/clipboard/files", "DELETE /api/clipboard/files/{id}",
 	"POST /api/claude-accounts", "POST /api/codex-accounts", "POST /api/vault", "POST /api/vault/browser",
 	"POST /api/proxy/{action}", "POST /api/proxy/delay", "POST /api/safety/check", "POST /api/safety/close", "POST /api/tailscale/{action}",
-	"POST /api/mobile-pair", "DELETE /api/mobile-pair",
+	"DELETE /api/mobile-pair", "DELETE /api/devices/invite", "DELETE /api/devices/{id}",
 	"POST /api/mobile/browser/open", "POST /api/mobile/browser/favorites", "POST /api/mobile/browser/{id}/action", "POST /api/mobile/browser/{id}/close",
 	"POST /api/mobile/cli/sessions", "POST /api/mobile/cli/sessions/{id}/account", "POST /api/mobile/cli/sessions/{id}/approval",
 	"POST /api/mobile/cli/sessions/{id}/archive", "POST /api/mobile/cli/sessions/{id}/delete", "POST /api/mobile/cli/sessions/{id}/media",

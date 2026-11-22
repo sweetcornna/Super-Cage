@@ -48,8 +48,7 @@ func windowsMobileFixture(t *testing.T) (*Server, *mobileRecord, func()) {
 	s.projectShares = map[string]*projectShare{workspace: {windowsProject: &windowsProjectBinding{ID: strings.Repeat("a", 16), Grant: strings.Repeat("b", 64), Path: record.GuestWorkspace}, done: make(chan struct{})}}
 	room, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	s.phones.record = &phoneRecord{}
-	s.phones.roomCtx, s.phones.roomProof = room, "current-private-room"
+	installTestDevice(s, room, nil, "current-private-room")
 	s.ready = true
 	s.windowsState.Available = true
 	s.windowsState.ComponentsChecked = time.Now()
@@ -82,17 +81,17 @@ func TestWindowsMobileHandlerRequiresCurrentRoomAndUnlockedAccount(t *testing.T)
 			t.Fatalf("untrusted room admitted: %d", w.Code)
 		}
 	}
-	if w := windowsPhoneRequest(t, s, "GET", path, "", s.phones.roomProof); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"can_send":true`) {
+	if w := windowsPhoneRequest(t, s, "GET", path, "", "current-private-room"); w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"can_send":true`) {
 		t.Fatalf("actual native dispatch failed: %d %s", w.Code, w.Body.String())
 	}
 	if err := s.account.lockAccess(false); err != nil {
 		t.Fatal(err)
 	}
-	if w := windowsPhoneRequest(t, s, "GET", path, "", s.phones.roomProof); w.Code != http.StatusLocked {
+	if w := windowsPhoneRequest(t, s, "GET", path, "", "current-private-room"); w.Code != http.StatusLocked {
 		t.Fatalf("locked account allowed a mobile session read: %d", w.Code)
 	}
 	cancel()
-	if w := windowsPhoneRequest(t, s, "GET", path, "", s.phones.roomProof); w.Code != http.StatusForbidden {
+	if w := windowsPhoneRequest(t, s, "GET", path, "", "current-private-room"); w.Code != http.StatusForbidden {
 		t.Fatalf("revoked room admitted: %d", w.Code)
 	}
 }
@@ -103,7 +102,7 @@ func TestWindowsMobileProjectsReflectInstalledNativeHandlers(t *testing.T) {
 		if !installed {
 			s.windowsState.Capabilities = nil
 		}
-		w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/projects", "", s.phones.roomProof)
+		w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/projects", "", "current-private-room")
 		var state struct {
 			Shared bool `json:"shared_sessions"`
 		}
@@ -121,7 +120,7 @@ func TestWindowsMobilePurgeUsesLiveHostGrantInsteadOfHostGuestPath(t *testing.T)
 	}
 	capture := filepath.Join(t.TempDir(), "purge-relay.jsonl")
 	t.Setenv("CAGE_WINDOWS_CLI_RELAY_CAPTURE", capture)
-	w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/purge", `{"confirm":true}`, s.phones.roomProof)
+	w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/purge", `{"confirm":true}`, "current-private-room")
 	if w.Code != http.StatusOK {
 		t.Fatalf("native purge dispatch: %d %s", w.Code, w.Body.String())
 	}
@@ -142,7 +141,7 @@ func TestWindowsMobileHandlerUsesHostRecordGrantAndRejectsPhoneGuestPaths(t *tes
 	requestID := uuid.NewString()
 	path := "/api/mobile/cli/sessions/" + record.ID + "/messages"
 	body := `{"request_id":"` + requestID + `","text":"中文 fixture"}`
-	w := windowsPhoneRequest(t, s, "POST", path, body, s.phones.roomProof)
+	w := windowsPhoneRequest(t, s, "POST", path, body, "current-private-room")
 	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"acknowledged_request_id":"`+requestID+`"`) {
 		t.Fatalf("native receipt failed: %d %s", w.Code, w.Body.String())
 	}
@@ -157,18 +156,18 @@ func TestWindowsMobileHandlerUsesHostRecordGrantAndRejectsPhoneGuestPaths(t *tes
 		t.Fatal("native path/grant leaked to phone")
 	}
 	guestBody, _ := json.Marshal(map[string]any{"id": uuid.NewString(), "workspace": record.GuestWorkspace})
-	if w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions", string(guestBody), s.phones.roomProof); w.Code != http.StatusForbidden {
+	if w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions", string(guestBody), "current-private-room"); w.Code != http.StatusForbidden {
 		t.Fatalf("phone selected guest directory: %d", w.Code)
 	}
 	other, err := s.mobileCLI.create(s.profile, t.TempDir(), uuid.NewString())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+other.ID, "", s.phones.roomProof); w.Code != http.StatusForbidden {
+	if w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+other.ID, "", "current-private-room"); w.Code != http.StatusForbidden {
 		t.Fatalf("ungranted project history exposed: %d", w.Code)
 	}
 	close(s.projectShares[record.Workspace].done)
-	if w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+record.ID, "", s.phones.roomProof); w.Code == http.StatusOK {
+	if w := windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+record.ID, "", "current-private-room"); w.Code == http.StatusOK {
 		t.Fatal("revoked project reached native view")
 	}
 }
@@ -184,7 +183,7 @@ func TestWindowsLegacyMobileLaunchPreservesHistoryWithoutLinuxFallback(t *testin
 	if _, _, _, err := s.prepareMobileLaunch(record); err != errWindowsLegacyMobile {
 		t.Fatalf("legacy Windows fallback: %v", err)
 	}
-	w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/open", `{"automatic":true}`, s.phones.roomProof)
+	w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/open", `{"automatic":true}`, "current-private-room")
 	if w.Code != http.StatusConflict {
 		t.Fatalf("legacy Linux record executed: %d", w.Code)
 	}
@@ -200,7 +199,7 @@ func TestWindowsMobileRoomRevocationCancelsInFlightNativeRequest(t *testing.T) {
 	t.Setenv("CAGE_WINDOWS_CLI_RELAY_BLOCK", marker)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
-		done <- windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+record.ID, "", s.phones.roomProof)
+		done <- windowsPhoneRequest(t, s, "GET", "/api/mobile/cli/sessions/"+record.ID, "", "current-private-room")
 	}()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -240,7 +239,7 @@ func TestWindowsMobileMediaMapsOnlyCurrentLiveProject(t *testing.T) {
 	}
 	for _, reference := range []string{"frame.png", guestRoot + `\nested\frame.png`} {
 		body, _ := json.Marshal(mediaChunkRequest{Reference: reference})
-		w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/media", string(body), s.phones.roomProof)
+		w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/media", string(body), "current-private-room")
 		if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"mime":"image/png"`) {
 			t.Fatalf("native media path: %d %s", w.Code, w.Body.String())
 		}
@@ -252,7 +251,7 @@ func TestWindowsMobileMediaMapsOnlyCurrentLiveProject(t *testing.T) {
 	}
 	close(s.projectShares[record.Workspace].done)
 	body, _ := json.Marshal(mediaChunkRequest{Reference: "frame.png"})
-	if w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/media", string(body), s.phones.roomProof); w.Code != http.StatusConflict {
+	if w := windowsPhoneRequest(t, s, "POST", "/api/mobile/cli/sessions/"+record.ID+"/media", string(body), "current-private-room"); w.Code != http.StatusConflict {
 		t.Fatalf("revoked media mount accepted: %d", w.Code)
 	}
 }
@@ -260,17 +259,13 @@ func TestWindowsMobileMediaMapsOnlyCurrentLiveProject(t *testing.T) {
 func TestWindowsMobileRealPairingTransportReachesNativeSession(t *testing.T) {
 	s, record, cancelOld := windowsMobileFixture(t)
 	cancelOld()
-	s.phones.record = nil
-	s.phones.roomCtx = nil
-	s.phones.roomProof = ""
+	clearTestDevices(s)
 	client, ctx := pairedWindowsPhoneForTest(t, s)
 	reply, err := client.Do(ctx, "GET", "/api/mobile/cli/sessions/"+record.ID, nil)
 	if err != nil || reply.Status != http.StatusOK || !strings.Contains(string(reply.Body), `"can_send":true`) {
 		t.Fatalf("encrypted phone/native session: %v %#v", err, reply)
 	}
-	s.phones.mu.Lock()
-	privateProof := s.phones.roomProof
-	s.phones.mu.Unlock()
+	privateProof := liveProof(t, s)
 	if strings.Contains(string(reply.Body), record.GuestWorkspace) || strings.Contains(string(reply.Body), privateProof) {
 		t.Fatal("private backend capability reached phone")
 	}
@@ -294,7 +289,7 @@ func pairedWindowsPhoneForTest(t *testing.T, s *Server) (*mobilelink.Client, con
 	s.origin = "http://" + server.Listener.Addr().String()
 	server.Start()
 	t.Cleanup(server.Close)
-	t.Cleanup(s.stopPhone)
+	t.Cleanup(s.stopDevices)
 	s.preferences.MobileRelay = relayHTTP.URL
 	response := windowsBrowserRequestForTest(s, "POST", "/api/mobile-pair", []byte(`{}`))
 	var invitation struct{ Manual string }

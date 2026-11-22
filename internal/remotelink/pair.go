@@ -48,6 +48,10 @@ var (
 	ErrPairTimedOut = errors.New("pairing was not approved in time")
 )
 
+// ErrNoPeer means the wait for a device in the room ended with no device:
+// the code expired, the relay ended the waiting room, or ctx ended.
+var ErrNoPeer = errors.New("no device joined the room")
+
 var pairRefusals = map[string]error{"failed": ErrPairFailed, "rejected": ErrPairRejected, "timeout": ErrPairTimedOut}
 
 // pairRand supplies the commit-then-reveal nonces. Tests replace it.
@@ -173,9 +177,12 @@ func pairHandshake(ctx context.Context, ws *websocket.Conn, config *tls.Config, 
 		waitErr := wait.Err()
 		cancel()
 		if waitErr != nil {
-			return nil, fmt.Errorf("waiting for paired device: %w", waitErr)
+			return nil, fmt.Errorf("waiting for paired device: %w: %w", waitErr, ErrNoPeer)
 		}
-		if readErr != nil || kind != websocket.BinaryMessage {
+		if readErr != nil {
+			return nil, fmt.Errorf("%w: %v", ErrNoPeer, readErr)
+		}
+		if kind != websocket.BinaryMessage {
 			return nil, errors.New("peer did not send a binary TLS handshake")
 		}
 		stream.reader = first

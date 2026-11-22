@@ -116,7 +116,7 @@ func AgentOperations() []AgentOperation {
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})
 	post("vault.browser", "Use the browser vault's existing save/fill/block actions", "/api/vault/browser", from(vaultBrowserInput{}))
 	get("mobile.get", "Inspect phone pairing", "/api/mobile-pair")
-	post("mobile.pair", "Generate the same phone pairing invitation", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
+	post("mobile.pair", "Window only: a device is added in the desktop window, which shows the code; returns open_desktop", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
 	add("mobile.remove", "Remove the same paired device", "DELETE", "/api/mobile-pair", object(nil))
 	get("tailscale.get", "Read guest private-network state", "/api/tailscale")
 	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key"} {

@@ -356,9 +356,9 @@ func TestDeviceInviteKeepsTodaysQRAndLongCode(t *testing.T) {
 }
 
 func TestDeviceCodeApprovalOutcomes(t *testing.T) {
-	saved := deviceApprovalTimeout
-	deviceApprovalTimeout = 300 * time.Millisecond
-	defer func() { deviceApprovalTimeout = saved }()
+	saved := DeviceApprovalTimeout
+	DeviceApprovalTimeout = 300 * time.Millisecond
+	defer func() { DeviceApprovalTimeout = saved }()
 	for _, test := range []struct {
 		name   string
 		decide func(context.Context, DeviceRequest) bool
@@ -444,8 +444,8 @@ func TestDeviceCodeSecondJoinerExpiryAndCancel(t *testing.T) {
 		if _, err := f.redeem(ctx, inv.Code, nil); !errors.Is(err, ErrDeviceCodeUnknown) {
 			t.Fatalf("expired code: %v", err)
 		}
-		if err := receive(t, done); err == nil {
-			t.Fatal("host paired after expiry")
+		if err := receive(t, done); !errors.Is(err, ErrDeviceCodeExpired) {
+			t.Fatalf("host after expiry: %v", err)
 		}
 	})
 	t.Run("dialog closed", func(t *testing.T) {

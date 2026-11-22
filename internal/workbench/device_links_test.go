@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sylvinus/agent-vm/internal/keepawake"
 	"github.com/sylvinus/agent-vm/internal/mobilelink"
 	"github.com/sylvinus/agent-vm/internal/relay"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
@@ -36,8 +37,9 @@ func deviceTestRelay(t *testing.T) (string, *atomic.Int64) {
 	return server.URL, &joiner
 }
 
-// A host of today's build: it pairs the joining computer as its one phone
-// (mobile_pair.go), keep-awake helper included, stopped at cleanup.
+// A host with a device list (devices.go). Its alias routes are today's
+// (POST/GET/DELETE /api/mobile-pair), so it also stands for a host of
+// today's build that pairs the joining computer as its one phone.
 func deviceTestHost(t *testing.T, relayOrigin string) *Server {
 	t.Helper()
 	s, _ := grantedToolUpdateServer(t)
@@ -46,7 +48,13 @@ func deviceTestHost(t *testing.T, relayOrigin string) *Server {
 	s.origin = "http://" + server.Listener.Addr().String()
 	server.Start()
 	t.Cleanup(server.Close)
-	t.Cleanup(s.stopPhone)
+	t.Cleanup(s.stopDevices)
+	// No real power request in tests (on macOS that would start caffeinate).
+	s.keepAwake = func(ctx context.Context, report func(keepawake.State)) {
+		report(keepawake.State{Active: true})
+		<-ctx.Done()
+		report(keepawake.State{})
+	}
 	return s
 }
 
