@@ -252,12 +252,14 @@ internal sealed class ScienceFrameHost
     // Crash ends the renderer process of a frame's session and returns once
     // the frame's Inspector.targetCrashed arrived. The process is terminated
     // from here when it holds frames of origin ending only (Terminate);
-    // otherwise the session gets Page.crash (it never answers). Page.crash
-    // makes the WebView's crash reporting write a minidump of the frame's
-    // process (about 6 MB in WebView2 157) to the user data folder, for
-    // every teardown; a terminated process leaves none
-    // (desktop/windows.webview2-checks: page-crash, teardown). The frame's
-    // process exit is expected (FrameExited).
+    // otherwise, or when that fails in any way, the session gets Page.crash
+    // (it never answers). Page.crash makes the WebView's crash reporting
+    // write a minidump of the frame's process (about 6 MB in WebView2 157)
+    // to the user data folder, for every teardown; a terminated process
+    // raises nothing for crash reporting to catch and left none in the
+    // checks (desktop/windows.webview2-checks: page-crash, teardown; they run
+    // with custom crash reporting on). The frame's process exit is expected
+    // (FrameExited).
     private Task Crash(string session, string ending)
     {
         if (dead.Contains(session)) return Task.CompletedTask;
@@ -270,7 +272,11 @@ internal sealed class ScienceFrameHost
 
     private async Task EndProcess(string session, string ending, TaskCompletionSource seen)
     {
-        if (ending.Length != 0 && await Terminate(core, ending)) return;
+        try
+        {
+            if (ending.Length != 0 && await Terminate(core, ending)) return;
+        }
+        catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException or NotImplementedException or Win32Exception or ObjectDisposedException) { }
         try
         {
             _ = core.CallDevToolsProtocolMethodForSessionAsync(session, "Page.crash", "{}")
@@ -285,11 +291,15 @@ internal sealed class ScienceFrameHost
     // another site.
     internal static async Task<bool> Terminate(CoreWebView2 core, string origin)
     {
-        IReadOnlyList<CoreWebView2ProcessExtendedInfo> infos;
-        try { infos = await core.Environment.GetProcessExtendedInfosAsync(); }
+        List<(int, IReadOnlyList<string>)> renderers;
+        try
+        {
+            var infos = await core.Environment.GetProcessExtendedInfosAsync();
+            renderers = infos.Where(info => info.ProcessInfo.Kind == CoreWebView2ProcessKind.Renderer)
+                .Select(info => (info.ProcessInfo.ProcessId, (IReadOnlyList<string>)(info.AssociatedFrameInfos ?? []).Select(frame => frame.Source ?? "").ToList())).ToList();
+        }
         catch (Exception error) when (error is InvalidOperationException or COMException or ArgumentException or NotImplementedException) { return false; }
-        var chosen = ScienceFrame.FrameProcesses(infos.Where(info => info.ProcessInfo.Kind == CoreWebView2ProcessKind.Renderer)
-            .Select(info => (info.ProcessInfo.ProcessId, (IReadOnlyList<string>)(info.AssociatedFrameInfos ?? []).Select(frame => frame.Source ?? "").ToList())), origin);
+        var chosen = ScienceFrame.FrameProcesses(renderers, origin);
         if (chosen == null || chosen.Count == 0) return false;
         foreach (var id in chosen)
             if (!await EndRenderer(id)) return false;
