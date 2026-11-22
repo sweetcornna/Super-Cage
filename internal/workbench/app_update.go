@@ -263,6 +263,8 @@ func (s *Server) updateProfile() string {
 // still changes the fingerprint.
 func (s *Server) noteAppUpdateActivity() { s.appUpdate.registry.Touch() }
 
+// notePhoneRequest is called for every request of a paired device: a phone or
+// a joined computer, which counts as a device here, not as a remote session.
 func (s *Server) notePhoneRequest() {
 	s.appUpdate.lastPhone.Store(time.Now().UnixNano())
 	s.appUpdate.registry.Touch()

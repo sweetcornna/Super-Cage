@@ -82,7 +82,7 @@ func TestSuperCagePhoneInBrowser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	go mobilelink.ServeHost(ctx, relayHTTP.URL, room.ID, room.HostToken, hostID, phoneID.Pin, backend)
+	go mobilelink.ServeHost(ctx, relayHTTP.URL, room.ID, room.HostToken, hostID, phoneID.Pin, mobilelink.Opened(backend))
 	phone, err := mobilelink.ConnectClient(ctx, relayHTTP.URL, room.ID, room.ClientToken, phoneID, hostID.Pin)
 	if err != nil {
 		t.Fatal(err)

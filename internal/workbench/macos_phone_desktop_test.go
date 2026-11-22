@@ -160,8 +160,7 @@ func TestMacOSPhoneDesktopHandlerHonorsRoomGateAndRevocation(t *testing.T) {
 	resumeRememberedPhoneHost(t, s)
 	room, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	s.phones.record = &phoneRecord{}
-	s.phones.roomCtx, s.phones.roomProof = room, "current-room"
+	installTestDevice(s, room, nil, "current-room")
 	open := fmt.Sprintf(`{"id":%q,"width":390,"height":640}`, id)
 	if response := windowsPhoneRequest(t, s, "POST", "/api/mobile/desktop/open", open, "old-room"); response.Code != 403 {
 		t.Fatalf("old room accepted: %d", response.Code)

@@ -277,7 +277,7 @@ GET、HEAD 默认可读，分发窗口专用凭据的读取除外（例如升级
 | Claude 账号、额度、分组、启停、调度与排序 | claude-accounts.get/change，动作与字段类型由 capabilities 给出；业务 action 与界面相同。 |
 | Codex 账号、额度、启停、调度与排序（Linux 环境） | codex-accounts.get/change，action 为 update/scheduling/refresh/usage_panel/remove；登录与界面相同，通过 kind 为 codex-login 的终端完成。 |
 | 密码保险箱 | vault.get 列元数据；vault.change 的 action 为 save/delete/unblock/reveal；reveal 仍需 account_password，再次验证后返回真实密码；vault.browser 提供页面填充和保存。 |
-| 手机配对 | mobile.get/pair/remove；自建中继输入 admin/relay，配对结果是私密邀请码。 |
+| 设备 | mobile.get、mobile.remove（只有一台设备时移除它）；`GET /api/devices` 列出手机和加入的电脑，`DELETE /api/devices/{id}` 移除一台。添加设备（mobile.pair、`POST /api/devices/invite`）只能在桌面窗口操作，代理会收到 open_desktop。 |
 | Tailscale 与 SSH 公钥 | tailscale.get，以及 install/connect/login/disconnect/logout/add-key/remove-key；公钥字段为 key。 |
 | 浏览器首页 | browser.preferences.get/set；set 立即更新浏览器，失败保留旧值，长度限制与界面一致。settings.patch 单独修改首页时复用同一保存流程。 |
 | Cookie、权限、扩展、收藏 | browser.cookies/settings/extensions；favorites.get/change。Cookie 的 mode、scope、id、cookieKey 与界面相同。 |
