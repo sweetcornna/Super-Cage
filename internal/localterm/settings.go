@@ -30,11 +30,22 @@ type Settings struct {
 	ClipboardWrite bool `json:"clipboard_write"`
 }
 
+// UnreadableSettings are what a window uses when the settings cannot be
+// read: the defaults with clipboard writes off. A choice that cannot be read
+// is not taken as permission.
+func UnreadableSettings() Settings {
+	settings := DefaultSettings()
+	settings.ClipboardWrite = false
+	return settings
+}
+
 // DefaultSettings follow Cage's web terminal: dropped images upload and
 // clipboard writes pass.
 func DefaultSettings() Settings { return Settings{ImageUpload: true, ClipboardWrite: true} }
 
-// LoadSettings reads the choices kept in dir; a missing file gives the defaults.
+// LoadSettings reads the choices kept in dir; a missing file gives the
+// defaults, one that cannot be read or parsed UnreadableSettings and an
+// error.
 func LoadSettings(dir string) (Settings, error) {
 	settings := DefaultSettings()
 	data, err := os.ReadFile(filepath.Join(dir, SettingsFile))
@@ -42,10 +53,10 @@ func LoadSettings(dir string) (Settings, error) {
 		return settings, nil
 	}
 	if err != nil {
-		return settings, err
+		return UnreadableSettings(), err
 	}
 	if len(data) > 64<<10 || json.Unmarshal(data, &settings) != nil {
-		return DefaultSettings(), errors.New("本机终端设置无法读取，已使用默认设置")
+		return UnreadableSettings(), errors.New("本机终端设置无法读取：已关闭剪贴板写入，其余使用默认设置")
 	}
 	if settings.App != "" && Lookup(settings.App) == nil {
 		settings.App = ""

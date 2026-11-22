@@ -1101,7 +1101,7 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 		session.sshViewers--
 		session.mu.Unlock()
 	}()
-	settings := localterm.DefaultSettings()
+	settings := localterm.UnreadableSettings()
 	if paths, err := s.entryPaths(); err == nil {
 		settings, _ = localterm.LoadSettings(paths.ComputerDir)
 	}

@@ -35,6 +35,7 @@ import (
 	"github.com/sylvinus/agent-vm/internal/attach"
 	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/controlwire"
+	"github.com/sylvinus/agent-vm/internal/localterm"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 	"github.com/sylvinus/agent-vm/internal/termfilter"
 	"github.com/sylvinus/agent-vm/internal/version"
@@ -1622,5 +1623,22 @@ func TestAttachRestartsAfterTrimmedHistoryKeepingScrollback(t *testing.T) {
 	}
 	if strings.Contains(out, "\x1bc") {
 		t.Fatal("a full reset reached the window")
+	}
+}
+
+// Settings that cannot be read do not let the environment write this
+// computer's clipboard: the clipboard write is dropped though the owner types.
+func TestAttachClipboardOffWhenSettingsUnreadable(t *testing.T) {
+	s := attachController(t, nil)
+	if err := os.WriteFile(filepath.Join(filepath.Dir(s.configPath), localterm.SettingsFile), []byte("{\"clipboard_write\":"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := startChild(t, s, "report")
+	a := startAttach(t, attachTo(s, session.id))
+	a.waitFor("ready", 1)
+	a.typeText("?effects")
+	out := a.waitFor("effects-shown", 1)
+	if strings.Contains(out, "\x1b]52;") {
+		t.Fatalf("a clipboard write passed with unreadable settings: %q", out)
 	}
 }
