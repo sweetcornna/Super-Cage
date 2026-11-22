@@ -1,6 +1,6 @@
 package workbench
 
-// The joining side of 设备互通 (docs/design/devices.md): this computer joins
+// The joining side of 设备互通 (multi-device): this computer joins
 // another computer's Super Cage with today's long pairing code and opens that
 // computer's phone surface in its own window. The other computer treats this
 // one as a paired device (on a build released today, as its one phone).
@@ -450,7 +450,6 @@ func (s *Server) openJoinedComputer(w http.ResponseWriter, r *http.Request, id s
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	link := &deviceLink{id: id, generation: randomToken(), client: client, api: mobilelink.Operations(client), ctx: ctx, cancel: cancel, restAfter: cmp.Or(d.restAfter, deviceLinkRest)}
-	link.stopLock = context.AfterFunc(lockCtx, link.close)
 	d.mu.Lock()
 	if d.closed || lockCtx.Err() != nil {
 		d.mu.Unlock()
@@ -477,6 +476,12 @@ func (s *Server) openJoinedComputer(w http.ResponseWriter, r *http.Request, id s
 		_ = s.saveJoinedComputers(computers)
 	}
 	d.mu.Unlock()
+	// Registered once the link is listed, so a lock at any moment of the open
+	// (even before this line) removes it from the list too.
+	stop := context.AfterFunc(lockCtx, func() { d.drop(link) })
+	link.mu.Lock()
+	link.stopLock = stop
+	link.mu.Unlock()
 	link.arm()
 	go link.report()
 	jsonReply(w, map[string]string{"connection": deviceConnectionPrefix + id + ":" + link.generation, "url": "/mobile.html"})
@@ -585,6 +590,16 @@ func (d *deviceLinks) close(id string) {
 	}
 }
 
+// drop closes link and forgets it, unless a newer open replaced it.
+func (d *deviceLinks) drop(link *deviceLink) {
+	d.mu.Lock()
+	if d.links[link.id] == link {
+		delete(d.links, link.id)
+	}
+	d.mu.Unlock()
+	link.close()
+}
+
 func (d *deviceLinks) closeAll() {
 	d.mu.Lock()
 	links := d.links
@@ -605,14 +620,18 @@ func (d *deviceLinks) shutdown() {
 }
 
 func (l *deviceLink) close() {
-	l.stopLock()
 	l.cancel()
 	l.mu.Lock()
 	if l.idle != nil {
 		l.idle.Stop()
 		l.idle = nil
 	}
+	stop := l.stopLock
+	l.stopLock = nil
 	l.mu.Unlock()
+	if stop != nil {
+		stop()
+	}
 	_ = l.client.Close()
 }
 

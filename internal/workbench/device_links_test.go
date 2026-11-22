@@ -270,6 +270,9 @@ func TestJoinedComputerOpensTodaysHostAsItsPhone(t *testing.T) {
 	if w := deviceRequest(s, "GET", "/api/mobile/cli/sessions", "", deviceCall{connection: connection}); w.Code != http.StatusConflict {
 		t.Fatalf("closed link after lock: HTTP %d", w.Code)
 	}
+	if w := deviceRequest(s, "GET", "/api/client/devices", "", deviceCall{}); !strings.Contains(w.Body.String(), `"state":"closed"`) {
+		t.Fatalf("list after a lock: %s", w.Body.String())
+	}
 	if w := deviceRequest(s, "POST", "/api/client/devices/"+id+"/open", "{}", deviceCall{}); w.Code != http.StatusLocked {
 		t.Fatalf("open while locked: HTTP %d", w.Code)
 	}
