@@ -85,7 +85,7 @@ func openController(profile string) (*controllerClient, error) {
 const olderControllerGraceEndsIn = "0.1.17"
 
 // olderControllerGraceEntries are the functions that give the grace.
-var olderControllerGraceEntries = []string{"connectController", "openController", "connectControllerConn"}
+var olderControllerGraceEntries = []string{"connectController", "openController"}
 
 // olderControllerGraceCallers are the functions that still use the grace
 // (they call or pass one of olderControllerGraceEntries); automation (the agent
@@ -98,7 +98,6 @@ var olderControllerGraceCallers = []string{
 	"desktopGateway.trustedLogin", "desktopLaunch", "desktopLocal.Connect", "desktopLocal.Release",
 	"desktopLocal.ReleaseOwnedIdle", "desktopLocal.ReleaseUnused", "desktopLocal.Status",
 	"desktopLocal.handoffOldLocal", "desktopLocal.releaseFailedLaunch", "exportDiagnostics", "waitControllerReady",
-	"connectControllerConn",
 }
 
 // connectController serves the window and its helpers. Until the next
@@ -132,14 +131,6 @@ func connectControllerOrOlder(profile string, older bool) (*controllerClient, er
 
 func openControllerConn(profile string) (controlclient.Conn, error) {
 	c, err := openController(profile)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
-
-func connectControllerConn(profile string) (controlclient.Conn, error) {
-	c, err := connectController(profile)
 	if err != nil {
 		return nil, err
 	}
