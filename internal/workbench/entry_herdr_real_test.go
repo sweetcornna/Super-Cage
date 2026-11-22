@@ -54,6 +54,10 @@ func TestEntryHerdrRealCores(t *testing.T) {
 
 	// The owner adds the environment with the command the page prints.
 	calls := len(testSSHCalls())
+	t.Cleanup(func() {
+		all := testSSHCalls()
+		t.Logf("ssh calls through the shim: %q", all[min(calls, len(all)):])
+	})
 	before := entryHeapKB()
 	out, code := h.shell(view.Herdr.Command)
 	if code != 0 || !strings.Contains(out, "\"name\":\"cage-default\"") {
