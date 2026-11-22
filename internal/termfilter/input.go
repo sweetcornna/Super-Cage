@@ -23,6 +23,14 @@ const (
 	// InputMotion is a mouse report of the pointer moving with no button
 	// pressed: the owner did not act, the pointer only passed over.
 	InputMotion
+	// InputPaste is text inside a bracketed paste, its end marker included
+	// (InputReader only): typed, whatever it holds.
+	InputPaste
+	// InputFragment is the start of an escape sequence an InputReader gave
+	// up waiting for the rest of, and the rest when it comes: passed on as
+	// typed, but never a sign the owner is at the window, since an answer
+	// cut by a read looks the same.
+	InputFragment
 )
 
 // Reply names the query an answer is for.

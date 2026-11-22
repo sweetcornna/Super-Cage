@@ -617,11 +617,15 @@ func (l *Link) writeGuest(data []byte) error {
 // attach applies to its window: Herdr's viewer reports focus with FOCUS
 // frames, and the last one decides; a pane that never reported focus counts
 // as the owner's for Window after a key or mouse press typed into it.
-// Terminal replies (and focus reports) do not count as typing.
+// Terminal replies (and focus reports) do not count as typing. Input is
+// read as ssh and attach windows read theirs (termfilter.InputReader): a
+// reply cut across DATA frames is still a reply.
 type Presence struct {
 	window    time.Duration
 	focus     atomic.Int32 // 0 never reported, 1 in, 2 out
 	lastInput atomic.Int64
+	// input is the owner-side pump's alone.
+	input termfilter.InputReader
 }
 
 // Focus records a FOCUS frame.
@@ -633,18 +637,15 @@ func (p *Presence) Focus(in bool) {
 	}
 }
 
-// Input records what the owner's pane sent as DATA.
+// Input records what the owner's pane sent as DATA. A sequence cut at the
+// end of a frame waits for the next; one that never completes never counts.
 func (p *Presence) Input(data []byte) {
-	for i := 0; i < len(data); {
-		n, kind, _ := termfilter.NextInput(data[i:])
-		if n <= 0 {
-			break
-		}
-		i += n
-		if kind == termfilter.InputKey || kind == termfilter.InputMouse {
-			p.lastInput.Store(time.Now().UnixNano())
-			return
-		}
+	typed := false
+	p.input.Read(data, func(_ []byte, kind termfilter.InputKind, _ termfilter.Reply) {
+		typed = typed || kind == termfilter.InputKey || kind == termfilter.InputMouse || kind == termfilter.InputPaste
+	})
+	if typed {
+		p.lastInput.Store(time.Now().UnixNano())
 	}
 }
 

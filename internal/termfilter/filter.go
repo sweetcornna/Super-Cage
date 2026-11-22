@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 	"unicode/utf8"
 )
 
@@ -97,6 +98,39 @@ type Filter struct {
 	resets  int            // full and soft resets passed to the application
 	dropped map[string]int // what was dropped, by kind
 	left    leftState      // what the guest changed that End undoes
+
+	clock      func() time.Time // time.Now; tests set it
+	queryStart time.Time        // the second queries are counted in
+	queries    int              // answered queries passed in it
+	overRate   bool             // the string being decided asked past the rate
+}
+
+// queryRate bounds the answered queries that pass in one second. Programs
+// ask a few at a time (the corpus at most a handful in a session); a flood
+// would only come back as answers cut by the reads of the window's input.
+// Cage's web terminal still answers the ones dropped: OnQuery hears them.
+const queryRate = 64
+
+// overRate names the drop of a query past queryRate.
+const overRate = "query over the rate"
+
+// spendQueries takes n answered queries from this second's queryRate, if
+// there are that many left.
+func (f *Filter) spendQueries(n int) bool {
+	clock := f.clock
+	if clock == nil {
+		clock = time.Now
+	}
+	now := clock()
+	if now.Sub(f.queryStart) >= time.Second || now.Before(f.queryStart) {
+		f.queryStart, f.queries = now, 0
+	}
+	if f.queries+n > queryRate {
+		f.overRate = true
+		return false
+	}
+	f.queries += n
+	return true
 }
 
 // leftState is what the guest changed in the application, beyond what the
@@ -449,13 +483,17 @@ func (f *Filter) csi(dst []byte, b byte) []byte {
 			return dst
 		}
 		f.st = stGround
-		if f.opts.OnQuery != nil {
-			if kind := csiQuery(f.hold[2:f.n-1], b); kind != ReplyNone {
-				f.opts.OnQuery(kind)
-			}
+		query := csiQuery(f.hold[2:f.n-1], b)
+		if f.opts.OnQuery != nil && query != ReplyNone {
+			f.opts.OnQuery(query)
 		}
 		if f.allowCSI(f.hold[2:f.n-1], b) {
-			return f.emitHold(dst)
+			if query == ReplyNone || f.spendQueries(1) {
+				return f.emitHold(dst)
+			}
+			f.count(overRate)
+			f.n, f.overRate = 0, false
+			return dst
 		}
 		if f.n > 0 {
 			f.count(csiName(f.hold[2:f.n-1], b))
@@ -572,7 +610,12 @@ func (f *Filter) endString(dst []byte, from state, term []byte) []byte {
 		dst = f.emitHold(dst)
 		return append(dst, term...)
 	}
-	f.count(f.refusedName())
+	if f.overRate {
+		f.count(overRate)
+	} else {
+		f.count(f.refusedName())
+	}
+	f.overRate = false
 	f.n = 0
 	return dst
 }
@@ -724,7 +767,7 @@ func (f *Filter) decide(_ bool) bool {
 		}
 		switch string(f.body()[2:]) {
 		case "m", "r", " q", "\"q", "\"p":
-			return true
+			return f.spendQueries(1)
 		}
 		return false
 	case kindOSC:
@@ -794,7 +837,7 @@ func (f *Filter) decideOSC() bool {
 			return false
 		}
 		query := contains(text, '?')
-		if f.replay && query {
+		if query && (f.replay || !f.spendQueries(count(text, '?'))) {
 			return false
 		}
 		if !query || string(body[:semi]) == "4" && setsColour(text) {

@@ -337,3 +337,22 @@ func TestAppleScriptErrorsInTheOwnersWords(t *testing.T) {
 		}
 	}
 }
+
+// Settings that cannot be read are not taken as permission: clipboard writes
+// are off, the rest is the defaults. A missing file is the defaults.
+func TestUnreadableSettingsTurnClipboardWritesOff(t *testing.T) {
+	for name, write := range map[string]func(path string) error{
+		"corrupt":    func(path string) error { return os.WriteFile(path, []byte("{\"clipboard_write\":"), 0o600) },
+		"too large":  func(path string) error { return os.WriteFile(path, make([]byte, 65<<10), 0o600) },
+		"not a file": func(path string) error { return os.Mkdir(path, 0o700) },
+	} {
+		dir := t.TempDir()
+		if err := write(filepath.Join(dir, SettingsFile)); err != nil {
+			t.Fatal(err)
+		}
+		settings, err := LoadSettings(dir)
+		if err == nil || settings.ClipboardWrite || !settings.ImageUpload || settings != UnreadableSettings() {
+			t.Errorf("%s: %+v, %v", name, settings, err)
+		}
+	}
+}

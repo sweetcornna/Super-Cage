@@ -367,6 +367,14 @@ func TestClipboardWritesFollowTheOwnersPane(t *testing.T) {
 		{"focus left", func(r *rig) { r.owner(Frame(3, KindFocus, []byte{1})); r.owner(Frame(3, KindFocus, []byte{0})) }, false},
 		{"typed, no focus reports", func(r *rig) { r.owner(Frame(3, KindData, []byte("ls\r"))) }, true},
 		{"only a terminal reply", func(r *rig) { r.owner(Frame(3, KindData, []byte("\x1b[12;40R"))) }, false},
+		{"a reply cut across frames", func(r *rig) {
+			r.owner(Frame(3, KindData, []byte("\x1b[12;")))
+			r.owner(Frame(3, KindData, []byte("40R")))
+		}, false},
+		{"a key after a cut reply", func(r *rig) {
+			r.owner(Frame(3, KindData, []byte("\x1b[12;")))
+			r.owner(Frame(3, KindData, []byte("40Rls\r")))
+		}, true},
 		{"only a focus report", func(r *rig) { r.owner(Frame(3, KindData, []byte("\x1b[I"))) }, false},
 		{"automatic input", func(r *rig) { r.owner(Frame(3, KindAutomaticInput, []byte("a"))) }, false},
 		{"nothing", func(*rig) {}, false},

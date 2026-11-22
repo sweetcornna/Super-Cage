@@ -161,13 +161,10 @@ func (s *Server) entryHerdrLink(ctx context.Context, conn *entryConn, channel ss
 		_, _ = io.WriteString(channel.Stderr(), "Super Cage："+err.Error()+"\n")
 		return
 	}
-	settings := localterm.DefaultSettings()
+	// An unreadable choice allows no clipboard write, as for ssh terminals.
+	settings := localterm.UnreadableSettings()
 	if paths, err := s.entryPaths(); err == nil {
-		var loaded error
-		if settings, loaded = localterm.LoadSettings(paths.ComputerDir); loaded != nil {
-			// An unreadable choice allows nothing.
-			settings.ClipboardWrite = false
-		}
+		settings, _ = localterm.LoadSettings(paths.ComputerDir)
 	}
 	hopCtx, stopHop := context.WithCancel(ctx)
 	defer stopHop()
