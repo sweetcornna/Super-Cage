@@ -347,6 +347,14 @@ func (record *mobileRecord) summary() mobileSummary {
 	}
 	return view
 }
+
+// carryReaches: the carried messages of a completed handoff still have the
+// conversation they continue: the target's, or the one a /clear in it began.
+func (record *mobileRecord) carryReaches() bool {
+	sw := record.Switch
+	return sw != nil && (record.CLIID == sw.TargetID || record.clearedPart(sw.TargetID) != nil)
+}
+
 func (record *mobileRecord) snapshot() mobileSession {
 	view := record.mobileSession
 	view.AccountID = record.Account.ID
@@ -356,8 +364,16 @@ func (record *mobileRecord) snapshot() mobileSession {
 	}
 	if sw := record.Switch; sw != nil {
 		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error, SourceLabel: sw.SourceLabel, Reason: sw.Reason, ResetsAt: sw.ResetsAt, Automatic: sw.Automatic, At: sw.At}
+		var left []string
 		for _, message := range sw.Carry {
-			view.AccountSwitch.carry = view.AccountSwitch.carry || sw.Phase == "completed" && !message.Delivered
+			if sw.Phase == "completed" && !message.Delivered {
+				view.AccountSwitch.carry = view.AccountSwitch.carry || record.carryReaches()
+				left = append(left, "「"+message.Text+"」")
+			}
+		}
+		if len(left) > 0 && !record.carryReaches() {
+			view.AccountSwitch.carry = false
+			view.ConnectionNotice = strings.TrimSpace(view.ConnectionNotice + "\n账号交接时未送达的消息：" + strings.Join(left, "、") + "。这段会话已换成另一段对话，消息没有发出：需要时请重新发送。")
 		}
 	}
 	if !record.Terminal {

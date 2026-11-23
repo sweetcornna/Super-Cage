@@ -643,10 +643,11 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		if force {
 			sw.Note = claudeInterruptedNote(record)
 		}
-		// Messages an earlier handoff still holds (after an undo they wait
-		// for the account's reset) go on with this one, and come back if it
-		// is dropped.
-		if earlier := record.Switch; earlier != nil && earlier.Phase == "completed" && slices.ContainsFunc(earlier.Carry, func(m claudeCarried) bool { return !m.Delivered }) {
+		// Messages an earlier handoff still holds for this conversation
+		// (after an undo they wait for the account's reset) go on with this
+		// one, and come back if it is dropped. Ones already reported as not
+		// sent (the conversation changed) are not sent behind the person.
+		if earlier := record.Switch; earlier != nil && earlier.Phase == "completed" && record.carryReaches() && slices.ContainsFunc(earlier.Carry, func(m claudeCarried) bool { return !m.Delivered }) {
 			earlier.Earlier = nil
 			sw.Earlier = earlier
 		}
@@ -1122,8 +1123,11 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 	s.mobileCLI.mu.Lock()
 	record, err := s.mobileCLI.record(s.profile, id)
 	s.mobileCLI.mu.Unlock()
-	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || record.CLIID != record.Switch.TargetID || time.Now().Unix() < record.HandoffWait {
-		return // after an undo the messages wait for the account's reset
+	// After a /clear in the target its entry follows the new id: the messages
+	// go there. Any other id change leaves them to the person (snapshot).
+	// After an undo they wait for the account's reset.
+	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || !record.carryReaches() || time.Now().Unix() < record.HandoffWait {
+		return
 	}
 	for _, message := range record.Switch.Carry {
 		if message.Delivered {
