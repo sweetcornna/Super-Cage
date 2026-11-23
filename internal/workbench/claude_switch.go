@@ -988,7 +988,9 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 	s.mobileCLI.mu.Lock()
 	record, err := s.mobileCLI.record(s.profile, id)
 	s.mobileCLI.mu.Unlock()
-	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || record.CLIID != record.Switch.TargetID {
+	// After a /clear in the target its entry follows the new id: the messages
+	// go there. Any other id change leaves them to the person (snapshot).
+	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || !record.carryReaches() {
 		return
 	}
 	for _, message := range record.Switch.Carry {
@@ -999,6 +1001,9 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 			return
 		}
 		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+			if record.Switch == nil {
+				return nil
+			}
 			for i := range record.Switch.Carry {
 				if record.Switch.Carry[i].ID == message.ID {
 					record.Switch.Carry[i].Delivered = true
