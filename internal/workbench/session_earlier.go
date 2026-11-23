@@ -212,6 +212,12 @@ func (s *Server) terminalAccountProblem(record *mobileRecord) string {
 }
 
 func (s *Server) separateEarlier(id, cliID, title string) (mobileSummary, error) {
+	s.claudeAccounts.mu.Lock()
+	accounts, err := s.loadClaudeAccounts()
+	s.claudeAccounts.mu.Unlock()
+	if err != nil {
+		return mobileSummary{}, err
+	}
 	m := &s.mobileCLI
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -226,7 +232,13 @@ func (s *Server) separateEarlier(id, cliID, title string) (mobileSummary, error)
 	execution := record.Executions[index]
 	separate := &mobileRecord{mobileSession: mobileSession{mobileSummary: mobileSummary{ID: uuid.NewString(), Workspace: record.Workspace, Title: title, UpdatedAt: time.Now().UTC()}, Turns: []mobileTurn{}},
 		CLIID: cliID, Terminal: true, Resume: true, Account: execution.Account, GuestConfig: execution.Config, Launcher: record.Launcher, GuestWorkspace: record.GuestWorkspace}
-	separate.AccountID, separate.AccountLabel = record.AccountID, record.AccountLabel
+	// The part's own account: a handoff since may have moved the entry.
+	separate.AccountID = execution.Account.ID
+	if account := accounts.find(execution.Account.ID); account != nil {
+		separate.AccountLabel = account.Label
+	} else if execution.Account.ID == record.Account.ID {
+		separate.AccountLabel = record.AccountLabel
+	}
 	separate.Generation = m.epochLocked()
 	separate.changed()
 	if err := writePrivate(mobileRecordPath(s.profile, separate.ID), separate); err != nil {
