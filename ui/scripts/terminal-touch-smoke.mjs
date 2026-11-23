@@ -11,7 +11,8 @@ const { chromium } = require(process.env.CAGE_PLAYWRIGHT_MODULE || "playwright")
 // without the mouse (less), and wheel reports to one that reads the mouse
 // (Codex); a tap still focuses. Its first read answers only the queries the
 // server did not mark answered, a reset read applies the modes in its state,
-// and the phone sends its size again each time it is shown.
+// and the phone sends its size again each time it is shown and when its
+// user types.
 // Desktop (1440x900): the wheel does the same three things; a finger drag
 // works there too; a reset replay applies the state of its history marker
 // and answers only the unanswered queries; a view mounted hidden opens its
@@ -168,6 +169,16 @@ async function phone() {
     await page.evaluate(() => window.showTestTerminal({ phone: true, visible: true }));
     await until(() => resizes.length > sized, "the phone did not send its size when shown again");
     assert.deepEqual(resizes.at(-1), resizes[0]);
+    // Typing on the phone takes the size back, as the computer does when
+    // its user types there; at most once every five seconds.
+    await sleep(5200);
+    const typedSized = resizes.length;
+    await page.locator(".xterm-helper-textarea").focus();
+    await page.keyboard.type("x");
+    await until(() => resizes.length > typedSized, "typing on the phone did not send its size");
+    await page.keyboard.type("y");
+    await sleep(400);
+    assert.equal(resizes.length, typedSized + 1, "at most one size every five seconds");
     assert.deepEqual(errors, []);
   } finally {
     await context.close();
@@ -266,7 +277,7 @@ async function desktop() {
 try {
   await phone();
   await desktop();
-  console.log("PASS: a finger drag scrolls the phone terminal in the normal screen, sends arrows in a full-screen program and wheel reports to one that reads the mouse; the desktop wheel does the same; replays apply their modes and leave answered queries unanswered; the phone re-sends its size when shown; a hidden desktop view connects when shown");
+  console.log("PASS: a finger drag scrolls the phone terminal in the normal screen, sends arrows in a full-screen program and wheel reports to one that reads the mouse; the desktop wheel does the same; replays apply their modes and leave answered queries unanswered; the phone re-sends its size when shown and when its user types; a hidden desktop view connects when shown");
 } finally {
   await browser.close();
 }

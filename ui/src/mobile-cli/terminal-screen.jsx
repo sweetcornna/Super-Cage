@@ -35,6 +35,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
   const ctrl = useRef(false);
   const lastSize = useRef("");
   const resend = useRef(null);
+  const claim = useRef(null);
   const writer = useRef(null);
   const [ctrlOn, setCtrlOn] = useState(false);
   const [state, setState] = useState({ connecting: true, closed: false, exit: null, error: "" });
@@ -88,25 +89,45 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     const binary = t.onBinary((value) => send(value));
     const theme = () => { t.options.theme = darkQuery.matches ? dark : light; };
     darkQuery.addEventListener("change", theme);
-    let timer;
+    let timer, sizedAt = 0;
+    const sendSize = () => {
+      clearTimeout(timer);
+      if (t.cols < 2 || t.rows < 2) return;
+      lastSize.current = t.cols + "x" + t.rows;
+      sizedAt = Date.now();
+      terminals.resize(id, t.cols, t.rows).catch(() => {});
+    };
     const resize = () => {
       try { f.fit(); } catch { return; }
       const size = t.cols + "x" + t.rows;
       if (size === lastSize.current || t.cols < 2 || t.rows < 2) return;
       clearTimeout(timer);
-      timer = setTimeout(() => { lastSize.current = size; terminals.resize(id, t.cols, t.rows).catch(() => {}); }, 250);
+      timer = setTimeout(sendSize, 250);
     };
     // The terminal's size is the last viewer's that set it: a computer
     // showing it meanwhile may have changed it. Shown again or reconnected,
     // the phone sends its size even when it did not change.
     resend.current = () => { lastSize.current = ""; resize(); };
+    // Typing on the phone makes its size the terminal's again, as typing on
+    // the computer does there (the viewer that typed last decides the size).
+    // At most every five seconds; a size the terminal has changes nothing.
+    claim.current = () => {
+      if (Date.now() - sizedAt < 5000) return;
+      try { f.fit(); } catch { return; }
+      sendSize();
+    };
+    const typing = host.current;
+    typing.addEventListener("keydown", claim.current, true);
+    typing.addEventListener("input", claim.current, true);
     const observer = new ResizeObserver(resize);
     observer.observe(host.current);
     window.visualViewport?.addEventListener("resize", resize);
     requestAnimationFrame(resize);
     return () => {
       alive.current = false; clearTimeout(timer); observer.disconnect();
-      resend.current = null; stopTouch(); writer.current.dispose(); writer.current = null;
+      typing.removeEventListener("keydown", claim.current, true);
+      typing.removeEventListener("input", claim.current, true);
+      resend.current = claim.current = null; stopTouch(); writer.current.dispose(); writer.current = null;
       window.visualViewport?.removeEventListener("resize", resize);
       darkQuery.removeEventListener("change", theme);
       data.dispose(); binary.dispose(); t.dispose();
@@ -189,7 +210,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     {!state.closed && <div className="key-bar" role="toolbar" aria-label="快捷按键" onPointerDown={(e) => e.preventDefault()}>
       {keys.map(([label, action]) => <button key={label} type="button" aria-pressed={label === "Ctrl" ? ctrlOn : undefined}
         className={label === "Ctrl" && ctrlOn ? "on" : undefined}
-        onClick={() => { haptic("light"); if (action) action(); else { ctrl.current = !ctrl.current; setCtrlOn(ctrl.current); } term.current?.focus(); }}>{label}</button>)}
+        onClick={() => { haptic("light"); claim.current?.(); if (action) action(); else { ctrl.current = !ctrl.current; setCtrlOn(ctrl.current); } term.current?.focus(); }}>{label}</button>)}
     </div>}
     {askClose && <Confirm title="关闭这个终端？" confirm="关闭终端" danger busy={closing} onCancel={() => setAskClose(false)} onConfirm={close}>
       终端里正在运行的程序会结束。</Confirm>}
