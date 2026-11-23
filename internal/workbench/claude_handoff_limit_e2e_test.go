@@ -421,7 +421,8 @@ func TestClaudeLimitHandoffEndToEnd(t *testing.T) {
 		}
 	}
 	resumed := h.lastBody("b", "stopped for this account change")
-	if resumed == "" || !strings.Contains(resumed, "Background commands and subagents it had started were stopped") {
+	// It says what was stopped, and no more: a detached command may live on.
+	if resumed == "" || !strings.Contains(resumed, "with the subagents and background commands it was running as its own processes") || !strings.Contains(resumed, "A command that detached itself may still be running") {
 		t.Fatal("the resume prompt does not say what was interrupted")
 	}
 	if left := h.running(marker); len(left) != 0 {
