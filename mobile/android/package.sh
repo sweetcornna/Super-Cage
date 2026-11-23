@@ -24,7 +24,7 @@ case "${1:-}" in
     [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'Invalid application VERSION.' >&2; exit 2; }
     manifest_args+=(--replace-version --version-name "$version" --version-code "$CAGE_ANDROID_VERSION_CODE")
     signing_args=(--ks "$CAGE_ANDROID_KEYSTORE" --ks-key-alias "$CAGE_ANDROID_KEY_ALIAS" --ks-pass "file:$CAGE_ANDROID_PASSWORD_FILE")
-    out="$build/Cage-$version-android-arm64.apk"
+    out="$build/Super-Cage-$version-android-arm64.apk"
     ;;
   *) echo 'Usage: mobile/android/package.sh [--release]' >&2; exit 2 ;;
 esac

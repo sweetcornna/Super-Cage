@@ -2,7 +2,7 @@
 
 Super Cage 手机端是远程客户端。点首页中央的「连接电脑」，用二维码或配对码连接主机，即可查看项目、接续 Claude Code 会话和处理工具审批。配对后还可在手机上操作主机里的浏览器和 Claude Desktop。代理、时区和语言在远程主机的 Super Cage 中设置。右上角的设置提供主题和电脑连接选项。
 
-Android arm64 APK 可从[官网下载入口](https://claude-cage.com/#download)获取，支持 Android 8.0+。iOS 17+ 版本通过 TestFlight 内部测试分发（App「Cage Tenant」，套装 ID `io.github.sweetcornna.claude-cage.tenant.mobile`），也可以用 Xcode 在本地构建并签名安装。
+Android arm64 APK 在 [GitHub 发布页](https://github.com/sweetcornna/Super-Cage/releases/latest)下载（`Super-Cage-<版本>-android-arm64.apk`），支持 Android 8.0+。iOS 17+ 版本通过 TestFlight 内部测试分发（App「Cage Tenant」，套装 ID `io.github.sweetcornna.claude-cage.tenant.mobile`），也可以用 Xcode 在本地构建并签名安装。
 
 ## 示例工作台
 
@@ -31,7 +31,7 @@ CAGE_PLAYWRIGHT_MODULE=<playwright 模块路径> CAGE_TEST_BROWSER_PATH=<Chrome 
 
 打开 Super Cage 或切回前台时，手机每隔至少 12 小时自动检查一次更新，也可以随时在「设置 → 应用更新 → 检查更新」手动检查。正式版只提示更新到更高的正式版，预发行版也会提示更新到更高的预发行版。
 
-发现新版后点「下载更新」。手机校验安装包后会打开系统安装界面。首次更新时，按提示允许 Super Cage 安装来自此来源的应用，返回后点「更新」。覆盖安装会保留主题、设备身份和电脑配对记录。旧版设置里没有「检查更新」时，先从官网下载新版 APK 并覆盖安装一次。
+发现新版后点「下载更新」。手机校验安装包后会打开系统安装界面。首次更新时，按提示允许 Super Cage 安装来自此来源的应用，返回后点「更新」。覆盖安装会保留主题、设备身份和电脑配对记录。也可以从发布页下载新版 APK 覆盖安装；自行构建的 APK 签名不同，需先卸载再安装发布页的版本。
 
 ## iOS 本地构建
 
@@ -70,7 +70,7 @@ export CAGE_ANDROID_VERSION_CODE=2
 bash mobile/build.sh android-release
 ```
 
-发行 APK 的 versionName 读取根目录 `VERSION`，输出为 `mobile/.build/android/Cage-<版本>-android-arm64.apk`。签名和 16 KiB 对齐检查通过后才写入最终文件。发布时附带 SHA-256，并核对签名证书指纹、应用版本、安装与覆盖更新行为。
+发行 APK 的 versionName 读取根目录 `VERSION`，输出为 `mobile/.build/android/Super-Cage-<版本>-android-arm64.apk`。签名和 16 KiB 对齐检查通过后才写入最终文件。发布时附带 SHA-256，并核对签名证书指纹、应用版本、安装与覆盖更新行为。
 
 ## 扫码连接电脑
 

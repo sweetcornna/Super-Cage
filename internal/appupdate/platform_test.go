@@ -12,7 +12,7 @@ func TestPlatformReleaseNeverInstallsAnotherPlatform(t *testing.T) {
 	windowsAsset.Name = "Super-Cage-0.2.0-windows-amd64-setup.exe"
 	windowsAsset.URL = "https://github.com/" + repository + "/releases/download/v0.2.0/" + windowsAsset.Name
 	androidAsset := r.Assets[0]
-	androidAsset.Name = "Cage-0.2.0-android-arm64.apk" // Android packages still use the legacy name
+	androidAsset.Name = "Cage-0.2.0-android-arm64.apk" // the name used before the rename stays accepted
 	androidAsset.URL = "https://github.com/" + repository + "/releases/download/v0.2.0/" + androidAsset.Name
 	r.Assets = append(r.Assets, windowsAsset, androidAsset)
 	for _, tc := range []struct{ os, arch, name string }{
