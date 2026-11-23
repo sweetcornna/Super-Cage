@@ -96,6 +96,8 @@ jobs:
           cache-dependency-path: |
             go.sum
             tools/tailnet/go.sum
+      # ui/scripts/prepare-vnc.mjs patches noVNC with "uv run python".
+      - uses: astral-sh/setup-uv@v10.3.3
       # The workbench UI and the guest payloads are embedded in the binary.
       - name: Build cage and cage-attach for Linux
         run: make cage
@@ -124,6 +126,8 @@ jobs:
           cache-dependency-path: |
             go.sum
             tools/tailnet/go.sum
+      # ui/scripts/prepare-vnc.mjs patches noVNC with "uv run python".
+      - uses: astral-sh/setup-uv@v10.3.3
       - run: make cage-ui assets tailnet-assets
       - run: make test-fast
 

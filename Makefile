@@ -135,7 +135,7 @@ test-go:
 # 100-460 s; run them with make test-go on a machine that has all of that.
 # Needs the generated embeds first (make cage-ui assets tailnet-assets).
 test-fast:
-	$(GO) test -tags $(TAGS) $$($(GO) list -tags $(TAGS) ./cmd/... ./internal/... | grep -v -E '/internal/(cage|workbench)$$')
+	pkgs=$$($(GO) list -tags $(TAGS) ./cmd/... ./internal/... | grep -v -E '/internal/(cage|workbench)$$') && test -n "$$pkgs" && $(GO) test -tags $(TAGS) $$pkgs
 
 # The Windows build and its tests compile and vet, from any OS. The Windows
 # paths' logic is tested everywhere (paths.Windows); the tests themselves
