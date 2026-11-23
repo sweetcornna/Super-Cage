@@ -2,17 +2,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 if [[ "$(uname -s)" != Darwin ]]; then echo 'Super Cage.app must be built on macOS.' >&2; exit 1; fi
-case "${1:-}" in ''|--install|--macos-trial|--install-macos-trial|--intel-macos-test) ;; *) echo 'Usage: scripts/build-app.sh [--install|--macos-trial|--install-macos-trial|--intel-macos-test]' >&2; exit 2 ;; esac
+case "${1:-}" in ''|--install|--macos-trial|--install-macos-trial) ;; *) echo 'Usage: scripts/build-app.sh [--install|--macos-trial|--install-macos-trial]' >&2; exit 2 ;; esac
 bundle_id=io.github.lee-xeo.claude-cage
 app_name='Super Cage'
 if [[ "${1:-}" == *macos-trial ]]; then
   bundle_id+=.macos-trial
   app_name='Super Cage macOS'
-fi
-if [[ "${1:-}" == --intel-macos-test ]]; then
-  [[ $(uname -m) == x86_64 ]] || { echo 'Intel test packages require an Intel Mac.' >&2; exit 2; }
-  bundle_id+=.intel-macos-test
-  app_name='Super Cage Intel'
 fi
 installed_app="$HOME/Applications/$app_name.app"
 app_destination="${CAGE_BUILD_OUTPUT:-$PWD/_output/$app_name.app}"
@@ -66,9 +61,6 @@ swiftc -O -target "$(uname -m)-apple-macosx14.0" -parse-as-library -framework Co
 cp _output/bin/cage "$bundle/Contents/Resources/cage"
 cp _output/bin/cage-attach "$bundle/Contents/Resources/cage-attach"
 "$bundle/Contents/Resources/cage" verify-macos-guest
-if [[ "$(uname -m)" == x86_64 ]]; then
-  bash scripts/build-intel-macos-runtime.sh "$bundle/Contents/Resources/intel-macos"
-fi
 if [[ "$(uname -m)" == arm64 || "$(uname -m)" == x86_64 ]]; then
   bash scripts/guest-os/package-macos-guest.sh "$bundle/Contents/Resources/guest-os"
   if [[ -d "$bundle/Contents/Resources/guest-os/licenses/sshfs" ]]; then
@@ -162,7 +154,7 @@ if [[ "${1:-}" == --install* ]]; then
     --root "$bundle" --root "$PWD/_output" --root "$HOME/Applications" \
     --root /Applications --root "$HOME/.claude-cage-validation"
 else
-  if [[ -z "${CAGE_BUILD_OUTPUT:-}" && "${1:-}" != --macos-trial && "${1:-}" != --intel-macos-test ]]; then
+  if [[ -z "${CAGE_BUILD_OUTPUT:-}" && "${1:-}" != --macos-trial ]]; then
     node scripts/cleanup-apps.mjs --keep "$bundle" --root "$PWD/_output"
   fi
 fi

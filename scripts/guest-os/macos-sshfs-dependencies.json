@@ -40,17 +40,5 @@
     "formulaSha256": "94c19a0d869da4990a8f3f371e37c986ad72124d2d94032e061c4a9019f9e174",
     "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.49/pcre2-10.49.tar.bz2",
     "sha256": "53c156e1ba416a20da8e65395daa132da0d80e76910424caca3fcdae7831d384"
-  },
-  "intel": {
-    "glib": {
-      "version": "2.88.3",
-      "url": "https://download.gnome.org/sources/glib/2.88/glib-2.88.3.tar.xz",
-      "sha256": "ab24d24e698dfa1e408b7bcdb508f4aafc906185a8b8ce72fdf79bbbdc9b383b"
-    },
-    "pcre2": {
-      "version": "10.47",
-      "url": "https://github.com/PCRE2Project/pcre2/releases/download/pcre2-10.47/pcre2-10.47.tar.bz2",
-      "sha256": "47fe8c99461250d42f89e6e8fdaeba9da057855d06eb7fc08d9ca03fd08d7bc7"
-    }
   }
 }
