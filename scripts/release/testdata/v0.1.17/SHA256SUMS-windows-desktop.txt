@@ -1,0 +1,7 @@
+c728749b322c379d2ca8b2f9d99e11d0a711ccc2da9dd4d5e3495bb5a06e270d  Super-Cage-0.1.17-windows-amd64-setup-unsigned.exe
+e7c596b37ff27ec487d19b1920f73e0c97a78067ea35766530ee9659ade72711  mihomo-v1.19.33-source.tar.gz
+3f25dd37b9a52ba8ae327c00c4a7f1d94df841c5ebe10682de5e0b491a128321  qemu-11.1.0-cage-changes-source.tar.gz
+bc51ea4a7670fafb66de0396ae20a11a70c6273a1995c9d9985dc39969c8ea97  qemu-11.1.0-windows-full-source.tar.gz
+095bf9e1569ac8e103a932594d99174e1c7bcfd71a135b6a5860c3ceeff57112  qemu-e470268ff446ec56728215a987ed166d5ed8fb64-source.tar.gz
+d014b53382dbb17b8196ad12f50de7f20d0ef1b9f7d54b0be51a6cbb14209195  qemu-keycodemapdb-f5772a62ec52591ff6870b7e8ef32482371f22c6-source.tar.gz
+85aa7ba397f0a899b95238a4032d08e2514849ea1d80500179b917df40f14f5b  windows-desktop-build-metadata.json
