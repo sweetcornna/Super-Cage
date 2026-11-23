@@ -14,6 +14,7 @@ import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink 
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { attachTouchScroll } from "./terminal-touch-scroll.mjs";
+import { answeredBytes, quietReplayAnswers } from "./terminal-replay-answers.mjs";
 import { api, writeClipboard, nativeAvailable } from "./api";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareClipboardPaste, sendImage } from "./image-transfer";
@@ -434,7 +435,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     let hiddenSince = visibleRef.current ? 0 : Date.now(), suspended = false, suspendTimer = null;
     // Bytes still to come in the current replay, or one whole frame from a
     // server without offsets. Replayed output never writes the clipboard.
-    let replayRemaining = 0, replayFrame = false, replaying = 0;
+    // answeredRemaining: the replay's leading bytes a viewer was shown before;
+    // their queries were answered then (terminal-replay-answers.mjs).
+    let replayRemaining = 0, replayFrame = false, replaying = 0, answeredRemaining = 0;
+    const writeReplay = quietReplayAnswers(terminal);
     const clipboardHandler = terminal.parser.registerOscHandler(52, async (data) => {
       if (disposed || replaying > 0 || !visibleRef.current || !focusedRef.current || !box.current?.contains(document.activeElement)) return true;
       const text = terminalClipboardText(data);
@@ -467,9 +471,13 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         } else if (state.type === "history") {
           const plan = terminalHistoryPlan(stream.offset, state);
           if (plan.reset) terminal.reset();
+          // The modes the kept output was written in, when the server no
+          // longer keeps the output that set them.
+          if (plan.reset && typeof state.state === "string" && state.state) terminal.write(state.state);
           stream.offset = plan.offset;
           if (plan.resumable) stream.heartbeats = true;
           replayRemaining = plan.resumable ? plan.size : 0;
+          answeredRemaining = plan.resumable ? answeredBytes(plan.offset, plan.size, state.answered) : 0;
           replayFrame = !plan.resumable;
         } else if (state.type === "pong" || state.type === "heartbeat") stream.heartbeats = true;
         else if (state.type === "exit") ended = true;
@@ -482,8 +490,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       replayRemaining = Math.max(0, replayRemaining - data.byteLength);
       if (stream.offset !== null) stream.offset += data.byteLength;
       if (!replay) return void terminal.write(data);
+      const answered = Math.min(answeredRemaining, data.byteLength);
+      answeredRemaining -= answered;
       replaying++;
-      terminal.write(data, () => { replaying--; });
+      writeReplay(data, answered, () => { replaying--; });
     };
     // lost handles the end of the current stream once, whether it closed or
     // the watchdog gave up on it, and schedules the next attempt.
@@ -580,7 +590,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       ws = current;
       socket.current = current;
       openedAt = 0;
-      replayRemaining = 0;
+      replayRemaining = answeredRemaining = 0;
       replayFrame = false;
       // Each connection proves again that its server sends heartbeats.
       stream.heartbeats = false;
@@ -789,6 +799,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       revealStartup.current = null;
       startupRender.dispose();
       clipboardHandler.dispose();
+      writeReplay.dispose();
       stopTouch();
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("copy", onCopy, true);

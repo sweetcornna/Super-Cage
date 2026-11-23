@@ -13,6 +13,7 @@ import { Confirm } from "./sheet";
 import { kindInfo } from "./terminals";
 import { takeInput } from "../terminal-input-chunks.mjs";
 import { attachTouchScroll } from "../terminal-touch-scroll.mjs";
+import { answeredBytes, quietReplayAnswers } from "../terminal-replay-answers.mjs";
 
 const light = { background: "#faf9f5", foreground: "#1f1e1d", cursor: "#d97757", cursorAccent: "#faf9f5", selectionBackground: "#e9d3c6",
   black: "#1f1e1d", red: "#b3261e", green: "#2e7d4f", yellow: "#8a5a00", blue: "#2f5d8a", magenta: "#8c3f72", cyan: "#2c6e6e", white: "#d9d4c7",
@@ -33,6 +34,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
   const alive = useRef(true);
   const ctrl = useRef(false);
   const lastSize = useRef("");
+  const writer = useRef(null);
   const [ctrlOn, setCtrlOn] = useState(false);
   const [state, setState] = useState({ connecting: true, closed: false, exit: null, error: "" });
   const [fontSize, setFontSize] = useState(() => Math.min(20, Math.max(10, Number(localStorage.getItem("super-cage-terminal-font")) || 13)));
@@ -71,6 +73,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     term.current = t; fit.current = f;
     // A finger dragged over the terminal scrolls it as a wheel would.
     const stopTouch = attachTouchScroll(t, host.current);
+    writer.current = quietReplayAnswers(t);
     const data = t.onData((value) => {
       if (ctrl.current && value.length === 1) {
         const code = value.toUpperCase().charCodeAt(0);
@@ -96,7 +99,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     requestAnimationFrame(resize);
     return () => {
       alive.current = false; clearTimeout(timer); observer.disconnect();
-      stopTouch();
+      stopTouch(); writer.current.dispose(); writer.current = null;
       window.visualViewport?.removeEventListener("resize", resize);
       darkQuery.removeEventListener("change", theme);
       data.dispose(); binary.dispose(); t.dispose();
@@ -117,13 +120,23 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       let failures = 0;
       while (!controller.signal.aborted) {
         try {
-          const reply = await terminals.output(id, after.current, { signal: controller.signal });
+          const from = after.current;
+          const reply = await terminals.output(id, from, { signal: controller.signal });
           if (controller.signal.aborted) return;
           failures = 0;
           setState((s) => s.connecting || s.error ? { ...s, connecting: false, error: "" } : s);
           if (reply) {
             if (reply.reset) term.current?.reset();
-            if (reply.data) term.current?.write(base64ToBytes(reply.data));
+            // The modes the kept output was written in, when the server no
+            // longer keeps the output that set them.
+            if (reply.reset && typeof reply.state === "string" && reply.state) term.current?.write(reply.state);
+            if (reply.data) {
+              // A replay (this view's first read, or after a reset) may hold
+              // queries answered when they were first shown.
+              const bytes = base64ToBytes(reply.data);
+              const replay = reply.reset || from === 0;
+              writer.current?.(bytes, replay ? answeredBytes(reply.next - bytes.length, bytes.length, reply.answered) : 0);
+            }
             after.current = reply.next;
             if (reply.closed) { setState((s) => ({ ...s, closed: true, exit: reply.exit_code ?? null })); return; }
           }
