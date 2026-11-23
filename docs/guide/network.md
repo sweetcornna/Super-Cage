@@ -6,8 +6,8 @@ order: 2
 keywords: Clash Mihomo YAML VLESS REALITY ML-KEM SOCKS5 SSH 私钥 住宅 IP DNS DoH 暂停 断网 代理链 订阅
 ---
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/proxy-subscription.jpg" target="_blank" rel="noopener" aria-label="查看原图：添加订阅链接与首次主机下载选项"><img src="../../www/public/docs/screenshots/proxy-subscription.jpg" alt="添加订阅链接与首次主机下载选项" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>添加订阅链接与首次主机下载选项。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/proxy-subscription.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/proxy-subscription.jpg" target="_blank" rel="noopener" aria-label="查看原图：添加订阅链接与首次主机下载选项"><img src="images/proxy-subscription.jpg" alt="添加订阅链接与首次主机下载选项" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>添加订阅链接与首次主机下载选项。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/proxy-subscription.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 导入自己的代理
@@ -57,8 +57,8 @@ proxies:
 同一个订阅地址可能按请求的客户端身份返回不同格式。Super Cage 下载时使用 Clash 客户端身份，服务商返回 YAML 时可以导入；若返回 Base64 或分享链接列表，仍需向服务商获取 Clash/Mihomo YAML。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/proxy-manual.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动填写 HTTP / SOCKS5 节点"><img src="../../www/public/docs/screenshots/proxy-manual.jpg" alt="手动填写 HTTP / SOCKS5 节点" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>手动填写 HTTP / SOCKS5 节点。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/proxy-manual.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/proxy-manual.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动填写 HTTP / SOCKS5 节点"><img src="images/proxy-manual.jpg" alt="手动填写 HTTP / SOCKS5 节点" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>手动填写 HTTP / SOCKS5 节点。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/proxy-manual.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 通过本机代理客户端转发
@@ -88,8 +88,8 @@ Super Cage 仍通过受管核心转发客机出站，原客户端负责连接上
 应用前检查预览，例如：`Super Cage → 中转节点 → 住宅代理 → 目标网站`。目标网站看到的是最终出口。订阅更新不会覆盖已保存的组合；使用中的节点被移除时会保留原配置并显示错误，需要你重新选择。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/network-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：网络与代理页面及出口变化规则"><img src="../../www/public/docs/screenshots/network-settings.jpg" alt="网络与代理页面及出口变化规则" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>网络与代理页面及出口变化规则。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/network-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/network-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：网络与代理页面及出口变化规则"><img src="images/network-settings.jpg" alt="网络与代理页面及出口变化规则" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>网络与代理页面及出口变化规则。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/network-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 为什么应用了节点仍然离线
@@ -109,8 +109,8 @@ macOS 主机只从 `networksetup` 报告的硬件端口中选择具有可用 IPv
 离线时仍可使用终端、共享文件及环境内的本地服务。浏览器地址栏中的 `localhost` 指当前 Super Cage 客机；开发服务应在 Super Cage 终端里启动。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/region-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：跟随出口 IP 的时区与语言设置"><img src="../../www/public/docs/screenshots/region-settings.jpg" alt="跟随出口 IP 的时区与语言设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>跟随出口 IP 的时区与语言设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/region-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/region-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：跟随出口 IP 的时区与语言设置"><img src="images/region-settings.jpg" alt="跟随出口 IP 的时区与语言设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>跟随出口 IP 的时区与语言设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/region-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 系统镜像的下载网络

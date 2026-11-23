@@ -20,8 +20,8 @@ Windows ARM64 和 Linux ARM64 暂不支持。平台依赖详情见 [Windows 指�
 这里选择的是运行 Super Cage 的主机平台。虚拟机里的客机系统在首次创建环境时选择：Apple 芯片 Mac 可用 macOS 或 Debian；具备完整 Hyper-V 的 Windows 11 专业版、企业版和教育版可用 Windows 11 或 Debian；Linux 主机可选择与本机同发行版的系统或 Debian 13。具体组合见[选择客机系统](guest-systems.md)。Super Cage 的 macOS 14+ 运行要求与系统克隆条件分别判断；当前 Mac 克隆入口要求 macOS 26.4+。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/account-setup.jpg" target="_blank" rel="noopener" aria-label="查看原图：首次创建 Super Cage 账户"><img src="../../www/public/docs/screenshots/account-setup.jpg" alt="首次创建 Super Cage 账户" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>首次创建 Super Cage 账户。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/account-setup.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/account-setup.jpg" target="_blank" rel="noopener" aria-label="查看原图：首次创建 Super Cage 账户"><img src="images/account-setup.jpg" alt="首次创建 Super Cage 账户" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>首次创建 Super Cage 账户。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/account-setup.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 创建 Super Cage 账户
@@ -73,8 +73,8 @@ Claude Code 和 Claude Desktop 在实际下载安装时查询官方最新版本�
 下载时显示已接收字节、可取得的总量与采样速度；校验单独显示处理进度。系统恢复和工具安装没有可测总量时显示阶段。继续安装沿用原安装身份、系统选择和已创建磁盘。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/windows-native-download.png" target="_blank" rel="noopener" aria-label="查看原图：Windows 原生应用首次下载镜像的进度"><img src="../../www/public/docs/screenshots/windows-native-download.png" alt="Windows 原生应用首次下载镜像的进度" width="750" height="320" loading="lazy" decoding="async" /></a>
-  <figcaption>Windows 原生应用首次下载镜像的进度。截图版本：0.1.5-alpha.2（测试构建） · Windows 11 x64 原生应用 · 2026-11-06。<a href="../../www/public/docs/screenshots/windows-native-download.png" target="_blank" rel="noopener">查看原图（750 × 320） ↗</a></figcaption>
+  <a href="images/windows-native-download.png" target="_blank" rel="noopener" aria-label="查看原图：Windows 原生应用首次下载镜像的进度"><img src="images/windows-native-download.png" alt="Windows 原生应用首次下载镜像的进度" width="750" height="320" loading="lazy" decoding="async" /></a>
+  <figcaption>Windows 原生应用首次下载镜像的进度。截图版本：0.1.5-alpha.2（测试构建） · Windows 11 x64 原生应用 · 2026-11-06。<a href="images/windows-native-download.png" target="_blank" rel="noopener">查看原图（750 × 320） ↗</a></figcaption>
 </figure>
 
 ## 完成第一项工作

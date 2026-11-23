@@ -3,12 +3,12 @@ title: 让 Agent 配置 Super Cage
 description: 给外部 Agent 的完整入口：下载校验、安装、配置代理与客机、任务跟踪、故障定位和恢复。
 group: 开始使用
 order: 5
-keywords: Agent CLI JSON 自动化 配置 接口 安装 诊断 修复 capabilities doctor llms
+keywords: Agent CLI JSON 自动化 配置 接口 安装 诊断 修复 capabilities doctor
 ---
 
 你可以把下面这段话交给自己的 Agent，让它根据你的目标准备 Super Cage。你只需提供自己的代理来源、选择工作环境，并在操作系统要求时完成授权。Super Cage 账户密码、Claude 登录、许可证确认和项目共享范围由你决定。
 
-> 请阅读 https://claude-cage.com/agent.md ，协助我安装、配置并验证 Super Cage。先检查本机安装和接口能力，再按实际状态操作；完成后告诉我环境是否就绪、网络是否通过检查，以及还需要我完成什么。保留所有现有账户、项目和虚拟机数据。
+> 请阅读 https://github.com/sweetcornna/Super-Cage/blob/main/docs/guide/agent.md ，协助我安装、配置并验证 Super Cage。先检查本机安装和接口能力，再按实际状态操作；完成后告诉我环境是否就绪、网络是否通过检查，以及还需要我完成什么。保留所有现有账户、项目和虚拟机数据。
 
 本页是当前源码与开发构建的接口说明。公开 Release 可能尚未包含 `cage agent`。安装后必须先运行能力探测；遇到未知命令时，使用该版本的界面和发行说明，或安装用户授权的较新构建。不要仅凭版本字符串推断接口已存在。
 
@@ -22,29 +22,15 @@ keywords: Agent CLI JSON 自动化 配置 接口 安装 诊断 修复 capabiliti
 | Windows | `%LOCALAPPDATA%\Programs\Cage\resources\cage.exe`，自定义安装目录以实际位置为准 | `& "$env:LOCALAPPDATA\Programs\Cage\resources\cage.exe" agent capabilities` |
 | Linux | `/usr/bin/claude-cage` | `claude-cage agent capabilities` |
 
-`agent capabilities` 输出本构建的协议版本、操作清单、输入字段和退出码，不启动后台或创建配置。首次配置与每次升级后都先读取一次。机器阅读入口为 `/agent.md`、`/llms.txt`、`/llms-full.txt`，使用 Super Cage 的外部 Agent 从本页开始。
+`agent capabilities` 输出本构建的协议版本、操作清单、输入字段和退出码，不启动后台或创建配置。首次配置与每次升级后都先读取一次。使用 Super Cage 的外部 Agent 从本页开始。
 
 所有 `agent` 命令自动输出 JSON，`--json` 可省略。示例把 `cage` 作为占位命令；执行时替换为上表路径。`--config /absolute/path/config.json` 明确选择配置；省略时使用 `CLAUDE_CAGE_CONFIG`，再省略则使用用户主目录下的 `.claude-cage/config.json`。每次输出中的 `config_path` 是实际目标。桌面配置的远端选择不会改变这个目标；管理服务器时，也可通过下文的 desktop / selected 范围管理桌面连接，或在授权的 SSH 通道内运行服务器接口。
 
 ## 下载、校验与安装
 
-下载助手位于官网的 `/agent-bootstrap.mjs`，需要 Node.js 20 或更新版本，无额外依赖。可以先下载并检查脚本，再执行。它只发现 Release、下载和校验安装包；输出后续安装步骤与参数数组。Agent 按平台执行安装，系统权限提示由用户处理。
+从 [GitHub Releases](https://github.com/sweetcornna/Super-Cage/releases) 选择与平台对应的安装包，同时下载同一 Release 的 `SHA256SUMS`，核对安装包的 SHA-256 后再安装。附件不完整、校验项缺失或重复、校验不符时停止，不要换用其他来源。省略版本时取 latest Release，它可能不包含预发行版，也可能缺少某个平台的附件；需要固定版本时使用明确的发行标签。Windows 只有未签名预览包时，必须先由用户明确选择该预览。
 
-macOS/Linux 也可先获取 `/cage-install.sh` 再运行，参数与下载助手相同，需要 Node 和 curl。`/install.sh` 保留给上游 agent-vm 兼容流程，安装 Super Cage 时使用本节列出的专用入口。
-
-```sh
-curl --proto '=https' --proto-redir '=https' -fL \
-  https://claude-cage.com/agent-bootstrap.mjs -o agent-bootstrap.mjs
-node agent-bootstrap.mjs plan --platform darwin-arm64
-node agent-bootstrap.mjs download --platform darwin-arm64 \
-  --version v0.1.6-alpha-preview --destination /absolute/path/downloads
-```
-
-Windows 可用 PowerShell 下载脚本后执行 `node .\agent-bootstrap.mjs plan --platform win32-amd64`；Linux 的平台参数为 `linux-amd64`。省略平台时自动识别当前 Node 进程的平台和架构。指定 `--version` 会固定发行标签；省略时查询 GitHub 的 latest Release，它可能不包含预发行版，也可能缺少某个平台的附件。
-
-助手从同一标签读取安装包与 `SHA256SUMS`，拒绝不完整附件、重复校验项、HTTP 降级和校验不符。下载使用独立临时文件，成功后才生成目标文件；目标已存在时保留它并报错。失败后可以重新下载到新的目标目录。Windows 只有未签名预览包时，返回 `unsigned_package_requires_consent`；用户明确选择该预览后才添加 `--allow-unsigned`。
-
-下载使用主机网络，需能访问 GitHub API 与 Release 附件。Node 24 支持通过 `node --use-env-proxy agent-bootstrap.mjs ...` 使用用户明确配置的 `HTTPS_PROXY` / `HTTP_PROXY`；也可使用用户现有的主机 TUN。不要回显代理凭据。较旧 Node 的 fetch 不自动采用这些环境代理；连接失败时先排查主机下载网络，避免反复重建 Super Cage 配置。
+下载使用主机网络，需能访问 GitHub Release 附件。使用用户明确配置的 `HTTPS_PROXY` / `HTTP_PROXY` 或用户现有的主机 TUN；不要回显代理凭据。连接失败时先排查主机下载网络，避免反复重建 Super Cage 配置。
 
 | 平台 | 安装与验证 |
 | --- | --- |

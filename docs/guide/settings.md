@@ -28,8 +28,8 @@ keywords: 设置 账户 保险箱 记住登录 Touch ID 主题 外观 字体 无
 Claude Code 的多账号登录、备注、额度查询和调度在侧栏“Claude 账号管理”中操作，详见[多账号与额度](accounts.md)。分配选项影响新建 Claude 终端。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/account-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：账户资料、密码与登录解锁设置"><img src="../../www/public/docs/screenshots/account-settings.jpg" alt="账户资料、密码与登录解锁设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>账户资料、密码与登录解锁设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/account-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/account-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：账户资料、密码与登录解锁设置"><img src="images/account-settings.jpg" alt="账户资料、密码与登录解锁设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>账户资料、密码与登录解锁设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/account-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 关于与手动检测更新
@@ -63,8 +63,8 @@ Super Cage 账户用于解锁当前环境。在云端工作台修改的是服务
 “锁定 Super Cage”保留后台任务，“退出账户”会停止环境。账户密码不等于项目磁盘加密密码。不要为了处理更新或目录问题重新创建账户。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/password-add.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动添加网站密码的表单"><img src="../../www/public/docs/screenshots/password-add.jpg" alt="手动添加网站密码的表单" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>手动添加网站密码的表单。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/password-add.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/password-add.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动添加网站密码的表单"><img src="images/password-add.jpg" alt="手动添加网站密码的表单" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>手动添加网站密码的表单。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/password-add.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 密码保险箱
@@ -76,8 +76,8 @@ Super Cage 账户用于解锁当前环境。在云端工作台修改的是服务
 密码记录保存在当前主机的 Super Cage 配置中，不跨设备自动同步；云端实例的保险箱位于服务器。备份时账户文件与密码库需一起保留。Super Cage 锁定时保险箱随之锁定，记住登录解锁时也可随之解锁。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/general-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：终端启动命令、画质与快捷键设置"><img src="../../www/public/docs/screenshots/general-settings.jpg" alt="终端启动命令、画质与快捷键设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>终端启动命令、画质与快捷键设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/general-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/general-settings.jpg" target="_blank" rel="noopener" aria-label="查看原图：终端启动命令、画质与快捷键设置"><img src="images/general-settings.jpg" alt="终端启动命令、画质与快捷键设置" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>终端启动命令、画质与快捷键设置。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/general-settings.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 通用与键盘
@@ -91,8 +91,8 @@ Super Cage 账户用于解锁当前环境。在云端工作台修改的是服务
 “浏览器默认网站”用于之后新建的网页。“流畅画质”降低绘图密度以改善滚动，保存后在下次环境启动生效。“项目文件缓存”只在 Linux 环境出现，默认开启，说明见[打开项目与编辑文件](workbench.md#打开项目与编辑文件)；更改后在下次环境启动生效。浏览器本身的标签布局与网站数据在独立浏览器设置中管理。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/appearance.jpg" target="_blank" rel="noopener" aria-label="查看原图：浅色、深色与自定义主题"><img src="../../www/public/docs/screenshots/appearance.jpg" alt="浅色、深色与自定义主题" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>浅色、深色与自定义主题。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/appearance.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/appearance.jpg" target="_blank" rel="noopener" aria-label="查看原图：浅色、深色与自定义主题"><img src="images/appearance.jpg" alt="浅色、深色与自定义主题" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>浅色、深色与自定义主题。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/appearance.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 外观、主题与无障碍

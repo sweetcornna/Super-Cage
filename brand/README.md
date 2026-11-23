@@ -52,6 +52,6 @@ the macOS tile (824 of 1024) and Android (72 of 108 dp) scale that same composit
 | mobile/android/res/drawable/cage_icon_foreground.xml, cage_icon_monochrome.xml | adaptive icon layers inside the 66 dp safe zone; background is `cage_icon_background` (ink) in values/themes.xml |
 | mobile/android/res/drawable/cage_logo.xml | in-app logo; ink and glow come from the theme (`?attr/cageInk`, `?attr/cageGlow`) |
 | mobile/assets/brand/logo.svg | copy of mark.svg |
-| ui/public and www/public | PNG logo (512, rounded), SVG favicon (small cut), favicon.ico (16/32/48), apple-touch-icon.png (180, opaque); ui/src/logo.png is the same 512 PNG |
+| ui/public | PNG logo (512, rounded), SVG favicon (small cut), favicon.ico (16/32/48), apple-touch-icon.png (180, opaque); ui/src/logo.png is the same 512 PNG |
 
 The doodles in mobile/assets/brand/doodles are not part of this generator; they keep using `node mobile/scripts/brand-assets.mjs`.

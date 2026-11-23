@@ -16,8 +16,8 @@ Claude Desktop 运行在所选客机中，使用对应系统的官方应用：ma
 Chat 和 Code 在同一个官方应用内使用。需要额外虚拟机的 Cowork 暂不支持。手机可以接续电脑上的同一个 Desktop 窗口，两端共用账号与应用数据，见[手机操作 Claude Desktop](mobile.md#在手机操作-claude-desktop)。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/cloud-desktop-welcome.png" target="_blank" rel="noopener" aria-label="查看原图：云端 Linux 环境中的 Claude Desktop 欢迎页"><img src="../../www/public/docs/screenshots/cloud-desktop-welcome.png" alt="云端 Linux 环境中的 Claude Desktop 欢迎页" width="1192" height="875" loading="lazy" decoding="async" /></a>
-  <figcaption>云端 Linux 环境中的 Claude Desktop 欢迎页。截图版本：Claude Desktop 4.16336.0 · 真实 Linux 云端环境 · 2026-11-06 · Super Cage 版本未记录；未登录 Claude。<a href="../../www/public/docs/screenshots/cloud-desktop-welcome.png" target="_blank" rel="noopener">查看原图（1192 × 875） ↗</a></figcaption>
+  <a href="images/cloud-desktop-welcome.png" target="_blank" rel="noopener" aria-label="查看原图：云端 Linux 环境中的 Claude Desktop 欢迎页"><img src="images/cloud-desktop-welcome.png" alt="云端 Linux 环境中的 Claude Desktop 欢迎页" width="1192" height="875" loading="lazy" decoding="async" /></a>
+  <figcaption>云端 Linux 环境中的 Claude Desktop 欢迎页。截图版本：Claude Desktop 4.16336.0 · 真实 Linux 云端环境 · 2026-11-06 · Super Cage 版本未记录；未登录 Claude。<a href="images/cloud-desktop-welcome.png" target="_blank" rel="noopener">查看原图（1192 × 875） ↗</a></figcaption>
 </figure>
 
 ## 调整文字与画面

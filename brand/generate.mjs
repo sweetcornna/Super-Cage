@@ -287,7 +287,6 @@ export const FAVICON_SIZES = [16, 32, 48];
 // Web icon sets: the PNG logo name, the SVG favicon, and further copies of the PNG logo.
 export const WEB_DIRS = [
   { dir: "ui/public", png: "cage.png", svg: "cage.svg", extra: ["ui/src/logo.png"] },
-  { dir: "www/public", png: "cage-icon.png", svg: "cage-icon.svg", extra: [] },
 ];
 // Add to Home Screen (web manifest) icons for the web apps that are installed from a phone: the workbench
 // (ui/public, its manifest.webmanifest) and the portal (PATHS.portalIcons). 192 px and the 512 px logo for

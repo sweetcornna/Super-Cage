@@ -69,8 +69,8 @@ keywords: 客机 客户机 克隆 本机 系统选择 macOS Windows Debian Ubunt
 选择后会显示目标系统、本机与客机构建号、预计系统下载量和可用空间要求。macOS 匹配相同版本和构建号。Windows 匹配发行版本、版本类型和语言，官方介质的补丁号可以与本机不同，两个构建号会同时显示。Windows 使用压缩系统文件，Linux 使用对应发行版的最小云镜像，虚拟磁盘按实际写入增长。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/host-system-clone.png" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/host-system-clone.png" alt="本机系统匹配的版本、已有材料与空间预览" width="1280" height="720" loading="lazy" decoding="async" /></a>
-  <figcaption>本机版本、安装材料与空间预览。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-09 · 独立首装验收；所示构建使用“克隆本机系统”名称，当前入口为“自动匹配本机系统版本”。<a href="../../www/public/docs/screenshots/host-system-clone.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
+  <a href="images/host-system-clone.png" target="_blank" rel="noopener"><img src="images/host-system-clone.png" alt="本机系统匹配的版本、已有材料与空间预览" width="1280" height="720" loading="lazy" decoding="async" /></a>
+  <figcaption>本机版本、安装材料与空间预览。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-09 · 独立首装验收；所示构建使用“克隆本机系统”名称，当前入口为“自动匹配本机系统版本”。<a href="images/host-system-clone.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
 </figure>
 
 在 macOS 上使用此选项需要 Apple Silicon 和 macOS 26.4 或更新版本，当前工作台的文件系统扩展依赖该版本提供的只读挂载能力。Windows 需要 Windows 11 x64 和完整 Hyper-V。Linux 支持 Debian 12/13、Ubuntu 22.04/24.04 x86_64。
@@ -108,8 +108,8 @@ macOS 27 客机的 macFUSE 组件需要你在客机中完成一次管理员授�
 以后启动自动登录；主动锁屏或注销时，从「登录客机账户」登录，必要时点击「查看客机密码」。FileVault 或其他系统设置阻止自动登录时，保留手动入口。账户、权限和文件随客机磁盘保留。客机系统自动登录使开机后账户直接可用，主机账户和 Super Cage 的解锁负责保护访问入口。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/macos-first-permissions.png" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/macos-first-permissions.png" alt="Mac 客机首次权限引导与文件系统扩展设置，授权已通过" width="1280" height="720" loading="lazy" decoding="async" /></a>
-  <figcaption>Mac 客机首次权限引导与文件系统扩展设置，画面显示授权已通过。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · macOS 26.5 客机 · 2026-11-09 · 独立首装验收，未登录 Claude。<a href="../../www/public/docs/screenshots/macos-first-permissions.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
+  <a href="images/macos-first-permissions.png" target="_blank" rel="noopener"><img src="images/macos-first-permissions.png" alt="Mac 客机首次权限引导与文件系统扩展设置，授权已通过" width="1280" height="720" loading="lazy" decoding="async" /></a>
+  <figcaption>Mac 客机首次权限引导与文件系统扩展设置，画面显示授权已通过。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · macOS 26.5 客机 · 2026-11-09 · 独立首装验收，未登录 Claude。<a href="images/macos-first-permissions.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
 </figure>
 
 ### Windows 的首次系统授权
