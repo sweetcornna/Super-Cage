@@ -1,0 +1,127 @@
+{
+  "tag_name": "v0.1.17",
+  "target_commitish": "ab762395abb4875c790f0faefa896e1b9e4876f8",
+  "draft": false,
+  "assets": [
+    {
+      "name": "cage-macos-guest-0.1.17-source.tar.gz",
+      "size": 41677663,
+      "digest": "sha256:1f380965f8aeda9dc0c0b90c6017dd365a2b7b1fd99fba1f2d87bc11f707c565",
+      "state": "uploaded"
+    },
+    {
+      "name": "linux-desktop-build-metadata.json",
+      "size": 123,
+      "digest": "sha256:2ac13781aa47a5ed92f91ba6b2506ad17e48b9fc080e3f2934b6ff67511186fd",
+      "state": "uploaded"
+    },
+    {
+      "name": "mihomo-v1.19.33-source.tar.gz",
+      "size": 1282993,
+      "digest": "sha256:e7c596b37ff27ec487d19b1920f73e0c97a78067ea35766530ee9659ade72711",
+      "state": "uploaded"
+    },
+    {
+      "name": "qemu-11.1.0-cage-changes-source.tar.gz",
+      "size": 10225,
+      "digest": "sha256:3f25dd37b9a52ba8ae327c00c4a7f1d94df841c5ebe10682de5e0b491a128321",
+      "state": "uploaded"
+    },
+    {
+      "name": "qemu-11.1.0-windows-full-source.tar.gz",
+      "size": 412574436,
+      "digest": "sha256:bc51ea4a7670fafb66de0396ae20a11a70c6273a1995c9d9985dc39969c8ea97",
+      "state": "uploaded"
+    },
+    {
+      "name": "qemu-e470268ff446ec56728215a987ed166d5ed8fb64-source.tar.gz",
+      "size": 40715926,
+      "digest": "sha256:095bf9e1569ac8e103a932594d99174e1c7bcfd71a135b6a5860c3ceeff57112",
+      "state": "uploaded"
+    },
+    {
+      "name": "qemu-keycodemapdb-f5772a62ec52591ff6870b7e8ef32482371f22c6-source.tar.gz",
+      "size": 29580,
+      "digest": "sha256:d014b53382dbb17b8196ad12f50de7f20d0ef1b9f7d54b0be51a6cbb14209195",
+      "state": "uploaded"
+    },
+    {
+      "name": "release-metadata.json",
+      "size": 299,
+      "digest": "sha256:c865e1b4779e98ebf55af702edf609d8f73f376a448cdc58f312a020181e1eb5",
+      "state": "uploaded"
+    },
+    {
+      "name": "SHA256SUMS",
+      "size": 930,
+      "digest": "sha256:d2c6b1bbaba2f4e21fb865ccb3cf8448e884145b9f9f1c5a14c8dbe2591b462a",
+      "state": "uploaded"
+    },
+    {
+      "name": "SHA256SUMS-linux-desktop.txt",
+      "size": 200,
+      "digest": "sha256:e421c426f47b98c504c19eb414d4726b78fa08aac0dc48ccd3d7e5ae5120d1c0",
+      "state": "uploaded"
+    },
+    {
+      "name": "SHA256SUMS-windows-desktop.txt",
+      "size": 790,
+      "digest": "sha256:f6734a9a4381df95944b80eeef192c91daba89be2c7810d1cddc51cef70ce91e",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-0.1.17-android-arm64.apk",
+      "size": 18165147,
+      "digest": "sha256:a76792431afb943f5b3f5b98a8fc4683f5a275ea9601243490138b450e5fd998",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-0.1.17-linux-amd64.deb",
+      "size": 129739112,
+      "digest": "sha256:3bdbd7a19c2ce77a53220fcc99a59b59bf0130bb3b464abe4b3ad7c43f06716d",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-0.1.17-macos-arm64.dmg",
+      "size": 198789551,
+      "digest": "sha256:bcb00c05fdcba72d5d569fab45f5798435eba6db43b1529c5e1fb030a9b9ac01",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-0.1.17-windows-amd64-setup-unsigned.exe",
+      "size": 493656885,
+      "digest": "sha256:c728749b322c379d2ca8b2f9d99e11d0a711ccc2da9dd4d5e3495bb5a06e270d",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-NoVirt-0.1.17-linux-amd64.tar.gz",
+      "size": 51342359,
+      "digest": "sha256:25b74fb79acc32c725174cfaabfa162e9c7e1db271da4fe78762894776cfebdb",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-NoVirt-0.1.17-linux-arm64.tar.gz",
+      "size": 56452368,
+      "digest": "sha256:4f9168ce5a3214ddff5bebcb051a49a8468ecce2d79b72b767789fa257484464",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-Server-0.1.17-linux-amd64.tar.gz",
+      "size": 6408825,
+      "digest": "sha256:93cd97e713c6a4068320e055ba0416e680704a28fa887aa3b65e0c74f21694c7",
+      "state": "uploaded"
+    },
+    {
+      "name": "Super-Cage-Server-0.1.17-linux-arm64.tar.gz",
+      "size": 5858737,
+      "digest": "sha256:5bfe1f8be00380e56538622e33baeb276d0489f64ab0b7490cd767584320b239",
+      "state": "uploaded"
+    },
+    {
+      "name": "windows-desktop-build-metadata.json",
+      "size": 125,
+      "digest": "sha256:85aa7ba397f0a899b95238a4032d08e2514849ea1d80500179b917df40f14f5b",
+      "state": "uploaded"
+    }
+  ]
+}

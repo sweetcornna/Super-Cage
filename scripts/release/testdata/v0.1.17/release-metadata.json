@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "platform": "macos",
+  "version": "0.1.17",
+  "commitSha": "ab762395abb4875c790f0faefa896e1b9e4876f8",
+  "distribution": {
+    "platforms": [
+      "macos-arm64",
+      "linux-amd64",
+      "linux-arm64"
+    ],
+    "macosDeveloperIDSigned": true,
+    "macosNotarized": true
+  }
+}
