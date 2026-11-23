@@ -914,7 +914,7 @@ func claudeAutomaticStep(list claudeAccountList, record *mobileRecord, active ma
 }
 
 // deliverClaudeCarry gives the target, once it is idle, the messages the
-// source never took: one per check, under the request id each got when the
+// source never took, in order, under the request id each got when the
 // history was frozen. The target channel acknowledges a repeated id without
 // delivering it again, so a retry after a lost reply is harmless.
 func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileSession) {
@@ -934,14 +934,15 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 		if _, err := s.terminalConversationAction(ctx, id, map[string]any{"action": "send", "request_id": message.ID, "text": message.Text}); err != nil {
 			return
 		}
-		_ = s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
 			for i := range record.Switch.Carry {
 				if record.Switch.Carry[i].ID == message.ID {
 					record.Switch.Carry[i].Delivered = true
 				}
 			}
 			return nil
-		})
-		return
+		}) != nil {
+			return
+		}
 	}
 }
