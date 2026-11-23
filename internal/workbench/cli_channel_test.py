@@ -2,6 +2,7 @@ import concurrent.futures
 import importlib.util
 import io
 import json
+import re
 import os
 from pathlib import Path
 import select
@@ -179,18 +180,17 @@ class ChannelTests(unittest.TestCase):
         self.assertTrue(all(mark==channel.process_fingerprint(pid) for pid,mark in found))
         self.assertEqual(channel.descendants(None),[])
 
-    def test_account_switch_stops_only_the_source_and_its_children(self):
-        # A second, unrelated session of the same account never blocks and is
-        # not stopped; the source's own background command stops with it.
+    def switch_with_a_background_command(self,force):
         self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
         source=subprocess.Popen(["/bin/sh","-c","sleep 30 & wait"])
         sibling=subprocess.Popen(["/bin/sleep","30"])
-        self.addCleanup(lambda:[p.kill() or p.wait() for p in (source,sibling)])
         deadline=time.monotonic()+5
         while not channel.descendants(source.pid) and time.monotonic()<deadline:time.sleep(.05)
         child=int(channel.descendants(source.pid)[0][0])
+        self.addCleanup(lambda:[p.kill() or p.wait() for p in (source,sibling)] and None)
+        self.addCleanup(lambda:channel.live(child) and os.kill(child,9))
         connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
-        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id}
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id,"force":force}
         channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project,"pid":source.pid})
         rows=[{"pid":source.pid,"sessionId":self.session,"cwd":self.project,"status":"idle","kind":"interactive"}]
         def reap(pid,force=False):
@@ -199,10 +199,38 @@ class ChannelTests(unittest.TestCase):
         with patch.object(channel,"active_sessions",return_value=rows),patch.object(channel,"terminate_cli",side_effect=reap):
             result=channel.prepare_account_switch(request)
         self.assertTrue(Path(result["transcript"]).is_file())
+        self.assertIsNone(sibling.poll(),"an unrelated session of the account was stopped")
+        return child
+
+    def test_account_switch_stops_only_the_source_and_its_children(self):
+        # A second, unrelated session of the same account never blocks and is
+        # not stopped; the source's own background command stops with it when
+        # the stop was confirmed or forced.
+        child=self.switch_with_a_background_command(True)
         deadline=time.monotonic()+5
         while channel.live(child) and time.monotonic()<deadline:time.sleep(.05)
         self.assertFalse(channel.live(child),"the source's background command kept running")
-        self.assertIsNone(sibling.poll(),"an unrelated session of the account was stopped")
+
+    def test_unconfirmed_switch_leaves_background_commands_alone(self):
+        # Nobody confirmed stopping the source's work: its children are not
+        # killed (the host asks first whenever it knows of running tasks).
+        child=self.switch_with_a_background_command(False)
+        time.sleep(.3)
+        self.assertTrue(channel.live(child),"an unconfirmed switch killed a background command")
+
+    def test_account_switch_names_a_cli_running_outside_the_project(self):
+        # A force cannot move a CLI that runs in another folder: the refusal
+        # names that folder, and nothing is stopped or fenced.
+        self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
+        connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id,"force":True}
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project,"pid":4242})
+        outside=str(self.home/"elsewhere")
+        rows=[{"pid":4242,"sessionId":self.session,"cwd":outside,"status":"busy","kind":"interactive"}]
+        with patch.object(channel,"active_sessions",return_value=rows),patch.object(channel,"terminate_cli") as stop:
+            with self.assertRaisesRegex(ValueError,"^switch:outside:"+re.escape(outside)+"$"): channel.prepare_account_switch(request)
+            stop.assert_not_called()
+        self.assertNotIn("account_switch",channel.read_json(self.root/connection/"state.json"))
 
     def test_forced_switch_stops_a_working_source_and_returns_unsent_messages(self):
         # At a confirmed limit, or after the person confirmed, a working source

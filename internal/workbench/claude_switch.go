@@ -3,9 +3,12 @@ package workbench
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/google/uuid"
 )
@@ -24,6 +27,10 @@ type claudeSwitchInput struct {
 	Answer string `json:"answer"`
 	// wake: the wait for a reset ended and the source continues on itself.
 	wake bool
+	// undo returns to the account a limit handoff came from: the task is
+	// never continued there, and the session waits for that account's reset.
+	undo bool
+	wait int64
 }
 
 type claudeSwitchOption struct {
@@ -58,6 +65,9 @@ type claudeHandoffView struct {
 	WaitLabel string `json:"wait_label,omitempty"`
 	// Automatic: the session's rule is to continue automatically.
 	Automatic bool `json:"automatic"`
+	// Refusal: why the automatic continuation did not happen (Waiting is
+	// "refused" then); it is tried again when something changes.
+	Refusal string `json:"refusal,omitempty"`
 }
 
 var errClaudeSwitchAnswered = errors.New("这个问题已在另一台设备上回答，界面已更新。")
@@ -81,6 +91,37 @@ func (r *mobileRecord) switchPolicy(list claudeAccountList) string {
 
 func (r *mobileRecord) ownSwitchPolicy() bool {
 	return (r.SwitchPolicySet || r.SwitchPolicy == "allow" || r.SwitchPolicy == "wait") && validSwitchPolicy(r.SwitchPolicy)
+}
+
+// implicitConsent: whether accounts without a 接续分组 may continue this
+// session automatically. Consent is kept where it was given: a session with
+// its own rule has its own (a copied rule from an older version has none, so
+// it keeps the explicit groups); otherwise 调度设置 decides.
+func (r *mobileRecord) implicitConsent(list claudeAccountList) bool {
+	if r.ownSwitchPolicy() {
+		return r.UngroupedHandoff
+	}
+	return list.Scheduling.UngroupedHandoff
+}
+
+// confirmedLimit: the session's turn ended on its account's quota limit and
+// the usage reading confirms a used-up window. Nothing else forces a switch.
+func confirmedLimit(list claudeAccountList, record *mobileRecord, now time.Time) bool {
+	source := claudeSwitchSource(list, record)
+	if source == nil || record.AccountFailure != "rate_limit" {
+		return false
+	}
+	window, _ := source.exhaustedWindow(now)
+	return window != ""
+}
+
+// runningTasks counts the source's subagents and background tasks still
+// running after its turn.
+func (r *mobileRecord) runningTasks() int {
+	if r.Tasks != nil && r.Tasks.Count > 0 {
+		return r.Tasks.Count
+	}
+	return r.RunningTasks
 }
 
 // claudeSwitchSource is the session's account while its identity is still
@@ -161,7 +202,10 @@ func claudeHandoffState(list claudeAccountList, record *mobileRecord, now time.T
 		view.Waiting, view.WaitUntil, view.WaitLabel = "source", view.ResetsAt, source.Label
 		return view
 	}
-	if policy == "allow" && len(automaticSwitchTargets(list, record, list.Scheduling.UngroupedHandoff, now)) > 0 {
+	if policy == "allow" && len(automaticSwitchTargets(list, record, record.implicitConsent(list), now)) > 0 {
+		if record.HandoffRefusal != "" {
+			view.Waiting, view.Refusal = "refused", record.HandoffRefusal
+		}
 		return view // the monitor continues it on another account
 	}
 	if suggested := automaticSwitchTargets(list, record, true, now); len(suggested) > 0 {
@@ -186,8 +230,8 @@ func claudeHandoffState(list claudeAccountList, record *mobileRecord, now time.T
 	return view
 }
 
-// claudeInterruptedNote tells the resumed model what the handoff stopped.
-// It names only what the person sees: the latest turn's unfinished calls.
+// claudeInterruptedNote tells the resumed model what the handoff stopped:
+// the latest turn's unfinished calls and the tasks still running after it.
 func claudeInterruptedNote(record *mobileRecord) string {
 	var names []string
 	if n := len(record.Turns); n > 0 {
@@ -201,7 +245,17 @@ func claudeInterruptedNote(record *mobileRecord) string {
 			}
 		}
 	}
-	note := "\n\nThe previous execution was stopped for this account change. Background commands and subagents it had started were stopped with it; restart only what still matters, after checking what already took effect."
+	if record.Tasks != nil {
+		for _, task := range record.Tasks.Running {
+			name := task.Name
+			if task.Detail != "" {
+				name = task.Detail + " (" + task.Name + ")"
+			}
+			names = append(names, "- "+name+", running in the background")
+		}
+	}
+	// A command that detached itself from the CLI may still be running.
+	note := "\n\nThe previous execution was stopped for this account change, with the subagents and background commands it was running as its own processes. A command that detached itself may still be running. Check what already took effect and restart only what still matters."
 	if len(names) > 0 {
 		note += "\nUnfinished when it stopped:\n" + strings.Join(names, "\n")
 	}
@@ -255,25 +309,13 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "切换授权无效", 400)
 			return
 		}
-		if input.Policy == "allow" {
-			// Choosing automatic continuation is the yes that lets ungrouped
-			// accounts continue one another.
-			s.claudeAccounts.mu.Lock()
-			list, err := s.loadClaudeAccounts()
-			if err == nil && !list.Scheduling.UngroupedHandoff {
-				list.Scheduling.UngroupedHandoff = true
-				err = s.saveClaudeAccounts(list)
-			}
-			s.claudeAccounts.mu.Unlock()
-			if err != nil {
-				requestError(w, err)
-				return
-			}
-		}
 		if err := s.changeClaudeSession(r.Context(), view.ID, func(record *mobileRecord) error {
 			if record.Switch != nil && record.Switch.Phase != "completed" {
 				return errors.New("账号交接中，请等待完成后修改授权")
 			}
+			// Automatic continuation chosen for this session is its yes, for
+			// this session only, to accounts without a 接续分组.
+			record.UngroupedHandoff = record.UngroupedHandoff || input.Policy == "allow"
 			record.SwitchPolicy, record.SwitchPolicySet = input.Policy, true
 			if input.Policy == "default" {
 				record.SwitchPolicy, record.SwitchPolicySet = "", false
@@ -326,12 +368,15 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	handoff := claudeHandoffState(list, record, now)
 	undo := claudeUndoTarget(list, record) != nil
-	busy := record.Active && record.AccountFailure == ""
+	// A turn or a background task still running needs the one confirm,
+	// unless the account's quota limit already ended the work.
+	tasks := record.runningTasks()
+	busy := (record.Active || tasks > 0) && !confirmedLimit(list, record, now)
 	supported := record.Terminal && record.Launcher == "claude" && record.Account.ID != ""
 	s.mobileCLI.mu.Unlock()
 	// handoff_api tells a client which fields and actions this server knows.
 	jsonReply(w, map[string]any{"session": snapshot, "source_id": sourceID, "switch_policy": policy, "candidates": options, "supported": supported,
-		"handoff_api": 2, "targets": targets, "source_busy": busy, "handoff": handoff, "undo": undo, "switch_policy_own": own})
+		"handoff_api": 2, "targets": targets, "source_busy": busy, "source_tasks": tasks, "handoff": handoff, "undo": undo, "switch_policy_own": own})
 }
 
 // changeClaudeSession applies change to a session record under the operation
@@ -385,12 +430,16 @@ func (s *Server) answerClaudeQuestion(ctx context.Context, id string, input clau
 		return errClaudeSwitchAnswered
 	}
 	standing := map[string]string{"always": "allow", "wait_always": "wait"}[input.Answer]
+	// The question is about two accounts of one group (the suggestion comes
+	// from the source's group); a yes about two accounts without a group is
+	// the yes for all of them, a yes within an explicit group is not.
+	ungrouped := claudeSwitchSource(list, record).HandoffGroup == ""
 	if standing != "" {
 		s.claudeAccounts.mu.Lock()
 		list, err = s.loadClaudeAccounts()
 		if err == nil {
 			list.Scheduling.SwitchPolicy, list.Scheduling.SwitchAnswered = standing, true
-			list.Scheduling.UngroupedHandoff = list.Scheduling.UngroupedHandoff || standing == "allow"
+			list.Scheduling.UngroupedHandoff = list.Scheduling.UngroupedHandoff || standing == "allow" && ungrouped
 			err = s.saveClaudeAccounts(list)
 		}
 		s.claudeAccounts.mu.Unlock()
@@ -405,6 +454,8 @@ func (s *Server) answerClaudeQuestion(ctx context.Context, id string, input clau
 		}
 		if err := s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
 			record.followStandingAnswer(standing)
+			// 切换并继续 is this session's yes to accounts without a group.
+			record.UngroupedHandoff = record.UngroupedHandoff || input.Answer == "once" && ungrouped
 			return nil
 		}); err != nil {
 			return err
@@ -467,15 +518,11 @@ func (s *Server) undoClaudeSwitch(ctx context.Context, id string, input claudeSw
 	if back == nil {
 		return errors.New("这次交接已不能撤销：可以在账号菜单中直接选择要使用的账号。")
 	}
-	input.Target, input.Continue = back.ID, false
-	if err := s.switchClaudeAccount(ctx, id, input, false); err != nil {
-		return err
-	}
+	// The wait travels with the switch and is set where its preparation
+	// commits, so a retried or interrupted undo still waits.
 	_, reset := back.exhaustedWindow(time.Now())
-	return s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
-		record.HandoffWait = reset
-		return nil
-	})
+	input.Target, input.Continue, input.undo, input.wait = back.ID, false, true, reset
+	return s.switchClaudeAccount(ctx, id, input, false)
 }
 
 func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claudeSwitchInput, automatic bool) error {
@@ -536,10 +583,11 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		if source == nil {
 			return errors.New("原账号的登录身份已改变：在账号管理中检查 " + record.AccountLabel + "，重新登录后再切换。")
 		}
-		// A turn that ended on an account failure has nothing left to lose:
-		// the source is stopped without asking.
-		limited := record.AccountFailure != ""
+		// A turn that ended on a confirmed quota limit has nothing left to
+		// lose: the source is stopped without asking. Any other failure
+		// (overload, server error) is not, and asks like a working source.
 		window, reset := source.exhaustedWindow(now)
+		limited := record.AccountFailure == "rate_limit" && window != ""
 		target := list.find(input.Target)
 		if automatic {
 			if record.switchPolicy(list) != "allow" || record.AccountFailure != "rate_limit" {
@@ -549,7 +597,7 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 				return errors.New("尚未确认订阅额度耗尽，保留原账号")
 			}
 			eligible := input.wake && input.Target == source.ID
-			for _, option := range automaticSwitchTargets(list, record, list.Scheduling.UngroupedHandoff, now) {
+			for _, option := range automaticSwitchTargets(list, record, record.implicitConsent(list), now) {
 				eligible = eligible || option.ID == input.Target
 			}
 			if !eligible {
@@ -561,6 +609,9 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 			}
 			if target.Status != "ready" {
 				return errors.New(target.Label + " 尚未登录：在账号管理中点“检查状态”或重新登录后再切换。")
+			}
+			if tasks := record.runningTasks(); tasks > 0 && !limited && !input.Force {
+				return errors.New("还有 " + strconv.Itoa(tasks) + " 个后台任务在运行：确认“停止当前任务并切换到 " + target.Label + "”（后台任务也会停止），或等它们结束。")
 			}
 			if record.Active && !limited && !input.Force {
 				return errors.New("当前任务仍在运行：确认“停止当前任务并切换到 " + target.Label + "”，或等本轮结束。")
@@ -579,12 +630,14 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		}
 		force := input.Force || automatic || limited
 		sw := &claudeAccountSwitch{ID: input.RequestID, Phase: "preparing", Source: claudeExecution{record.CLIID, record.Account, record.GuestConfig}, Target: selection, TargetLabel: target.Label, TargetID: uuid.NewString(), Connection: record.Connection,
-			Continue: input.Continue || force, Force: force, SourceLabel: source.Label, Automatic: automatic, At: now.Unix()}
+			Continue: !input.undo && (input.Continue || force), Force: force, SourceLabel: source.Label, Automatic: automatic, At: now.Unix(), Wait: input.wait}
 		if limited && window != "" {
 			sw.Reason, sw.ResetsAt = window, reset
 		} else if input.wake {
 			sw.Reason = "reset"
 		}
+		// Something is stopped only when the switch is forced; then the
+		// resumed model is told what.
 		if force {
 			sw.Note = claudeInterruptedNote(record)
 		}
@@ -661,8 +714,8 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		if result.Workspace != "" && cliWorkspaceWithin(result.Workspace, root, s.windowsGuest != nil) {
 			record.GuestWorkspace = result.Workspace // the target starts in the session's own folder
 		}
-		record.AccountFailure = ""
-		record.HandoffWait, record.WaitingReset = 0, 0
+		record.AccountFailure, record.HandoffRefusal = "", ""
+		record.HandoffWait, record.WaitingReset = sw.Wait, 0
 		// Each message the source never took gets its own request id once, so
 		// the target channel delivers it a single time whatever is retried.
 		if sw.Carry == nil {
@@ -791,8 +844,19 @@ func claudeSwitchRefusal(message string) error {
 	if sentence, ok := claudeSwitchRefusals[message]; ok {
 		return errors.New(sentence)
 	}
-	return errors.New(message)
+	if folder, ok := strings.CutPrefix(message, "switch:outside:"); ok {
+		return errors.New("这段会话的 Claude Code 现在在项目以外的文件夹（" + folder + "）里运行：在那个终端退出 Claude Code，或回到项目文件夹后再切换。")
+	}
+	// An older guest helper refuses in a sentence written for people.
+	if strings.ContainsFunc(message, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
+		return errors.New(message)
+	}
+	// Anything else (a Python error, a damaged history line) is for the log.
+	log.Printf("account handoff: guest error: %s", message)
+	return errors.New(claudeSwitchGeneric)
 }
+
+const claudeSwitchGeneric = "账号交接没有完成，会话仍在原账号：稍后再试；仍不行时重新打开这段会话。"
 
 // Preserve metadata written concurrently while committing execution ownership.
 func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
@@ -804,7 +868,7 @@ func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
 		return err
 	}
 	record.CustomTitle, record.Pinned, record.Archived, record.Deleted = current.CustomTitle, current.Pinned, current.Archived, current.Deleted
-	record.SwitchPolicy, record.SwitchPolicySet = current.SwitchPolicy, current.SwitchPolicySet
+	record.SwitchPolicy, record.SwitchPolicySet, record.UngroupedHandoff = current.SwitchPolicy, current.SwitchPolicySet, current.UngroupedHandoff
 	record.Revision = current.Revision
 	record.changed()
 	return writePrivate(mobileRecordPath(s.profile, record.ID), record)
@@ -848,7 +912,16 @@ type claudeMonitor struct {
 	// waiting: the record holds a WaitingReset, to be cleared when the limit
 	// that set it is over. Read once from the record when the check starts.
 	waiting, started bool
+	// refused: what an automatic attempt that the guest or a check refused
+	// was made from. The same attempt is not made again until that changes
+	// or claudeRefusalBackoff has passed.
+	refused   string
+	refusedAt time.Time
 }
+
+// claudeRefusalBackoff: how long an automatic continuation that was refused
+// waits before it is tried again with nothing changed.
+const claudeRefusalBackoff = 15 * time.Minute
 
 func (s *Server) claudeNow() time.Time {
 	if s.claudeAccounts.now != nil {
@@ -870,7 +943,7 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monito
 		s.mobileCLI.mu.Lock()
 		record, err := s.mobileCLI.record(s.profile, id)
 		s.mobileCLI.mu.Unlock()
-		monitor.waiting = err == nil && record.WaitingReset > 0
+		monitor.waiting = err == nil && (record.WaitingReset > 0 || record.HandoffRefusal != "")
 	}
 	s.settleClaudeWait(ctx, id, view.AccountFailure, monitor)
 	if view.AccountFailure != "rate_limit" || view.AccountSwitch != nil && view.AccountSwitch.Phase != "completed" {
@@ -932,22 +1005,60 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monito
 		}
 	}
 	if target != "" {
-		_ = s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, wake: wake}, true)
+		s.tryAutomaticSwitch(ctx, id, list, record, target, wake, monitor, now)
 	}
 }
 
-// settleClaudeWait forgets a wait for the first reset once the limit that
-// set it is over (the person went on in the CLI, or a handoff happened), so a
-// later, different limit is never taken for that reset.
+// claudeAttemptKey names what an automatic attempt depends on: the session's
+// execution, failure and rule, and each account's login, scheduling, group
+// and whether it is used up. Quota percentages and revisions are left out,
+// so a refused attempt is repeated only when one of these changes.
+func claudeAttemptKey(list claudeAccountList, record *mobileRecord, target string, wake bool, now time.Time) string {
+	key := []string{record.CLIID, record.Connection, record.AccountFailure, record.switchPolicy(list), strconv.FormatBool(record.implicitConsent(list)), target, strconv.FormatBool(wake)}
+	for _, a := range list.Accounts {
+		window, _ := a.exhaustedWindow(now)
+		key = append(key, a.ID, a.Status, strconv.FormatBool(a.Enabled), a.HandoffGroup, a.Email, window)
+	}
+	return strings.Join(key, "\x00")
+}
+
+// tryAutomaticSwitch makes the automatic attempt unless the same one was
+// refused and nothing it depends on has changed since, within the backoff.
+// A refusal is kept on the record and shown while the session waits.
+func (s *Server) tryAutomaticSwitch(ctx context.Context, id string, list claudeAccountList, record *mobileRecord, target string, wake bool, monitor *claudeMonitor, now time.Time) {
+	key := claudeAttemptKey(list, record, target, wake, now)
+	if monitor.refused == key && now.Sub(monitor.refusedAt) < claudeRefusalBackoff {
+		return
+	}
+	err := s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, wake: wake}, true)
+	if err == nil || errors.Is(err, errTerminalBusy) || errors.Is(err, errMobileLocked) || errors.Is(err, errTerminalNotReady) || ctx.Err() != nil {
+		monitor.refused = "" // done, or a passing state: the next check tries again
+		return
+	}
+	monitor.refused, monitor.refusedAt = key, now
+	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		if record.Switch == nil || record.Switch.Phase == "completed" {
+			record.HandoffRefusal = err.Error()
+		}
+		return nil
+	}) == nil {
+		monitor.waiting = true // cleared with the limit (settleClaudeWait)
+	}
+}
+
+// settleClaudeWait forgets a wait for the first reset, and a refused
+// automatic continuation, once the limit that set it is over (the person
+// went on in the CLI, or a handoff happened), so a later, different limit is
+// never taken for that reset or that refusal.
 func (s *Server) settleClaudeWait(ctx context.Context, id, failure string, monitor *claudeMonitor) {
 	if !monitor.waiting || failure == "rate_limit" {
 		return
 	}
 	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
-		record.WaitingReset = 0
+		record.WaitingReset, record.HandoffRefusal = 0, ""
 		return nil
 	}) == nil {
-		monitor.waiting = false
+		monitor.waiting, monitor.refused = false, ""
 	}
 }
 
@@ -961,7 +1072,7 @@ func claudeAutomaticStep(list claudeAccountList, record *mobileRecord, active ma
 		return "", false, record.WaitingReset
 	}
 	window, _ := source.exhaustedWindow(now)
-	options := automaticSwitchTargets(list, record, list.Scheduling.UngroupedHandoff, now)
+	options := automaticSwitchTargets(list, record, record.implicitConsent(list), now)
 	switch {
 	case window != "" && len(options) > 0:
 		return bestClaudeTarget(list, options, active, logins, last, now), false, 0
@@ -988,8 +1099,8 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 	s.mobileCLI.mu.Lock()
 	record, err := s.mobileCLI.record(s.profile, id)
 	s.mobileCLI.mu.Unlock()
-	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || record.CLIID != record.Switch.TargetID {
-		return
+	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || record.CLIID != record.Switch.TargetID || time.Now().Unix() < record.HandoffWait {
+		return // after an undo the messages wait for the account's reset
 	}
 	for _, message := range record.Switch.Carry {
 		if message.Delivered {
@@ -999,14 +1110,23 @@ func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileS
 			return
 		}
 		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
-			for i := range record.Switch.Carry {
-				if record.Switch.Carry[i].ID == message.ID {
-					record.Switch.Carry[i].Delivered = true
-				}
-			}
+			record.markCarried(message.ID)
 			return nil
 		}) != nil {
 			return
+		}
+	}
+}
+
+// markCarried records a carried message as delivered. The switch can be gone
+// by then (a new handoff, or one undone): nothing is left to mark.
+func (r *mobileRecord) markCarried(id string) {
+	if r.Switch == nil {
+		return
+	}
+	for i := range r.Switch.Carry {
+		if r.Switch.Carry[i].ID == id {
+			r.Switch.Carry[i].Delivered = true
 		}
 	}
 }

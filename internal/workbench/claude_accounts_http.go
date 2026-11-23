@@ -35,9 +35,8 @@ type claudeSchedulingInput struct {
 func (input claudeSchedulingInput) apply(p claudeScheduling) claudeScheduling {
 	// Choosing a rule in 调度设置 is a standing answer.
 	p.SwitchAnswered = p.answered() || input.SwitchPolicy != p.SwitchPolicy
-	// Choosing automatic continuation is the yes that lets ungrouped accounts
-	// continue one another.
-	p.UngroupedHandoff = p.UngroupedHandoff || input.SwitchPolicy == "allow" && p.SwitchPolicy != "allow"
+	// Consent for accounts without a 接续分组 is given only by its own control
+	// (ungrouped_handoff); the rule alone never implies it.
 	p.Mode, p.SwitchPolicy = input.Mode, input.SwitchPolicy
 	if input.SwitchAnswered != nil {
 		p.SwitchAnswered = *input.SwitchAnswered
@@ -103,14 +102,12 @@ func (s *Server) mutateClaudeAccounts(w http.ResponseWriter, r *http.Request) {
 		list, loadErr := s.loadClaudeAccounts()
 		err = loadErr
 		if err == nil && input.Action == "prefer" {
-			// One action: new sessions use this account from now on (and it
-			// takes part in scheduling); an empty id returns to the rule.
+			// One action: new sessions use this account from now on; an empty
+			// id returns to the rule. It does not join automatic scheduling or
+			// continuation: 参与分配 stays as the person set it.
 			if a := list.find(input.ID); input.ID != "" && a == nil {
 				err = errors.New("未找到 Claude 账号，请刷新面板")
 			} else {
-				if a != nil {
-					a.Enabled = true
-				}
 				list.Scheduling.Preferred = input.ID
 			}
 		} else if err == nil && input.Action == "scheduling" {

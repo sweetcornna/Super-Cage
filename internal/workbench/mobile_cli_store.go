@@ -138,6 +138,13 @@ type mobileRecord struct {
 	// WaitingReset: under automatic continuation every account that may take
 	// the session was used up; it continues at this first reset.
 	WaitingReset int64 `json:"waiting_reset,omitempty"`
+	// UngroupedHandoff: consent given in this session (its menu's automatic
+	// rule, or 切换并继续 on its question) that accounts without a 接续分组
+	// may continue it. It counts only while the session has its own rule.
+	UngroupedHandoff bool `json:"ungrouped_handoff,omitempty"`
+	// HandoffRefusal: why the last automatic continuation was refused; shown
+	// while the session waits, cleared by a handoff or the end of the limit.
+	HandoffRefusal string `json:"handoff_refusal,omitempty"`
 	// Cleared lists the conversations /clear left behind in this record's
 	// terminal, oldest first (清除前的对话).
 	Cleared []clearedPart `json:"cleared,omitempty"`
@@ -204,6 +211,9 @@ type claudeAccountSwitch struct {
 	// Carry holds the messages the source never took, each delivered once to
 	// the target under its own request id.
 	Carry []claudeCarried `json:"carry,omitempty"`
+	// Wait is the reset the target account waits for (an undo back to a
+	// used-up account), applied where the preparation commits.
+	Wait int64 `json:"wait,omitempty"`
 }
 
 type claudeCarried struct {

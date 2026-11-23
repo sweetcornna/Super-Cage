@@ -43,7 +43,7 @@ func TestClaudeSwitchRefusalNamesTheNextStep(t *testing.T) {
 			t.Fatal(code, got)
 		}
 	}
-	if got := claudeSwitchRefusal("older helper text").Error(); got != "older helper text" {
+	if got := claudeSwitchRefusal("会话仍在运行，请稍后再试").Error(); got != "会话仍在运行，请稍后再试" {
 		t.Fatal("an older guest helper's sentence must pass through", got)
 	}
 }

@@ -456,9 +456,12 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 	var ids []string
 	checkDefault := false
 	for _, a := range previous.Accounts {
+		// The preferred account is used for new sessions even when it does
+		// not take part in automatic scheduling.
+		candidate := a.Enabled || a.ID == previous.Scheduling.Preferred
 		if a.Source == "default" {
-			checkDefault = checkDefault || a.Enabled
-		} else if a.Enabled && a.Status == "ready" {
+			checkDefault = checkDefault || candidate
+		} else if candidate && a.Status == "ready" {
 			ids = append(ids, a.guestID())
 		}
 	}
@@ -498,7 +501,7 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		q, ok := readings[a.guestID()]
-		if a.Enabled && a.Status == "ready" && ok && q.Identity == claudeIdentityHash(a.Email, a.Organization) {
+		if (a.Enabled || a.ID == list.Scheduling.Preferred) && a.Status == "ready" && ok && q.Identity == claudeIdentityHash(a.Email, a.Organization) {
 			if a.mergeQuota(&q.claudeQuota, now) {
 				updated = true
 			}
@@ -531,7 +534,7 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		if a.Source == "default" && (defaultSubject == "" || defaultSubject != claudeIdentityHash(a.Email, a.Organization)) {
-			a.Enabled = false // local selection view, not the persisted preference
+			a.Enabled, a.Status = false, "unverified" // local selection view, not the persisted state
 		}
 	}
 	selected := pickClaudeAccount(list, active, logins, m.lastPick, preferred, now)
@@ -545,8 +548,9 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 // Start at the account following the last allocation. Among eligible accounts,
 // prefer fewer live sessions, then the largest known remaining minimum window.
 func pickClaudeAccount(list claudeAccountList, active map[string]int, logins map[string]bool, last, preferred string, now time.Time) string {
-	// The person's chosen account wins while it can take a session.
-	if a := list.find(list.Scheduling.Preferred); a != nil && a.Enabled && a.Status == "ready" && !logins[a.ID] {
+	// The person's chosen account wins while it can take a session, whether
+	// or not it takes part in automatic scheduling.
+	if a := list.find(list.Scheduling.Preferred); a != nil && a.Status == "ready" && !logins[a.ID] {
 		if _, eligible := a.headroom(now); eligible {
 			return a.ID
 		}
