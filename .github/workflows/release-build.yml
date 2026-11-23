@@ -12,13 +12,10 @@ on:
         description: Exact 40-character commit SHA to build
         required: true
         type: string
-  # Temporary, while this workflow is developed on its branch.
-  push:
-    branches: [release-ci]
 permissions:
   contents: read
 env:
-  CAGE_BUILD_REF: ${{ inputs.sha || github.sha }}
+  CAGE_BUILD_REF: ${{ inputs.sha }}
 jobs:
   windows:
     name: Windows installer and sources
