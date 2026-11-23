@@ -302,7 +302,7 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		record.Workspace = workspace
 		record.Active = item.Active
 		record.RunningTasks = item.RunningTasks
-		title := item.Title
+		title := clearedConversationTitle(item.Title)
 		if title == clearedTitle && record.Title != "" {
 			// The guest titles a conversation by its first command until a
 			// name is set; after /clear the entry keeps its previous title.
@@ -338,6 +338,16 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 // clearedTitle is how the guest titles a conversation that began with /clear:
 // the CLI starts the new transcript with that command's row.
 const clearedTitle = "/clear"
+
+// clearedConversationTitle reads the title the guest gives a conversation that
+// began with /clear: "/clear" from its transcript, or the command row itself
+// when it is known from its channel state (its transcript has no folder yet).
+func clearedConversationTitle(title string) string {
+	if strings.HasPrefix(title, "<command-name>"+clearedTitle+"<") {
+		return clearedTitle
+	}
+	return title
+}
 
 // untitledTitle is a conversation the guest knows only from its channel
 // state: the CLI has its id but has not written its transcript yet.
@@ -399,13 +409,22 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 			}
 			continue
 		}
-		switch item.Title {
+		switch clearedConversationTitle(item.Title) {
 		case untitledTitle:
-			deferred[item.CLIID] = owner
+			// Held back only while it has no history (the resident helper
+			// says so): an untitled conversation with some gets its own entry.
+			if !item.HasHistory {
+				deferred[item.CLIID] = owner
+			}
 		case clearedTitle:
 			executions, cleared, previous, resume := owner.Executions, owner.Cleared, owner.CLIID, owner.Resume
 			owner.Executions = append(slices.Clip(executions), claudeExecution{CLIID: previous, Account: owner.Account, Config: owner.GuestConfig})
 			owner.Cleared = append(slices.Clip(cleared), clearedPart{CLIID: previous, ClearedAt: time.Now().UTC(), Empty: !present[previous]})
+			if sw := owner.Switch; !present[previous] && sw != nil && sw.Phase == "completed" && sw.TargetID == previous && owner.clearedPart(sw.Source.CLIID) == nil {
+				// A handoff's target writes its copy of the history only with its
+				// first prompt: before that, the conversation is the source's.
+				owner.Cleared = append(owner.Cleared, clearedPart{CLIID: sw.Source.CLIID, ClearedAt: time.Now().UTC()})
+			}
 			owner.CLIID, owner.Resume = item.CLIID, true
 			owner.changed()
 			if err := writePrivate(mobileRecordPath(s.profile, owner.ID), owner); err != nil {

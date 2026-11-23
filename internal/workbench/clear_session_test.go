@@ -263,6 +263,38 @@ func TestClearDuringAnAccountHandoffIsHeldBack(t *testing.T) {
 	}
 }
 
+// An untitled id is held back only while it has no transcript: a conversation
+// the entry's terminal resumed whose transcript has no title still gets an
+// entry (review 0.1.17 finding 7: it was hidden forever).
+func TestUntitledConversationWithATranscriptGetsItsOwnEntry(t *testing.T) {
+	f := newClearFixture(t)
+	a, x := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	resumed := f.item(x, f.connection, untitledTitle, true)
+	resumed.HasHistory = true
+	f.observe(f.item(a, "", "整理发布流程", false), resumed)
+	list := f.list(t)
+	if record := f.record(t); len(list) != 2 || record.CLIID != a || len(record.Cleared) != 0 {
+		t.Fatalf("an untitled conversation with a transcript: %+v %+v", list, record)
+	}
+}
+
+// Between /clear and its first prompt the guest knows the new id from its
+// channel state, titled by the transcript's command row (the official CLI's
+// transcript has no folder yet): it is linked, never an entry of its own.
+func TestClearKnownFromTheChannelStateIsLinked(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.observe(f.item(b, f.connection, "<command-name>/clear</command-name>", true), f.item(a, "", "整理发布流程", false))
+	list := f.list(t)
+	if record := f.record(t); len(list) != 1 || list[0].Title != "整理发布流程" || record.CLIID != b || record.clearedPart(a) == nil {
+		t.Fatalf("a /clear known from the channel state: %+v %+v", list, record)
+	}
+}
+
 func TestClearBeforeTheFirstPromptLeavesAnEmptyPart(t *testing.T) {
 	f := newClearFixture(t)
 	a, b := f.record(t).CLIID, uuid.NewString()
