@@ -457,10 +457,6 @@ if value == {"permissions": {"defaultMode": "bypassPermissions"}, "tui": "fullsc
     return True
 
 
-def active_session(session_id, config=""):
-    return bool(active_sessions(session_id, config))
-
-
 def active_sessions(session_id, config=""):
     return [row for row in running_sessions(config) if row.get("sessionId") == session_id]
 
@@ -567,7 +563,7 @@ def prepare_account_switch(request):
         saved = read_json(receipt)
         if saved["binding"] != binding:
             raise ValueError("switch:reused")
-        return {"transcript": str(folder / "history.jsonl"), "workspace": saved.get("workspace", "")}
+        return {**saved, "transcript": str(folder / "history.jsonl")}
     path = next((config / "projects").glob("*/" + sid + ".jsonl"), None)
     if path is None or path.is_symlink():
         raise ValueError("switch:history")
@@ -582,7 +578,7 @@ def prepare_account_switch(request):
     # the source's own children are found by ancestry and stopped with it.
     rows = active_sessions(sid, str(config))
     for row in rows:
-        if not workspace_within(row.get("cwd", ""), root) or row.get("status") != "idle" or row.get("kind") != "interactive":
+        if not workspace_within(row.get("cwd", ""), root) or not request.get("force") and (row.get("status") != "idle" or row.get("kind") != "interactive"):
             raise ValueError("switch:running")
     pid = read_json(ROOT / connection / "state.json", {}).get("pid")
     fingerprint = process_fingerprint(pid)
@@ -594,7 +590,9 @@ def prepare_account_switch(request):
     with state_file(connection) as state:
         if state.get("cli_id") != sid or state.get("config") != str(config) or state.get("pid") != pid or not workspace_within(state.get("workspace", ""), root):
             raise ValueError("switch:changed")
-        if state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent"):
+        # A handoff the person confirmed, or one at a confirmed quota limit,
+        # stops a working source: its turn ends and its approvals are dropped.
+        if not request.get("force") and (state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent")):
             raise ValueError("switch:busy")
         # A fence whose preparation never froze a history is stale: replace it.
         existing = state.get("account_switch")
@@ -611,10 +609,9 @@ def prepare_account_switch(request):
             time.sleep(.05)
         if executing():
             latest = read_json(ROOT / connection / "state.json", {})
-            current = process_fingerprint(pid)
             # The CLI can finish its SessionEnd hook but hang while shutting down
             # its MCP child. Terminate only that same, already idle and fenced CLI.
-            if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and current == fingerprint and not active_sessions(sid, str(config)):
+            if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and process_fingerprint(pid) == fingerprint and not active_sessions(sid, str(config)):
                 terminate_cli(pid, True)
                 deadline = time.monotonic() + 1
                 while executing() and time.monotonic() < deadline:
@@ -630,7 +627,11 @@ def prepare_account_switch(request):
             stream.write(path.read_bytes())
             temporary = stream.name
         os.replace(temporary, target)
-        save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first})
+        # A message the source never took is not in the frozen history. The
+        # host delivers it to the target once, under a new request id.
+        received = transcript(target)[3]
+        carry = [item for item in read_json(ROOT / connection / "state.json", {}).get("sent", []) if item["id"] not in received]
+        save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first, "carry": carry})
     except BaseException:
         with state_file(connection) as latest:
             if latest.get("account_switch") == switch_id:
@@ -638,7 +639,7 @@ def prepare_account_switch(request):
         raise
     with state_file(connection) as state:
         state["closed"] = True
-    return {"transcript": str(target), "workspace": first}
+    return {"transcript": str(target), "workspace": first, "carry": carry}
 
 
 def cancel_account_switch(request):
@@ -661,7 +662,7 @@ def purge_session(request):
     config = Path(request["config"]) if request.get("config") else config_directory(request.get("account") or "default")
     config = config.resolve()
     workspace = request["workspace"].rstrip("/")
-    if active_session(session_id, str(config)):
+    if active_sessions(session_id, str(config)):
         raise ValueError("Claude Code 仍在运行这段会话，请先结束原终端中的 Claude Code")
     projects = config / "projects"
     if projects.is_symlink():
@@ -728,7 +729,7 @@ def launch(request):
     session_id = identifier(request.get("resume") or request.get("session_id") or connection)
     _, previous = connection_for(session_id, config_directory("default"))
     if request.get("resume"):
-        if active_session(request["resume"]):
+        if active_sessions(request["resume"]):
             raise ValueError("原会话仍在电脑终端运行，请先结束该终端中的 Claude Code 再接续")
     command = _runtime["command_text"](__file__, ["hook", connection])
     events = ("SessionStart", "UserPromptSubmit", "MessageDisplay", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure", "SessionEnd")
@@ -766,6 +767,7 @@ def launch(request):
             state["resume_transcript"] = request["resume_transcript"]
             state["resume_task"] = bool(request.get("continue_after_switch"))
             state["account_resume"] = True
+            state["note"] = request.get("note", "")
             transfer = read_json(ROOT.parent / "cli-account-switches" / identifier(request["switch_id"]) / "receipt.json", {})
             state["requests"] = {**transfer.get("requests", {}), **state["requests"]}
         state["handoff_permission_mode"] = transfer.get("permission_mode") or previous.get("handoff_permission_mode", "")
@@ -876,7 +878,7 @@ def serve(connection):
                             # inject the same continuation twice.
                             save(ROOT / connection / "state.json", state)
                             emit({"method": "notifications/claude/channel", "params": {
-                                "content": Path(__file__).with_suffix(".account-resume.md" if state.get("account_resume") else ".resume.md").read_text(encoding="utf-8"),
+                                "content": Path(__file__).with_suffix(".account-resume.md" if state.get("account_resume") else ".resume.md").read_text(encoding="utf-8") + state.get("note", ""),
                                 "meta": {"resume": "true"}}})
                     else:
                         raise ValueError("unsupported operation")
@@ -962,7 +964,7 @@ def main():
             result = rpc(request)
         elif mode == "active":
             config = request.get("config") or str(config_directory(request.get("account") or "default"))
-            result = {"running": active_session(identifier(request["cli_id"]), config)}
+            result = {"running": bool(active_sessions(identifier(request["cli_id"]), config))}
         elif mode == "handoff":
             try:
                 result = handoff_session(request)
