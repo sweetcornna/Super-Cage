@@ -342,7 +342,9 @@ if ($Operation -eq 'prepare') {
 } elseif ($Operation -eq 'cleanup') {
     $diagnosticStep = 'verifying_previous_file_ownership'
     $transfer = Get-Content -LiteralPath $Receipt -Raw -Encoding UTF8 | ConvertFrom-Json
-    $actual = @(Read-Tree $Source @($transfer.files.path) | Where-Object { !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object { Relative-Path $Source $_.FullName })
+    # A reused folder can hold no old program file; @($null) would name one.
+    $ownedPaths = [string[]]@(foreach ($entry in @($transfer.files)) { if ($entry.path) { $entry.path } })
+    $actual = @(Read-Tree $Source $ownedPaths | Where-Object { !($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } | ForEach-Object { Relative-Path $Source $_.FullName })
     foreach ($entry in $transfer.files) {
         if ($entry.path -notin $actual) { continue }
         try {
