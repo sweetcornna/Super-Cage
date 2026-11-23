@@ -161,6 +161,21 @@ await step("start screen", async () => {
   const names = (await bridge(page)).filter(m => m.action === "name");
   assert.ok(names.length > 0 && names.every(m => m.name === deviceName), "the page names the device " + JSON.stringify(names));
 });
+await step("home composer: type, send, the session is created and answered", async () => {
+  const box = page.getByRole("textbox", { name: "消息", exact: true });
+  await box.fill("先看看这个项目里有什么。");
+  await page.getByRole("button", { name: "发送", exact: true }).tap();
+  await page.locator('button[aria-label="复制回复"]').first().waitFor({ timeout: 8000 });
+  await see(page, "先看看这个项目里有什么。");
+  await shot(page, "home-composer");
+});
+await step("new conversation, then a recent row", async () => {
+  await page.getByRole("button", { name: "新对话", exact: true }).first().tap();
+  await see(page, "今天想在");
+  await see(page, "先看看这个项目里有什么。");
+  await page.locator(".recent").getByRole("button", { name: "把首页标题改得更醒目" }).tap();
+  await see(page, "已经把首页标题调大");
+});
 await step("side panel shows the device name, projects and sessions", async () => {
   await openDrawer(page);
   assert.match(await drawer(page).locator(".drawer-brand small").innerText(), /示例工作台 · 演示数据/);
@@ -181,7 +196,7 @@ await step("send a message and read the canned reply", async () => {
   await box.fill("你好，请介绍一下这个示例。");
   await page.getByRole("button", { name: "发送", exact: true }).tap();
   await see(page, "正在思考");
-  await see(page, "示例工作台里预先写好的回复");
+  await page.waitForFunction(() => !document.querySelector(".thinking") && document.querySelectorAll('button[aria-label="复制回复"]').length >= 2, null, { timeout: 8000 });
   await shot(page, "reply");
 });
 await step("stop a running reply", async () => {
@@ -198,6 +213,27 @@ await step("attach a file to a message", async () => {
   await page.getByRole("button", { name: "发送", exact: true }).tap();
   await see(page, ".super-cage/attachments");
   await page.waitForFunction(() => document.querySelectorAll('button[aria-label="复制回复"]').length >= 3, null, { timeout: 8000 });
+});
+await step("attach a picture, send it, open it inline", async () => {
+  const replies = () => page.locator('button[aria-label="复制回复"]').count();
+  const count = await replies();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==", "base64");
+  await page.locator(".composer input[type=file]").setInputFiles({ name: "示例截图.png", mimeType: "image/png", buffer: png });
+  await page.waitForFunction(() => document.querySelector(".attachment.done"));
+  await page.getByRole("textbox", { name: "消息", exact: true }).fill("请看这张图。");
+  await page.getByRole("button", { name: "发送", exact: true }).tap();
+  const trigger = page.locator(".project-media button.media-trigger", { hasText: "示例截图.png" });
+  await trigger.waitFor({ timeout: 8000 });
+  await trigger.tap();
+  await page.locator(".project-media img").waitFor({ timeout: 8000 });
+  assert.equal(await page.locator(".media-error").count(), 0, "the picture was not shown");
+  await page.waitForFunction(n => document.querySelectorAll('button[aria-label="复制回复"]').length > n, count, { timeout: 8000 });
+  await shot(page, "picture");
+});
+await step("a picture that is too large for the example: a calm sentence", async () => {
+  await page.locator(".composer input[type=file]").setInputFiles({ name: "大文件.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(3 << 20, 1) });
+  await see(page, "示例里最多上传 2 MB");
+  await page.getByRole("button", { name: /移除 大文件\.bin/ }).tap();
 });
 await step("approve a tool call", async () => {
   await openSession(page, "运行测试（审批示例）");
@@ -418,6 +454,15 @@ if (!args["no-idle"]) {
           if (await p.evaluate(() => document.hidden)) note("a touch did not wake the resting example");
           if ((await net(p)).filter(r => r.start > to).length < 2) note("the page did not read again after a touch");
           await see(p, "把首页标题改得更醒目");
+          // A bare click (no pointer, as VoiceOver sends it) wakes the example too, and the page reads again.
+          await p.keyboard.press("Escape");
+          await p.waitForTimeout(33000);
+          if (!(await p.evaluate(() => document.hidden))) note("the example did not rest again after the touch");
+          const seenBefore = (await net(p)).length;
+          await p.evaluate(() => document.querySelector('button[aria-label="展开侧栏"]').click());
+          await p.waitForTimeout(1500);
+          if (await p.evaluate(() => document.hidden)) note("a bare click did not wake the resting example");
+          if ((await net(p)).length - seenBefore < 2) note("the page did not read again after a bare click");
         }
       }
       await p.context().close();

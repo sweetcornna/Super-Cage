@@ -129,7 +129,8 @@ enum ExampleWorkspace {
           document.dispatchEvent(new Event("visibilitychange"));
         };
         const touched = () => { clearTimeout(timer); timer = setTimeout(() => rest(true), REST_MS); rest(false); };
-        for (const type of ["pointerdown", "touchstart", "keydown", "wheel", "input"]) addEventListener(type, touched, {capture: true, passive: true});
+        // "click" alone covers an activation that arrives without a pointer (VoiceOver, a keyboard, a script).
+        for (const type of ["pointerdown", "touchstart", "keydown", "wheel", "input", "click"]) addEventListener(type, touched, {capture: true, passive: true});
         touched();
       }
 
@@ -238,6 +239,14 @@ enum ExampleWorkspace {
           }
           return reply(view(s));
         case "open": return reply(view(s));
+        case "media": {
+          // A picture the person attached, or one of the sample files, shown inline in a message.
+          const reference = String(body?.reference || "");
+          const mime = {png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp"}[reference.split(".").pop().toLowerCase()];
+          const entry = reference && !reference.startsWith("/") && !reference.split("/").includes("..") ? files.get(s.workspace + "/" + reference) : null;
+          if (entry?.type !== "file" || !mime || !entry.bytes.length) return refuse("未找到媒体文件。", 404);
+          return reply({size: entry.bytes.length, mime, version: "example", data: toBase64(entry.bytes.subarray(Number(body.offset) || 0))});
+        }
         case "metadata":
           if (body?.title !== undefined) { s.title = s.custom_title = String(body.title); s.metadata_set = true; }
           if (body?.pinned !== undefined) { s.pinned = !!body.pinned; s.metadata_set = true; }
