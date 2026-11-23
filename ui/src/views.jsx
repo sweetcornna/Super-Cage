@@ -12,6 +12,7 @@ import { Terminal } from "../.generated/xterm.mjs";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { api, writeClipboard, nativeAvailable } from "./api";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareClipboardPaste, sendImage } from "./image-transfer";
@@ -351,9 +352,16 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       minimumContrastRatio: 4.5,
       scrollback: 6000,
       theme: terminalTheme(theme, variant),
+      // terminal.unicode, for the Unicode 11 widths below.
+      allowProposedApi: true,
     });
     const fitter = new FitAddon();
     terminal.loadAddon(fitter);
+    // Emoji and other wide characters take two cells, as Codex, Claude Code
+    // and the shell's line editor count them; xterm's default (Unicode 6)
+    // gives many one, which shifts the rest of their line.
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = "11";
     terminal.loadAddon(new WebLinksAddon(activateLogin, { urlRegex: claudeLoginLink }));
     // The Codex device page opens in the user's own browser; the one-time
     // code stays in this terminal and no credential crosses into the page.

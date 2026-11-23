@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { ArrowLeft, Minus, Plus, X } from "lucide-react";
 import { Terminal } from "../../.generated/xterm.mjs";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { base64ToBytes, terminals } from "./services.mjs";
@@ -61,6 +62,9 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       scrollback: 5000, theme: darkQuery.matches ? dark : light, allowProposedApi: true, macOptionIsMeta: true });
     const f = new FitAddon();
     t.loadAddon(f);
+    // Wide characters (emoji) take two cells, as the programs count them.
+    t.loadAddon(new Unicode11Addon());
+    t.unicode.activeVersion = "11";
     t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) openExternal(uri); }));
     t.open(host.current);
     term.current = t; fit.current = f;
