@@ -436,7 +436,8 @@ func claudeUndoTarget(list claudeAccountList, record *mobileRecord) *claudeAccou
 	if sw == nil || sw.Phase != "completed" || sw.Reason != "five_hour" && sw.Reason != "seven_day" || len(record.Executions) == 0 || record.CLIID != sw.TargetID {
 		return nil
 	}
-	previous := record.Executions[len(record.Executions)-1].Account
+	// The handoff's own source: /clear appends to Executions after it.
+	previous := sw.Source.Account
 	a := list.find(previous.ID)
 	if a == nil || a.Status != "ready" || a.guestID() != previous.GuestID || claudeIdentityHash(a.Email, a.Organization) != previous.Subject {
 		return nil

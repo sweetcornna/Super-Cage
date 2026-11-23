@@ -357,8 +357,7 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 		byID[record.ID] = record
 	}
 	eligible := func(record *mobileRecord) bool {
-		// A record inside an account handoff changes its id by that handoff.
-		return record != nil && record.Terminal && !record.codex() && !record.Deleted && !record.Archived && (record.Switch == nil || record.Switch.Phase == "completed")
+		return record != nil && record.Terminal && !record.codex() && !record.Deleted && !record.Archived
 	}
 	// Owners are taken before discovery rewrites records: the old id's item no
 	// longer carries the connection, and an open terminal outlives it.
@@ -381,6 +380,15 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 	for _, item := range found {
 		owner := owners[item.Connection]
 		if item.Connection == "" || owner == nil || owner.CLIID == item.CLIID || !validCLIUUID(item.CLIID) {
+			continue
+		}
+		if sw := owner.Switch; sw != nil && sw.Phase != "completed" {
+			// An account handoff in progress decides this entry's id: a new id
+			// on its terminal meanwhile makes no entry and is linked, if it is
+			// a /clear, once the handoff is settled.
+			if known[item.CLIID] == nil {
+				deferred[item.CLIID] = owner
+			}
 			continue
 		}
 		if known[item.CLIID] != nil {

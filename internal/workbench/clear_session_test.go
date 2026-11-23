@@ -223,6 +223,44 @@ func TestResumeOfAnEarlierPartInTheSameTerminalMakesItCurrent(t *testing.T) {
 	}
 }
 
+// An entry inside an account handoff is never linked: the handoff decides its
+// id. A /clear on its terminal meanwhile makes no entry of its own, and is
+// linked once the handoff is settled (here: it failed and undid itself).
+func TestClearDuringAnAccountHandoffIsHeldBack(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	setSwitch := func(sw *claudeAccountSwitch) {
+		t.Helper()
+		f.s.mobileCLI.mu.Lock()
+		record, _ := f.s.mobileCLI.record(f.s.profile, f.id)
+		record.Switch = sw
+		err := writePrivate(mobileRecordPath(f.s.profile, f.id), record)
+		f.s.mobileCLI.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	for _, sw := range []claudeAccountSwitch{
+		{Phase: "preparing"}, {Phase: "prepared"}, {Phase: "prepared", Error: "目标账号身份无法确认，保留待恢复历史"}, {Phase: "starting"},
+	} {
+		sw.ID, sw.TargetID, sw.Connection, sw.Source = uuid.NewString(), uuid.NewString(), f.connection, claudeExecution{CLIID: a}
+		setSwitch(&sw)
+		list := f.list(t)
+		if record := f.record(t); len(list) != 1 || list[0].ID != f.id || record.CLIID != a || len(record.Cleared) != 0 {
+			t.Fatalf("%s %q: linked or split during the handoff: %+v %+v", sw.Phase, sw.Error, list, record)
+		}
+	}
+	// The preparation was refused and undid itself (claude_switch.go undo).
+	setSwitch(nil)
+	list := f.list(t)
+	if record := f.record(t); len(list) != 1 || record.CLIID != b || len(record.Cleared) != 1 || record.Cleared[0].CLIID != a {
+		t.Fatalf("not linked after the handoff undid itself: %+v %+v", list, record)
+	}
+}
+
 func TestClearBeforeTheFirstPromptLeavesAnEmptyPart(t *testing.T) {
 	f := newClearFixture(t)
 	a, b := f.record(t).CLIID, uuid.NewString()
