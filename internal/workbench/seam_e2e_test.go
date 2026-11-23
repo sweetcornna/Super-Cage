@@ -54,6 +54,23 @@ func (h *limitHarness) clearAndPrompt(id, prompt string) (previous, current stri
 	return previous, h.record(id).CLIID
 }
 
+// keepScreen writes the session terminal's output to SEAM_SCREENS when the test fails.
+func (h *limitHarness) keepScreen(id, name string) {
+	folder := os.Getenv("SEAM_SCREENS")
+	if folder == "" {
+		return
+	}
+	h.t.Cleanup(func() {
+		if !h.t.Failed() {
+			return
+		}
+		if terminal := h.s.terminals.get(h.record(id).TerminalID); terminal != nil {
+			_ = os.MkdirAll(folder, 0700)
+			_ = os.WriteFile(filepath.Join(folder, h.t.Name()+"-"+name+".txt"), terminal.outputAfter(0, 1<<20).Data, 0600)
+		}
+	})
+}
+
 func (h *limitHarness) account(id string, body map[string]any) (int, string) {
 	raw, _ := json.Marshal(body)
 	response := request(h.s, "POST", "/api/mobile/cli/sessions/"+id+"/account", h.s.origin, string(raw), true)
@@ -273,6 +290,7 @@ func TestSeamHandoffThenClearEndToEnd(t *testing.T) {
 	// /resume of the cleared part in the terminal: the entry follows it back,
 	// and the undo is offered again, back to A.
 	h.typeInto(id, "/resume "+target)
+	h.keepScreen(id, "resume")
 	h.wait(id, "the entry follows /resume of its earlier part", func(mobileSession) bool {
 		r := h.record(id)
 		return r.CLIID == target && len(r.Cleared) == 1 && r.Cleared[0].CLIID == current
@@ -280,6 +298,22 @@ func TestSeamHandoffThenClearEndToEnd(t *testing.T) {
 	list, _ := h.s.loadClaudeAccounts()
 	if back := claudeUndoTarget(list, h.record(id)); back == nil || back.ID != a || !h.inspect(id).Undo {
 		t.Fatalf("undo after /resume of the handoff's conversation: %+v", back)
+	}
+	// The undo runs: the handoff's conversation goes back to A under a new id;
+	// the part cleared on B stays listed.
+	view = h.inspect(id)
+	if code, reply := h.account(id, map[string]any{"action": "undo", "request_id": uuid.NewString(), "source_id": view.Source, "confirm": true}); code != 200 {
+		t.Fatal("undo:", code, reply)
+	}
+	h.wait(id, "the undo", func(v mobileSession) bool {
+		return v.AccountSwitch != nil && v.AccountSwitch.Phase == "completed" && v.AccountID == a && v.CanSend != nil && *v.CanSend && !v.Active
+	})
+	undone := h.record(id).CLIID
+	if r := h.record(id); r.Account.ID != a || undone == target || undone == current || r.clearedPart(current) == nil {
+		t.Fatalf("after the undo: %+v", r)
+	}
+	if parts := h.earlier(id); len(parts) != 1 || parts[0].CLIID != current {
+		t.Fatalf("earlier parts after the undo: %+v", parts)
 	}
 	// e. Archive, restore, purge.
 	if code := h.call(id, "POST", "/archive", map[string]any{}, nil); code != 200 {
@@ -320,7 +354,7 @@ func TestSeamHandoffThenClearEndToEnd(t *testing.T) {
 		}
 	}
 	for _, account := range []string{a, b} {
-		for _, cli := range []string{source, target, current} {
+		for _, cli := range []string{source, target, current, undone} {
 			if path, ok := h.transcripts(account)[cli]; ok {
 				t.Fatalf("%s survived the purge: %s", cli, path)
 			}
