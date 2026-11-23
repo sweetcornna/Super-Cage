@@ -28,6 +28,9 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/cli/sessions/{id}/archive", s.mobileArchiveSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/restore", s.mobileRestoreSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/purge", s.mobilePurgeSession)
+	mux.HandleFunc("GET /api/cli/sessions/{id}/earlier", s.mobileEarlierParts)
+	mux.HandleFunc("GET /api/cli/sessions/{id}/earlier/{cli}", s.mobileEarlierPart)
+	mux.HandleFunc("POST /api/cli/sessions/{id}/earlier/{cli}/separate", s.mobileSeparateEarlier)
 	// The desktop stops a Codex turn it can only watch (a phone turn) here.
 	mux.HandleFunc("POST /api/cli/sessions/{id}/stop", s.mobileStop)
 	mux.HandleFunc("GET /api/mobile/cli/projects", s.mobileProjects)
@@ -45,6 +48,9 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/archive", s.mobileArchiveSession)
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/restore", s.mobileRestoreSession)
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/purge", s.mobilePurgeSession)
+	mux.HandleFunc("GET /api/mobile/cli/sessions/{id}/earlier", s.mobileEarlierParts)
+	mux.HandleFunc("GET /api/mobile/cli/sessions/{id}/earlier/{cli}", s.mobileEarlierPart)
+	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/earlier/{cli}/separate", s.mobileSeparateEarlier)
 }
 
 func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
@@ -79,7 +85,7 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法读取会话", 500)
 		return
 	}
-	existing := s.terminals.get(record.TerminalID)
+	existing := s.boundTerminal(record)
 	needsTerminal := existing == nil || !existing.ownsConversation()
 	if needsTerminal {
 		s.mu.Lock()
@@ -87,6 +93,18 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 		if !sharedCLILauncher(launcher) || record.Launcher != "" && launcher != record.Launcher {
 			http.Error(w, "主机启动命令与原会话不一致，请恢复原配置后重试", 422)
+			return
+		}
+		if problem := s.terminalAccountProblem(record); problem != "" {
+			// The account handoff (claude_switch.go) can offer another account here.
+			w.Header().Set("X-Cage-Recovery", "claude-account")
+			http.Error(w, problem, 409)
+			return
+		}
+		if view.missingHistory != "" && s.windowsGuest == nil && s.macosGuest == nil {
+			// The CLI would say "No conversation found" and leave a shell.
+			w.Header().Set("X-Cage-Recovery", "conversation-missing")
+			http.Error(w, "电脑上找不到这段会话的 Claude Code 记录（"+view.missingHistory+" 中没有它），无法接续。Claude Code 会按保留期自动删除较早的会话记录，记录也可能已被删除。这个条目仍然保留，可以归档它，或新建会话继续工作。", 409)
 			return
 		}
 	}

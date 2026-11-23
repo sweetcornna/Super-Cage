@@ -181,6 +181,7 @@ var agentRoutes = []string{
 	"POST /api/terminals", "DELETE /api/terminals/{id}", "POST /api/terminals/{id}/login-link", "POST /api/terminals/{id}/metadata",
 	"POST /api/cli/sessions/{id}/account", "POST /api/cli/sessions/{id}/archive", "POST /api/cli/sessions/{id}/metadata", "POST /api/cli/sessions/{id}/open",
 	"POST /api/cli/sessions/{id}/purge", "POST /api/cli/sessions/{id}/restore", "POST /api/cli/sessions/{id}/stop",
+	"POST /api/cli/sessions/{id}/earlier/{cli}/separate", "POST /api/mobile/cli/sessions/{id}/earlier/{cli}/separate",
 	"POST /api/projects/open", "POST /api/projects/save", "POST /api/projects/remove", "POST /api/projects/refresh", "POST /api/projects/client-share",
 	"POST /api/browser/{action}", "POST /api/browser/clipboard", "POST /api/browser/extensions/upload", "POST /api/browser/files/uploads/{id}", "POST /api/browser/preferences",
 	"POST /api/claude-desktop/{action}", "POST /api/claude-desktop/resize",

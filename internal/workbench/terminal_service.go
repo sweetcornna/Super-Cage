@@ -225,6 +225,39 @@ func (m *terminalManager) forConversation(connection string) *terminalSession {
 	return nil
 }
 
+// conversationOwners maps each open terminal's channel connection to the
+// session it shows.
+func (m *terminalManager) conversationOwners() map[string]string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	owners := map[string]string{}
+	for _, session := range m.sessions {
+		session.mu.Lock()
+		if session.connectionID != "" && session.sharedID != "" && !session.closed {
+			owners[session.connectionID] = session.sharedID
+		}
+		session.mu.Unlock()
+	}
+	return owners
+}
+
+// boundTerminal is the terminal a record names, only while that terminal still
+// shows the record's conversation: a /resume of another conversation inside
+// the CLI moves the terminal to that conversation's record.
+func (s *Server) boundTerminal(record *mobileRecord) *terminalSession {
+	terminal := s.terminals.get(record.TerminalID)
+	if terminal == nil {
+		return nil
+	}
+	terminal.mu.Lock()
+	shared := terminal.sharedID
+	terminal.mu.Unlock()
+	if shared != "" && shared != record.ID {
+		return nil
+	}
+	return terminal
+}
+
 // Reattaching a repeated login request must not create a second OAuth flow.
 // A profile can serve many normal terminals or a single exclusive login.
 func (m *terminalManager) existingClaudeLogin(id string, login bool) (*terminalSession, error) {
@@ -346,10 +379,10 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 		// The guest can be unreadable or not yet started while its host PTY
 		// already owns this conversation. A stale snapshot cannot start a copy.
-		if existing := s.terminals.get(record.TerminalID); existing != nil && existing.ownsConversation() {
+		if existing := s.boundTerminal(record); existing != nil && existing.ownsConversation() {
 			return existing, nil
 		}
-		if existing := s.terminals.get(record.TerminalID); existing != nil && existing.summary()["closed"] == true {
+		if existing := s.boundTerminal(record); existing != nil && existing.summary()["closed"] == true {
 			s.terminals.remove(record.TerminalID)
 		}
 	}

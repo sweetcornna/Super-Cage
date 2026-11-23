@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -254,6 +255,7 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 			known[execution.CLIID] = record
 		}
 	}
+	deferred := s.followClearedConversations(m, known, found)
 	for _, item := range found {
 		var workspace, matched string
 		for guest, path := range workspaces {
@@ -266,6 +268,12 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		}
 		record := known[item.CLIID]
 		if record != nil && record.CLIID != item.CLIID {
+			continue
+		}
+		if owner := deferred[item.CLIID]; owner != nil && record == nil {
+			// The terminal's CLI has a new id without a transcript yet: no
+			// entry for it, and the entry it continues stays running.
+			running[owner.ID] = running[owner.ID] || item.Running
 			continue
 		}
 		if record != nil && (record.Deleted || record.Archived) {
@@ -294,8 +302,14 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		record.Workspace = workspace
 		record.Active = item.Active
 		record.RunningTasks = item.RunningTasks
-		record.Title, record.GuestConfig, record.Connection = item.Title, item.Config, item.Connection
-		s.cliDiscovery.named(record.ID, item.Title)
+		title := item.Title
+		if title == clearedTitle && record.Title != "" {
+			// The guest titles a conversation by its first command until a
+			// name is set; after /clear the entry keeps its previous title.
+			title = record.Title
+		}
+		record.Title, record.GuestConfig, record.Connection = title, item.Config, item.Connection
+		s.cliDiscovery.named(record.ID, title)
 		record.GuestWorkspace = item.Workspace
 		if item.Connection != "" {
 			if terminal := s.terminals.forConversation(item.Connection); terminal != nil {
@@ -321,6 +335,142 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 	return nil
 }
 
+// clearedTitle is how the guest titles a conversation that began with /clear:
+// the CLI starts the new transcript with that command's row.
+const clearedTitle = "/clear"
+
+// untitledTitle is a conversation the guest knows only from its channel
+// state: the CLI has its id but has not written its transcript yet.
+const untitledTitle = "Claude Code"
+
+// followClearedConversations keeps one entry per terminal conversation when the
+// CLI changes its session id in place. /clear ends the old id and starts a new
+// one in the same process, so the same channel connection reports it. A new
+// id on a connection owned by another record's terminal joins that record when
+// its transcript began with /clear; the old id becomes an earlier part. An id
+// with no transcript yet is held back (returned) so it never makes an entry of
+// its own. Anything else, such as /resume of another conversation, keeps the
+// usual rules. Caller holds m.mu.
+func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]*mobileRecord, found []terminalConversation) map[string]*mobileRecord {
+	byID := map[string]*mobileRecord{}
+	for _, record := range known {
+		byID[record.ID] = record
+	}
+	eligible := func(record *mobileRecord) bool {
+		// A record inside an account handoff changes its id by that handoff.
+		return record != nil && record.Terminal && !record.codex() && !record.Deleted && !record.Archived && (record.Switch == nil || record.Switch.Phase == "completed")
+	}
+	// Owners are taken before discovery rewrites records: the old id's item no
+	// longer carries the connection, and an open terminal outlives it.
+	owners := map[string]*mobileRecord{}
+	for _, record := range byID {
+		if eligible(record) && record.Connection != "" {
+			owners[record.Connection] = record
+		}
+	}
+	for connection, id := range s.terminals.conversationOwners() {
+		if record := byID[id]; eligible(record) {
+			owners[connection] = record
+		}
+	}
+	present := make(map[string]bool, len(found))
+	for _, item := range found {
+		present[item.CLIID] = true
+	}
+	deferred := map[string]*mobileRecord{}
+	for _, item := range found {
+		owner := owners[item.Connection]
+		if item.Connection == "" || owner == nil || owner.CLIID == item.CLIID || !validCLIUUID(item.CLIID) {
+			continue
+		}
+		if known[item.CLIID] != nil {
+			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil {
+				s.resumeEarlierPart(m, owner, item.CLIID, present)
+			}
+			continue
+		}
+		switch item.Title {
+		case untitledTitle:
+			deferred[item.CLIID] = owner
+		case clearedTitle:
+			executions, cleared, previous, resume := owner.Executions, owner.Cleared, owner.CLIID, owner.Resume
+			owner.Executions = append(slices.Clip(executions), claudeExecution{CLIID: previous, Account: owner.Account, Config: owner.GuestConfig})
+			owner.Cleared = append(slices.Clip(cleared), clearedPart{CLIID: previous, ClearedAt: time.Now().UTC(), Empty: !present[previous]})
+			owner.CLIID, owner.Resume = item.CLIID, true
+			owner.changed()
+			if err := writePrivate(mobileRecordPath(s.profile, owner.ID), owner); err != nil {
+				// Unsaved, the link is retried by the next discovery.
+				owner.Executions, owner.Cleared, owner.CLIID, owner.Resume = executions, cleared, previous, resume
+				deferred[item.CLIID] = owner
+				continue
+			}
+			known[item.CLIID] = owner
+			if m.catalog != nil {
+				m.catalog[owner.ID] = owner.summary()
+			}
+		}
+	}
+	return deferred
+}
+
+// resumeEarlierPart: /resume of an earlier part inside the entry's own
+// terminal makes it the entry's conversation again, and the conversation the
+// terminal left becomes an earlier part. Unsaved, it is retried by the next
+// discovery. Caller holds m.mu.
+func (s *Server) resumeEarlierPart(m *mobileCLIStore, owner *mobileRecord, id string, present map[string]bool) {
+	index := slices.IndexFunc(owner.Executions, func(e claudeExecution) bool { return e.CLIID == id })
+	if index < 0 {
+		return
+	}
+	executions, cleared, previous := owner.Executions, owner.Cleared, owner.CLIID
+	owner.Executions = append(slices.Delete(slices.Clone(executions), index, index+1), claudeExecution{CLIID: previous, Account: owner.Account, Config: owner.GuestConfig})
+	owner.Cleared = append(slices.DeleteFunc(slices.Clone(cleared), func(part clearedPart) bool { return part.CLIID == id }),
+		clearedPart{CLIID: previous, ClearedAt: time.Now().UTC(), Empty: !present[previous]})
+	owner.CLIID, owner.Resume = id, true
+	owner.changed()
+	if err := writePrivate(mobileRecordPath(s.profile, owner.ID), owner); err != nil {
+		owner.Executions, owner.Cleared, owner.CLIID = executions, cleared, previous
+		return
+	}
+	if m.catalog != nil {
+		m.catalog[owner.ID] = owner.summary()
+	}
+}
+
+// conversationFollowPace is the least time between two follow-up looks (the
+// clients' own list pace): a CLI that sits after /clear costs at most that.
+var conversationFollowPace = 5 * time.Second
+
+// followConversationID looks at the guest's sessions once more when a view
+// finds that the record's terminal no longer runs the record's id (a /clear or
+// a /resume inside the CLI): a phone inside a conversation polls only its view,
+// so the list's discovery would not link it. One look runs at a time.
+func (s *Server) followConversationID() {
+	if last := s.conversationFollowAt.Load(); last != 0 && time.Since(time.Unix(0, last)) < conversationFollowPace {
+		return
+	}
+	if !s.conversationFollow.CompareAndSwap(false, true) {
+		return
+	}
+	s.conversationFollowAt.Store(time.Now().UnixNano())
+	go func() {
+		defer s.conversationFollow.Store(false)
+		paths, err := s.projectPaths()
+		if err != nil {
+			return
+		}
+		// As a list request does: discovery works on the loaded catalog.
+		granted := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			granted[path] = true
+		}
+		if _, err := s.mobileCLI.summaries(s.profile, granted, false); err != nil {
+			return
+		}
+		_, _ = s.observeSessions(s.lifetimeContext(), paths, sessionListKinds{claude: true}, time.Now())
+	}()
+}
+
 func (s *Server) terminalConversationView(ctx context.Context, id string) (mobileSession, error) {
 	s.conversationMu.Lock()
 	defer s.conversationMu.Unlock()
@@ -336,6 +486,11 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	}
 	var current terminalConversation
 	input := map[string]any{"cli_id": record.CLIID, "config": record.GuestConfig, "connection": record.Connection, "account": record.Account.GuestID}
+	if s.windowsGuest == nil && s.macosGuest == nil {
+		// The resident helper keeps a session the CLI filed under this project
+		// in it when its latest folder lies elsewhere (cli_discovery.py).
+		input["project"] = s.cliWorkspace(record.Workspace)
+	}
 	if err := s.windowsConversationInput(record, input); err != nil {
 		return mobileSession{}, err
 	}
@@ -343,6 +498,15 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
+	if current.Connection == "" {
+		// The guest has no connection on this id while the entry's terminal
+		// still runs a conversation: its CLI moved to another id (/clear, or a
+		// /resume inside it). Checked on every view, as the new id's transcript
+		// appears only with the next prompt.
+		if terminal := s.boundTerminal(record); record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
+			s.followConversationID()
+		}
+	}
 	root := s.cliConversationRoot(record)
 	if current.Workspace == "" && !current.HasHistory && record.TerminalID != "" {
 		if record.Switch != nil && record.Switch.Phase == "starting" && !current.Running {
@@ -385,7 +549,7 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	if record.Turns == nil {
 		record.Turns = []mobileTurn{}
 	}
-	if !s.cliDiscovery.discoveredTitle(id, record.Title) {
+	if !s.cliDiscovery.discoveredTitle(id, record.Title) && !(record.Title != "" && strings.HasPrefix(current.Title, "<command-name>"+clearedTitle+"<")) {
 		record.Title = current.Title
 	}
 	record.ConnectionNotice = current.ConnectionNotice
@@ -426,7 +590,11 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 			m.catalog[id] = record.summary()
 		}
 	}
-	return record.snapshot(), nil
+	view := record.snapshot()
+	if record.Resume && !current.HasHistory && !current.NativeHistory && current.Config != "" && record.ResumeTranscript == "" && record.Switch == nil {
+		view.missingHistory = current.Config
+	}
+	return view, nil
 }
 
 // cliConversationRoot is the guest folder of the project a terminal
@@ -635,10 +803,13 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		}
 		return string(data), record, nil
 	}
-	body := s.cliHelperCommand("launch", string(data)) + "; exec bash -i"
+	// Only status 1: what every refusal gives (the CLI, the account wrapper, the
+	// helper); a CLI ended by a signal (a hand-over: 143) or left (0) says nothing.
+	body := s.cliHelperCommand("launch", string(data)) + "; [ $? -ne 1 ] || printf '\\n%s\\n' " + shellescape.Quote(terminalLaunchFailed) + "; exec bash -i"
+	root := s.cliWorkspace(workspace)
 	directory := record.GuestWorkspace
 	if directory == "" {
-		directory = s.cliWorkspace(workspace)
+		directory = root
 	}
 	record.GuestWorkspace = directory
 	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
@@ -650,8 +821,23 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		}
 		return s.macOSClaudeLaunch(workspace, string(data)), record, nil
 	}
-	script := "cd " + shellescape.Quote(directory) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
+	script := terminalDirectory(directory, root) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
 	return script, record, nil
+}
+
+// terminalLaunchFailed follows a launch that ended with status 1 (the CLI exits
+// 0 when the person leaves it): its own message is just above.
+const terminalLaunchFailed = "Super Cage：Claude Code 未能启动或接续这段会话，原因见上方。会话仍在列表中，可以再次打开；这个终端现在是普通命令行。"
+
+// terminalDirectory enters the folder the conversation last worked in, or the
+// project when that folder is gone (a removed worktree): the CLI finds the
+// transcript by its id from any folder, so the resume goes on and says where.
+func terminalDirectory(directory, root string) string {
+	if directory == root {
+		return "cd " + shellescape.Quote(root)
+	}
+	notice := shellescape.Quote("会话上次所在的文件夹已不存在，已在项目文件夹中继续：" + root)
+	return "{ cd " + shellescape.Quote(directory) + " 2>/dev/null || { cd " + shellescape.Quote(root) + " && printf '%s\n' " + notice + "; }; }"
 }
 
 func (s *Server) isTerminalConversation(id string) bool {

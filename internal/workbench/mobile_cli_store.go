@@ -46,6 +46,9 @@ type mobileSummary struct {
 	// RunningTasks counts the subagents and background tasks of a terminal
 	// conversation whose CLI is live (from discovery); absent when none run.
 	RunningTasks int `json:"running_tasks,omitempty"`
+	// EarlierParts counts what /clear left behind in this entry's terminal
+	// (清除前的对话); absent when nothing was cleared.
+	EarlierParts int `json:"earlier_parts,omitempty"`
 	// Owner is who writes a Codex session's thread now: "" (nobody), "desktop"
 	// (a terminal of this server), "phone" (a phone turn) or "external" (any
 	// other process). Codex sessions only.
@@ -84,6 +87,9 @@ type mobileSession struct {
 	AccountFailure  string            `json:"account_failure,omitempty"`
 	AccountSwitch   *claudeSwitchView `json:"account_switch,omitempty"`
 	mediaWorkingDir string
+	// missingHistory: a view found no transcript of a conversation the entry
+	// resumes (not stored, not sent).
+	missingHistory string
 	mobileSummary
 	Turns                 []mobileTurn `json:"turns"`
 	SingleTurn            bool         `json:"single_turn,omitempty"`
@@ -132,6 +138,9 @@ type mobileRecord struct {
 	// WaitingReset: under automatic continuation every account that may take
 	// the session was used up; it continues at this first reset.
 	WaitingReset int64 `json:"waiting_reset,omitempty"`
+	// Cleared lists the conversations /clear left behind in this record's
+	// terminal, oldest first (清除前的对话).
+	Cleared []clearedPart `json:"cleared,omitempty"`
 	// CodexAccount is the Codex account whose CODEX_HOME holds the thread;
 	// empty means the environment's own ~/.codex.
 	CodexAccount string `json:"codex_account,omitempty"`
@@ -146,6 +155,27 @@ type claudeExecution struct {
 	CLIID   string          `json:"cli_id"`
 	Account claudeSelection `json:"account"`
 	Config  string          `json:"config"`
+}
+
+// clearedPart is a conversation a /clear in the same terminal left behind. Its
+// id is also in Executions, so discovery, purge and the account handoff treat
+// it as an earlier execution of the record.
+type clearedPart struct {
+	CLIID     string    `json:"cli_id"`
+	ClearedAt time.Time `json:"cleared_at"`
+	// Empty: the part had no transcript when it was linked (a /clear before
+	// the first prompt), so purge does not expect its history.
+	Empty bool `json:"empty,omitempty"`
+}
+
+// clearedPart returns the record's cleared part with that id, if any.
+func (r *mobileRecord) clearedPart(id string) *clearedPart {
+	for i := range r.Cleared {
+		if r.Cleared[i].CLIID == id {
+			return &r.Cleared[i]
+		}
+	}
+	return nil
 }
 
 type claudeAccountSwitch struct {
@@ -280,9 +310,22 @@ func (record *mobileRecord) changed() {
 	record.Revision++
 	record.UpdatedAt = time.Now().UTC()
 }
+
+// earlierParts counts the cleared parts that had a transcript.
+func (record *mobileRecord) earlierParts() int {
+	count := 0
+	for _, part := range record.Cleared {
+		if !part.Empty {
+			count++
+		}
+	}
+	return count
+}
+
 func (record *mobileRecord) summary() mobileSummary {
 	view := record.mobileSummary
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 		view.placeholder = !record.Resume && len(record.Turns) == 0
@@ -293,6 +336,7 @@ func (record *mobileRecord) summary() mobileSummary {
 func (record *mobileRecord) snapshot() mobileSession {
 	view := record.mobileSession
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 	}

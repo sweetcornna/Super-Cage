@@ -1,7 +1,8 @@
 import React, { useRef, useState } from "react";
-import { Archive, LoaderCircle, MoreHorizontal, Pencil, Pin, PinOff, Terminal } from "lucide-react";
+import { Archive, History, LoaderCircle, MoreHorizontal, Pencil, Pin, PinOff, Terminal } from "lucide-react";
 import { useBackDismiss } from "./web-shell.mjs";
 import { runningText } from "./tasks.mjs";
+import { earlierCount } from "../earlier-parts.mjs";
 
 export function ProviderBadge({ provider }) {
   return provider === "codex" ? <span className="provider-badge codex">Codex</span> : null;
@@ -16,7 +17,8 @@ export function SessionRow({ session, current, disabled, onSelect, onAction, det
   const gesture = useRef(null);
   const suppressClick = useRef(false);
   const selection = useRef(null);
-  const width = 120;
+  const earlier = earlierCount(session) > 0;
+  const width = earlier ? 160 : 120;
   const reveal = -(offset ?? (revealed ? -width : 0));
   const finish = (event, cancelled = false) => {
     const start = gesture.current;
@@ -37,6 +39,7 @@ export function SessionRow({ session, current, disabled, onSelect, onAction, det
         {session.pinned ? <PinOff size={16} /> : <Pin size={16} />}
       </button>
       <button type="button" aria-label="重命名" title="重命名" disabled={disabled} onClick={() => onAction("rename", session)}><Pencil size={16} /></button>
+      {earlier && <button type="button" aria-label="清除前的对话" title="清除前的对话" disabled={disabled} onClick={() => onAction("earlier", session)}><History size={16} /></button>}
       <button type="button" aria-label="归档" title="归档" disabled={disabled} onClick={() => onAction("archive", session)}><Archive size={16} /></button>
     </div>
     <div className="session-slide" style={{ width:`calc(100% - ${reveal}px)`, transition: offset === null ? undefined : "none" }}

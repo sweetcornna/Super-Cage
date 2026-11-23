@@ -50,6 +50,8 @@ codex = None
 codex_name = ""
 codex_lock = threading.Lock()
 summaries = {}
+# The folder each listed transcript began in (its head never changes).
+origins = {}
 # The subagent files each session's latest view read, so a held read wakes
 # when a running child writes; sessions without running children add nothing.
 children = {}
@@ -517,6 +519,9 @@ def install(module):
     summary, running, connection = module.history_summary, module.running_sessions, module.connection_for
 
     def history_summary(path):
+        return recorded_workspace(path, cached_summary(path), getattr(local, "roots", None))
+
+    def cached_summary(path):
         key = file_key(path)
         cached = summaries.get(str(path))
         if cached is not None and key is not None and cached[0] == key:
@@ -549,16 +554,62 @@ def install(module):
     module.history_summary, module.running_sessions, module.connection_for = history_summary, running_sessions, connection_for
 
 
+def project_folder(path):
+    # The folder name the CLI files a transcript under: its starting folder
+    # with every character but letters and digits replaced.
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def first_workspace(path):
+    # The cwd of the transcript's first row that has one: where it began.
+    key = str(path)
+    if key not in origins:
+        found = ""
+        try:
+            with open(path) as stream:
+                for _ in range(64):
+                    line = stream.readline(1 << 20)
+                    if not line:
+                        break
+                    try:
+                        cwd = json.loads(line).get("cwd")
+                    except (ValueError, AttributeError):
+                        continue
+                    if isinstance(cwd, str) and cwd:
+                        found = cwd
+                        break
+        except OSError:
+            return ""
+        if not found:
+            return ""  # not cached: the first row with a cwd may be written yet
+        if len(origins) >= SUMMARY_LIMIT:
+            origins.clear()
+        origins[key] = found
+    return origins[key]
+
+
+def recorded_workspace(path, summary, roots):
+    """A session whose latest folder lies outside every granted project, but
+    that began in one of them and is filed under it (a resume from another
+    folder or a cd moved it), stays in that project. The folder name alone is
+    ambiguous (/w/a-b and /w/a/b share one), so where it began decides."""
+    workspace, title = summary
+    if not roots or any(channel.workspace_within(workspace, root) for root in roots):
+        return summary
+    root = next((root for root in roots if project_folder(root) == Path(path).parent.name), None)
+    return (root, title) if root and channel.workspace_within(first_workspace(path), root) else summary
+
+
 def discover(request):
     index = {}
     for path in channel.ROOT.glob("*/state.json"):
         state = read_state(path)
         index.setdefault((state.get("cli_id"), state.get("config")), []).append((path.parent.name, state))
-    local.states = index
+    local.states, local.roots = index, list(request["workspaces"])
     try:
         sessions = channel.discover(request)
     finally:
-        local.states = None
+        local.states = local.roots = None
     for item in sessions:
         count = running_tasks(item) if item.get("running") else 0
         if count:
@@ -605,6 +656,10 @@ def view(request):
     watched = []
     parts = view_parts(config, session_id)
     result = channel.view(config, session_id)
+    if isinstance(request.get("project"), str) and request["project"]:
+        path = transcript_path(config, session_id)
+        if path:
+            result["workspace"] = recorded_workspace(path, (result.get("workspace", ""), ""), [request["project"]])[0]
     view_tasks(result, config, session_id, watched)
     with lock:
         if watched:

@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -440,6 +441,38 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(found[0]["running_tasks"], 1)
         self.assertNotEqual(hashed, changed)
         self.assertEqual(self.discovery.task_scans[str(path)][1], path.stat().st_size)
+
+    def recorded(self, session, cwds):
+        # A transcript filed, as the CLI does, under its starting folder's name.
+        folder = self.config / "projects" / re.sub(r"[^A-Za-z0-9]", "-", cwds[0])
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / (session + ".jsonl")
+        with path.open("w") as stream:
+            for index, cwd in enumerate(cwds):
+                stream.write(json.dumps({"cwd": cwd, "type": "user", "uuid": str(uuid.uuid4()), "message": {"content": "prompt %d" % index}}) + "\n")
+        return path
+
+    def test_a_session_whose_cwd_left_the_project_stays_in_it(self):
+        inside, outside, elsewhere, neighbour = (str(uuid.uuid4()) for _ in range(4))
+        # Resumed from a subfolder, from a folder outside the project, a
+        # session that was never the project's, and one from an ungranted
+        # folder whose name the CLI files under the same folder name.
+        self.recorded(inside, [self.project, self.project + "/sub"])
+        self.recorded(outside, [self.project, str(self.home / "other")])
+        self.recorded(elsewhere, [str(self.home / "other")])
+        collider = str(Path(self.project).parent) + "-" + Path(self.project).name
+        self.assertEqual(re.sub(r"[^A-Za-z0-9]", "-", collider), re.sub(r"[^A-Za-z0-9]", "-", self.project))
+        self.recorded(neighbour, [collider, collider + "/x"])
+        plain = {item["cli_id"]: item["workspace"] for item in self.plain.discover(self.request)}
+        self.assertEqual(plain, {inside: self.project + "/sub"}, "the channel helper drops the session that left")
+        found = {item["cli_id"]: item["workspace"] for item in self.discovery.discover(self.request)[0]}
+        self.assertEqual(found, {inside: self.project + "/sub", outside: self.project})
+        # Its view names the project too when the workbench says which one.
+        request = {"cli_id": outside, "config": str(self.config)}
+        self.assertEqual(self.discovery.view(dict(request))["workspace"], str(self.home / "other"))
+        self.assertEqual(self.discovery.view(dict(request, project=self.project))["workspace"], self.project)
+        self.assertEqual(self.discovery.view({"cli_id": elsewhere, "config": str(self.config), "project": self.project})["workspace"], str(self.home / "other"))
+        self.assertEqual(self.discovery.view({"cli_id": neighbour, "config": str(self.config), "project": self.project})["workspace"], collider + "/x")
 
     def test_server_framing(self):
         code = self.home / ".local/share/cage/cli-channel-code"

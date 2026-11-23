@@ -15,7 +15,9 @@ export function projectSessionRows(tabs, sessions, saved, manualOrder, baseline)
       sessionActive: Boolean(session?.active),
       sessionRunningElsewhere: Boolean(tab.historySession && session?.running),
       sessionClaudeDesktop: Boolean(tab.historySession && session?.running && session?.claude_desktop),
-      sessionPinned: Boolean(session ? session.pinned : saved[tab.id]?.pinned) };
+      sessionPinned: Boolean(session ? session.pinned : saved[tab.id]?.pinned),
+      earlierParts: Number(session?.earlier_parts) > 0 ? Number(session.earlier_parts) : 0,
+      earlierSession: session && Number(session.earlier_parts) > 0 ? session : undefined };
   });
   for (const row of rows) if (!baseline.has(sessionKey(row))) baseline.set(sessionKey(row), baseline.size);
   return rows.sort((a, b) => {
