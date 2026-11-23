@@ -538,11 +538,14 @@ def handoff_receipt(config, session_id):
 
 def prepare_account_switch(request):
     # Freeze only an idle source. Never resubmit prompts or tools here.
+    # Everything that can refuse is checked before the source is fenced or
+    # stopped; a failure after the fence lifts it again.
     sid = identifier(request["cli_id"])
     switch_id = identifier(request["switch_id"])
     config = Path(request["config"]).resolve()
     connection = identifier(request["connection"])
     workspace = request["workspace"]
+    root = request.get("root", workspace)
     folder = ROOT.parent / "cli-account-switches" / switch_id
     receipt = folder / "receipt.json"
     binding = {key: request[key] for key in ("cli_id", "config", "connection", "workspace", "target_cli_id")}
@@ -551,55 +554,6 @@ def prepare_account_switch(request):
         if saved["binding"] != binding:
             raise ValueError("switch:reused")
         return {"transcript": str(folder / "history.jsonl"), "workspace": saved.get("workspace", "")}
-    with state_file(connection) as state:
-        if state.get("cli_id") != sid or state.get("config") != str(config) or not workspace_within(state.get("workspace", ""), request.get("root", workspace)):
-            raise ValueError("switch:changed")
-        if state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent"):
-            raise ValueError("switch:busy")
-        existing = state.get("account_switch")
-        if existing and existing != switch_id:
-            raise ValueError("switch:pending")
-        state["account_switch"] = switch_id
-        save(ROOT / connection / "state.json", state)
-    rows = active_sessions(sid, str(config))
-    # Any other live worker in this account can represent a background
-    # child of the source. The registry does not expose a complete ancestry.
-    listing = subprocess.run(["claude", "agents", "--json"], env={**os.environ, "CLAUDE_CONFIG_DIR": str(config)}, capture_output=True, text=True, timeout=10)
-    if listing.returncode != 0:
-        raise ValueError("switch:listing")
-    if any(row.get("sessionId") != sid and live(row.get("pid")) for row in json.loads(listing.stdout)):
-        raise ValueError("switch:siblings")
-    for row in rows:
-        if row.get("cwd") != workspace or row.get("status") != "idle" or row.get("kind") != "interactive":
-            raise ValueError("switch:running")
-    pid = state.get("pid")
-    fingerprint = process_fingerprint(pid) if live(pid) else ""
-    def executing():
-        if not live(pid):
-            return False
-        if os.name == "nt":
-            return True
-        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
-        return bool(status.stdout.strip()) and not status.stdout.lstrip().startswith("Z")
-    if executing() and not any(row.get("pid") == pid for row in rows):
-        raise ValueError("switch:process")
-    for row in rows:
-        terminate_cli(row["pid"])
-    deadline = time.monotonic() + 5
-    while executing() and time.monotonic() < deadline:
-        time.sleep(.05)
-    if executing():
-        latest = read_json(ROOT / connection / "state.json", {})
-        current = process_fingerprint(pid)
-        # The CLI can finish its SessionEnd hook but hang while shutting down
-        # its MCP child. Terminate only that same, already idle and fenced CLI.
-        if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and current == fingerprint and not active_sessions(sid, str(config)):
-            terminate_cli(pid, True)
-            deadline = time.monotonic() + 1
-            while executing() and time.monotonic() < deadline:
-                time.sleep(.05)
-    if executing():
-        raise ValueError("switch:exit")
     path = next((config / "projects").glob("*/" + sid + ".jsonl"), None)
     if path is None or path.is_symlink():
         raise ValueError("switch:history")
@@ -619,17 +573,73 @@ def prepare_account_switch(request):
                 pending.add(block["id"])
             elif block.get("type") == "tool_result":
                 pending.discard(block.get("tool_use_id"))
-    if not workspace_within(first, request.get("root", workspace)):
+    if not workspace_within(first, root):
         raise ValueError("switch:project")
     if pending:
         raise ValueError("switch:tools")
-    folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
-    target = folder / "history.jsonl"
-    with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:
-        stream.write(path.read_bytes())
-        temporary = stream.name
-    os.replace(temporary, target)
-    save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first})
+    rows = active_sessions(sid, str(config))
+    # Any other live worker in this account can represent a background
+    # child of the source. The registry does not expose a complete ancestry.
+    listing = subprocess.run(["claude", "agents", "--json"], env={**os.environ, "CLAUDE_CONFIG_DIR": str(config)}, capture_output=True, text=True, timeout=10)
+    if listing.returncode != 0:
+        raise ValueError("switch:listing")
+    if any(row.get("sessionId") != sid and live(row.get("pid")) for row in json.loads(listing.stdout)):
+        raise ValueError("switch:siblings")
+    for row in rows:
+        if not workspace_within(row.get("cwd", ""), root) or row.get("status") != "idle" or row.get("kind") != "interactive":
+            raise ValueError("switch:running")
+    pid = read_json(ROOT / connection / "state.json", {}).get("pid")
+    fingerprint = process_fingerprint(pid) if live(pid) else ""
+    def executing():
+        if not live(pid):
+            return False
+        if os.name == "nt":
+            return True
+        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
+        return bool(status.stdout.strip()) and not status.stdout.lstrip().startswith("Z")
+    if executing() and not any(row.get("pid") == pid for row in rows):
+        raise ValueError("switch:process")
+    with state_file(connection) as state:
+        if state.get("cli_id") != sid or state.get("config") != str(config) or state.get("pid") != pid or not workspace_within(state.get("workspace", ""), root):
+            raise ValueError("switch:changed")
+        if state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent"):
+            raise ValueError("switch:busy")
+        # A fence whose preparation never froze a history is stale: replace it.
+        existing = state.get("account_switch")
+        if existing and existing != switch_id and (folder.parent / existing / "receipt.json").exists():
+            raise ValueError("switch:pending")
+        state["account_switch"] = switch_id
+        save(ROOT / connection / "state.json", state)
+    try:
+        for row in rows:
+            terminate_cli(row["pid"])
+        deadline = time.monotonic() + 5
+        while executing() and time.monotonic() < deadline:
+            time.sleep(.05)
+        if executing():
+            latest = read_json(ROOT / connection / "state.json", {})
+            current = process_fingerprint(pid)
+            # The CLI can finish its SessionEnd hook but hang while shutting down
+            # its MCP child. Terminate only that same, already idle and fenced CLI.
+            if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and current == fingerprint and not active_sessions(sid, str(config)):
+                terminate_cli(pid, True)
+                deadline = time.monotonic() + 1
+                while executing() and time.monotonic() < deadline:
+                    time.sleep(.05)
+        if executing():
+            raise ValueError("switch:exit")
+        folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
+        target = folder / "history.jsonl"
+        with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:
+            stream.write(path.read_bytes())
+            temporary = stream.name
+        os.replace(temporary, target)
+        save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first})
+    except BaseException:
+        with state_file(connection) as latest:
+            if latest.get("account_switch") == switch_id:
+                latest.pop("account_switch")
+        raise
     with state_file(connection) as state:
         state["closed"] = True
     return {"transcript": str(target), "workspace": first}

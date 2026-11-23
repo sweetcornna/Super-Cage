@@ -129,6 +129,42 @@ class ChannelTests(unittest.TestCase):
         with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
             with self.assertRaisesRegex(ValueError,"switch:project"): channel.prepare_account_switch(request)
 
+    def test_account_switch_refusals_leave_the_source_running_and_unfenced(self):
+        # Every check that can refuse runs before the source is fenced or
+        # stopped; a failure after the fence lifts it again.
+        self.history(self.session,str(self.home/"elsewhere"),[{"type":"user","message":{"content":"start"}}])
+        connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id}
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project,"pid":os.getpid()})
+        completed=type("Result",(),{"returncode":0,"stdout":"[]"})()
+        with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed),patch.object(channel,"terminate_cli") as stop:
+            with self.assertRaisesRegex(ValueError,"switch:project"): channel.prepare_account_switch(request)
+            stop.assert_not_called()
+        self.assertNotIn("account_switch",channel.read_json(self.root/connection/"state.json"))
+        self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project})
+        with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed),patch.object(channel.os,"replace",side_effect=OSError("disk full")):
+            with self.assertRaises(OSError): channel.prepare_account_switch(request)
+        state=channel.read_json(self.root/connection/"state.json")
+        self.assertNotIn("account_switch",state)
+        self.assertFalse(state.get("closed"))
+        self.assertFalse((self.root.parent/"cli-account-switches"/switch_id/"receipt.json").exists())
+
+    def test_account_switch_replaces_a_stale_unprepared_fence(self):
+        self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
+        connection,stale,target=[str(uuid.uuid4()) for _ in range(3)]
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":str(uuid.uuid4())}
+        # An earlier helper fenced the session and then refused: no receipt.
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project,"account_switch":stale})
+        completed=type("Result",(),{"returncode":0,"stdout":"[]"})()
+        with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
+            result=channel.prepare_account_switch(request)
+            self.assertTrue(Path(result["transcript"]).is_file())
+            self.assertEqual(channel.read_json(self.root/connection/"state.json")["account_switch"],request["switch_id"])
+            # A fence whose history is already frozen is still respected.
+            other={**request,"switch_id":str(uuid.uuid4())}
+            with self.assertRaisesRegex(ValueError,"switch:pending"): channel.prepare_account_switch(other)
+
     def test_failure_hook_reports_kind_and_new_turn_clears_it(self):
         payload={"hook_event_name":"StopFailure","session_id":self.session,"error":"rate_limit","error_details":"private upstream diagnostic"}
         with patch.object(channel.sys,"stdin",io.StringIO(json.dumps(payload))):channel.hook(self.session)

@@ -188,13 +188,21 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 	if sw := record.Switch; sw != nil && sw.ID == input.RequestID && sw.Phase == "completed" {
 		return nil
 	}
-	if record.Switch != nil && record.Switch.Phase != "completed" && record.Switch.ID != input.RequestID {
-		return errors.New("已有账号交接待恢复，请重试原操作")
+	if old := record.Switch; old != nil && old.Phase != "completed" && old.ID != input.RequestID {
+		if old.Phase != "preparing" {
+			return errors.New("上一次交接已把会话历史交给 " + old.TargetLabel + "：点“重试账号交接”完成它。")
+		}
+		// A preparation that did not finish never froze the history. A new
+		// choice replaces it; the person does not have to cancel it first.
+		if err := s.dropClaudeSwitch(ctx, record); err != nil {
+			return err
+		}
 	}
 	if input.SourceID != record.CLIID && (record.Switch == nil || record.Switch.ID != input.RequestID || record.Switch.Source.CLIID != input.SourceID) {
 		return errors.New("会话账号已变化，请刷新后确认")
 	}
-	if record.Switch == nil || record.Switch.ID != input.RequestID {
+	fresh := record.Switch == nil || record.Switch.ID != input.RequestID
+	if fresh {
 		if automatic {
 			policy := record.SwitchPolicy
 			if policy == "" {
@@ -235,6 +243,15 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 	}
 	sw := record.Switch
 	fail := func(err error) error { sw.Error = err.Error(); _ = s.saveClaudeSwitch(record); return err }
+	// Nothing was frozen: the guest refused and lifted its own fence, or this
+	// attempt failed before it reached the guest. The session stays as it was.
+	undo := func(err error) error { record.Switch = nil; _ = s.saveClaudeSwitch(record); return err }
+	before := func(err error) error {
+		if fresh {
+			return undo(err)
+		}
+		return fail(err) // an earlier attempt's outcome in the guest is unknown
+	}
 	if sw.Phase == "preparing" {
 		// Authorization can be revoked or the target identity can change while
 		// an interrupted preparation is waiting for a retry.
@@ -244,11 +261,11 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 			eligible = eligible || option.ID == sw.Target.ID
 		}
 		if !eligible || target == nil || target.guestID() != sw.Target.GuestID || claudeIdentityHash(target.Email, target.Organization) != sw.Target.Subject {
-			return fail(errors.New("目标账号或接续分组已变化，请取消本次交接后重新选择"))
+			return before(errors.New("目标账号或接续分组已变化：重新选择目标账号。"))
 		}
 		status, err := s.probeClaude(ctx, sw.Target.GuestID)
 		if err != nil || status.subject() != sw.Target.Subject {
-			return fail(errors.New("目标账号登录已变化，请取消交接后检查账号"))
+			return before(errors.New("无法确认 " + sw.TargetLabel + " 的登录：在账号管理中点“检查状态”，需要时重新登录。"))
 		}
 		var result struct {
 			Transcript string `json:"transcript"`
@@ -256,14 +273,14 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 			Error      string `json:"error"`
 		}
 		if sw.Source.Config == "" || sw.Connection == "" {
-			return fail(errors.New("原会话连接尚未就绪，请先打开原会话"))
+			return before(errors.New("原会话连接尚未就绪：先打开这段会话，再切换。"))
 		}
 		// The session's project, not the folder its CLI is in now, decides
 		// whether its history may continue here.
 		root := s.cliConversationRoot(record)
 		query := map[string]any{"cli_id": sw.Source.CLIID, "config": sw.Source.Config, "connection": sw.Connection, "workspace": record.GuestWorkspace, "root": root, "target_cli_id": sw.TargetID, "switch_id": sw.ID}
 		if err := s.windowsConversationInput(record, query); err != nil {
-			return fail(err)
+			return before(err)
 		}
 		if s.windowsGuest != nil {
 			delete(query, "root") // the workspace is the registered project folder
@@ -273,7 +290,13 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 			return fail(err)
 		}
 		if result.Error != "" {
-			return fail(claudeSwitchRefusal(result.Error))
+			// The guest refused before freezing the history. Lift its fence
+			// also when an older helper did not lift it itself.
+			refusal := claudeSwitchRefusal(result.Error)
+			if s.dropClaudeSwitch(ctx, record) != nil {
+				return fail(refusal)
+			}
+			return refusal
 		}
 		if !strings.HasPrefix(result.Transcript, "/") && !(s.windowsGuest != nil && windowsCLIAbsolutePath(result.Transcript)) {
 			return fail(errors.New("原会话历史未确认，未启动目标账号"))
@@ -360,10 +383,16 @@ func (s *Server) cancelClaudeSwitch(ctx context.Context, id, requestID string) e
 	if record.Switch == nil {
 		return nil
 	}
-	sw := record.Switch
-	if sw.ID != requestID || sw.Phase != "preparing" {
+	if sw := record.Switch; sw.ID != requestID || sw.Phase != "preparing" {
 		return errors.New("目标账号已接管历史，请在当前会话继续")
 	}
+	return s.dropClaudeSwitch(ctx, record)
+}
+
+// dropClaudeSwitch lifts the guest fence of a preparation that has not frozen
+// the history and forgets it. The caller holds the operation lock.
+func (s *Server) dropClaudeSwitch(ctx context.Context, record *mobileRecord) error {
+	sw := record.Switch
 	var response struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
@@ -372,11 +401,13 @@ func (s *Server) cancelClaudeSwitch(ctx context.Context, id, requestID string) e
 	if err := s.windowsConversationInput(record, query); err != nil {
 		return err
 	}
-	if err := s.runCLIChannel(ctx, "account-switch-cancel", query, &response); err != nil {
-		return err
-	}
-	if !response.OK {
-		return claudeSwitchRefusal(response.Error)
+	if sw.Connection != "" {
+		if err := s.runCLIChannel(ctx, "account-switch-cancel", query, &response); err != nil {
+			return err
+		}
+		if !response.OK {
+			return claudeSwitchRefusal(response.Error)
+		}
 	}
 	record.Switch = nil
 	return s.saveClaudeSwitch(record)
