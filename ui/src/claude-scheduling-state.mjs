@@ -9,8 +9,8 @@ export function answered(scheduling) {
 export function ruleSentence(scheduling) {
   const policy = scheduling?.switch_policy || "ask";
   if (policy === "allow") {
-    return "额度确认用完时，自动换到还有额度的账号继续，会话历史随之带过去"
-      + (scheduling.ungrouped_handoff ? "；没有设分组的账号之间也会互相接续" : "；只在同一接续分组内接续")
+    return "额度确认用完时，自动换到还有额度、参与分配的账号继续，会话历史随之带过去"
+      + (scheduling.ungrouped_handoff ? "；没有设分组的账号之间也会互相接续" : "；只在同一接续分组内接续，没有设分组的账号之间仍会先问你")
       + "。都用完时等最先恢复的账号，届时自动继续。";
   }
   if (policy === "wait") return "额度用完时等原账号恢复，不换账号。";
@@ -19,7 +19,14 @@ export function ruleSentence(scheduling) {
     : "还没有设定：第一次有账号额度用完时，会在会话里问你一次。";
 }
 
-export const MANUAL_SENTENCE = "手动切换不受这些限制：在会话的账号菜单里选哪个账号，就换到哪个。";
+export const MANUAL_SENTENCE = "手动切换不受这些限制：在会话的账号菜单里选哪个账号，就换到哪个。在某个会话里选的规则只管那个会话。";
+
+// The explicit yes in 调度设置 for accounts without a 接续分组.
+export const UNGROUPED_LABEL = "没有设接续分组的账号之间也自动接续";
+
+export function ungroupedChange(scheduling, on) {
+  return { ...scheduling, ungrouped_handoff: !!on };
+}
 export const GROUP_SENTENCE = "接续分组只限制自动接续：设了分组的账号只和同组账号互相接续。工作账号和个人账号请分到不同分组，以免会话历史自动进入另一身份。";
 
 // Offered once two logged-in accounts take part, until it is answered.

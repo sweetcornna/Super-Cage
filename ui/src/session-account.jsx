@@ -89,7 +89,7 @@ export function SessionAccount({ id, request, onChanged, compact = false }) {
         </button>)}
       </div>}
       {confirming && !switching && <div className="session-account-confirm" role="group" aria-label="确认切换">
-        <p>{confirmText(label(confirming))}</p>
+        <p>{confirmText(label(confirming), view.source_tasks)}</p>
         <div className="session-account-choices">
           <button type="button" className="session-account-primary" disabled={busy} onClick={()=>pick(confirming)}>停止并切换</button>
           <button type="button" className="text-button" disabled={busy} onClick={()=>setConfirming(null)}>取消</button>
