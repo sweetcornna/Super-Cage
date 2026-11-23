@@ -113,6 +113,15 @@ function replaceVersions(text, paths, version) {
   return result;
 }
 
+// The iPhone app's version is the project-level MARKETING_VERSION of the Xcode project, in the Debug and Release
+// configurations. It is written as the application VERSION itself. App Store Connect accepts only three
+// period-separated integers there, so an iOS build for it is made from a stable VERSION.
+export const iosProjectPath = 'mobile/ios/CageMobile.xcodeproj/project.pbxproj';
+const marketing = /(\bMARKETING_VERSION = )([^;\s]+)(;)/g;
+export function marketingVersions(text) {
+  return [...text.matchAll(marketing)].map(match => match[2]);
+}
+
 export function versionFiles(root, version) {
   parseVersion(version);
   const versionPath = resolve(root, 'VERSION');
@@ -133,6 +142,13 @@ export function versionFiles(root, version) {
       result.set(path, replaceVersions(text, paths, version));
     }
   }
+  const projectPath = resolve(root, iosProjectPath);
+  const project = readFileSync(projectPath, 'utf8');
+  const found = marketingVersions(project);
+  if (!found.length || found.some(actual => actual !== current)) {
+    throw new Error(`${iosProjectPath}: MARKETING_VERSION must match VERSION (${current})`);
+  }
+  result.set(projectPath, project.replace(marketing, (_, before, old, after) => before + version + after));
   return result;
 }
 

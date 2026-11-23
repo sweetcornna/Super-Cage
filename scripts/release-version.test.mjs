@@ -2,15 +2,20 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { compareVersions, nextVersion, parseVersion, versionFiles } from './release-version.mjs';
+import { compareVersions, iosProjectPath, marketingVersions, nextVersion, parseVersion, versionFiles } from './release-version.mjs';
+
+// The Xcode project keeps the version in two build configurations; other values that happen to look like it stay.
+const project = '// !$*UTF8*$!\n{\n\t\t01 = {isa = XCBuildConfiguration; buildSettings = {CAGE_APP_ID = "fixture"; MARKETING_VERSION = 1.2.3-alpha.9; CURRENT_PROJECT_VERSION = 1; PRODUCT_NAME = "1.2.3-alpha.9";}; name = Debug;};\n\t\t02 = {isa = XCBuildConfiguration; buildSettings = {CAGE_APP_ID = "fixture"; MARKETING_VERSION = 1.2.3-alpha.9; CURRENT_PROJECT_VERSION = 1;}; name = Release;};\n}\n';
 
 function fixture(t) {
   const root = mkdtempSync(join(tmpdir(), 'cage-release-version-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, 'VERSION'), '1.2.3-alpha.9\r\n');
+  mkdirSync(join(root, dirname(iosProjectPath)), { recursive: true });
+  writeFileSync(join(root, iosProjectPath), project);
   for (const directory of ['ui', 'www']) {
     mkdirSync(join(root, directory));
     writeFileSync(join(root, directory, 'package.json'), '{\r\n\t"name" : "fixture",\r\n\t"version": "1.2.3-alpha.9",\r\n\t"dependencies": {"same-version": "1.2.3-alpha.9"},\r\n\t"number": 900719925474099312345\r\n}\r\n');
@@ -77,12 +82,12 @@ test('reserves existing tags including future draft tags and ignores noncanonica
   assert.equal(nextVersion('0.1.0', 'major', ['v2.4.9-rc.3']), '3.0.0');
 });
 
-test('returns five edits without writing files or changing dependency data and formatting', t => {
+test('returns six edits without writing files or changing dependency data and formatting', t => {
   const root = fixture(t);
-  const paths = ['VERSION', 'ui/package.json', 'ui/package-lock.json', 'www/package.json', 'www/package-lock.json'];
+  const paths = ['VERSION', 'ui/package.json', 'ui/package-lock.json', 'www/package.json', 'www/package-lock.json', iosProjectPath];
   const before = new Map(paths.map(path => [join(root, path), readFileSync(join(root, path), 'utf8')]));
   const edits = versionFiles(root, '1.2.3');
-  assert.equal(edits.size, 5);
+  assert.equal(edits.size, 6);
   assert.deepEqual([...edits.keys()], [...before.keys()]);
   assert.equal(edits.get(join(root, 'VERSION')), '1.2.3\r\n');
   for (const [path, original] of before) {
@@ -95,8 +100,49 @@ test('returns five edits without writing files or changing dependency data and f
       const old = JSON.parse(original);
       assert.deepEqual(lock.packages['node_modules/library'], old.packages['node_modules/library']);
       assert.deepEqual(lock.metadata, old.metadata);
+    } else if (path === join(root, iosProjectPath)) {
+      // The project: both MARKETING_VERSION values, nothing else.
+      assert.equal(edits.get(path), original.replaceAll('MARKETING_VERSION = 1.2.3-alpha.9;', 'MARKETING_VERSION = 1.2.3;'));
+      assert.deepEqual(marketingVersions(edits.get(path)), ['1.2.3', '1.2.3']);
+      assert.ok(edits.get(path).includes('PRODUCT_NAME = "1.2.3-alpha.9"'));
     }
   }
+});
+
+test('the iOS project follows a stable and a prerelease bump', t => {
+  const root = fixture(t);
+  const path = join(root, iosProjectPath);
+  for (const version of ['1.2.3', '1.3.0-beta.1', '2.0.0']) assert.deepEqual(marketingVersions(versionFiles(root, version).get(path)), [version, version]);
+});
+
+test('rejects a project whose iOS version is missing or differs from VERSION, without writing', t => {
+  const path = root => join(root, iosProjectPath);
+  for (const [name, change] of [
+    ['one configuration is stale', text => text.replace('MARKETING_VERSION = 1.2.3-alpha.9;', 'MARKETING_VERSION = 1.2.2;')],
+    ['both are stale', text => text.replaceAll('MARKETING_VERSION = 1.2.3-alpha.9;', 'MARKETING_VERSION = 0.1.15;')],
+    ['it is missing', text => text.replaceAll('MARKETING_VERSION = 1.2.3-alpha.9; ', '')],
+  ]) {
+    const root = fixture(t);
+    const changed = change(project);
+    writeFileSync(path(root), changed);
+    assert.throws(() => versionFiles(root, '2.0.0'), /MARKETING_VERSION must match VERSION/, name);
+    assert.equal(readFileSync(path(root), 'utf8'), changed);
+  }
+});
+
+test('check-version fails when the iOS project and VERSION differ', t => {
+  const root = fixture(t);
+  mkdirSync(join(root, 'scripts'));
+  for (const name of ['check-version.mjs', 'release-version.mjs']) writeFileSync(join(root, 'scripts', name), readFileSync(new URL('./' + name, import.meta.url)));
+  const check = () => spawnSync(process.execPath, [join(root, 'scripts', 'check-version.mjs')], { encoding: 'utf8' });
+  assert.equal(check().status, 0, check().stderr);
+  assert.match(check().stdout, /iOS project versions match VERSION: 1\.2\.3-alpha\.9/);
+  writeFileSync(join(root, iosProjectPath), project.replace('MARKETING_VERSION = 1.2.3-alpha.9;', 'MARKETING_VERSION = 0.1.15;'));
+  const result = check();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /MARKETING_VERSION differs from VERSION/);
+  writeFileSync(join(root, iosProjectPath), project.replaceAll('MARKETING_VERSION = 1.2.3-alpha.9;', ''));
+  assert.match(check().stderr, /no MARKETING_VERSION found/);
 });
 
 test('rejects inconsistent versions in any package or lockfile root without writing', t => {

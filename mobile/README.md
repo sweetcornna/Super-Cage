@@ -4,6 +4,19 @@ Super Cage 手机端是远程客户端。点首页中央的「连接电脑」，
 
 Android arm64 APK 可从[官网下载入口](https://claude-cage.com/#download)获取，支持 Android 8.0+。iOS 17+ 版本通过 TestFlight 内部测试分发（App「Cage Tenant」，套装 ID `io.github.sweetcornna.claude-cage.tenant.mobile`），也可以用 Xcode 在本地构建并签名安装。
 
+## 示例工作台
+
+首页第三个入口「看看示例工作台」不需要账号、服务器或电脑。点开后进入名为「示例工作台 · 演示数据」的工作台，里面有虚构的项目、会话、工具审批、终端、文件和环境，可以直接试用：发消息会收到预先写好的回复，终端只运行几条读取示例文件的命令，其余操作和远程浏览器、Claude Desktop 一样会提示「示例里不能这样做，连接自己的 Super Cage 后可用」。示例全部在手机内存里运行，不联网、不配对、不保存凭据，也不写入钥匙串或已连接设备列表；点侧栏底部的「退出」回到首页，示例随即丢弃，重启 App 也一样。设置里没有这个入口。
+
+示例由 `mobile/ios/CageMobile/ExampleWorkspace.swift` 实现：手机工作台页面从 App 包内以自己的 URL 协议加载，并在页面开始前注入一段脚本，脚本在内存里回答页面的全部请求。修改后用无头 Chrome 对真实的手机界面核对：
+
+```sh
+npm ci --prefix ui && node mobile/build-ui.mjs
+CAGE_PLAYWRIGHT_MODULE=<playwright 模块路径> CAGE_TEST_BROWSER_PATH=<Chrome 路径> node mobile/scripts/example-workspace-check.mjs
+```
+
+脚本逐屏走查（390×844，触摸），任何未捕获错误、控制台错误、无应答请求、对其他来源的请求都会失败，并在空闲时统计每个界面的请求频率。iPhone 模拟器里另有只在模拟器构建中编译的假扫码入口和 `-preview-screen` 截图参数，真机构建不含它们。
+
 ## 连接服务器
 
 首页的「连接服务器」用于多租户 Super Cage 服务器。填写门户地址（只接受 HTTPS 域名）、账户和密码后登录，即可查看、新建和打开自己的虚拟机。停机的虚拟机会先启动，首次可能需要几分钟。打开后工作台列出 Claude Code 项目和会话，可在手机上对话和处理工具审批；远程浏览器与 Claude Desktop 仍需扫码连接电脑。
