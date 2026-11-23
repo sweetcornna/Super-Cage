@@ -1,0 +1,49 @@
+/* Subagents and background tasks: the strip above the composer, the cards in a
+   turn, the sheet. Ink on paper, one clay accent for what runs; the running dot
+   breathes like the conversation's status dot (super.css) and stops with it. */
+.task-strip { margin: 0 0 8px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); overflow: hidden; }
+.task-strip ul, .task-cards, .task-list { list-style: none; margin: 0; padding: 0; }
+.task-strip li + li { border-top: 1px solid var(--line); }
+.task-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 9px; row-gap: 1px; align-items: center; width: 100%; min-height: 40px; padding: 6px 12px; border: 0; background: transparent; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.task-title { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.task-title strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; }
+.task-title small { flex: none; color: var(--muted); font-size: 11.5px; }
+.task-time { color: var(--muted); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.task-now { grid-column: 2 / -1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 12.5px; }
+.task-dot { display: inline-block; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--clay); box-shadow: 0 0 0 3px var(--clay-soft); animation: breathe 1.6s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .task-dot { animation: none; } }
+.task-more { display: flex; align-items: center; gap: 2px; width: 100%; min-height: 34px; padding: 4px 12px 4px 28px; border: 0; border-top: 1px solid var(--line); background: transparent; color: var(--clay-ink); font: inherit; font-size: 12.5px; text-align: left; cursor: pointer; }
+.task-more.compact { display: none; }
+.task-row:focus-visible, .task-more:focus-visible, .task-card:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+/* A short screen (keyboard open, landscape): one row, so the transcript keeps its room. */
+@media (max-height: 520px) {
+  .task-strip li + li, .task-strip .task-now, .task-more.full { display: none; }
+  .task-more.compact { display: flex; }
+  .task-row { min-height: 34px; padding-block: 3px; }
+  .task-more { min-height: 30px; }
+}
+
+/* Cards in the turn that started them. */
+.task-cards { display: grid; gap: 6px; margin-bottom: 10px; }
+.task-card { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 9px; width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.task-card.running { border-color: color-mix(in srgb, var(--clay) 45%, var(--line)); }
+.task-outcome { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12.5px; white-space: nowrap; }
+.task-outcome small { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.task-outcome.running { color: var(--clay-ink); }
+.task-outcome.failed, .task-state-icon.failed { color: var(--error); }
+.task-outcome.completed, .task-state-icon.completed { color: var(--green); }
+.task-state-icon { flex: none; color: var(--muted); }
+
+/* The sheet. */
+.task-sheet h3 { margin: 12px 0 6px; font-family: var(--serif); font-size: 15px; font-weight: 500; color: var(--muted); }
+.task-item { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; column-gap: 10px; row-gap: 2px; align-items: center; padding: 10px 0; }
+.task-item + .task-item { border-top: 1px solid var(--line); }
+.task-kind-icon { color: var(--muted); }
+.task-item .task-meta, .task-item .task-now { grid-column: 2 / -1; color: var(--muted); font-size: 12.5px; }
+.task-item .task-now { white-space: normal; overflow-wrap: anywhere; }
+
+/* The running count beside the conversation's status and in session lists. */
+.task-count { color: var(--clay-ink); }
+.status-label .task-count::before { content: "·"; margin: 0 4px; color: var(--muted); }
+.task-marker { display: inline-flex; align-items: center; gap: 5px; color: var(--clay-ink); font-size: 12px; }
+.task-marker::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--clay); }

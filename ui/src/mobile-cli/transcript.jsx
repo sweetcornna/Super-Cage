@@ -2,6 +2,8 @@ import React, { createContext, memo, useContext, useMemo } from "react";
 import { Marked } from "marked";
 import { Bell, Check, ChevronRight, CircleAlert, Terminal } from "lucide-react";
 import { ProjectMedia, projectMediaKind, webURL } from "./transcript-media";
+import { TaskCards } from "./task-views";
+import { splitTools } from "./tasks.mjs";
 import "./transcript.css";
 
 export const TranscriptContext = createContext(null);
@@ -275,10 +277,13 @@ export const MessageBody = memo(function MessageBody({ text }) {
   );
 });
 
-export function ToolActivity({ tools }) {
-  if (!tools?.length) return null;
+// Subagents and background tasks get their own cards (tasks.jsx); the
+// ordinary calls stay in the collapsed list, as an older server's tools all do.
+export function ToolActivity({ tools: all, onTasks }) {
+  if (!all?.length) return null;
+  const { tasks, calls: tools } = splitTools(all);
   const failures = tools.filter((t) => t.status === "failed").length;
-  return (
+  const history = tools.length > 0 && (
     <details className="claude-record tool-history">
       <summary>
         <Terminal size={16} />
@@ -300,5 +305,12 @@ export function ToolActivity({ tools }) {
         ))}
       </ul>
     </details>
+  );
+  if (!tasks.length) return history;
+  return (
+    <>
+      <TaskCards tools={tasks} onOpen={onTasks} />
+      {history}
+    </>
   );
 }
