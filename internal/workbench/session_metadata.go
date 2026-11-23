@@ -344,10 +344,14 @@ func (s *Server) purgeSession(ctx context.Context, id string) error {
 		executions = nil
 	}
 	for _, execution := range executions {
+		expect := execution.CLIID != record.CLIID || record.Resume
+		if part := record.clearedPart(execution.CLIID); part != nil && part.Empty {
+			expect = false // a /clear before the first prompt left no transcript
+		}
 		input := map[string]any{
 			"cli_id": execution.CLIID, "config": execution.Config,
 			"account": execution.Account.GuestID, "workspace": guestPath(record.Workspace),
-			"expect_history": execution.CLIID != record.CLIID || record.Resume,
+			"expect_history": expect,
 		}
 		if err := s.windowsConversationInput(record, input); err != nil {
 			return err

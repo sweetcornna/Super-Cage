@@ -123,6 +123,9 @@ type mobileRecord struct {
 	Switch           *claudeAccountSwitch `json:"switch,omitempty"`
 	Executions       []claudeExecution    `json:"executions,omitempty"`
 	ResumeTranscript string               `json:"resume_transcript,omitempty"`
+	// Cleared lists the conversations /clear left behind in this record's
+	// terminal, oldest first (清除前的对话).
+	Cleared []clearedPart `json:"cleared,omitempty"`
 	// CodexAccount is the Codex account whose CODEX_HOME holds the thread;
 	// empty means the environment's own ~/.codex.
 	CodexAccount string `json:"codex_account,omitempty"`
@@ -137,6 +140,27 @@ type claudeExecution struct {
 	CLIID   string          `json:"cli_id"`
 	Account claudeSelection `json:"account"`
 	Config  string          `json:"config"`
+}
+
+// clearedPart is a conversation a /clear in the same terminal left behind. Its
+// id is also in Executions, so discovery, purge and the account handoff treat
+// it as an earlier execution of the record.
+type clearedPart struct {
+	CLIID     string    `json:"cli_id"`
+	ClearedAt time.Time `json:"cleared_at"`
+	// Empty: the part had no transcript when it was linked (a /clear before
+	// the first prompt), so purge does not expect its history.
+	Empty bool `json:"empty,omitempty"`
+}
+
+// clearedPart returns the record's cleared part with that id, if any.
+func (r *mobileRecord) clearedPart(id string) *clearedPart {
+	for i := range r.Cleared {
+		if r.Cleared[i].CLIID == id {
+			return &r.Cleared[i]
+		}
+	}
+	return nil
 }
 
 type claudeAccountSwitch struct {

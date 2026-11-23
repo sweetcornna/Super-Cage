@@ -48,6 +48,7 @@ type Server struct {
 	scienceLast                                      claudeScienceLast
 	scienceHost                                      scienceHost
 	agentNativeQueue                                 agentNativeQueue
+	conversationFollow                               atomic.Bool // followConversationID runs
 	macSetupProjectsChecked                          time.Time
 	macSetupProjectsAttempt                          time.Time
 	macSetupSharingConfirmed                         bool

@@ -79,7 +79,7 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "无法读取会话", 500)
 		return
 	}
-	existing := s.terminals.get(record.TerminalID)
+	existing := s.boundTerminal(record)
 	needsTerminal := existing == nil || !existing.ownsConversation()
 	if needsTerminal {
 		s.mu.Lock()
