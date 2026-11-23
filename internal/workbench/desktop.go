@@ -81,11 +81,12 @@ func openController(profile string) (*controllerClient, error) {
 // environment and complete an update. The proof ships in 0.1.16. The grace
 // was to end in 0.1.17, which follows 0.1.16 by two days: it stays for that
 // release, so that an install over 0.1.15 (which has no in-app update and
-// may skip 0.1.16) can still save and stop its environment. From 0.1.18
-// every caller below uses connectProvenController and openController refuses
-// a record without auth. TestOlderControllerGraceCallers fails once the
-// version reaches it.
-const olderControllerGraceEndsIn = "0.1.18"
+// may skip 0.1.16) can still save and stop its environment. 0.1.18 is an
+// installer hotfix one day after 0.1.17 and keeps it for the same reason.
+// From 0.1.19 every caller below uses connectProvenController and
+// openController refuses a record without auth.
+// TestOlderControllerGraceCallers fails once the version reaches it.
+const olderControllerGraceEndsIn = "0.1.19"
 
 // olderControllerGraceEntries are the functions that give the grace.
 var olderControllerGraceEntries = []string{"connectController", "openController"}
