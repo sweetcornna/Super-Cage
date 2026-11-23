@@ -6,7 +6,7 @@ import { createWorkbench } from "./workbench-fixture.mjs";
 // once, with no gap and no repeat. The visible terminal keeps its stream
 // however long it stays shown; a session that ended while its view was
 // suspended still shows its last output and the end; a terminal restored
-// hidden after a reload is suspended too. The terminal server is a stand-in
+// hidden after a reload opens no stream until it is shown. The terminal server is a stand-in
 // that keeps each session's output and replays it after the requested offset.
 const fixture = await createWorkbench({ mockWebSockets: false, beforeNavigate: page => page.clock.install() });
 const { browser, page, errors, state } = fixture;
@@ -137,22 +137,24 @@ try {
   await advance(30_000);
   assert.equal(of(first).length, 3, "an ended session must not reconnect");
 
-  // After a reload the second terminal is restored hidden; it is suspended
-  // two minutes later and resumes when shown.
+  // After a reload the second terminal is restored hidden. Its xterm cannot
+  // take its size while hidden, so it opens its stream only when shown and
+  // draws the kept history at its own size.
   const before = of(second).length;
   await page.reload();
-  await until(() => of(second).length === before + 1, "the restored terminal did not connect");
-  assert.equal(of(second).at(-1).after, "0");
+  await page.getByRole("tab", { name: "终端 2", exact: true }).first().waitFor();
+  await new Promise(resolve => setTimeout(resolve, 500));
   await advance(125_000);
-  await until(() => open(second).length === 0, "a terminal restored hidden was not suspended");
-  assert.equal((await perf(second)).suspended, 1);
+  assert.equal(of(second).length, before, "a terminal restored hidden must not connect before it is shown");
   emit(second, "TWO-B\r\n$ ");
   await show("终端 2");
-  await until(async () => (await screen()).includes("TWO-B"), "the restored terminal did not resume");
+  await until(() => of(second).length === before + 1, "the restored terminal did not connect when shown");
+  assert.equal(of(second).at(-1).after, "0");
+  await until(async () => (await screen()).includes("TWO-B"), "the restored terminal did not show its output");
   assert.equal(times(await screen(), "TWO-A"), 1);
   assert.equal(times(await screen(), "TWO-B"), 1);
   assert.deepEqual(errors, []);
-  console.log("PASS: hidden terminals suspend after two minutes and resume after their offset without gaps or repeats; the visible terminal stays attached; an ended session shows its tail; a terminal restored hidden suspends");
+  console.log("PASS: hidden terminals suspend after two minutes and resume after their offset without gaps or repeats; the visible terminal stays attached; an ended session shows its tail; a terminal restored hidden connects when shown");
 } finally {
   await browser.close();
 }

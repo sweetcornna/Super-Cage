@@ -213,7 +213,8 @@ body { background: var(--paper); -webkit-font-smoothing: antialiased; }
 .terminal-title strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .terminal-title svg { color: var(--clay-ink); flex: none; }
 .terminal-status { padding: 4px 14px; font-size: 12.5px; color: var(--clay-ink); background: var(--clay-soft); }
-.terminal-host { flex: 1; min-height: 0; padding: 6px 2px 0 8px; overflow: hidden; }
+/* A drag scrolls the terminal (terminal-touch-scroll.mjs), not the page. */
+.terminal-host { flex: 1; min-height: 0; padding: 6px 2px 0 8px; overflow: hidden; touch-action: none; }
 .terminal-host .xterm { height: 100%; }
 .terminal-host .xterm-viewport { background: transparent !important; }
 .key-bar { display: flex; gap: 6px; padding: 6px 8px max(6px, var(--safe-bottom, env(safe-area-inset-bottom))); overflow-x: auto; border-top: 1px solid var(--line); background: var(--surface); scrollbar-width: none; flex: none; }

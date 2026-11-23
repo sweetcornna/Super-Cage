@@ -12,6 +12,9 @@ import { Terminal } from "../.generated/xterm.mjs";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
 import { FitAddon } from "@xterm/addon-fit";
+import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { attachTouchScroll } from "./terminal-touch-scroll.mjs";
+import { answeredBytes, quietReplayAnswers } from "./terminal-replay-answers.mjs";
 import { api, writeClipboard, nativeAvailable } from "./api";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareClipboardPaste, sendImage } from "./image-transfer";
@@ -351,9 +354,16 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       minimumContrastRatio: 4.5,
       scrollback: 6000,
       theme: terminalTheme(theme, variant),
+      // terminal.unicode, for the Unicode 11 widths below.
+      allowProposedApi: true,
     });
     const fitter = new FitAddon();
     terminal.loadAddon(fitter);
+    // Emoji and other wide characters take two cells, as Codex, Claude Code
+    // and the shell's line editor count them; xterm's default (Unicode 6)
+    // gives many one, which shifts the rest of their line.
+    terminal.loadAddon(new Unicode11Addon());
+    terminal.unicode.activeVersion = "11";
     terminal.loadAddon(new WebLinksAddon(activateLogin, { urlRegex: claudeLoginLink }));
     // The Codex device page opens in the user's own browser; the one-time
     // code stays in this terminal and no credential crosses into the page.
@@ -363,6 +373,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     terminal.open(box.current);
     instance.current = terminal;
     fit.current = fitter;
+    // A finger dragged over the terminal scrolls it as a wheel would.
+    const stopTouch = attachTouchScroll(terminal, box.current);
     // WebGL draws the grid off the main thread's layout work; the DOM
     // renderer stays as the fallback. See terminal-renderer.mjs.
     const perf = cagePerf().terminal(session.id);
@@ -421,9 +433,16 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     // hiddenSince is when the view was last hidden (0 while shown); a view
     // hidden for terminalSuspendMs is suspended: no stream until it is shown.
     let hiddenSince = visibleRef.current ? 0 : Date.now(), suspended = false, suspendTimer = null;
+    // A view mounted hidden (a tab restored behind another) opens its stream
+    // when it is first shown: until then its xterm cannot take its size, and
+    // a replay drawn at another size stays garbled.
+    let waiting = !visibleRef.current;
     // Bytes still to come in the current replay, or one whole frame from a
     // server without offsets. Replayed output never writes the clipboard.
-    let replayRemaining = 0, replayFrame = false, replaying = 0;
+    // answeredRemaining: the replay's leading bytes a viewer was shown before;
+    // their queries were answered then (terminal-replay-answers.mjs).
+    let replayRemaining = 0, replayFrame = false, replaying = 0, answeredRemaining = 0;
+    const writeReplay = quietReplayAnswers(terminal);
     const clipboardHandler = terminal.parser.registerOscHandler(52, async (data) => {
       if (disposed || replaying > 0 || !visibleRef.current || !focusedRef.current || !box.current?.contains(document.activeElement)) return true;
       const text = terminalClipboardText(data);
@@ -456,9 +475,13 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         } else if (state.type === "history") {
           const plan = terminalHistoryPlan(stream.offset, state);
           if (plan.reset) terminal.reset();
+          // The modes the kept output was written in, when the server no
+          // longer keeps the output that set them.
+          if (plan.reset && typeof state.state === "string" && state.state) writeReplay(new TextEncoder().encode(state.state), Infinity);
           stream.offset = plan.offset;
           if (plan.resumable) stream.heartbeats = true;
           replayRemaining = plan.resumable ? plan.size : 0;
+          answeredRemaining = plan.resumable ? answeredBytes(plan.offset, plan.size, state.answered) : 0;
           replayFrame = !plan.resumable;
         } else if (state.type === "pong" || state.type === "heartbeat") stream.heartbeats = true;
         else if (state.type === "exit") ended = true;
@@ -471,8 +494,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       replayRemaining = Math.max(0, replayRemaining - data.byteLength);
       if (stream.offset !== null) stream.offset += data.byteLength;
       if (!replay) return void terminal.write(data);
+      const answered = Math.min(answeredRemaining, data.byteLength);
+      answeredRemaining -= answered;
       replaying++;
-      terminal.write(data, () => { replaying--; });
+      writeReplay(data, answered, () => { replaying--; });
     };
     // lost handles the end of the current stream once, whether it closed or
     // the watchdog gave up on it, and schedules the next attempt.
@@ -550,6 +575,11 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         return;
       }
       hiddenSince = 0;
+      if (waiting) {
+        waiting = false;
+        resize();
+        return void connect();
+      }
       if (!suspended) return;
       suspended = false;
       failures = 0;
@@ -561,7 +591,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     const connect = () => {
       clearTimeout(retryTimer);
       retryTimer = null;
-      if (disposed || ended || ws || suspended) return;
+      if (disposed || ended || ws || suspended || waiting) return;
       // A retry or a wake-up of a view hidden long enough suspends it instead.
       if (dormant()) return void suspendStream();
       const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset, terminalViewer(session.id))));
@@ -569,7 +599,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       ws = current;
       socket.current = current;
       openedAt = 0;
-      replayRemaining = 0;
+      replayRemaining = answeredRemaining = 0;
       replayFrame = false;
       // Each connection proves again that its server sends heartbeats.
       stream.heartbeats = false;
@@ -617,6 +647,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       ws.send(JSON.stringify({ type: "input", data }));
     };
     terminal.onData((data) => {
+      if (writeReplay.stale(data)) return;
       if (emittingPaste) send(data);
       else void enqueue(() => send(data)).catch(() => {});
     });
@@ -778,6 +809,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       revealStartup.current = null;
       startupRender.dispose();
       clipboardHandler.dispose();
+      writeReplay.dispose();
+      stopTouch();
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("copy", onCopy, true);
       host.removeEventListener("dragover", onDragOver);
