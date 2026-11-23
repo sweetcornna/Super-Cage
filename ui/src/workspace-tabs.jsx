@@ -14,8 +14,10 @@ import {
   Pin,
   PinOff,
   TerminalSquare,
+  History,
   X,
 } from "lucide-react";
+import { EarlierPartsDialog } from "./earlier-parts-dialog";
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
 import { api } from "./api";
@@ -70,6 +72,7 @@ export function WorkspaceTabs({
   sessionOpenError,
 }) {
   const [menu, setMenu] = useState(null);
+  const [earlier, setEarlier] = useState(null);
   // 本机终端: "保留" on a terminal an ssh session opened, so it outlives the
   // connection; the terminal list's next revision shows the change.
   const [keepError, setKeepError] = useState(null);
@@ -308,6 +311,18 @@ export function WorkspaceTabs({
                 <Pin size={14} />
                 {saved[menu.tab.id]?.pinned ? "取消置顶" : "置顶标签"}
               </button>
+              {menu.tab.earlierSession && (
+                <button
+                  role="menuitem"
+                  onClick={() => {
+                    setMenu(null);
+                    setEarlier(menu.tab.earlierSession);
+                  }}
+                >
+                  <History size={14} />
+                  清除前的对话
+                </button>
+              )}
               {menu.tab.origin?.kind === "ssh" && !menu.tab.origin.kept && (
                 <button
                   role="menuitem"
@@ -487,6 +502,7 @@ export function WorkspaceTabs({
                   {tab.origin?.kind === "ssh" && !tab.origin.kept &&
                     <TerminalAction label="保留终端" icon={Anchor} disabled={busy} onClick={() => keep(tab)} />}
                   <TerminalAction label="重命名" icon={Pencil} disabled={busy} onClick={() => onRename(tab)} />
+                  {tab.earlierSession && <TerminalAction label="清除前的对话" icon={History} disabled={busy} onClick={() => setEarlier(tab.earlierSession)} />}
                   <TerminalAction label={tab.cli_session_id ? "归档" : "关闭终端"} icon={tab.cli_session_id ? Archive : X} disabled={busy} onClick={event => onClose(tab, event.currentTarget)} />
                 </div>
               )}
@@ -563,6 +579,7 @@ export function WorkspaceTabs({
           </>,
           document.body,
         )}
+      {earlier && <EarlierPartsDialog session={earlier} onClose={() => setEarlier(null)} />}
     </>
   );
 }

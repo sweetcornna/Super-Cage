@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { Archive, ArrowDown, ArrowLeft, Check, Copy, LoaderCircle, Menu, Monitor, RefreshCw, SquarePen } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Check, Copy, History, LoaderCircle, Menu, Monitor, RefreshCw, SquarePen } from "lucide-react";
 import { RemoteDisplay } from "./remote-browser";
 import { CodeNavigation, ProjectTree, WorkspaceDrawer, workspaceCoreTools, workspaceTools } from "./workspace-drawer";
 import { Home } from "./home";
@@ -26,6 +26,8 @@ import { afterOutcome, HOLD_SECONDS, initialPoll, MIN_SPACING_MS, pollQuery, req
 import { keepSame } from "../poll-state.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
 import { TaskCount, TaskSheet, TaskStrip } from "./task-views";
+import { EarlierSheet } from "./earlier";
+import { earlierCount } from "../earlier-parts.mjs";
 
 // Whether the server holds session reads (its list answers carry
 // "revision"); a transcript read sends wait only then.
@@ -87,6 +89,7 @@ function App() {
   const [visible, setVisible] = useState(!document.hidden);
   const [creating, setCreating] = useState(false);
   const [sessionAction, setSessionAction] = useState(null);
+  const [earlierSession, setEarlierSession] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [sessionActionError, setSessionActionError] = useState("");
   const mutationBusy = useRef(false);
@@ -219,11 +222,11 @@ function App() {
   const updateSession = useCallback((snapshot) => {
     setCatalog((old) => {
       if (!old) return old;
-      const { id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, provider, running_tasks } = snapshot;
+      const { id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, provider, running_tasks, earlier_parts } = snapshot;
       if (archivedSessions.current.has(id)) return old;
       const previous = old.sessions.find((s) => s.id === id);
       if (previous && previous.generation === generation && previous.revision >= revision) return old;
-      return { ...old, sessions: [{ id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, ...(provider ? {provider} : {}), ...(running_tasks ? {running_tasks} : {}) }, ...old.sessions.filter((s) => s.id !== id)] };
+      return { ...old, sessions: [{ id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, ...(provider ? {provider} : {}), ...(running_tasks ? {running_tasks} : {}), ...(earlier_parts ? {earlier_parts} : {}) }, ...old.sessions.filter((s) => s.id !== id)] };
     });
   }, []);
   const projects = catalog?.projects || [];
@@ -261,6 +264,7 @@ function App() {
   const chooseSessionAction = (kind, target) => {
     if (mutationBusy.current) return;
     if (kind === "pin") void mutateSession(kind, target, {pinned:!target.pinned});
+    else if (kind === "earlier") setEarlierSession(target);
     else { setSessionActionError(""); setSessionAction({kind, session:target}); }
   };
   const start = async (target, first) => {
@@ -400,6 +404,7 @@ function App() {
         toggle={(path,next) => setExpanded(previous => new Map(previous).set(path,next))}
         emptyHint={serverVM ? "请先在网页工作台打开项目。" : undefined} />}
     </WorkspaceDrawer>}
+    {earlierSession && <EarlierSheet session={earlierSession} onClose={() => setEarlierSession(null)} onSeparated={refreshAll} />}
     {sessionAction && <SessionActionDialog key={sessionAction.kind + sessionAction.session.id} action={sessionAction} busy={actionBusy}
       error={sessionActionError} onCancel={() => setSessionAction(null)} onSubmit={body => mutateSession(sessionAction.kind, sessionAction.session, body)}/>}
   </main>;
@@ -420,6 +425,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const [reload, setReload] = useState(0);
   const [approvalFeedback, setApprovalFeedback] = useState(null);
   const [tasksOpen, setTasksOpen] = useState(false);
+  const [earlierOpen, setEarlierOpen] = useState(false);
   const checkApproval = useRef(null);
   const readFailures = useRef(0);
   const holdRefused = useRef(false);
@@ -650,6 +656,8 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       </section>}
     {!uncertain && (readError || connectionError) && <Notice onRetry={retry} label="再次连接">{readError || connectionError}</Notice>}
     {session && !codex && <SessionAccount id={id} request={request} onChanged={()=>setReload(n=>n+1)} compact />}
+    {session && !codex && earlierCount(session) > 0 && <button type="button" className="earlier-entry" onClick={() => setEarlierOpen(true)}>
+      <History size={14} aria-hidden="true" />清除前的对话 · {earlierCount(session)}</button>}
     {(sendProgress || connectionProgress || readProgress) && <p className="note" role="status">{sendProgress || connectionProgress || readProgress}</p>}
     {session?.connection_notice && <Notice>{session.connection_notice}</Notice>}
     {session?.history_truncated && <p className="note">手机显示的历史已截断，完整内容保存在电脑 {assistant} 中。</p>}
@@ -690,6 +698,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
         canSend={!(busy || confirming || !!readProgress || !!readError || !ready || !session || session.single_turn || session.can_send === false || attachments.uploading || (!draft.trim() && !attachments.items.some(item => item.status === "done")))} />
     </div>
     {tasksOpen && <TaskSheet session={session} onClose={() => setTasksOpen(false)} />}
+    {earlierOpen && session && <EarlierSheet session={session} onClose={() => setEarlierOpen(false)} />}
   </>;
 }
 

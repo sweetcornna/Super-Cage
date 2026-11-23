@@ -46,6 +46,9 @@ type mobileSummary struct {
 	// RunningTasks counts the subagents and background tasks of a terminal
 	// conversation whose CLI is live (from discovery); absent when none run.
 	RunningTasks int `json:"running_tasks,omitempty"`
+	// EarlierParts counts what /clear left behind in this entry's terminal
+	// (清除前的对话); absent when nothing was cleared.
+	EarlierParts int `json:"earlier_parts,omitempty"`
 	// Owner is who writes a Codex session's thread now: "" (nobody), "desktop"
 	// (a terminal of this server), "phone" (a phone turn) or "external" (any
 	// other process). Codex sessions only.
@@ -266,9 +269,22 @@ func (record *mobileRecord) changed() {
 	record.Revision++
 	record.UpdatedAt = time.Now().UTC()
 }
+
+// earlierParts counts the cleared parts that had a transcript.
+func (record *mobileRecord) earlierParts() int {
+	count := 0
+	for _, part := range record.Cleared {
+		if !part.Empty {
+			count++
+		}
+	}
+	return count
+}
+
 func (record *mobileRecord) summary() mobileSummary {
 	view := record.mobileSummary
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 		view.placeholder = !record.Resume && len(record.Turns) == 0
@@ -279,6 +295,7 @@ func (record *mobileRecord) summary() mobileSummary {
 func (record *mobileRecord) snapshot() mobileSession {
 	view := record.mobileSession
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 	}

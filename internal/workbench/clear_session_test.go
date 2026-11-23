@@ -159,7 +159,7 @@ func TestClearKeepsOneEntryThroughRestarts(t *testing.T) {
 	}
 	// Twice in a row, the second time before any prompt.
 	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, "", clearedTitle, false), f.item(c, f.connection, clearedTitle, true))
-	if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+	if list := f.list(t); len(list) != 1 || list[0].ID != f.id || list[0].EarlierParts != 2 {
 		t.Fatalf("after a second /clear: %+v", list)
 	}
 	if record := f.record(t); record.CLIID != c || len(record.Cleared) != 2 || record.Cleared[1].CLIID != b || len(record.Executions) != 2 {
