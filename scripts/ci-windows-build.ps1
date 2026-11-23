@@ -1,9 +1,12 @@
 #requires -Version 7.0
 # CI orchestration only. Builds the checked-out version and never publishes it.
+# The default (development) and -Release modes build and run the Windows tests.
+# -ReleaseAssets only builds the unsigned release asset set (release-build.yml).
 [CmdletBinding()]
-param([switch]$Release)
+param([switch]$Release, [switch]$ReleaseAssets)
 . (Join-Path $PSScriptRoot 'windows-common.ps1')
 if (-not $IsWindows) { throw 'This CI entry point requires a disposable Windows runner.' }
+if ($Release -and $ReleaseAssets) { throw 'Choose -Release or -ReleaseAssets, not both.' }
 if ($env:CAGE_BUILD_REF -notmatch '^[0-9A-Fa-f]{40}$') { throw 'CAGE_BUILD_REF must be a complete commit SHA.' }
 $repository = Split-Path $PSScriptRoot -Parent
 Push-Location $repository
@@ -43,10 +46,78 @@ function Write-CiPhaseSummary {
     $lines += $script:phases | ForEach-Object { "| $($_.Name) | $($_.Seconds) | $($_.Result) |" }
     $lines + '' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
 }
+# The unsigned release asset set, in one flat directory: installer, Mihomo
+# and QEMU source archives, and build metadata. Build, package and cheap
+# checks only; the test suites belong to the development mode.
+function Build-WindowsReleaseAssets {
+    param([Parameter(Mandatory)][string]$Repository, [Parameter(Mandatory)][string]$Destination)
+    if (& git status --porcelain --untracked-files=no) { throw 'Tracked files differ from the requested commit.' }
+    Invoke-BuildTool 'node' @('scripts/check-version.mjs')
+    $version = Get-CageVersion $Repository
+    $dependencies = Get-Content -LiteralPath (Join-Path $Repository 'packaging/windows/dependencies.json') -Raw | ConvertFrom-Json
+    $installerName = "Super-Cage-$version-windows-amd64-setup-unsigned.exe"
+    $fullSourceName = "qemu-$($dependencies.qemu.version)-windows-full-source.tar.gz"
+    $metadataName = 'windows-desktop-build-metadata.json'
+    $expected = @($installerName, "mihomo-$($dependencies.mihomoSource.version)-source.tar.gz", "$($dependencies.qemuSource.file).gz",
+        "qemu-keycodemapdb-$($dependencies.qemuKeycodemap.version)-source.tar.gz", "qemu-$($dependencies.qemu.version)-cage-changes-source.tar.gz",
+        $fullSourceName, $metadataName)
+    if (Test-Path -LiteralPath $Destination) { throw "Release asset directory already exists: $Destination" }
+
+    Enter-CiPhase 'Corresponding sources'
+    & (Join-Path $PSScriptRoot 'prepare-qemu-release.ps1')
+    $fullSource = Join-Path $Repository '_output/windows-qemu-sources/full-source.tar.gz'
+
+    Enter-CiPhase 'Build the unsigned application'
+    & (Join-Path $PSScriptRoot 'build-windows.ps1')
+
+    Enter-CiPhase 'Package the unsigned installer and source archives'
+    & (Join-Path $PSScriptRoot 'install-nsis.ps1') -Destination $env:RUNNER_TEMP
+    $env:PATH = (Join-Path $env:RUNNER_TEMP 'nsis-3.13') + [IO.Path]::PathSeparator + $env:PATH
+    & (Join-Path $PSScriptRoot 'package-windows.ps1') -SkipBuild -OutputDirectory $Destination
+    # Only the release packaging copies the full sources; the unsigned QEMU
+    # manifest in the application is the one the archive was collected for.
+    $manifest = Join-Path $Repository '_output/windows-amd64/app/resources/runtime/qemu/cage-build.json'
+    if ((Get-WindowsQemuSourceManifestHash $fullSource) -ne (Get-FileHash -LiteralPath $manifest -Algorithm SHA256).Hash) {
+        throw 'The full QEMU source archive does not identify the packaged QEMU build.'
+    }
+    Copy-Item -LiteralPath $fullSource -Destination (Join-Path $Destination $fullSourceName)
+    Invoke-BuildTool 'node' @('scripts/release-version.mjs', 'metadata', 'windows', (Join-Path $Destination $metadataName))
+    # Publication writes the release checksum lists; this one covers only part of the set.
+    Remove-Item -LiteralPath (Join-Path $Destination 'SHA256SUMS')
+
+    Enter-CiPhase 'Check the release assets'
+    $actualNames = @(Get-ChildItem -LiteralPath $Destination -Force | ForEach-Object Name | Sort-Object)
+    $difference = Compare-Object @($expected | Sort-Object) $actualNames -CaseSensitive
+    if ($difference) { throw "Unexpected release assets: $(($difference | ForEach-Object { "$($_.SideIndicator) $($_.InputObject)" }) -join ', ')" }
+    $installer = Get-Item -LiteralPath (Join-Path $Destination $installerName)
+    if ($installer.Length -ge 512MB) { throw "Installer is not under 512 MiB: $($installer.Length) bytes" }
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer.FullName
+    if ($signature.Status -ne 'NotSigned') { throw "Unexpected installer Authenticode status: $($signature.Status)" }
+    $metadata = Get-Content -LiteralPath (Join-Path $Destination $metadataName) -Raw | ConvertFrom-Json
+    if ($metadata.schema -ne 1 -or $metadata.platform -ne 'windows' -or $metadata.version -ne $version -or $metadata.commitSha -ne $env:CAGE_BUILD_REF) {
+        throw 'Windows build metadata differs from the requested commit.'
+    }
+    $rows = foreach ($name in $expected) {
+        $item = Get-Item -LiteralPath (Join-Path $Destination $name)
+        [pscustomobject]@{ Name = $name; Bytes = $item.Length; SHA256 = (Get-FileHash -LiteralPath $item.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+    }
+    $rows | Format-Table -AutoSize | Out-String -Width 400 | Write-Host
+    Write-Host "Installer Authenticode status: $($signature.Status)"
+    if ($env:GITHUB_STEP_SUMMARY) {
+        $lines = @('| Windows release asset | Bytes | SHA-256 |', '| --- | ---: | --- |')
+        $lines += $rows | ForEach-Object { '| {0} | {1} | `{2}` |' -f $_.Name, $_.Bytes, $_.SHA256 }
+        $lines + '' | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+    }
+}
 try {
-    Enter-CiPhase 'Checkout identity and script tests'
+    Enter-CiPhase $(if ($ReleaseAssets) { 'Checkout identity' } else { 'Checkout identity and script tests' })
     $actual = (& git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or $actual -ne $env:CAGE_BUILD_REF) { throw 'Checkout differs from the requested commit.' }
+    if ($ReleaseAssets) {
+        Build-WindowsReleaseAssets -Repository $repository -Destination (Join-Path $repository '_output/release-windows')
+        Complete-CiPhase
+        return
+    }
     $windowsPowerShell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell/v1.0/powershell.exe'
     # These tests read only the checkout. Run them before the long build so
     # a broken script fails in the first minute instead of after packaging.
