@@ -214,6 +214,10 @@ type claudeAccountSwitch struct {
 	// Wait is the reset the target account waits for (an undo back to a
 	// used-up account), applied where the preparation commits.
 	Wait int64 `json:"wait,omitempty"`
+	// Earlier is the completed handoff this one replaced while it still held
+	// undelivered messages: they go on with this one when it commits, and
+	// it comes back when this one is dropped.
+	Earlier *claudeAccountSwitch `json:"earlier,omitempty"`
 }
 
 type claudeCarried struct {

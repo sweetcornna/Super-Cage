@@ -263,7 +263,7 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
           <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
             onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
           <span className="claude-switch-track" aria-hidden="true" />
-          <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
+          <span>{profile.enabled ? "参与分配" : preferred ? "仅新会话使用" : "已暂停"}</span>
         </label>
         {fromTerminal ? <span className="claude-profile-source">普通终端账号</span> : profile.status === "ready"
           ? <button className="quiet-button claude-icon-action" aria-label="重新登录" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>

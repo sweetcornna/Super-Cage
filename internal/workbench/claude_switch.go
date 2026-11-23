@@ -5,10 +5,12 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -430,10 +432,13 @@ func (s *Server) answerClaudeQuestion(ctx context.Context, id string, input clau
 		return errClaudeSwitchAnswered
 	}
 	standing := map[string]string{"always": "allow", "wait_always": "wait"}[input.Answer]
-	// The question is about two accounts of one group (the suggestion comes
-	// from the source's group); a yes about two accounts without a group is
-	// the yes for all of them, a yes within an explicit group is not.
-	ungrouped := claudeSwitchSource(list, record).HandoffGroup == ""
+	if input.Target == "" {
+		input.Target = state.Question.ID
+	}
+	// A yes about two accounts without a group is the yes for all of them; a
+	// yes within an explicit group, or towards one, is not.
+	target := list.find(input.Target)
+	ungrouped := claudeSwitchSource(list, record).HandoffGroup == "" && target != nil && target.HandoffGroup == ""
 	if standing != "" {
 		s.claudeAccounts.mu.Lock()
 		list, err = s.loadClaudeAccounts()
@@ -449,9 +454,6 @@ func (s *Server) answerClaudeQuestion(ctx context.Context, id string, input clau
 	}
 	switch input.Answer {
 	case "once", "always":
-		if input.Target == "" {
-			input.Target = state.Question.ID
-		}
 		if err := s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
 			record.followStandingAnswer(standing)
 			// 切换并继续 is this session's yes to accounts without a group.
@@ -641,6 +643,13 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		if force {
 			sw.Note = claudeInterruptedNote(record)
 		}
+		// Messages an earlier handoff still holds (after an undo they wait
+		// for the account's reset) go on with this one, and come back if it
+		// is dropped.
+		if earlier := record.Switch; earlier != nil && earlier.Phase == "completed" && slices.ContainsFunc(earlier.Carry, func(m claudeCarried) bool { return !m.Delivered }) {
+			earlier.Earlier = nil
+			sw.Earlier = earlier
+		}
 		record.Switch = sw
 		if err := s.saveClaudeSwitch(record); err != nil {
 			return err
@@ -650,7 +659,7 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 	fail := func(err error) error { sw.Error = err.Error(); _ = s.saveClaudeSwitch(record); return err }
 	// Nothing was frozen: the guest refused and lifted its own fence, or this
 	// attempt failed before it reached the guest. The session stays as it was.
-	undo := func(err error) error { record.Switch = nil; _ = s.saveClaudeSwitch(record); return err }
+	undo := func(err error) error { record.Switch = sw.Earlier; _ = s.saveClaudeSwitch(record); return err }
 	before := func(err error) error {
 		if fresh {
 			return undo(err)
@@ -689,7 +698,7 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		}
 		err = s.runCLIChannel(ctx, "account-switch", query, &result)
 		if err != nil {
-			return fail(err)
+			return fail(claudeGuestError(err))
 		}
 		if result.Error != "" {
 			// The guest refused before freezing the history. Lift its fence
@@ -720,10 +729,18 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		// the target channel delivers it a single time whatever is retried.
 		if sw.Carry == nil {
 			sw.Carry = []claudeCarried{}
+			if sw.Earlier != nil {
+				for _, message := range sw.Earlier.Carry {
+					if !message.Delivered {
+						sw.Carry = append(sw.Carry, message) // never sent: same id
+					}
+				}
+			}
 			for _, message := range result.Carry {
 				sw.Carry = append(sw.Carry, claudeCarried{ID: uuid.NewString(), Text: message.Text})
 			}
 		}
+		sw.Earlier = nil
 		sw.Phase, sw.Error = "prepared", ""
 		if err := s.saveClaudeSwitch(record); err != nil {
 			return err
@@ -820,7 +837,7 @@ func (s *Server) dropClaudeSwitch(ctx context.Context, record *mobileRecord) err
 			return claudeSwitchRefusal(response.Error)
 		}
 	}
-	record.Switch = nil
+	record.Switch = sw.Earlier // what an earlier handoff still held
 	return s.saveClaudeSwitch(record)
 }
 
@@ -847,12 +864,18 @@ func claudeSwitchRefusal(message string) error {
 	if folder, ok := strings.CutPrefix(message, "switch:outside:"); ok {
 		return errors.New("这段会话的 Claude Code 现在在项目以外的文件夹（" + folder + "）里运行：在那个终端退出 Claude Code，或回到项目文件夹后再切换。")
 	}
-	// An older guest helper refuses in a sentence written for people.
-	if strings.ContainsFunc(message, func(r rune) bool { return unicode.Is(unicode.Han, r) }) {
-		return errors.New(message)
+	return claudeGuestError(errors.New(message))
+}
+
+// claudeGuestError keeps a sentence written for people (the host's own, or
+// an older guest helper's refusal) and turns anything else (a Python error,
+// a Windows bridge code) into one sentence; the raw text goes to the server
+// log only.
+func claudeGuestError(err error) error {
+	if first, _ := utf8.DecodeRuneInString(err.Error()); unicode.Is(unicode.Han, first) {
+		return err
 	}
-	// Anything else (a Python error, a damaged history line) is for the log.
-	log.Printf("account handoff: guest error: %s", message)
+	log.Printf("account handoff: guest error: %s", err)
 	return errors.New(claudeSwitchGeneric)
 }
 

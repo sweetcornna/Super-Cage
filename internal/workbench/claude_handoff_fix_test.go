@@ -61,6 +61,9 @@ func TestClaudeSessionConsentStaysInItsSession(t *testing.T) {
 	if target, _, _ := claudeAutomaticStep(list, &other, nil, nil, "", time.Now()); target != "" {
 		t.Fatal("another session moved on a yes it never got", target)
 	}
+	if state := claudeHandoffState(list, &other, time.Now()); state.Question == nil || state.Question.ID != b {
+		t.Fatalf("the other session does not ask: %+v", state)
+	}
 	// A copied allow from an older version keeps its explicit-groups meaning,
 	// whatever 调度设置 says.
 	list.Scheduling.UngroupedHandoff = true
@@ -68,6 +71,9 @@ func TestClaudeSessionConsentStaysInItsSession(t *testing.T) {
 	legacy.SwitchPolicy = "allow"
 	if target, _, _ := claudeAutomaticStep(list, &legacy, nil, nil, "", time.Now()); target != "" {
 		t.Fatal("a copied allow moved between ungrouped accounts", target)
+	}
+	if state := claudeHandoffState(list, &legacy, time.Now()); state.Question == nil {
+		t.Fatalf("a copied allow does not ask between ungrouped accounts: %+v", state)
 	}
 	if target, _, _ := claudeAutomaticStep(list, &other, nil, nil, "", time.Now()); target != b {
 		t.Fatal("a session following 调度设置 ignores its consent", target)
@@ -111,6 +117,34 @@ func TestClaudeAlwaysWithinAGroupKeepsUngroupedApart(t *testing.T) {
 	list, _ = s.loadClaudeAccounts()
 	if list.Scheduling.SwitchPolicy != "allow" || list.Scheduling.UngroupedHandoff {
 		t.Fatalf("always within a group: %+v", list.Scheduling)
+	}
+}
+
+// The yes covers ungrouped accounts only when the account it moves to has
+// no group either.
+func TestClaudeAlwaysTowardsAGroupKeepsUngroupedApart(t *testing.T) {
+	s, id, record, _ := claudeSwitchGuest(t, handoffGuest)
+	now := time.Now()
+	list, _ := s.loadClaudeAccounts()
+	c := strings.Repeat("c", 24)
+	list.Accounts[0].HandoffGroup, list.Accounts[1].HandoffGroup = "", "work"
+	list.Accounts = append(list.Accounts, claudeAccount{ID: c, Label: "C", Email: "c@example.test", Enabled: true, Status: "ready"})
+	list.Accounts[0].Quota = exhaustedQuota(now, "seven_day", now.Add(30*time.Hour))
+	if err := s.saveClaudeAccounts(list); err != nil {
+		t.Fatal(err)
+	}
+	record.AccountFailure = "rate_limit"
+	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+		t.Fatal(err)
+	}
+	if state := claudeHandoffState(list, record, now); state.Question == nil || state.Question.ID != c {
+		t.Fatalf("question: %+v", state)
+	}
+	if err := s.answerClaudeQuestion(claudeSwitchContext(s), id, claudeSwitchInput{Answer: "always", Target: list.Accounts[1].ID, RequestID: uuid.NewString(), SourceID: record.CLIID, Confirm: true}); err != nil {
+		t.Fatal(err)
+	}
+	if list, _ = s.loadClaudeAccounts(); list.Scheduling.SwitchPolicy != "allow" || list.Scheduling.UngroupedHandoff {
+		t.Fatalf("always towards a grouped account: %+v", list.Scheduling)
 	}
 }
 
@@ -383,6 +417,52 @@ func TestClaudeCarryMarkSurvivesAMissingSwitch(t *testing.T) {
 	record.markCarried("y")
 	if record.Switch.Carry[0].Delivered || !record.Switch.Carry[1].Delivered {
 		t.Fatal(record.Switch.Carry)
+	}
+}
+
+// The refusal travels the whole way as a sentence: the switch is dropped and
+// no raw guest text reaches the session.
+func TestClaudeGuestRefusalReachesThePersonAsASentence(t *testing.T) {
+	for _, scenario := range []struct{ reply, want string }{
+		{"{'error':'switch:outside:/work/other'}", "/work/other"},
+		{"{'error':\"Traceback: KeyError 'cwd'\"}", claudeSwitchGeneric},
+	} {
+		s, id, record, _ := claudeSwitchGuest(t, "if mode=='account-switch':\n    print(json.dumps("+scenario.reply+"))\nelse:\n    print(json.dumps({'ok':True}))\n")
+		err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: strings.Repeat("b", 24), Confirm: true}, false)
+		stored, _ := s.mobileCLI.record(s.profile, id)
+		if err == nil || !strings.Contains(err.Error(), scenario.want) || strings.Contains(err.Error(), "Traceback") || stored.Switch != nil || stored.Account.ID != record.Account.ID {
+			t.Fatalf("%s: %v, switch %+v", scenario.reply, err, stored.Switch)
+		}
+	}
+}
+
+// Messages an undone handoff still holds go on with the next handoff, and
+// stay when that one is refused.
+func TestClaudeUndeliveredMessagesSurviveTheNextSwitch(t *testing.T) {
+	held := claudeCarried{ID: "held", Text: "typed on B"}
+	start := func(t *testing.T, script string) (*Server, string, *mobileRecord, string) {
+		s, id, record, home := claudeSwitchGuest(t, script)
+		record.Switch = &claudeAccountSwitch{ID: uuid.NewString(), Phase: "completed", TargetID: record.CLIID, Carry: []claudeCarried{{ID: "sent", Text: "old", Delivered: true}, held}}
+		record.HandoffWait = time.Now().Add(time.Hour).Unix()
+		if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+			t.Fatal(err)
+		}
+		return s, id, record, home
+	}
+	s, id, record, _ := start(t, refusingGuest)
+	if err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: strings.Repeat("b", 24), Confirm: true}, false); err == nil {
+		t.Fatal("the refusing guest did not refuse")
+	}
+	if stored, _ := s.mobileCLI.record(s.profile, id); stored.Switch == nil || len(stored.Switch.Carry) != 2 || stored.Switch.Carry[1] != held {
+		t.Fatalf("a refused switch lost the held message: %+v", stored.Switch)
+	}
+	s, id, record, _ = start(t, handoffGuest)
+	if err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: strings.Repeat("b", 24), Confirm: true}, false); err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := s.mobileCLI.record(s.profile, id)
+	if carry := stored.Switch.Carry; len(carry) != 2 || carry[0] != held || carry[1].Text != "waiting behind the limit" || stored.Switch.Earlier != nil || stored.HandoffWait != 0 {
+		t.Fatalf("the next switch: %+v, wait %d", stored.Switch, stored.HandoffWait)
 	}
 }
 

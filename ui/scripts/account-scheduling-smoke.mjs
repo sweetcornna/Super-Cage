@@ -17,14 +17,14 @@ const scheduling={mode:"balanced",switch_policy:"ask"};
 let profiles=[{id:"a",label:"账号 A",email:"a@example.invalid",status:"ready",enabled:true},{id:"b",label:"账号 B",email:"b@example.invalid",status:"ready",enabled:true},
   {id:"c",label:"账号 C",email:"c@example.invalid",status:"ready",enabled:false}];
 const labels={a:"账号 A",b:"账号 B",c:"账号 C",d:"账号 D"};
-const server={account:"a",question:true,busy:false,switched:null,undo:false,policy:"ask",own:false,elsewhere:false,calls:[]};
+const server={account:"a",question:true,busy:false,tasks:0,switched:null,undo:false,policy:"ask",own:false,elsewhere:false,calls:[]};
 const session=()=>({id:sid,workspace,title:"额度验证",terminal_available:true,desktop_terminal_id:"t1",can_send:true,revision:1,turns:[],
   account_id:server.account,account_label:labels[server.account],account_failure:server.question?"rate_limit":"",account_switch:server.switched});
 const view=()=>{
   const targets=[{id:"a",label:"账号 A",status:"ready",enabled:true,exhausted:"seven_day",resets_at:reset,remaining:0},{id:"b",label:"账号 B",status:"ready",enabled:true,remaining:62},
     {id:"c",label:"账号 C",status:"ready",enabled:false,remaining:-1},{id:"d",label:"账号 D",status:"signed_out",enabled:true,remaining:-1}].filter(t=>t.id!==server.account);
   return {session:session(),source_id:"12345678-1234-4321-aaaa-123456789abd",switch_policy:server.own?server.policy:scheduling.switch_policy,switch_policy_own:server.own,supported:true,handoff_api:2,
-    candidates:targets.filter(t=>t.status==="ready").map(({id,label})=>({id,label})),targets,source_busy:server.busy,undo:server.undo,
+    candidates:targets.filter(t=>t.status==="ready").map(({id,label})=>({id,label})),targets,source_busy:server.busy,source_tasks:server.tasks,undo:server.undo,
     handoff:server.question?{window:"seven_day",resets_at:reset,question:{id:"b",label:"账号 B"},automatic:false}:{automatic:false}};
 };
 const refuse=(route,body)=>route.fulfill({status:409,contentType:"text/plain; charset=utf-8",body});
@@ -39,7 +39,7 @@ const account=(route,body)=>{
   }
   if(body.action==="switch"){
     if(server.busy&&!body.force)return refuse(route,`当前任务仍在运行：确认“停止当前任务并切换到 ${labels[body.target]}”，或等本轮结束。`);
-    server.account=body.target;server.busy=false;server.question=false;server.undo=false;
+    server.account=body.target;server.busy=false;server.tasks=0;server.question=false;server.undo=false;
     server.switched={id:body.request_id,phase:"completed",source_label:"账号 A",target_label:labels[body.target]};
   }
   if(body.action==="policy"){server.policy=body.policy;server.own=body.policy!=="default";}
@@ -72,20 +72,21 @@ try{
   assert.equal(await line.getByRole("button",{name:/撤销/}).count(),1);
   await shot(page,"handoff-line-desktop.png");
 
-  // A manual switch while the source works: one confirm, then force.
-  server.busy=true;server.undo=false;server.switched=null;server.account="a";
+  // A manual switch while the source works: one confirm, then force. The
+  // confirm names the background tasks that stop with it.
+  server.busy=true;server.tasks=1;server.undo=false;server.switched=null;server.account="a";
   await page.getByRole("button",{name:/^账号 B · /}).click();
-  await page.getByRole("button",{name:"切换到 账号 A",exact:true}).waitFor();
   server.calls.length=0;
-  // The next poll shows A again (2 s while open).
+  // The open menu's poll (2 s) shows A again; its targets follow.
   await page.getByRole("button",{name:/^账号 A · /}).waitFor();
+  await page.getByRole("button",{name:"切换到 账号 B",exact:true}).waitFor();
   const disabled=page.getByRole("button",{name:"切换到 账号 C",exact:true});
   assert.match(await disabled.innerText(),/未参与自动分配/);
   assert.equal(await page.getByRole("button",{name:"切换到 账号 D",exact:true}).isDisabled(),true,"an account that is not logged in is not a target");
   await disabled.click();
   const confirm=page.getByRole("group",{name:"确认切换"});
   await confirm.waitFor();
-  assert.match(await confirm.innerText(),/会停止当前任务并切换到 账号 C，继续吗？/);
+  assert.match(await confirm.innerText(),/会停止当前任务（包括 1 个后台任务）并切换到 账号 C，继续吗？/);
   assert.equal(server.calls.length,0,"nothing is sent before the confirm");
   await shot(page,"manual-confirm-desktop.png");
   await confirm.getByRole("button",{name:"停止并切换",exact:true}).click();
@@ -97,7 +98,7 @@ try{
     const body=route.request().postDataJSON();
     if(body?.action==="scheduling"){Object.assign(scheduling,body.scheduling);if(body.order)profiles=body.order.map(id=>profiles.find(a=>a.id===id));}
     if(body?.action==="update")Object.assign(profiles.find(a=>a.id===body.id),body);
-    if(body?.action==="prefer"){scheduling.preferred=body.id;const a=profiles.find(p=>p.id===body.id);if(a)a.enabled=true;}
+    if(body?.action==="prefer")scheduling.preferred=body.id; // 参与分配 stays as it was
     return route.fulfill({json:{accounts:profiles,scheduling,detection_status:"offline",handoff_api:2}});
   });
   await page.getByRole("button",{name:"Claude 账号管理",exact:true}).click();
@@ -119,10 +120,21 @@ try{
   await offer.waitFor({state:"detached"});
   assert.equal(scheduling.switch_policy,"allow");assert.equal(scheduling.ungrouped_handoff,true);assert.equal(scheduling.switch_answered,true);
   await page.getByText(/没有设分组的账号之间也会互相接续/).waitFor();
+  // The ungrouped yes is its own control: off, the rule says they still ask.
+  const ungrouped=page.getByRole("checkbox",{name:"没有设接续分组的账号之间也自动接续",exact:true});
+  assert.equal(await ungrouped.isChecked(),true);
+  await ungrouped.click(); // saved first, then shown: no optimistic state
+  await page.getByText(/没有设分组的账号之间仍会先问你/).waitFor();
+  assert.equal(await ungrouped.isChecked(),false);
+  assert.equal(scheduling.ungrouped_handoff,false);assert.equal(scheduling.switch_policy,"allow");
+  await ungrouped.click();
+  await page.getByText(/没有设分组的账号之间也会互相接续/).waitFor();
+  assert.equal(scheduling.ungrouped_handoff,true);
   await page.getByText(/手动切换不受这些限制/).first().waitFor();
   await page.getByRole("article",{name:"账号 C",exact:true}).getByRole("button",{name:"新会话使用此账号",exact:true}).click();
   await page.getByRole("article",{name:"账号 C",exact:true}).getByText("新会话优先",{exact:true}).waitFor();
-  assert.equal(scheduling.preferred,"c");assert.equal(profiles.find(a=>a.id==="c").enabled,true);
+  assert.equal(scheduling.preferred,"c");assert.equal(profiles.find(a=>a.id==="c").enabled,false,"preferring does not turn on 参与分配");
+  await page.getByRole("article",{name:"账号 C",exact:true}).getByText("仅新会话使用",{exact:true}).waitFor();
   await page.getByRole("article",{name:"账号 A",exact:true}).getByRole("button",{name:"设置接续分组"}).click();
   await page.getByRole("textbox",{name:"账号 A 的接续分组"}).fill("本人账号");
   await page.getByRole("article",{name:"账号 A",exact:true}).getByRole("button",{name:"保存分组"}).click();
@@ -174,5 +186,5 @@ try{
   assert.equal(server.calls.length,1);assert.equal(server.calls[0].action,"switch");assert.equal(server.calls[0].confirm,true);
   assert.equal(server.calls[0].force,undefined,"an idle source needs no confirm");
   assert.deepEqual(errors,[]);assert.deepEqual(phoneErrors,[]);
-  console.log("Account handoff: question card, handoff line with undo, manual switch with one confirm, 调度设置 offer and rule, preferred account, phone answer from the other device and phone manual switch passed.");
+  console.log("Account handoff: question card, handoff line with undo, manual switch with one confirm naming background tasks, 调度设置 offer, rule and the ungrouped yes, preferred account outside scheduling, phone answer from the other device and phone manual switch passed.");
 }finally{await browser.close();}
