@@ -86,5 +86,5 @@ test("automatic cleaning names its moments the way a person says them", () => {
   assert.equal(momentLabel(new Date(2026, 10, 20, 9, 30).getTime(), now), "昨天 09:30");
   assert.equal(momentLabel(new Date(2026, 10, 2, 8, 0).getTime(), now), "11月2日 08:00");
   assert.equal(momentLabel(new Date(2025, 11, 31, 23, 59).getTime(), now), "2025年12月31日 23:59");
-  assert.match(autoLine({ attempted: new Date(now - 3_600_000).toISOString(), result: "timeout" }), /^自动清理还没有成功过：最近一次（(今天|昨天) \d\d:\d\d）没有完成（用时过长），下次再试。$/);
+  assert.match(autoLine({ attempted: new Date(Date.now() - 3_600_000).toISOString(), result: "timeout" }), /^自动清理还没有成功过：最近一次（(今天|昨天) \d\d:\d\d）没有完成（用时过长），下次再试。$/);
 });
