@@ -12,14 +12,42 @@ import (
 var errClaudeAccessLost = errors.New("Super Cage 已锁定，请先解锁")
 
 type claudeAccountInput struct {
-	Action       string            `json:"action"`
-	Identity     string            `json:"identity"`
-	ID           string            `json:"id"`
-	Label        string            `json:"label"`
-	Enabled      *bool             `json:"enabled"`
-	HandoffGroup *string           `json:"handoff_group"`
-	Scheduling   *claudeScheduling `json:"scheduling"`
-	Order        []string          `json:"order"`
+	Action       string                 `json:"action"`
+	Identity     string                 `json:"identity"`
+	ID           string                 `json:"id"`
+	Label        string                 `json:"label"`
+	Enabled      *bool                  `json:"enabled"`
+	HandoffGroup *string                `json:"handoff_group"`
+	Scheduling   *claudeSchedulingInput `json:"scheduling"`
+	Order        []string               `json:"order"`
+}
+
+// claudeSchedulingInput leaves a field the client did not send as stored, so
+// a client that knows only mode and switch_policy keeps the standing answers.
+type claudeSchedulingInput struct {
+	Mode             string  `json:"mode"`
+	SwitchPolicy     string  `json:"switch_policy"`
+	SwitchAnswered   *bool   `json:"switch_answered"`
+	UngroupedHandoff *bool   `json:"ungrouped_handoff"`
+	Preferred        *string `json:"preferred"`
+}
+
+func (input claudeSchedulingInput) apply(p claudeScheduling) claudeScheduling {
+	// Choosing a rule in 调度设置 is a standing answer.
+	p.SwitchAnswered = p.answered() || input.SwitchPolicy != p.SwitchPolicy
+	// Consent for accounts without a 接续分组 is given only by its own control
+	// (ungrouped_handoff); the rule alone never implies it.
+	p.Mode, p.SwitchPolicy = input.Mode, input.SwitchPolicy
+	if input.SwitchAnswered != nil {
+		p.SwitchAnswered = *input.SwitchAnswered
+	}
+	if input.UngroupedHandoff != nil {
+		p.UngroupedHandoff = *input.UngroupedHandoff
+	}
+	if input.Preferred != nil {
+		p.Preferred = *input.Preferred
+	}
+	return p
 }
 
 func (s *Server) listClaudeAccounts(w http.ResponseWriter, r *http.Request) {
@@ -66,18 +94,27 @@ func (s *Server) mutateClaudeAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	case "refresh", "refresh_default":
 		err = s.refreshClaudeUsage(r.Context(), input)
-	case "update", "scheduling":
+	case "update", "scheduling", "prefer":
 		s.op.Lock()
 		defer s.op.Unlock()
 		m := &s.claudeAccounts
 		m.mu.Lock()
 		list, loadErr := s.loadClaudeAccounts()
 		err = loadErr
-		if err == nil && input.Action == "scheduling" {
-			if input.Scheduling == nil || !input.Scheduling.valid() {
+		if err == nil && input.Action == "prefer" {
+			// One action: new sessions use this account from now on; an empty
+			// id returns to the rule. It does not join automatic scheduling or
+			// continuation: 参与分配 stays as the person set it.
+			if a := list.find(input.ID); input.ID != "" && a == nil {
+				err = errors.New("未找到 Claude 账号，请刷新面板")
+			} else {
+				list.Scheduling.Preferred = input.ID
+			}
+		} else if err == nil && input.Action == "scheduling" {
+			if input.Scheduling == nil || !input.Scheduling.apply(list.Scheduling).valid() {
 				err = errors.New("请选择有效的调度模式和切换授权")
 			} else {
-				list.Scheduling = *input.Scheduling
+				list.Scheduling = input.Scheduling.apply(list.Scheduling)
 			}
 			if err == nil && input.Order != nil {
 				if len(input.Order) != len(list.Accounts) {

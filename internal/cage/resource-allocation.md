@@ -639,3 +639,126 @@ Merged: origin/super-cage-redesign at b213406 (merge commit d79716b; the branch 
 - The simulator's kernel model and its fitted numbers (7.7).
 - On a Linux test machine with an inflated virtio balloon, tests that stub host.MemGiB read the real
   /proc/vmstat through machineBootGiB and are not deterministic.
+
+
+## 8. A stopped environment's start (branch start-memory, 2026-11-23)
+
+### 8.1 What went wrong
+After a host reboot the workspace VM booted at its ceiling (9728 MiB) with its environment stopped. Its working set
+was the workspace's own services, so A returned the idle memory down to the guarantee (2048 MiB, MemTotal 1738 MiB).
+A start then ran QEMU with `-m 7168` (the boot maximum B chose from the machine's boot size); with
+vm.overcommit_memory=0 the kernel refuses one anonymous mapping larger than MemTotal + swap
+(`__vm_enough_memory: ... no enough memory for the allocation`), QEMU printed "cannot set up guest memory 'pc.ram'"
+and exited. Nothing told A: machine-memory.json is written by the running guest's host agent only. The person saw
+"程序提前结束（退出码 1）" because cli boot() prints the QEMU reason on a line of its own, without the "Error: " prefix the
+workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against the old runtime.go).
+
+### 8.2 As built
+- B (cage.PrepareBoot, called by vm.Lima.Start for every Linux guest of a Cage profile: cage up, cage setup's base
+  build, the restart after a share change), before the hostagent starts:
+  - fast path: /proc/meminfo (and /proc/sys/vm/overcommit_memory when the heuristic and the strict rule disagree):
+    the kernel maps the maximum (mode 0: M + 256 MiB <= MemTotal + swap; 2: Committed_AS + M + 256 MiB <=
+    CommitLimit; 1: always) and the guest's floor fits (available >= min(2 GiB, M) + clamp(MemTotal/64, 256, 512 MiB)).
+    Nothing is written or waited for.
+  - otherwise, when an outer balloon holds memory (/proc/vmstat balloon counters; without them, memory blocks online
+    more than 1 GiB beyond MemTotal), it writes machine-memory.json
+    {version 1, short_bytes S, wanted_bytes M, pressure true, reason "start"}, rewrites it every 10 s, reads
+    /proc/meminfo every second for up to 75 s, and removes the file (only if its reason is still "start") when the
+    wait ends, before QEMU starts. S = what the start needs beyond the machine's working set: A adds it to W +
+    headroom, so one grant takes MemTotal past the need (2048 -> 8960 MiB for the incident).
+  - then: the maximum if the kernel maps it; else the largest whole GiB it maps, if >= 2 GiB, with a notice
+    (the boot maximum is the balloon's ceiling until the next environment restart, so the notice stays in
+    <instance>/boot-memory-notice.txt until the next start and GET /api/environment/resources shows it as its notice
+    while the environment runs below its configured memory, with restart_required); else a BootMemoryError
+    ("内存不足以启动环境：…" with sizes and what to do).
+  - the wait ("正在向服务器申请内存…", then "已获得所需内存，继续启动环境…") and the notice reach the start job's message
+    through a line "CAGE_JOB_MESSAGE <text>" on stderr (printed only under a workbench job, CLAUDE_CAGE_JOB_ID set;
+    the workbench hides it from the log).
+- A: no new allocation rule; three small changes. The reason "start" (NestedStart) logs the growth as "environment
+  start needs memory"; a start counts as short, so it also grows while the host is in pressure, without the shortage
+  step on top (its need is exact). MemoryState passes the pressure flag to the rule for a start's request only.
+  Finding: 0.1.16 reads machine-memory.json's pressure flag and drops it between the reading and the rule
+  (MemoryState copies NestedShort, not NestedPressure), so on a real host a running nested guest under pressure has
+  never been a shortage (7.13's rule exists only in the simulator). Passing it on for running guests changes
+  allocation under host pressure for every running environment; left as is, a decision of its own.
+- A, bound (fix-start-bound, review item 12): a request with reason "start" counts as a start for startWindow =
+  150 s from the gateway's first sight of it (boundStarts in allocation.go, run by the balancer before the rule).
+  Past the window it is ignored altogether until it has been gone for startRearm = 5 min (memoryDemandHold); the
+  round it goes over, the VM's held demand is dropped, and the gateway logs "a start request still there 2m30s
+  after it was first seen is ignored until it has been gone for 5m0s" once. See 8.5.
+- Errors: vmStartError says "QEMU 启动失败：内存不足…" for QEMU's memory refusal; the workbench maps the start's own
+  sentence, QEMU's refusal and the kernel's line to one memory sentence, and its QEMU match no longer needs "Error: ".
+
+### 8.3 Budgets and measurements
+- Fast path: +23 us per start (BenchmarkBootFastPath, macOS APFS file reads of a 56-line meminfo; /proc on Linux not
+  measured here). Nothing runs while the environment is stopped and nobody starts it; A's round is still one exec.
+- Start at the guarantee (replay): request 1 s after a gateway round -> grant at the next round -> QEMU 15 s after the
+  request; at most one round (15 s) plus Incus's balloon time (not modelled: the replay applies a grant at once) plus
+  1 s of polling.
+- Memory a stopped workspace holds: the guarantee, as before. After an abandoned start: the grant (8960 MiB) for
+  memoryDemandHold (5 min), back to within one step of the guarantee after 8 min (TestAllocationStartRequestExpires).
+- Short host (16 GiB, 1.5 GiB free, an idle 10 GiB neighbour): first round +768 MiB, the full grant after 7 rounds
+  (105 s): longer than the 75 s wait, so the start falls back to the largest whole GiB it maps then.
+
+### 8.4 Rejected
+- A guarantee equal to the boot size, or -memory-min 8GiB: every idle workspace keeps ~8 GiB for ever.
+- A floor of the nested maximum while the environment runs: QEMU's mapping is made once, at start; afterwards the
+  balloon follows the machine (machine_smaller). A's floor (working set + 512 MiB, the working set holding QEMU's
+  resident memory) is what a running guest needs (TestAllocationRunningGuestKeepsWhatItNeeds).
+- Growing a stopped workspace when its portal opens: Active also comes from terminal heartbeats and any proxied
+  chunk; it would hold ~7 GiB per opened workspace (N opened-but-stopped workspaces: N x 7 GiB) to save at most one
+  15 s round of a start that takes 35 s or more.
+- memory-backend-ram,reserve=off (MAP_NORESERVE) for the guest's memory: possible in third_party/lima qemu.go
+  (next to `-m`: `-object memory-backend-ram,id=..,size=..,reserve=off -numa node,memdev=..`; not with virtiofs,
+  which already uses a shared file backend), not hashed into the guest revision. reserve= exists from QEMU 6.1 and
+  only on Linux hosts; the vendored Lima accepts Linux hosts from QEMU 4.0.0 (minimumQemuVersion: hard 4.0.0, soft
+  6.2.0 = Ubuntu 22.04; Debian 12 ships 7.2, Ubuntu 24.04 8.2), so it needs a version gate (getQemuVersion is already
+  read there). macOS (VZ, or QEMU >= 8.2.1 on arm64) and Windows (QEMU >= 11.0.0, WHPX) do not need it: their
+  allocation is not refused this way. It changes the QEMU command line of every Linux-hosted edition, cannot be run
+  here, and alone moves the failure to a run-time OOM kill of QEMU. Follow-up for the partial-grant case, where it would let the full maximum start on a machine that backs
+  only part of it. virtio-mem (growing the guest instead of a large boot maximum) is the longer-term option.
+- A new field A sums with short_bytes, or a separate file: 0.1.16 would not read it; one carrier.
+- Waiting in the workbench (owner of the job message): it would have to compute the boot maximum again
+  (AutomaticLimits reads vmstat and every sysfs memory block) and two processes would own the decision.
+
+### 8.5 What bounds a workspace that keeps rewriting it
+machine-memory.json is written inside the workspace VM, so a workspace (or a compromised guest) can write anything
+into it. Before the bound the answer was "its ceiling and max-min fairness": a file rewritten with reason "start"
+every < 45 s stayed a shortage for ever, grew first while the host was in pressure, made idle and then in-use
+neighbours give back down to their fair shares for its growth, and its held demand kept the idle return from taking
+anything back. Now:
+- The host agent publishes one start request for at most its wait (bootWait, 75 s) and removes it when the wait
+  ends. startWindow = 150 s, two such waits: one start, an immediate retry after it failed, and gateway rounds
+  pushed back by slow guest reads; a real start never reaches it (TestNormalStartKeepsItsGrantWithTheBound: grant
+  at the first round, held for 5 min as before).
+- Past the window the request is not a start, whoever writes it: no shortage, no priority under host pressure, no
+  demand (not even as plain short_bytes, which would stay live demand up to the ceiling and keep the idle return
+  and the neighbours' fair shares at its mercy), and the demand it had raised is no longer held. The VM is back to
+  its own working set plus headroom: the idle return takes the grant back one step per round, and nothing more is
+  taken from others for it (TestStartRequestThatNeverEndsBecomesOrdinaryDemand: rewritten every 30 s for 10
+  minutes on a 16 GiB host, the VM is back at the guarantee and a neighbour that grows at five minutes gets its
+  whole demand; without the bound the neighbour stays 1.5 GiB short).
+- The window counts the time the request was there, over the gateway's sightings of it; a time without it counts
+  as startGap = 45 s at most (the request's own age bound). So a second start a few minutes after the first (the
+  environment was stopped, or its start failed and is retried) is still a start for a whole wait, also when host
+  pressure took the first grant back meanwhile (TestSecondStartSoonAfterTheFirstIsStillAStart); a request that
+  comes and goes spends its 150 s at 45 s per appearance at least.
+- A request whose window is over must have been gone for startRearm = 5 min before it is a start again. That is
+  the held demand's hold: a second start within it finds the first start's grant still held, so it needs no
+  priority; after it, it is honoured as a start again (TestStartRequestRearmsAfterItHasBeenGone).
+- What remains: a workspace that writes a request for less than 150 s, removes it for 5 minutes and starts over is
+  treated each time like a real start (a person starting the environment every 7.5 minutes): at most 150 s of
+  priority per 7.5 minutes, its ceiling and max-min fairness. A running guest's own report (no reason) is not
+  affected by the bound; it is bounded, as before, by the ceiling, max-min fairness and the 5-minute hold.
+
+### 8.6 Editions and versions
+| | today (0.1.16) | with this change |
+|---|---|---|
+| server, Incus VM + balloon, gateway 0.1.16 | QEMU refused, "退出码 1" | grows at once while the host is not in pressure; in pressure the flag is dropped, so the start waits 75 s and falls back or refuses with the memory sentence |
+| server, new gateway + new workspace | - | grows at once, also in host pressure; partial grant -> fallback >= 2 GiB or the sentence |
+| server, gateway 0.1.15 (no machine-memory.json, legacy policy) | same failure | no growth; 75 s wait, then fallback or the sentence |
+| server, new gateway with CAGE_TENANT_MEMORY_POLICY=legacy | same failure | planMemory ignores nested demand: as 0.1.15 |
+| new gateway + old workspace binary | same failure | same failure (nothing publishes while stopped); the workspace binary carries the fix |
+| server without virtualisation (containers) | not affected | not affected (no QEMU, no elastic memory) |
+| desktop macOS / Windows | not affected (machine not measured) | unchanged, no reading beyond the fast path's GOOS check |
+| desktop Linux | not affected with automatic sizing (M < MemTotal) | fast path; with too little memory: no wait (no balloon), fallback or the sentence instead of QEMU's exit |

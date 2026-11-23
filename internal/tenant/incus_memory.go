@@ -95,7 +95,14 @@ func (r *IncusRuntime) MemoryState(ctx context.Context) (MemoryState, error) {
 		entry := state.Instances[id]
 		reading := guests[index]
 		entry.GuestTotal, entry.GuestAvailable, entry.GuestSilent = reading.GuestTotal, reading.GuestAvailable, reading.GuestSilent
-		entry.GuestStall, entry.GuestSwapIns, entry.GuestSwapKnown, entry.NestedShort = reading.GuestStall, reading.GuestSwapIns, reading.GuestSwapKnown, reading.NestedShort
+		entry.GuestStall, entry.GuestSwapIns, entry.GuestSwapKnown = reading.GuestStall, reading.GuestSwapIns, reading.GuestSwapKnown
+		// The pressure flag reaches the rule only for a start's request: for
+		// a running guest the reading has always dropped it, and passing it
+		// on (as resource-allocation.md 7.13 intends) changes allocation
+		// under host pressure for every running environment; that is a
+		// decision of its own.
+		entry.NestedShort, entry.NestedStart = reading.NestedShort, reading.NestedStart
+		entry.NestedPressure = reading.NestedStart && reading.NestedPressure
 		state.Instances[id] = entry
 	}
 	return state, nil
@@ -111,7 +118,9 @@ const guestMemoryScript = "head -c 16384 /proc/meminfo; echo '#cage-psi'; head -
 
 // machineMemoryFile is the file a host agent writes next to its profile's
 // control.json for the gateway: what its guest wants and the machine cannot
-// back now. The guest writes it, so it can at most claim its own ceiling.
+// back now. The guest writes it, so it can at most claim its own ceiling, and
+// a start's request (reason "start") counts as one only for startWindow from
+// its first sight (boundStarts).
 const machineMemoryFile = "machine-memory.json"
 
 // nestedFresh is how old a nested demand may be, either way, before it is
@@ -157,10 +166,14 @@ func parseGuestMemory(body []byte, now time.Time) (InstanceMemory, error) {
 		UpdatedAt time.Time `json:"updated_at"`
 		Short     int64     `json:"short_bytes"`
 		Pressure  bool      `json:"pressure"`
+		// Reason is "start" while a stopped environment's start waits for
+		// this VM to grow (cage.PrepareBoot); the same short_bytes, so older
+		// gateways honour it too.
+		Reason string `json:"reason"`
 	}
 	if data := bytes.TrimSpace(sections["nested"]); len(data) > 0 && json.Unmarshal(data, &nested) == nil && nested.Version == 1 &&
 		nested.Short > 0 && nested.Short <= 1<<40 && now.Sub(nested.UpdatedAt).Abs() <= nestedFresh {
-		reading.NestedShort, reading.NestedPressure = nested.Short, nested.Pressure
+		reading.NestedShort, reading.NestedPressure, reading.NestedStart = nested.Short, nested.Pressure, nested.Reason == "start"
 	}
 	return reading, nil
 }

@@ -53,6 +53,78 @@ const (
 	memoryShortStall = 10
 )
 
+// A start's request (NestedStart, cage.PrepareBoot) is honoured as a start
+// only for startWindow from the gateway's first sight of it. The host agent
+// publishes one for at most its own wait (75 s, cage bootWait) and removes it
+// when that ends; a request still there after the window is not a start,
+// whoever writes it (a workspace that keeps rewriting machine-memory.json),
+// so it is ignored altogether: no priority while the host is in pressure, no
+// demand, and the held demand it raised is dropped so the idle return and
+// the others' fair shares see only the VM's own working set. A request opens
+// a new window once it has been gone for startRearm. The window counts the
+// time the request was there: a time without it counts as startGap at most,
+// so a second start soon after the first one is still a start.
+const (
+	// startWindow is two of the host agent's waits: one start, an immediate
+	// retry after it failed, and gateway rounds delayed by slow guests.
+	startWindow = 150 * time.Second
+	// startRearm is the held demand's hold: a second start within it finds
+	// the first one's grant still held; after it, it is honoured again.
+	startRearm = memoryDemandHold
+	// startGap is the request's own age bound (cage): sightings farther
+	// apart than this are separate starts.
+	startGap = 45 * time.Second
+)
+
+// startSight is when a VM's start request was first and last seen, and
+// whether it outlived its window.
+type startSight struct {
+	first, last time.Time
+	// spent is how long the request has been there, over its sightings.
+	spent   time.Duration
+	expired bool
+}
+
+// boundStarts applies startWindow and startRearm to one reading: it clears
+// the request of every VM whose window is over and drops the held demand of
+// one that just went over. It returns the sightings for the next round and
+// the VMs whose request went over in this one.
+func boundStarts(now time.Time, state MemoryState, seen map[string]startSight, held map[string]demandState) (map[string]startSight, []string) {
+	next := make(map[string]startSight, len(seen))
+	var expired []string
+	for id, sight := range seen {
+		// A request gone for startRearm is forgotten: the next one is a new
+		// start.
+		if now.Sub(sight.last) < startRearm {
+			next[id] = sight
+		}
+	}
+	for id, entry := range state.Instances {
+		if !entry.NestedStart {
+			continue
+		}
+		sight, ok := next[id]
+		if !ok {
+			sight = startSight{first: now}
+		} else {
+			sight.spent += min(now.Sub(sight.last), startGap)
+		}
+		sight.last = now
+		if sight.spent > startWindow {
+			if !sight.expired {
+				sight.expired = true
+				delete(held, id)
+				expired = append(expired, id)
+			}
+			entry.NestedShort, entry.NestedStart, entry.NestedPressure = 0, false, false
+			state.Instances[id] = entry
+		}
+		next[id] = sight
+	}
+	slices.Sort(expired)
+	return next, expired
+}
+
 // hostKeep is the least free memory the host keeps beyond the limits it
 // grants in one round: well under its reserve, which also covers its own use.
 func hostKeep(reserve int64) int64 { return max(int64(memoryShrinkStep), reserve/4) }
@@ -273,9 +345,14 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 		// headroom under host pressure never reads as a shortage).
 		// A nested guest under pressure that its machine cannot back is a
 		// shortage too; a nested guest that only lacks headroom is not.
+		// A nested guest's start (NestedStart) is short too, so that it also
+		// grows while the host is in pressure, but its need is exact: what it
+		// must map beyond this working set, with no growth step on top.
 		if entry.GuestStall >= memoryShortStall || in.swapIn[id] || entry.GuestAvailable < memoryMinHeadroom/2 || entry.NestedPressure && entry.NestedShort > 0 {
 			short[id] = true
-			d = max(d, entry.Limit+max(int64(memoryShrinkStep), entry.Limit/4))
+			if !entry.NestedStart || entry.GuestStall >= memoryShortStall || in.swapIn[id] || entry.GuestAvailable < memoryMinHeadroom/2 {
+				d = max(d, entry.Limit+max(int64(memoryShrinkStep), entry.Limit/4))
+			}
 		}
 		d += max(entry.NestedShort, 0)
 		d = min(ceiling, max(guarantee, roundUpMemory(d)))
@@ -349,7 +426,10 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 				continue
 			}
 			reason := "guest needs memory"
-			if entry.NestedShort > 0 {
+			switch {
+			case entry.NestedStart:
+				reason = "environment start needs memory"
+			case entry.NestedShort > 0:
 				reason = "nested guest needs memory"
 			}
 			if fair[id] < heldDemand[id] {

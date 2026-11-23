@@ -1,0 +1,15 @@
+.earlier-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.earlier-list button { width: 100%; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 10px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); text-align: left; }
+.earlier-list span { display: grid; gap: 2px; min-width: 0; }
+.earlier-list strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.earlier-list small, .earlier-meta { color: var(--muted); font-size: 12.5px; }
+.earlier-list svg { color: var(--muted); }
+.earlier-back { display: inline-flex; align-items: center; gap: 4px; border: 0; background: none; color: var(--clay-ink); padding: 4px 0; }
+.earlier-part { display: grid; gap: 10px; }
+.earlier-turns { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+.earlier-prompt { margin: 0; justify-self: end; max-width: 85%; padding: 8px 12px; border-radius: 14px; background: var(--clay-soft); color: var(--ink); white-space: pre-wrap; }
+.earlier-turns li { display: grid; gap: 6px; }
+.earlier-error { color: var(--error); }
+.earlier-entry { display: inline-flex; align-items: center; gap: 6px; align-self: flex-start; margin: 4px 16px 0; padding: 4px 10px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--surface); color: var(--muted); font-size: 12.5px; }

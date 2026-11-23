@@ -76,18 +76,18 @@ Super Cage 有桌面版（macOS、Windows、Linux）和 Linux 服务器版。桌
 
 ### 桌面版
 
-从 [v0.1.16 发布页](https://github.com/sweetcornna/Super-Cage/releases/tag/v0.1.16)下载：
+从 [v0.1.17 发布页](https://github.com/sweetcornna/Super-Cage/releases/tag/v0.1.17)下载：
 
 | 电脑 | 安装包 | 要求 |
 | --- | --- | --- |
-| Mac | [`Super-Cage-0.1.16-macos-arm64.dmg`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.16/Super-Cage-0.1.16-macos-arm64.dmg) | Apple Silicon，macOS 14 或更新 |
-| Windows | 未签名的预览版安装器稍后补充到发布页 | Windows 10 22H2 或 Windows 11，x64 |
-| Linux | [`Super-Cage-0.1.16-linux-amd64.deb`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.16/Super-Cage-0.1.16-linux-amd64.deb) | Debian 12、Ubuntu 22.04 或 24.04，x86-64，需要 KVM |
+| Mac | [`Super-Cage-0.1.17-macos-arm64.dmg`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-macos-arm64.dmg) | Apple Silicon，macOS 14 或更新 |
+| Windows | 0.1.17 的安装器稍后补充到发布页；在此之前可用上一版的未签名预览版 [`Super-Cage-0.1.16-windows-amd64-setup-unsigned.exe`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.16/Super-Cage-0.1.16-windows-amd64-setup-unsigned.exe) | Windows 10 22H2 或 Windows 11，x64 |
+| Linux | [`Super-Cage-0.1.17-linux-amd64.deb`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-linux-amd64.deb) | Debian 12、Ubuntu 22.04 或 24.04，x86-64，需要 KVM |
 
 Intel Mac、Windows ARM64 和 Linux ARM64 暂不支持。
 
-1. **校验**：macOS 安装包对照 `SHA256SUMS`，Linux 桌面安装包对照 `SHA256SUMS-linux-desktop.txt`。
-2. **安装**：Mac 上打开 DMG，把 `Super Cage.app` 拖进「应用程序」。从 0.1.16 起，App 和 DMG 经 Developer ID 签名和 Apple 公证，之后的版本可以在应用内更新。Linux 上运行 `sudo apt install ./Super-Cage-0.1.16-linux-amd64.deb`；要在本机运行环境，再装 `sudo apt install qemu-system-x86 qemu-utils ovmf openssh-client iproute2 git`，并确认当前用户能读写 `/dev/kvm`。
+1. **校验**：macOS 安装包对照 `SHA256SUMS`，Linux 桌面安装包对照 `SHA256SUMS-linux-desktop.txt`，Windows 安装器对照 `SHA256SUMS-windows-desktop.txt`。
+2. **安装**：Mac 上打开 DMG，把 `Super Cage.app` 拖进「应用程序」。从 0.1.16 起，App 和 DMG 经 Developer ID 签名和 Apple 公证，之后的版本可以在应用内更新。Linux 上运行 `sudo apt install ./Super-Cage-0.1.17-linux-amd64.deb`；要在本机运行环境，再装 `sudo apt install qemu-system-x86 qemu-utils ovmf openssh-client iproute2 git`，并确认当前用户能读写 `/dev/kvm`。
 3. **首次启动**：创建 Super Cage 账户（密码至少 8 个字符，保存好恢复密钥），选择客机系统和存储目录，导入自己的代理（Clash/Mihomo YAML 订阅或文件，或 HTTP、SOCKS5、SSH 节点），点「开始安装」。网络检查通过后进入工作台。
 4. **开始工作**：点项目旁的加号打开自己的文件夹，选「新建 Claude 终端」，在环境里登录 Claude Code。
 
@@ -114,11 +114,11 @@ v0.1.14 及更早版本的归档名以 `Cage-Tenant-` 开头，例如 `Cage-Tena
 1. **下载并校验**（arm64 主机把文件名中的 `amd64` 换成 `arm64`）：
 
    ```sh
-   base=https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.16
-   curl -fLO "$base/Super-Cage-NoVirt-0.1.16-linux-amd64.tar.gz" -fLO "$base/SHA256SUMS"
+   base=https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17
+   curl -fLO "$base/Super-Cage-NoVirt-0.1.17-linux-amd64.tar.gz" -fLO "$base/SHA256SUMS"
    sha256sum -c --ignore-missing SHA256SUMS
-   tar -xzf Super-Cage-NoVirt-0.1.16-linux-amd64.tar.gz
-   cd Super-Cage-NoVirt-0.1.16-linux-amd64
+   tar -xzf Super-Cage-NoVirt-0.1.17-linux-amd64.tar.gz
+   cd Super-Cage-NoVirt-0.1.17-linux-amd64
    ```
 
 2. **安装**：
@@ -145,8 +145,8 @@ v0.1.14 及更早版本的归档名以 `Cage-Tenant-` 开头，例如 `Cage-Tena
 3. **启动网关**：下载与主机架构对应的服务端归档并校验，然后运行：
 
    ```sh
-   tar -xzf Super-Cage-Server-0.1.16-linux-amd64.tar.gz
-   cd Super-Cage-Server-0.1.16-linux-amd64
+   tar -xzf Super-Cage-Server-0.1.17-linux-amd64.tar.gz
+   cd Super-Cage-Server-0.1.17-linux-amd64
    ./cage-tenant -origin https://cage.example.org \
      -state-dir /var/lib/cage-tenant -incus-image cage-blank
    ```

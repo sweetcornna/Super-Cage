@@ -240,8 +240,7 @@ func testClaudeAccountSwitchThroughSharedSession(t *testing.T, automatic bool) {
 		}
 		epoch, _ := s.account.access()
 		ctx := context.WithValue(context.Background(), accountEpochKey{}, epoch)
-		lastUsage := time.Now()
-		s.maybeSwitchClaudeAccount(ctx, id, &lastUsage)
+		s.maybeSwitchClaudeAccount(ctx, id, &claudeMonitor{lastUsageCheck: time.Now(), started: true})
 		m.mu.Lock()
 		latest, err := m.record(s.profile, id)
 		m.mu.Unlock()
@@ -251,8 +250,9 @@ func testClaudeAccountSwitchThroughSharedSession(t *testing.T, automatic bool) {
 		input.RequestID = latest.Switch.ID
 		raw, _ = json.Marshal(input)
 	}
+	switchStarted := time.Now()
 	response = request(s, "POST", "/api/cli/sessions/"+id+"/account", s.origin, string(raw), true)
-	if response.Code == 409 && strings.Contains(response.Body.String(), "原进程尚未退出") {
+	if response.Code == 409 && strings.Contains(response.Body.String(), "还没有退出") {
 		// Shutdown can wait for a last hook. Reuse the same durable operation;
 		// the retry must never create a second source or target execution.
 		response = request(s, "POST", "/api/cli/sessions/"+id+"/account", s.origin, string(raw), true)
@@ -266,6 +266,7 @@ func testClaudeAccountSwitchThroughSharedSession(t *testing.T, automatic bool) {
 	if len(view.Turns) != 1 || view.AccountID != list.Accounts[1].ID {
 		t.Fatalf("history or binding changed incorrectly: %#v", view)
 	}
+	t.Logf("handoff ready %s after the switch request", time.Since(switchStarted).Round(time.Millisecond))
 	// Replay an acknowledged pre-switch request through the new account channel.
 	call("POST", "/messages", map[string]string{"request_id": messageID, "text": "initial mobile prompt"})
 	call("POST", "/messages", map[string]string{"request_id": uuid.NewString(), "text": "follow-up"})

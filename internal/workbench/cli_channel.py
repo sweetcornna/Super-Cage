@@ -457,10 +457,6 @@ if value == {"permissions": {"defaultMode": "bypassPermissions"}, "tui": "fullsc
     return True
 
 
-def active_session(session_id, config=""):
-    return bool(active_sessions(session_id, config))
-
-
 def active_sessions(session_id, config=""):
     return [row for row in running_sessions(config) if row.get("sessionId") == session_id]
 
@@ -531,6 +527,20 @@ def handoff_session(request):
     return {"running": bool(rows)}
 
 
+def descendants(pid):
+    # Process parentage is the ancestry of a CLI's own work: its background
+    # commands and any CLI it started. Read it before the CLI exits, since its
+    # children are then reparented. Windows runs the CLI in a kill-on-close
+    # job, which stops its descendants with it.
+    if os.name == "nt" or not live(pid):
+        return []
+    table = [line.split() for line in subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines()]
+    found = {str(pid)}
+    for _ in range(9):
+        found |= {row[0] for row in table if row[1:] and row[1] in found}
+    return [(child, process_fingerprint(child)) for child in found - {str(pid)}]
+
+
 def handoff_receipt(config, session_id):
     key = hashlib.sha256((str(config) + "\n" + session_id).encode()).hexdigest()
     return ROOT.parent / "cli-handoffs" / (key + ".json")
@@ -538,98 +548,103 @@ def handoff_receipt(config, session_id):
 
 def prepare_account_switch(request):
     # Freeze only an idle source. Never resubmit prompts or tools here.
+    # Everything that can refuse is checked before the source is fenced or
+    # stopped; a failure after the fence lifts it again.
     sid = identifier(request["cli_id"])
     switch_id = identifier(request["switch_id"])
     config = Path(request["config"]).resolve()
     connection = identifier(request["connection"])
     workspace = request["workspace"]
+    root = request.get("root", workspace)
     folder = ROOT.parent / "cli-account-switches" / switch_id
     receipt = folder / "receipt.json"
     binding = {key: request[key] for key in ("cli_id", "config", "connection", "workspace", "target_cli_id")}
     if receipt.exists():
         saved = read_json(receipt)
         if saved["binding"] != binding:
-            raise ValueError("账号交接编号已用于另一项操作")
-        return {"transcript": str(folder / "history.jsonl")}
-    with state_file(connection) as state:
-        if state.get("cli_id") != sid or state.get("config") != str(config) or state.get("workspace") != workspace:
-            raise ValueError("原会话身份或项目已变化，请刷新后重试")
-        if state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent"):
-            raise ValueError("原会话仍有任务、待发消息或审批，请结束后再切换账号")
-        existing = state.get("account_switch")
-        if existing and existing != switch_id:
-            raise ValueError("此会话已有账号交接尚未完成")
-        state["account_switch"] = switch_id
-        save(ROOT / connection / "state.json", state)
-    rows = active_sessions(sid, str(config))
-    # Any other live worker in this account can represent a background
-    # child of the source. The registry does not expose a complete ancestry.
-    listing = subprocess.run(["claude", "agents", "--json"], env={**os.environ, "CLAUDE_CONFIG_DIR": str(config)}, capture_output=True, text=True, timeout=10)
-    if listing.returncode != 0:
-        raise ValueError("无法确认后台任务，未切换账号")
-    if any(row.get("sessionId") != sid and live(row.get("pid")) for row in json.loads(listing.stdout)):
-        raise ValueError("原账号仍有其他执行任务，请结束后台任务后再交接")
-    for row in rows:
-        if row.get("cwd") != workspace or row.get("status") != "idle" or row.get("kind") != "interactive":
-            raise ValueError("原 Claude Code 尚未安全停止，请先结束本轮任务")
-    pid = state.get("pid")
-    fingerprint = process_fingerprint(pid) if live(pid) else ""
-    def executing():
-        if not live(pid):
-            return False
-        if os.name == "nt":
-            return True
-        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
-        return bool(status.stdout.strip()) and not status.stdout.lstrip().startswith("Z")
-    if executing() and not any(row.get("pid") == pid for row in rows):
-        raise ValueError("无法核对原进程状态，请先退出原 Claude Code 后重试")
-    for row in rows:
-        terminate_cli(row["pid"])
-    deadline = time.monotonic() + 5
-    while executing() and time.monotonic() < deadline:
-        time.sleep(.05)
-    if executing():
-        latest = read_json(ROOT / connection / "state.json", {})
-        current = process_fingerprint(pid)
-        # The CLI can finish its SessionEnd hook but hang while shutting down
-        # its MCP child. Terminate only that same, already idle and fenced CLI.
-        if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and current == fingerprint and not active_sessions(sid, str(config)):
-            terminate_cli(pid, True)
-            deadline = time.monotonic() + 1
-            while executing() and time.monotonic() < deadline:
-                time.sleep(.05)
-    if executing():
-        raise ValueError("原进程尚未退出，未启动目标账号")
+            raise ValueError("switch:reused")
+        return {**saved, "transcript": str(folder / "history.jsonl")}
     path = next((config / "projects").glob("*/" + sid + ".jsonl"), None)
     if path is None or path.is_symlink():
-        raise ValueError("原会话历史不可用，未切换账号")
-    pending = set()
-    for line in path.read_text().splitlines():
-        row = json.loads(line)
-        if row.get("isSidechain"):
-            continue
-        if row.get("cwd") and row["cwd"] != workspace:
-            raise ValueError("历史项目与当前项目不一致")
-        blocks = (row.get("message") or {}).get("content", [])
-        if not isinstance(blocks, list):
-            continue
-        for block in blocks:
-            if block.get("type") == "tool_use":
-                pending.add(block["id"])
-            elif block.get("type") == "tool_result":
-                pending.discard(block.get("tool_use_id"))
-    if pending:
-        raise ValueError("历史仍有结果未确认的工具，不能自动接续")
-    folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
-    target = folder / "history.jsonl"
-    with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:
-        stream.write(path.read_bytes())
-        temporary = stream.name
-    os.replace(temporary, target)
-    save(receipt, {"binding": binding, "requests": state.get("requests", {})})
+        raise ValueError("switch:history")
+    # A session belongs to the folder it started in: its first recorded cwd.
+    # Later rows follow the CLI into subdirectories and worktrees. A tool call
+    # without a result is left to the resumed CLI, which tells the model that
+    # its outcome is unknown and must be checked before it is run again.
+    first = next((row["cwd"] for row in map(json.loads, path.read_text().splitlines()) if row.get("cwd") and not row.get("isSidechain")), "")
+    if not workspace_within(first, root):
+        raise ValueError("switch:project")
+    # Other live sessions of the same account are unrelated and never block;
+    # the source's own children are found by ancestry and stopped with it.
+    rows = active_sessions(sid, str(config))
+    force = request.get("force")
+    for row in rows:
+        # A force cannot move a CLI that runs outside the project: name it.
+        if not workspace_within(row.get("cwd", ""), root):
+            raise ValueError("switch:outside:" + row.get("cwd", ""))
+        if not force and (row.get("status") != "idle" or row.get("kind") != "interactive"):
+            raise ValueError("switch:running")
+    pid = read_json(ROOT / connection / "state.json", {}).get("pid")
+    fingerprint = process_fingerprint(pid)
+    def executing():
+        # A zombie has exited; Windows reports only live processes.
+        return live(pid) and (os.name == "nt" or subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout.strip()[:1] not in ("", "Z"))
+    if executing() and not any(row.get("pid") == pid for row in rows):
+        raise ValueError("switch:process")
+    with state_file(connection) as state:
+        if state.get("cli_id") != sid or state.get("config") != str(config) or state.get("pid") != pid or not workspace_within(state.get("workspace", ""), root):
+            raise ValueError("switch:changed")
+        # A handoff the person confirmed, or one at a confirmed quota limit,
+        # stops a working source: its turn ends and its approvals are dropped.
+        if not force and (state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent")):
+            raise ValueError("switch:busy")
+        # A fence whose preparation never froze a history is stale: replace it.
+        existing = state.get("account_switch")
+        if existing and existing != switch_id and (folder.parent / existing / "receipt.json").exists():
+            raise ValueError("switch:pending")
+        state["account_switch"] = switch_id
+        save(ROOT / connection / "state.json", state)
+    try:
+        # Its children are stopped only when the stop was confirmed or forced.
+        children = descendants(pid) if force else []
+        for row in rows:
+            terminate_cli(row["pid"])
+        deadline = time.monotonic() + 5
+        while executing() and time.monotonic() < deadline:
+            time.sleep(.05)
+        if executing():
+            latest = read_json(ROOT / connection / "state.json", {})
+            # The CLI can finish its SessionEnd hook but hang while shutting down
+            # its MCP child. Terminate only that same, already idle and fenced CLI.
+            if latest.get("closed") and latest.get("account_switch") == switch_id and fingerprint and process_fingerprint(pid) == fingerprint and not active_sessions(sid, str(config)):
+                terminate_cli(pid, True)
+                deadline = time.monotonic() + 1
+                while executing() and time.monotonic() < deadline:
+                    time.sleep(.05)
+        if executing():
+            raise ValueError("switch:exit")
+        for child, mark in children:
+            if live(child) and process_fingerprint(child) == mark:
+                terminate_cli(child, True)
+        folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
+        target = folder / "history.jsonl"
+        with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:
+            stream.write(path.read_bytes())
+            temporary = stream.name
+        os.replace(temporary, target)
+        # A message the source never took is not in the frozen history. The
+        # host delivers it to the target once, under a new request id.
+        received = transcript(target)[3]
+        carry = [item for item in read_json(ROOT / connection / "state.json", {}).get("sent", []) if item["id"] not in received]
+        save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first, "carry": carry})
+    except BaseException:
+        with state_file(connection) as latest:
+            if latest.get("account_switch") == switch_id:
+                latest.pop("account_switch")
+        raise
     with state_file(connection) as state:
         state["closed"] = True
-    return {"transcript": str(target)}
+    return {"transcript": str(target), "workspace": first, "carry": carry}
 
 
 def cancel_account_switch(request):
@@ -637,7 +652,7 @@ def cancel_account_switch(request):
     switch_id = identifier(request["switch_id"])
     with state_file(connection) as state:
         if state.get("cli_id") != identifier(request["cli_id"]) or state.get("account_switch") not in (None, switch_id):
-            raise ValueError("原会话交接已变化")
+            raise ValueError("switch:cancel")
         state.pop("account_switch", None)
     # The source may already be stopped, but it remains resumable. Remove only
     # this operation's frozen copy so a later retry cannot use stale history.
@@ -652,7 +667,7 @@ def purge_session(request):
     config = Path(request["config"]) if request.get("config") else config_directory(request.get("account") or "default")
     config = config.resolve()
     workspace = request["workspace"].rstrip("/")
-    if active_session(session_id, str(config)):
+    if active_sessions(session_id, str(config)):
         raise ValueError("Claude Code 仍在运行这段会话，请先结束原终端中的 Claude Code")
     projects = config / "projects"
     if projects.is_symlink():
@@ -719,7 +734,7 @@ def launch(request):
     session_id = identifier(request.get("resume") or request.get("session_id") or connection)
     _, previous = connection_for(session_id, config_directory("default"))
     if request.get("resume"):
-        if active_session(request["resume"]):
+        if active_sessions(request["resume"]):
             raise ValueError("原会话仍在电脑终端运行，请先结束该终端中的 Claude Code 再接续")
     command = _runtime["command_text"](__file__, ["hook", connection])
     events = ("SessionStart", "UserPromptSubmit", "MessageDisplay", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop", "StopFailure", "SessionEnd")
@@ -757,6 +772,7 @@ def launch(request):
             state["resume_transcript"] = request["resume_transcript"]
             state["resume_task"] = bool(request.get("continue_after_switch"))
             state["account_resume"] = True
+            state["note"] = request.get("note", "")
             transfer = read_json(ROOT.parent / "cli-account-switches" / identifier(request["switch_id"]) / "receipt.json", {})
             state["requests"] = {**transfer.get("requests", {}), **state["requests"]}
         state["handoff_permission_mode"] = transfer.get("permission_mode") or previous.get("handoff_permission_mode", "")
@@ -780,7 +796,9 @@ def launch(request):
         expected = ROOT.parent / "cli-account-switches" / identifier(request["switch_id"]) / "history.jsonl"
         if Path(request["resume_transcript"]) != expected or not expected.is_file():
             raise ValueError("账号交接历史无效")
-        args += ["--resume", _runtime["path"](expected), "--fork-session", "--session-id", session_id]
+        # Alias the folder, not the file: the CLI resumes a path only when it
+        # ends in .jsonl and searches its session list for anything else.
+        args += ["--resume", str(Path(_runtime["path"](expected.parent)) / expected.name), "--fork-session", "--session-id", session_id]
     else:
         args += ["--resume", session_id] if request.get("resume") else ["--session-id", session_id]
     if state.get("handoff_permission_mode") == "manual":
@@ -865,7 +883,7 @@ def serve(connection):
                             # inject the same continuation twice.
                             save(ROOT / connection / "state.json", state)
                             emit({"method": "notifications/claude/channel", "params": {
-                                "content": Path(__file__).with_suffix(".account-resume.md" if state.get("account_resume") else ".resume.md").read_text(encoding="utf-8"),
+                                "content": Path(__file__).with_suffix(".account-resume.md" if state.get("account_resume") else ".resume.md").read_text(encoding="utf-8") + state.get("note", ""),
                                 "meta": {"resume": "true"}}})
                     else:
                         raise ValueError("unsupported operation")
@@ -951,7 +969,7 @@ def main():
             result = rpc(request)
         elif mode == "active":
             config = request.get("config") or str(config_directory(request.get("account") or "default"))
-            result = {"running": active_session(identifier(request["cli_id"]), config)}
+            result = {"running": bool(active_sessions(identifier(request["cli_id"]), config))}
         elif mode == "handoff":
             try:
                 result = handoff_session(request)

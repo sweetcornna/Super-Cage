@@ -190,6 +190,12 @@ func (s *Server) submitMobileTurn(ctx context.Context, id, requestID, prompt str
 		size += len(t.Prompt) + len(t.Text)
 		for _, tool := range t.Tools {
 			size += len(tool.ID) + len(tool.Name) + len(tool.Detail) + 64
+			if tool.Kind != "" {
+				size += len(tool.AgentType) + 128
+			}
+			if tool.Now != nil {
+				size += len(tool.Now.Name) + len(tool.Now.Detail)
+			}
 		}
 	}
 	if size > mobileHistoryLimit || len(record.Turns) >= 256 {
@@ -286,6 +292,8 @@ func (s *Server) admitMobileTurn(request context.Context, record *mobileRecord, 
 		record.Resume = resume || result.Started
 		record.SingleTurn = result.SingleTurn && result.Started
 		turn.Approval = nil
+		// The run's CLI has exited; what it started in the background has too.
+		turn.Tools = cliconversation.CloseTasks(turn.Tools)
 		run.pending = nil
 		switch {
 		case ctx.Err() != nil || turn.Status == "stopping":

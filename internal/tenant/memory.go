@@ -78,6 +78,10 @@ type InstanceMemory struct {
 	// NestedPressure: the nested guest is under memory pressure itself, so its
 	// shortfall is a shortage, not missing headroom.
 	NestedPressure bool
+	// NestedStart: NestedShort is what a nested guest that is about to start
+	// needs to map its boot maximum (cage.PrepareBoot): the environment is
+	// stopped and its start waits for this VM to grow.
+	NestedStart bool
 	// Active is set by the balancer, not by the runtime: the workspace was
 	// used (browser traffic, a portal open, guest CPU) within memoryActiveWindow.
 	Active bool
@@ -113,6 +117,9 @@ type memoryBalancing struct {
 	// held is each VM's held demand and swapIns its last pswpin counter.
 	held    map[string]demandState
 	swapIns map[string]uint64
+	// starts is when each VM's start request was first and last seen
+	// (boundStarts).
+	starts map[string]startSight
 	// legacy selects the previous fair-share policy
 	// (CAGE_TENANT_MEMORY_POLICY=legacy in the gateway's environment).
 	legacy bool
@@ -132,7 +139,7 @@ func (s *Server) startMemoryBalancer() {
 		return
 	}
 	s.memory = memoryBalancing{runtime: runtime, changes: make(map[string]bool), pause: make(map[string]time.Time), failures: make(map[string]string), silent: make(map[string]int),
-		held: make(map[string]demandState), swapIns: make(map[string]uint64), legacy: os.Getenv("CAGE_TENANT_MEMORY_POLICY") == "legacy"}
+		held: make(map[string]demandState), swapIns: make(map[string]uint64), starts: make(map[string]startSight), legacy: os.Getenv("CAGE_TENANT_MEMORY_POLICY") == "legacy"}
 	reserve := "the larger of 2 GiB and 15% of host memory"
 	if s.cfg.MemoryReserve > 0 {
 		reserve = mib(s.cfg.MemoryReserve)
@@ -233,6 +240,11 @@ func (s *Server) balanceOnce() {
 	if s.memory.legacy {
 		plan = planMemory(state, s.cfg.MemoryReserve, s.memoryMin(), fixed, holdShrink, silent)
 	} else {
+		var expired []string
+		s.memory.starts, expired = boundStarts(now, state, s.memory.starts, s.memory.held)
+		for _, id := range expired {
+			log.Printf("cage-tenant: workspace %s: a start request still there %s after it was first seen is ignored until it has been gone for %s", id, startWindow, startRearm)
+		}
 		result := allocateMemory(allocationInput{now: now, state: state, reserve: s.cfg.MemoryReserve, minimum: s.memoryMin(),
 			fixed: fixed, holdShrink: holdShrink, silent: silent, swapIn: swapIn}, s.memory.held)
 		s.memory.held, s.memory.report, plan = result.held, result, result.changes

@@ -468,7 +468,7 @@ func (s *Server) awaitSessionView(ctx context.Context, view mobileSession, deadl
 		return false
 	}
 	pause := time.Second
-	if !view.Active {
+	if !view.Active && view.Tasks == nil {
 		pause = 4 * time.Second
 	}
 	guest := view.TerminalAvailable || view.Provider == codexProvider

@@ -95,6 +95,8 @@
   font-size: var(--fs-secondary);
   font-weight: 500;
 }
+/* The ungrouped yes: a checkbox line under the rule, not a stacked field. */
+.claude-scheduling > label.check-line { display: flex; align-items: center; gap: 8px; margin-top: -4px; }
 .claude-scheduling > .field-help { margin: 0; }
 .claude-account-order { max-height: 12rem; margin-top: 12px; overflow: auto; border-top: 1px solid var(--line); }
 .claude-account-order > div { display: flex; gap: 8px; align-items: center; min-height: var(--h-control); border-bottom: 1px solid var(--line); font-size: var(--fs-secondary); }
@@ -403,3 +405,12 @@
   .claude-quota-reset svg { display: none; }
   .claude-profile-identity:has(.claude-profile-rename) { grid-column: 1 / -1; }
 }
+
+/* The first-time question about a used-up quota, offered once in 调度设置. */
+.claude-scheduling-offer { display: grid; gap: 10px; width: min(100%, 34rem); margin: 6px 0 14px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--paper); }
+.claude-scheduling-offer p { margin: 0; color: var(--ink); font-size: var(--fs-secondary); line-height: 1.6; }
+.claude-scheduling-offer > div { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+.claude-scheduling-offer .text-button, .claude-profile-prefer { padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: var(--fs-caption); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.claude-scheduling > .field-help + .field-help { margin-top: 6px; }
+.claude-handoff-group { flex-wrap: wrap; }
+.claude-handoff-group .field-help { flex-basis: 100%; margin: 2px 0 0; }

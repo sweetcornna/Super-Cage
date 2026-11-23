@@ -3,9 +3,14 @@ package workbench
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 )
@@ -18,6 +23,16 @@ type claudeSwitchInput struct {
 	SourceID  string `json:"source_id"`
 	Confirm   bool   `json:"confirm"`
 	Continue  bool   `json:"continue"`
+	// Force: the person confirmed stopping the source's current task.
+	Force bool `json:"force"`
+	// Answer to the first-time question: once, always, wait_once, wait_always.
+	Answer string `json:"answer"`
+	// wake: the wait for a reset ended and the source continues on itself.
+	wake bool
+	// undo returns to the account a limit handoff came from: the task is
+	// never continued there, and the session waits for that account's reset.
+	undo bool
+	wait int64
 }
 
 type claudeSwitchOption struct {
@@ -25,25 +40,228 @@ type claudeSwitchOption struct {
 	Label string `json:"label"`
 }
 
+// claudeSwitchTarget is an account a person can move a session to by hand,
+// with what the person needs to see beside its name.
+type claudeSwitchTarget struct {
+	ID        string  `json:"id"`
+	Label     string  `json:"label"`
+	Status    string  `json:"status"`
+	Enabled   bool    `json:"enabled"`
+	Exhausted string  `json:"exhausted,omitempty"`
+	ResetsAt  int64   `json:"resets_at,omitempty"`
+	Remaining float64 `json:"remaining"`
+}
+
+// claudeHandoffView is what a session shows about its account's quota.
+type claudeHandoffView struct {
+	// Window and ResetsAt: the source's confirmed exhaustion.
+	Window   string `json:"window,omitempty"`
+	ResetsAt int64  `json:"resets_at,omitempty"`
+	// Question: the first-time (or every-time) question, with its suggestion.
+	Question *claudeSwitchOption `json:"question,omitempty"`
+	// Waiting is "source" while the session waits for its own account and
+	// "all" when no account that may continue it has quota left; WaitLabel
+	// resets first, at WaitUntil.
+	Waiting   string `json:"waiting,omitempty"`
+	WaitUntil int64  `json:"wait_until,omitempty"`
+	WaitLabel string `json:"wait_label,omitempty"`
+	// Automatic: the session's rule is to continue automatically.
+	Automatic bool `json:"automatic"`
+	// Refusal: why the automatic continuation did not happen (Waiting is
+	// "refused" then); it is tried again when something changes.
+	Refusal string `json:"refusal,omitempty"`
+}
+
+var errClaudeSwitchAnswered = errors.New("这个问题已在另一台设备上回答，界面已更新。")
+
 func validSwitchPolicy(policy string) bool {
 	return policy == "ask" || policy == "allow" || policy == "wait"
 }
 
-// Explicit groups prevent a work transcript from silently moving to a personal
-// identity. Empty groups never authorize a cross-account transfer.
-func switchCandidates(list claudeAccountList, record *mobileRecord) []claudeSwitchOption {
-	options := []claudeSwitchOption{}
+// switchPolicy is the session's own rule when the person set one, otherwise
+// the rule in 调度设置.
+//
+// Sessions from before switch_policy_set carry a copy of the rule at their
+// creation. A copied allow or wait was an explicit choice then and is kept; a
+// copied ask was the default and now follows 调度设置.
+func (r *mobileRecord) switchPolicy(list claudeAccountList) string {
+	if r.ownSwitchPolicy() {
+		return r.SwitchPolicy
+	}
+	return list.Scheduling.defaults().SwitchPolicy
+}
+
+func (r *mobileRecord) ownSwitchPolicy() bool {
+	return (r.SwitchPolicySet || r.SwitchPolicy == "allow" || r.SwitchPolicy == "wait") && validSwitchPolicy(r.SwitchPolicy)
+}
+
+// implicitConsent: whether accounts without a 接续分组 may continue this
+// session automatically. Consent is kept where it was given: a session with
+// its own rule has its own (a copied rule from an older version has none, so
+// it keeps the explicit groups); otherwise 调度设置 decides.
+func (r *mobileRecord) implicitConsent(list claudeAccountList) bool {
+	if r.ownSwitchPolicy() {
+		return r.UngroupedHandoff
+	}
+	return list.Scheduling.UngroupedHandoff
+}
+
+// confirmedLimit: the session's turn ended on its account's quota limit and
+// the usage reading confirms a used-up window. Nothing else forces a switch.
+func confirmedLimit(list claudeAccountList, record *mobileRecord, now time.Time) bool {
+	source := claudeSwitchSource(list, record)
+	if source == nil || record.AccountFailure != "rate_limit" {
+		return false
+	}
+	window, _ := source.exhaustedWindow(now)
+	return window != ""
+}
+
+// runningTasks counts the source's subagents and background tasks still
+// running after its turn.
+func (r *mobileRecord) runningTasks() int {
+	if r.Tasks != nil && r.Tasks.Count > 0 {
+		return r.Tasks.Count
+	}
+	return r.RunningTasks
+}
+
+// claudeSwitchSource is the session's account while its identity is still
+// the one the session was started with.
+func claudeSwitchSource(list claudeAccountList, record *mobileRecord) *claudeAccount {
 	source := list.find(record.Account.ID)
-	if source == nil || source.HandoffGroup == "" || source.guestID() != record.Account.GuestID || claudeIdentityHash(source.Email, source.Organization) != record.Account.Subject {
+	if source == nil || source.guestID() != record.Account.GuestID || claudeIdentityHash(source.Email, source.Organization) != record.Account.Subject {
+		return nil
+	}
+	return source
+}
+
+// The person's own choice is the authorization of a manual switch: every
+// other account is listed, whatever its group, scheduling or quota, and
+// one that is logged in can take the session.
+func manualSwitchTargets(list claudeAccountList, record *mobileRecord, now time.Time) []claudeSwitchTarget {
+	targets := []claudeSwitchTarget{}
+	if claudeSwitchSource(list, record) == nil {
+		return targets
+	}
+	for _, a := range list.Accounts {
+		if a.ID == record.Account.ID {
+			continue
+		}
+		room, _ := a.headroom(now)
+		window, reset := a.exhaustedWindow(now)
+		targets = append(targets, claudeSwitchTarget{a.ID, a.Label, a.Status, a.Enabled, window, reset, room})
+	}
+	return targets
+}
+
+// Automatic continuation moves a history only within its 接续分组. Accounts
+// without one form an implicit group once the person said yes to that; an
+// account given its own group stays apart.
+func automaticSwitchTargets(list claudeAccountList, record *mobileRecord, implicit bool, now time.Time) []claudeSwitchOption {
+	options := []claudeSwitchOption{}
+	source := claudeSwitchSource(list, record)
+	if source == nil || source.HandoffGroup == "" && !implicit {
 		return options
 	}
 	for _, a := range list.Accounts {
-		_, available := a.headroom(time.Now())
+		_, available := a.headroom(now)
 		if a.ID != source.ID && a.Enabled && a.Status == "ready" && a.HandoffGroup == source.HandoffGroup && available {
 			options = append(options, claudeSwitchOption{a.ID, a.Label})
 		}
 	}
 	return options
+}
+
+// bestClaudeTarget applies the scheduling mode to the given targets.
+func bestClaudeTarget(list claudeAccountList, options []claudeSwitchOption, active map[string]int, logins map[string]bool, last string, now time.Time) string {
+	candidates := claudeAccountList{Scheduling: list.Scheduling}
+	candidates.Scheduling.Preferred = ""
+	for _, a := range list.Accounts {
+		for _, option := range options {
+			if option.ID == a.ID {
+				candidates.Accounts = append(candidates.Accounts, a)
+			}
+		}
+	}
+	return pickClaudeAccount(candidates, active, logins, last, "", now)
+}
+
+// claudeHandoffState decides what the session shows at a quota limit. It
+// reads only stored state: no query runs while nothing is limited.
+func claudeHandoffState(list claudeAccountList, record *mobileRecord, now time.Time) claudeHandoffView {
+	policy := record.switchPolicy(list)
+	view := claudeHandoffView{Automatic: policy == "allow"}
+	source := claudeSwitchSource(list, record)
+	if source == nil || record.AccountFailure != "rate_limit" || record.Switch != nil && record.Switch.Phase != "completed" {
+		return view
+	}
+	view.Window, view.ResetsAt = source.exhaustedWindow(now)
+	if view.Window == "" {
+		return view // an unconfirmed limit (model-specific, overload, unknown) is no exhaustion
+	}
+	if policy == "wait" || now.Unix() < record.HandoffWait {
+		view.Waiting, view.WaitUntil, view.WaitLabel = "source", view.ResetsAt, source.Label
+		return view
+	}
+	if policy == "allow" && len(automaticSwitchTargets(list, record, record.implicitConsent(list), now)) > 0 {
+		if record.HandoffRefusal != "" {
+			view.Waiting, view.Refusal = "refused", record.HandoffRefusal
+		}
+		return view // the monitor continues it on another account
+	}
+	if suggested := automaticSwitchTargets(list, record, true, now); len(suggested) > 0 {
+		pick := bestClaudeTarget(list, suggested, nil, nil, "", now)
+		for i := range suggested {
+			if suggested[i].ID == pick {
+				view.Question = &suggested[i]
+			}
+		}
+		return view
+	}
+	// No account that may continue it has quota left: name the earliest reset.
+	view.Waiting, view.WaitUntil, view.WaitLabel = "all", view.ResetsAt, source.Label
+	for _, a := range list.Accounts {
+		if a.ID == source.ID || !a.Enabled || a.Status != "ready" || a.HandoffGroup != source.HandoffGroup {
+			continue
+		}
+		if _, reset := a.exhaustedWindow(now); reset > 0 && (view.WaitUntil == 0 || reset < view.WaitUntil) {
+			view.WaitUntil, view.WaitLabel = reset, a.Label
+		}
+	}
+	return view
+}
+
+// claudeInterruptedNote tells the resumed model what the handoff stopped:
+// the latest turn's unfinished calls and the tasks still running after it.
+func claudeInterruptedNote(record *mobileRecord) string {
+	var names []string
+	if n := len(record.Turns); n > 0 {
+		for _, tool := range record.Turns[n-1].Tools {
+			if tool.Status == "called" {
+				name := tool.Name
+				if tool.Detail != "" {
+					name = tool.Detail + " (" + tool.Name + ")"
+				}
+				names = append(names, "- "+name)
+			}
+		}
+	}
+	if record.Tasks != nil {
+		for _, task := range record.Tasks.Running {
+			name := task.Name
+			if task.Detail != "" {
+				name = task.Detail + " (" + task.Name + ")"
+			}
+			names = append(names, "- "+name+", running in the background")
+		}
+	}
+	// A command that detached itself from the CLI may still be running.
+	note := "\n\nThe previous execution was stopped for this account change, with the subagents and background commands it was running as its own processes. A command that detached itself may still be running. Check what already took effect and restart only what still matters."
+	if len(names) > 0 {
+		note += "\nUnfinished when it stopped:\n" + strings.Join(names, "\n")
+	}
+	return note
 }
 
 func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
@@ -64,12 +282,21 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, map[string]any{"session": view, "supported": false, "candidates": []claudeSwitchOption{}})
 		return
 	}
-	if input.Action == "switch" {
+	if input.Action == "switch" || input.Action == "answer" || input.Action == "undo" {
 		if !input.Confirm || !mobileID(input.RequestID) || !validCLIUUID(input.SourceID) {
 			http.Error(w, "请确认本次账号接续并提供当前会话标识", 400)
 			return
 		}
-		if err := s.switchClaudeAccount(r.Context(), view.ID, input, false); err != nil {
+		var err error
+		switch input.Action {
+		case "switch":
+			err = s.switchClaudeAccount(r.Context(), view.ID, input, false)
+		case "answer":
+			err = s.answerClaudeQuestion(r.Context(), view.ID, input)
+		default:
+			err = s.undoClaudeSwitch(r.Context(), view.ID, input)
+		}
+		if err != nil {
 			http.Error(w, err.Error(), 409)
 			return
 		}
@@ -79,35 +306,24 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if input.Action == "policy" {
-		if !validSwitchPolicy(input.Policy) {
+		// "default" returns the session to the rule in 调度设置.
+		if !validSwitchPolicy(input.Policy) && input.Policy != "default" {
 			http.Error(w, "切换授权无效", 400)
 			return
 		}
-		if !s.op.TryLock() {
-			http.Error(w, errTerminalBusy.Error(), 409)
-			return
-		}
-		defer s.op.Unlock()
-		s.account.mu.Lock()
-		if !s.mobileAuthorized(r.Context()) {
-			s.account.mu.Unlock()
-			http.Error(w, errMobileLocked.Error(), 423)
-			return
-		}
-		s.mobileCLI.mu.Lock()
-		record, err := s.mobileCLI.record(s.profile, view.ID)
-		if err == nil {
+		if err := s.changeClaudeSession(r.Context(), view.ID, func(record *mobileRecord) error {
 			if record.Switch != nil && record.Switch.Phase != "completed" {
-				err = errors.New("账号交接中，请等待完成后修改授权")
-			} else {
-				record.SwitchPolicy = input.Policy
-				record.changed()
-				err = writePrivate(mobileRecordPath(s.profile, view.ID), record)
+				return errors.New("账号交接中，请等待完成后修改授权")
 			}
-		}
-		s.mobileCLI.mu.Unlock()
-		s.account.mu.Unlock()
-		if err != nil {
+			// Automatic continuation chosen for this session is its yes, for
+			// this session only, to accounts without a 接续分组.
+			record.UngroupedHandoff = record.UngroupedHandoff || input.Policy == "allow"
+			record.SwitchPolicy, record.SwitchPolicySet = input.Policy, true
+			if input.Policy == "default" {
+				record.SwitchPolicy, record.SwitchPolicySet = "", false
+			}
+			return nil
+		}); err != nil {
 			requestError(w, err)
 			return
 		}
@@ -138,16 +354,177 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 	if a := list.find(record.Account.ID); a != nil {
 		record.AccountLabel = a.Label
 	}
+	now := time.Now()
 	snapshot := record.snapshot()
-	policy := record.SwitchPolicy
-	if policy == "" {
-		policy = list.Scheduling.SwitchPolicy
-	}
+	policy := record.switchPolicy(list)
+	own := record.ownSwitchPolicy()
+	snapshot.SwitchPolicy = policy
 	sourceID := record.CLIID
-	options := switchCandidates(list, record)
+	targets := manualSwitchTargets(list, record, now)
+	// An older client lists candidates and needs the 接续分组 no longer.
+	options := []claudeSwitchOption{}
+	for _, target := range targets {
+		if target.Status == "ready" {
+			options = append(options, claudeSwitchOption{target.ID, target.Label})
+		}
+	}
+	handoff := claudeHandoffState(list, record, now)
+	undo := claudeUndoTarget(list, record) != nil
+	// A turn or a background task still running needs the one confirm,
+	// unless the account's quota limit already ended the work.
+	tasks := record.runningTasks()
+	busy := (record.Active || tasks > 0) && !confirmedLimit(list, record, now)
 	supported := record.Terminal && record.Launcher == "claude" && record.Account.ID != ""
 	s.mobileCLI.mu.Unlock()
-	jsonReply(w, map[string]any{"session": snapshot, "source_id": sourceID, "switch_policy": policy, "candidates": options, "supported": supported})
+	// handoff_api tells a client which fields and actions this server knows.
+	jsonReply(w, map[string]any{"session": snapshot, "source_id": sourceID, "switch_policy": policy, "candidates": options, "supported": supported,
+		"handoff_api": 2, "targets": targets, "source_busy": busy, "source_tasks": tasks, "handoff": handoff, "undo": undo, "switch_policy_own": own})
+}
+
+// changeClaudeSession applies change to a session record under the operation
+// lock and the unlock check.
+func (s *Server) changeClaudeSession(ctx context.Context, id string, change func(*mobileRecord) error) error {
+	if !s.op.TryLock() {
+		return errTerminalBusy
+	}
+	defer s.op.Unlock()
+	s.account.mu.Lock()
+	defer s.account.mu.Unlock()
+	if !s.mobileAuthorized(ctx) {
+		return errMobileLocked
+	}
+	s.mobileCLI.mu.Lock()
+	defer s.mobileCLI.mu.Unlock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	if err != nil {
+		return err
+	}
+	if err := change(record); err != nil {
+		return err
+	}
+	record.changed()
+	return writePrivate(mobileRecordPath(s.profile, id), record)
+}
+
+// answerClaudeQuestion records the person's answer to "A's quota is used up;
+// continue on B?". The answer lives on the server, so answering on either
+// device answers it on both.
+func (s *Server) answerClaudeQuestion(ctx context.Context, id string, input claudeSwitchInput) error {
+	s.claudeAccounts.mu.Lock()
+	list, err := s.loadClaudeAccounts()
+	s.claudeAccounts.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.mobileCLI.mu.Lock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	s.mobileCLI.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if sw := record.Switch; sw != nil && sw.ID == input.RequestID {
+		return s.switchClaudeAccount(ctx, id, input, false) // a retried answer
+	}
+	// Only an open question takes an answer: once it was answered on one
+	// device, the other device's answer changes nothing.
+	state := claudeHandoffState(list, record, time.Now())
+	if state.Question == nil {
+		return errClaudeSwitchAnswered
+	}
+	standing := map[string]string{"always": "allow", "wait_always": "wait"}[input.Answer]
+	if input.Target == "" {
+		input.Target = state.Question.ID
+	}
+	// A yes about two accounts without a group is the yes for all of them; a
+	// yes within an explicit group, or towards one, is not.
+	target := list.find(input.Target)
+	ungrouped := claudeSwitchSource(list, record).HandoffGroup == "" && target != nil && target.HandoffGroup == ""
+	if standing != "" {
+		s.claudeAccounts.mu.Lock()
+		list, err = s.loadClaudeAccounts()
+		if err == nil {
+			list.Scheduling.SwitchPolicy, list.Scheduling.SwitchAnswered = standing, true
+			list.Scheduling.UngroupedHandoff = list.Scheduling.UngroupedHandoff || standing == "allow" && ungrouped
+			err = s.saveClaudeAccounts(list)
+		}
+		s.claudeAccounts.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	switch input.Answer {
+	case "once", "always":
+		if err := s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+			record.followStandingAnswer(standing)
+			// 切换并继续 is this session's yes to accounts without a group.
+			record.UngroupedHandoff = record.UngroupedHandoff || input.Answer == "once" && ungrouped
+			return nil
+		}); err != nil {
+			return err
+		}
+		input.Continue = true
+		return s.switchClaudeAccount(ctx, id, input, false)
+	case "wait_once", "wait_always":
+		return s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+			record.HandoffWait = state.ResetsAt
+			record.followStandingAnswer(standing)
+			return nil
+		})
+	}
+	return errors.New("未知回答")
+}
+
+// followStandingAnswer lets the session follow a standing answer just given
+// in it, instead of its own earlier rule.
+func (r *mobileRecord) followStandingAnswer(standing string) {
+	if standing != "" {
+		r.SwitchPolicy, r.SwitchPolicySet = "", false
+	}
+}
+
+// claudeUndoTarget is the account a handoff at a quota limit came from, while
+// the person can still go back to it.
+func claudeUndoTarget(list claudeAccountList, record *mobileRecord) *claudeAccount {
+	sw := record.Switch
+	if sw == nil || sw.Phase != "completed" || sw.Reason != "five_hour" && sw.Reason != "seven_day" || len(record.Executions) == 0 || record.CLIID != sw.TargetID {
+		return nil
+	}
+	// The handoff's own source: /clear appends to Executions after it.
+	previous := sw.Source.Account
+	a := list.find(previous.ID)
+	if a == nil || a.Status != "ready" || a.guestID() != previous.GuestID || claudeIdentityHash(a.Email, a.Organization) != previous.Subject {
+		return nil
+	}
+	return a
+}
+
+// undoClaudeSwitch moves the session back to the account it came from, where
+// it waits for that account's reset.
+func (s *Server) undoClaudeSwitch(ctx context.Context, id string, input claudeSwitchInput) error {
+	s.claudeAccounts.mu.Lock()
+	list, err := s.loadClaudeAccounts()
+	s.claudeAccounts.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	s.mobileCLI.mu.Lock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	s.mobileCLI.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if sw := record.Switch; sw != nil && sw.ID == input.RequestID {
+		return s.switchClaudeAccount(ctx, id, input, false)
+	}
+	back := claudeUndoTarget(list, record)
+	if back == nil {
+		return errors.New("这次交接已不能撤销：可以在账号菜单中直接选择要使用的账号。")
+	}
+	// The wait travels with the switch and is set where its preparation
+	// commits, so a retried or interrupted undo still waits.
+	_, reset := back.exhaustedWindow(time.Now())
+	input.Target, input.Continue, input.undo, input.wait = back.ID, false, true, reset
+	return s.switchClaudeAccount(ctx, id, input, false)
 }
 
 func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claudeSwitchInput, automatic bool) error {
@@ -188,85 +565,156 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 	if sw := record.Switch; sw != nil && sw.ID == input.RequestID && sw.Phase == "completed" {
 		return nil
 	}
-	if record.Switch != nil && record.Switch.Phase != "completed" && record.Switch.ID != input.RequestID {
-		return errors.New("已有账号交接待恢复，请重试原操作")
+	if old := record.Switch; old != nil && old.Phase != "completed" && old.ID != input.RequestID {
+		if old.Phase != "preparing" {
+			return errors.New("上一次交接已把会话历史交给 " + old.TargetLabel + "：点“重试账号交接”完成它。")
+		}
+		// A preparation that did not finish never froze the history. A new
+		// choice replaces it; the person does not have to cancel it first.
+		if err := s.dropClaudeSwitch(ctx, record); err != nil {
+			return err
+		}
 	}
 	if input.SourceID != record.CLIID && (record.Switch == nil || record.Switch.ID != input.RequestID || record.Switch.Source.CLIID != input.SourceID) {
 		return errors.New("会话账号已变化，请刷新后确认")
 	}
-	if record.Switch == nil || record.Switch.ID != input.RequestID {
+	fresh := record.Switch == nil || record.Switch.ID != input.RequestID
+	if fresh {
+		now := time.Now()
+		source := claudeSwitchSource(list, record)
+		if source == nil {
+			return errors.New("原账号的登录身份已改变：在账号管理中检查 " + record.AccountLabel + "，重新登录后再切换。")
+		}
+		// A turn that ended on a confirmed quota limit has nothing left to
+		// lose: the source is stopped without asking. Any other failure
+		// (overload, server error) is not, and asks like a working source.
+		window, reset := source.exhaustedWindow(now)
+		limited := record.AccountFailure == "rate_limit" && window != ""
+		target := list.find(input.Target)
 		if automatic {
-			policy := record.SwitchPolicy
-			if policy == "" {
-				policy = list.Scheduling.SwitchPolicy
-			}
-			a := list.find(record.Account.ID)
-			if policy != "allow" || record.AccountFailure != "rate_limit" || a == nil {
+			if record.switchPolicy(list) != "allow" || record.AccountFailure != "rate_limit" {
 				return errors.New("当前会话需要手动确认切换")
 			}
-			if _, available := a.headroom(time.Now()); available {
+			if window == "" && !input.wake {
 				return errors.New("尚未确认订阅额度耗尽，保留原账号")
 			}
-		}
-		found := false
-		for _, option := range switchCandidates(list, record) {
-			if option.ID == input.Target {
-				found = true
+			eligible := input.wake && input.Target == source.ID
+			for _, option := range automaticSwitchTargets(list, record, record.implicitConsent(list), now) {
+				eligible = eligible || option.ID == input.Target
+			}
+			if !eligible {
+				return errors.New("目标账号不可用，请检查接续分组和额度")
+			}
+		} else {
+			if target == nil || target.ID == source.ID {
+				return errors.New("请选择另一个账号")
+			}
+			if target.Status != "ready" {
+				return errors.New(target.Label + " 尚未登录：在账号管理中点“检查状态”或重新登录后再切换。")
+			}
+			if tasks := record.runningTasks(); tasks > 0 && !limited && !input.Force {
+				return errors.New("还有 " + strconv.Itoa(tasks) + " 个后台任务在运行：确认“停止当前任务并切换到 " + target.Label + "”（后台任务也会停止），或等它们结束。")
+			}
+			if record.Active && !limited && !input.Force {
+				return errors.New("当前任务仍在运行：确认“停止当前任务并切换到 " + target.Label + "”，或等本轮结束。")
 			}
 		}
-		if !found {
-			return errors.New("目标账号不可用，请将允许接续的账号设置为同一分组并检查额度")
-		}
-		a := list.find(input.Target)
-		selection := claudeSelection{ID: a.ID, GuestID: a.guestID(), Subject: claudeIdentityHash(a.Email, a.Organization)}
+		selection := claudeSelection{ID: target.ID, GuestID: target.guestID(), Subject: claudeIdentityHash(target.Email, target.Organization)}
 		// Check the official CLI identity before stopping any existing work.
 		status, probeErr := s.probeClaude(ctx, selection.GuestID)
 		if probeErr != nil || status.subject() != selection.Subject {
-			return errors.New("无法确认目标账号登录，请先检查账号状态")
+			return errors.New("无法确认 " + target.Label + " 的登录：在账号管理中点“检查状态”，需要时重新登录。")
 		}
-		sourceStatus, sourceErr := s.probeClaude(ctx, record.Account.GuestID)
-		if sourceErr != nil || sourceStatus.subject() != record.Account.Subject {
-			return errors.New("原账号身份已改变，请先检查原会话登录")
+		// A source that is signed out or on hold can still hand its history
+		// away; only a different identity in its directory stops the switch.
+		if sourceStatus, sourceErr := s.probeClaude(ctx, record.Account.GuestID); sourceErr == nil && sourceStatus.subject() != "" && sourceStatus.subject() != record.Account.Subject {
+			return errors.New("原账号的登录身份已改变：在账号管理中检查 " + source.Label + "，重新登录后再切换。")
 		}
-		record.Switch = &claudeAccountSwitch{ID: input.RequestID, Phase: "preparing", Source: claudeExecution{record.CLIID, record.Account, record.GuestConfig}, Target: selection, TargetLabel: a.Label, TargetID: uuid.NewString(), Connection: record.Connection, Continue: input.Continue}
+		force := input.Force || automatic || limited
+		sw := &claudeAccountSwitch{ID: input.RequestID, Phase: "preparing", Source: claudeExecution{record.CLIID, record.Account, record.GuestConfig}, Target: selection, TargetLabel: target.Label, TargetID: uuid.NewString(), Connection: record.Connection,
+			Continue: !input.undo && (input.Continue || force), Force: force, SourceLabel: source.Label, Automatic: automatic, At: now.Unix(), Wait: input.wait}
+		if limited && window != "" {
+			sw.Reason, sw.ResetsAt = window, reset
+		} else if input.wake {
+			sw.Reason = "reset"
+		}
+		// Something is stopped only when the switch is forced; then the
+		// resumed model is told what.
+		if force {
+			sw.Note = claudeInterruptedNote(record)
+		}
+		// Messages an earlier handoff still holds for this conversation
+		// (after an undo they wait for the account's reset) go on with this
+		// one, and come back if it is dropped. Ones already reported as not
+		// sent (the conversation changed) are not sent behind the person.
+		if earlier := record.Switch; earlier != nil && earlier.Phase == "completed" && record.carryReaches() && slices.ContainsFunc(earlier.Carry, func(m claudeCarried) bool { return !m.Delivered }) {
+			earlier.Earlier = nil
+			sw.Earlier = earlier
+		}
+		record.Switch = sw
 		if err := s.saveClaudeSwitch(record); err != nil {
 			return err
 		}
 	}
 	sw := record.Switch
 	fail := func(err error) error { sw.Error = err.Error(); _ = s.saveClaudeSwitch(record); return err }
+	// Nothing was frozen: the guest refused and lifted its own fence, or this
+	// attempt failed before it reached the guest. The session stays as it was.
+	undo := func(err error) error { record.Switch = sw.Earlier; _ = s.saveClaudeSwitch(record); return err }
+	before := func(err error) error {
+		if fresh {
+			return undo(err)
+		}
+		return fail(err) // an earlier attempt's outcome in the guest is unknown
+	}
 	if sw.Phase == "preparing" {
 		// Authorization can be revoked or the target identity can change while
 		// an interrupted preparation is waiting for a retry.
 		target := list.find(sw.Target.ID)
-		eligible := false
-		for _, option := range switchCandidates(list, record) {
-			eligible = eligible || option.ID == sw.Target.ID
-		}
-		if !eligible || target == nil || target.guestID() != sw.Target.GuestID || claudeIdentityHash(target.Email, target.Organization) != sw.Target.Subject {
-			return fail(errors.New("目标账号或接续分组已变化，请取消本次交接后重新选择"))
+		if claudeSwitchSource(list, record) == nil || target == nil || target.Status != "ready" || target.guestID() != sw.Target.GuestID || claudeIdentityHash(target.Email, target.Organization) != sw.Target.Subject {
+			return before(errors.New(sw.TargetLabel + " 的登录已变化：在账号管理中检查它，再重新选择目标账号。"))
 		}
 		status, err := s.probeClaude(ctx, sw.Target.GuestID)
 		if err != nil || status.subject() != sw.Target.Subject {
-			return fail(errors.New("目标账号登录已变化，请取消交接后检查账号"))
+			return before(errors.New("无法确认 " + sw.TargetLabel + " 的登录：在账号管理中点“检查状态”，需要时重新登录。"))
 		}
 		var result struct {
-			Transcript string `json:"transcript"`
-			Error      string `json:"error"`
+			Transcript string          `json:"transcript"`
+			Workspace  string          `json:"workspace"`
+			Carry      []claudeCarried `json:"carry"`
+			Error      string          `json:"error"`
 		}
 		if sw.Source.Config == "" || sw.Connection == "" {
-			return fail(errors.New("原会话连接尚未就绪，请先打开原会话"))
+			return before(errors.New("原会话连接尚未就绪：先打开这段会话，再切换。"))
 		}
-		query := map[string]any{"cli_id": sw.Source.CLIID, "config": sw.Source.Config, "connection": sw.Connection, "workspace": record.GuestWorkspace, "target_cli_id": sw.TargetID, "switch_id": sw.ID}
+		// The session's project, not the folder its CLI is in now, decides
+		// whether its history may continue here.
+		root := s.cliConversationRoot(record)
+		query := map[string]any{"cli_id": sw.Source.CLIID, "config": sw.Source.Config, "connection": sw.Connection, "workspace": record.GuestWorkspace, "root": root, "target_cli_id": sw.TargetID, "switch_id": sw.ID, "force": sw.Force}
 		if err := s.windowsConversationInput(record, query); err != nil {
-			return fail(err)
+			return before(err)
+		}
+		if s.windowsGuest != nil {
+			delete(query, "root") // the workspace is the registered project folder
 		}
 		err = s.runCLIChannel(ctx, "account-switch", query, &result)
 		if err != nil {
-			return fail(err)
+			return fail(claudeGuestError(err))
 		}
 		if result.Error != "" {
-			return fail(errors.New(result.Error))
+			// The guest refused before freezing the history. Lift its fence
+			// also when an older helper did not lift it itself. When the
+			// channel already moved to another conversation (switch:cancel),
+			// nothing of this switch is left in it: the session keeps none
+			// either, or every later choice would fail on it.
+			refusal := claudeSwitchRefusal(result.Error)
+			if err := s.dropClaudeSwitch(ctx, record); err != nil {
+				if err.Error() != claudeSwitchRefusals["switch:cancel"] {
+					return fail(refusal)
+				}
+				return undo(refusal)
+			}
+			return refusal
 		}
 		if !strings.HasPrefix(result.Transcript, "/") && !(s.windowsGuest != nil && windowsCLIAbsolutePath(result.Transcript)) {
 			return fail(errors.New("原会话历史未确认，未启动目标账号"))
@@ -279,7 +727,27 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		record.GuestConfig, record.Connection, record.TerminalID = "", "", ""
 		record.Resume, record.TerminalRunning, record.Active = false, false, false
 		record.ResumeTranscript = result.Transcript
-		record.AccountFailure = ""
+		if result.Workspace != "" && cliWorkspaceWithin(result.Workspace, root, s.windowsGuest != nil) {
+			record.GuestWorkspace = result.Workspace // the target starts in the session's own folder
+		}
+		record.AccountFailure, record.HandoffRefusal = "", ""
+		record.HandoffWait, record.WaitingReset = sw.Wait, 0
+		// Each message the source never took gets its own request id once, so
+		// the target channel delivers it a single time whatever is retried.
+		if sw.Carry == nil {
+			sw.Carry = []claudeCarried{}
+			if sw.Earlier != nil {
+				for _, message := range sw.Earlier.Carry {
+					if !message.Delivered {
+						sw.Carry = append(sw.Carry, message) // never sent: same id
+					}
+				}
+			}
+			for _, message := range result.Carry {
+				sw.Carry = append(sw.Carry, claudeCarried{ID: uuid.NewString(), Text: message.Text})
+			}
+		}
+		sw.Earlier = nil
 		sw.Phase, sw.Error = "prepared", ""
 		if err := s.saveClaudeSwitch(record); err != nil {
 			return err
@@ -350,10 +818,16 @@ func (s *Server) cancelClaudeSwitch(ctx context.Context, id, requestID string) e
 	if record.Switch == nil {
 		return nil
 	}
-	sw := record.Switch
-	if sw.ID != requestID || sw.Phase != "preparing" {
+	if sw := record.Switch; sw.ID != requestID || sw.Phase != "preparing" {
 		return errors.New("目标账号已接管历史，请在当前会话继续")
 	}
+	return s.dropClaudeSwitch(ctx, record)
+}
+
+// dropClaudeSwitch lifts the guest fence of a preparation that has not frozen
+// the history and forgets it. The caller holds the operation lock.
+func (s *Server) dropClaudeSwitch(ctx context.Context, record *mobileRecord) error {
+	sw := record.Switch
 	var response struct {
 		OK    bool   `json:"ok"`
 		Error string `json:"error"`
@@ -362,15 +836,57 @@ func (s *Server) cancelClaudeSwitch(ctx context.Context, id, requestID string) e
 	if err := s.windowsConversationInput(record, query); err != nil {
 		return err
 	}
-	if err := s.runCLIChannel(ctx, "account-switch-cancel", query, &response); err != nil {
-		return err
+	if sw.Connection != "" {
+		if err := s.runCLIChannel(ctx, "account-switch-cancel", query, &response); err != nil {
+			return err
+		}
+		if !response.OK {
+			return claudeSwitchRefusal(response.Error)
+		}
 	}
-	if !response.OK {
-		return errors.New(response.Error)
-	}
-	record.Switch = nil
+	record.Switch = sw.Earlier // what an earlier handoff still held
 	return s.saveClaudeSwitch(record)
 }
+
+// The guest helper names a refusal with a short code, which keeps its
+// embedded command within Windows' command-line limit. The host says it in
+// one sentence that names the thing and the next step, the same on every device.
+var claudeSwitchRefusals = map[string]string{
+	"switch:reused":  "这次交接的编号已用于另一项操作：刷新会话后重新选择目标账号。",
+	"switch:changed": "原会话的身份或项目已变化：刷新会话后再切换。",
+	"switch:busy":    "原会话还有任务、待发消息或审批：确认“停止当前任务并切换”，或等本轮结束。",
+	"switch:pending": "这段会话已有一次交接冻结了历史：重新打开这段会话后再切换。",
+	"switch:running": "原会话的 Claude Code 仍在执行本轮任务：确认“停止当前任务并切换”，或等它结束。",
+	"switch:process": "无法确认原会话的 Claude Code 进程：在原终端退出 Claude Code 后再切换。",
+	"switch:exit":    "原会话的 Claude Code 还没有退出，未切换：稍后再选一次目标账号。",
+	"switch:history": "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。",
+	"switch:project": "这段会话的历史属于另一个项目文件夹：从那个项目打开它后再切换。",
+	"switch:cancel":  "原会话的交接已变化：刷新会话后再操作。",
+}
+
+func claudeSwitchRefusal(message string) error {
+	if sentence, ok := claudeSwitchRefusals[message]; ok {
+		return errors.New(sentence)
+	}
+	if folder, ok := strings.CutPrefix(message, "switch:outside:"); ok {
+		return errors.New("这段会话的 Claude Code 现在在项目以外的文件夹（" + folder + "）里运行：在那个终端退出 Claude Code，或回到项目文件夹后再切换。")
+	}
+	return claudeGuestError(errors.New(message))
+}
+
+// claudeGuestError keeps a sentence written for people (the host's own, or
+// an older guest helper's refusal) and turns anything else (a Python error,
+// a Windows bridge code) into one sentence; the raw text goes to the server
+// log only.
+func claudeGuestError(err error) error {
+	if first, _ := utf8.DecodeRuneInString(err.Error()); unicode.Is(unicode.Han, first) {
+		return err
+	}
+	log.Printf("account handoff: guest error: %s", err)
+	return errors.New(claudeSwitchGeneric)
+}
+
+const claudeSwitchGeneric = "账号交接没有完成，会话仍在原账号：稍后再试；仍不行时重新打开这段会话。"
 
 // Preserve metadata written concurrently while committing execution ownership.
 func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
@@ -382,7 +898,7 @@ func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
 		return err
 	}
 	record.CustomTitle, record.Pinned, record.Archived, record.Deleted = current.CustomTitle, current.Pinned, current.Archived, current.Deleted
-	record.SwitchPolicy = current.SwitchPolicy
+	record.SwitchPolicy, record.SwitchPolicySet, record.UngroupedHandoff = current.SwitchPolicy, current.SwitchPolicySet, current.UngroupedHandoff
 	record.Revision = current.Revision
 	record.changed()
 	return writePrivate(mobileRecordPath(s.profile, record.ID), record)
@@ -394,7 +910,7 @@ func (s *Server) monitorClaudeAccount(terminal *terminalSession, id string) {
 	go func() {
 		defer s.activities.Done()
 		defer cancel()
-		var lastUsageCheck time.Time
+		var monitor claudeMonitor
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -413,16 +929,72 @@ func (s *Server) monitorClaudeAccount(terminal *terminalSession, id string) {
 			// terminal. Cancel an in-flight attempt if its access epoch ends.
 			attempt, finish := context.WithCancel(context.WithValue(ctx, accountEpochKey{}, epoch))
 			stop := context.AfterFunc(epoch, finish)
-			s.maybeSwitchClaudeAccount(attempt, id, &lastUsageCheck)
+			s.maybeSwitchClaudeAccount(attempt, id, &monitor)
 			stop()
 			finish()
 		}
 	}()
 }
 
-func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUsageCheck *time.Time) {
+// claudeMonitor is what one terminal's check remembers between ticks.
+type claudeMonitor struct {
+	lastUsageCheck time.Time
+	// waiting: the record holds a WaitingReset, to be cleared when the limit
+	// that set it is over. Read once from the record when the check starts.
+	waiting, started bool
+	// refused: what an automatic attempt that the guest or a check refused
+	// was made from. The same attempt is not made again until that changes
+	// or claudeRefusalBackoff has passed.
+	refused   string
+	refusedAt time.Time
+	// attempts counts that attempt's refusals in a row; retry: the last one
+	// usually passes by itself, so the next check tries again.
+	attempts int
+	retry    bool
+}
+
+// claudeRefusalBackoff: how long an automatic continuation that was refused
+// waits before it is tried again with nothing changed.
+const claudeRefusalBackoff = 15 * time.Minute
+
+// claudeTransientAttempts: a refusal that usually passes by itself (the source
+// CLI still exiting, its process not confirmed yet, a guest request that
+// failed) is tried again on the next checks, this many times in all, before
+// it waits like any other refusal.
+const claudeTransientAttempts = 6
+
+func claudeTransientRefusal(err error) bool {
+	switch err.Error() {
+	case claudeSwitchRefusals["switch:exit"], claudeSwitchRefusals["switch:process"], claudeSwitchGeneric:
+		return true
+	}
+	return false
+}
+
+func (s *Server) claudeNow() time.Time {
+	if s.claudeAccounts.now != nil {
+		return s.claudeAccounts.now()
+	}
+	return time.Now()
+}
+
+// maybeSwitchClaudeAccount runs on the terminal's existing ten-second check.
+// While nothing is limited it only reads the view that check already reads.
+func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monitor *claudeMonitor) {
 	view, err := s.terminalConversationView(ctx, id)
-	if err != nil || view.AccountFailure != "rate_limit" || view.SwitchPolicy != "allow" || view.AccountSwitch != nil && view.AccountSwitch.Phase != "completed" {
+	if err != nil {
+		return
+	}
+	s.deliverClaudeCarry(ctx, id, view)
+	if !monitor.started {
+		monitor.started = true
+		s.mobileCLI.mu.Lock()
+		record, err := s.mobileCLI.record(s.profile, id)
+		s.mobileCLI.mu.Unlock()
+		monitor.waiting = err == nil && (record.WaitingReset > 0 || record.HandoffRefusal != "")
+	}
+	s.settleClaudeWait(ctx, id, view.AccountFailure, monitor)
+	if view.AccountFailure != "rate_limit" || view.AccountSwitch != nil && view.AccountSwitch.Phase != "completed" {
 		return
 	}
 	s.claudeAccounts.mu.Lock()
@@ -437,44 +1009,180 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUs
 	if err != nil {
 		return
 	}
-	options := switchCandidates(list, record)
-	if len(options) == 0 {
+	source := claudeSwitchSource(list, record)
+	if source == nil {
 		return
 	}
-	// One bounded quota refresh on the failure path. The CLI owns this
-	// query and its tokens; no model prompt is generated for probing.
-	if time.Since(*lastUsageCheck) >= claudeUsageInterval {
-		*lastUsageCheck = time.Now()
+	now := s.claudeNow()
+	// Whatever the rule, the session must know whether its account is really
+	// used up: one bounded quota refresh while the limit is unconfirmed. The
+	// CLI owns this query and its tokens; no model prompt is generated.
+	if window, _ := source.exhaustedWindow(now); window == "" && time.Since(monitor.lastUsageCheck) >= claudeUsageInterval {
+		monitor.lastUsageCheck = time.Now()
 		_ = s.refreshClaudeUsage(ctx, claudeAccountInput{Action: "refresh", ID: record.Account.ID})
-	}
-	// Apply the same scheduling mode to eligible handoff targets.
-	candidates := claudeAccountList{Scheduling: list.Scheduling}
-	for _, a := range list.Accounts {
-		for _, option := range options {
-			if option.ID == a.ID {
-				candidates.Accounts = append(candidates.Accounts, a)
-			}
+		s.claudeAccounts.mu.Lock()
+		list, err = s.loadClaudeAccounts()
+		s.claudeAccounts.mu.Unlock()
+		if err != nil {
+			return
 		}
 	}
-	active := s.mobileCLI.activeAccounts()
-	logins := make(map[string]bool)
+	if record.switchPolicy(list) != "allow" || now.Unix() < record.HandoffWait {
+		return // nothing moves before the person said yes, or while they wait
+	}
+	active, logins := s.mobileCLI.activeAccounts(), map[string]bool{}
 	for _, terminal := range s.terminals.snapshot() {
-		if terminal["closed"] == true {
-			continue
-		}
-		account, _ := terminal["claude_account_id"].(string)
-		if terminal["kind"] == "claude-login" {
-			logins[account] = true
-		} else {
-			active[account]++
+		if account, _ := terminal["claude_account_id"].(string); terminal["closed"] != true {
+			if terminal["kind"] == "claude-login" {
+				logins[account] = true
+			} else {
+				active[account]++
+			}
 		}
 	}
 	s.claudeAccounts.mu.Lock()
 	last := s.claudeAccounts.lastPick
 	s.claudeAccounts.mu.Unlock()
-	target := pickClaudeAccount(candidates, active, logins, last, "", time.Now())
-	if target == "" {
+	target, wake, waitUntil := claudeAutomaticStep(list, record, active, logins, last, now)
+	if waitUntil != record.WaitingReset {
+		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+			record.WaitingReset = waitUntil
+			return nil
+		}) == nil {
+			monitor.waiting = waitUntil > 0
+		}
+	}
+	if target != "" {
+		s.tryAutomaticSwitch(ctx, id, list, record, target, wake, monitor, now)
+	}
+}
+
+// claudeAttemptKey names what an automatic attempt depends on: the session's
+// execution, failure and rule, and each account's login, scheduling, group
+// and whether it is used up. Quota percentages and revisions are left out,
+// so a refused attempt is repeated only when one of these changes.
+func claudeAttemptKey(list claudeAccountList, record *mobileRecord, target string, wake bool, now time.Time) string {
+	key := []string{record.CLIID, record.Connection, record.AccountFailure, record.switchPolicy(list), strconv.FormatBool(record.implicitConsent(list)), target, strconv.FormatBool(wake)}
+	for _, a := range list.Accounts {
+		window, _ := a.exhaustedWindow(now)
+		key = append(key, a.ID, a.Status, strconv.FormatBool(a.Enabled), a.HandoffGroup, a.Email, window)
+	}
+	return strings.Join(key, "\x00")
+}
+
+// tryAutomaticSwitch makes the automatic attempt unless the same one was
+// refused and nothing it depends on has changed since, within the backoff.
+// A refusal is kept on the record and shown while the session waits.
+func (s *Server) tryAutomaticSwitch(ctx context.Context, id string, list claudeAccountList, record *mobileRecord, target string, wake bool, monitor *claudeMonitor, now time.Time) {
+	key := claudeAttemptKey(list, record, target, wake, now)
+	if monitor.refused == key && !monitor.retry && now.Sub(monitor.refusedAt) < claudeRefusalBackoff {
 		return
 	}
-	_ = s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, Continue: true}, true)
+	err := s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, wake: wake}, true)
+	if err == nil || errors.Is(err, errTerminalBusy) || errors.Is(err, errMobileLocked) || errors.Is(err, errTerminalNotReady) || ctx.Err() != nil {
+		monitor.refused, monitor.attempts, monitor.retry = "", 0, false // done, or a passing state: the next check tries again
+		return
+	}
+	if monitor.refused != key || now.Sub(monitor.refusedAt) >= claudeRefusalBackoff {
+		monitor.attempts = 0
+	}
+	monitor.attempts++
+	monitor.refused, monitor.refusedAt = key, now
+	monitor.retry = claudeTransientRefusal(err) && monitor.attempts < claudeTransientAttempts
+	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		if record.Switch == nil || record.Switch.Phase == "completed" {
+			record.HandoffRefusal = err.Error()
+		}
+		return nil
+	}) == nil {
+		monitor.waiting = true // cleared with the limit (settleClaudeWait)
+	}
+}
+
+// settleClaudeWait forgets a wait for the first reset, and a refused
+// automatic continuation, once the limit that set it is over (the person
+// went on in the CLI, or a handoff happened), so a later, different limit is
+// never taken for that reset or that refusal.
+func (s *Server) settleClaudeWait(ctx context.Context, id, failure string, monitor *claudeMonitor) {
+	if !monitor.waiting || failure == "rate_limit" {
+		return
+	}
+	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		record.WaitingReset, record.HandoffRefusal = 0, ""
+		return nil
+	}) == nil {
+		monitor.waiting, monitor.refused, monitor.attempts, monitor.retry = false, "", 0, false
+	}
+}
+
+// claudeAutomaticStep decides, under automatic continuation, what a session
+// limited by its account's quota does now: move to target, continue on its
+// own account after a reset (wake), or wait until waitUntil, the first
+// reset of the accounts that may take it.
+func claudeAutomaticStep(list claudeAccountList, record *mobileRecord, active map[string]int, logins map[string]bool, last string, now time.Time) (target string, wake bool, waitUntil int64) {
+	source := claudeSwitchSource(list, record)
+	if source == nil || record.switchPolicy(list) != "allow" || record.AccountFailure != "rate_limit" || now.Unix() < record.HandoffWait {
+		return "", false, record.WaitingReset
+	}
+	window, _ := source.exhaustedWindow(now)
+	options := automaticSwitchTargets(list, record, record.implicitConsent(list), now)
+	switch {
+	case window != "" && len(options) > 0:
+		return bestClaudeTarget(list, options, active, logins, last, now), false, 0
+	case window != "":
+		// Every account that may continue it is used up. This same check
+		// continues it at the first reset.
+		return "", false, claudeHandoffState(list, record, now).WaitUntil
+	case record.WaitingReset > 0 && now.Unix() >= record.WaitingReset:
+		// The source reset first. Its CLI waits in its limit menu, so the
+		// history continues in a fresh CLI on the same account.
+		return source.ID, true, record.WaitingReset
+	}
+	return "", false, record.WaitingReset // an unconfirmed limit is not an exhaustion
+}
+
+// deliverClaudeCarry gives the target, once it is idle, the messages the
+// source never took, in order, under the request id each got when the
+// history was frozen. The target channel acknowledges a repeated id without
+// delivering it again, so a retry after a lost reply is harmless.
+func (s *Server) deliverClaudeCarry(ctx context.Context, id string, view mobileSession) {
+	if view.AccountSwitch == nil || !view.AccountSwitch.carry || view.CanSend == nil || !*view.CanSend || view.Active {
+		return // the usual case reads nothing more
+	}
+	s.mobileCLI.mu.Lock()
+	record, err := s.mobileCLI.record(s.profile, id)
+	s.mobileCLI.mu.Unlock()
+	// After a /clear in the target its entry follows the new id: the messages
+	// go there. Any other id change leaves them to the person (snapshot).
+	// After an undo they wait for the account's reset.
+	if err != nil || record.Switch == nil || record.Switch.Phase != "completed" || !record.carryReaches() || time.Now().Unix() < record.HandoffWait {
+		return
+	}
+	for _, message := range record.Switch.Carry {
+		if message.Delivered {
+			continue
+		}
+		if _, err := s.terminalConversationAction(ctx, id, map[string]any{"action": "send", "request_id": message.ID, "text": message.Text}); err != nil {
+			return
+		}
+		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+			record.markCarried(message.ID)
+			return nil
+		}) != nil {
+			return
+		}
+	}
+}
+
+// markCarried records a carried message as delivered. The switch can be gone
+// by then (a new handoff, or one undone): nothing is left to mark.
+func (r *mobileRecord) markCarried(id string) {
+	if r.Switch == nil {
+		return
+	}
+	for i := range r.Switch.Carry {
+		if r.Switch.Carry[i].ID == id {
+			r.Switch.Carry[i].Delivered = true
+		}
+	}
 }

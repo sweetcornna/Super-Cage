@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/docker/go-units"
 	"github.com/sylvinus/agent-vm/internal/cage"
@@ -107,7 +108,17 @@ func (s *Server) resourceStatus(w http.ResponseWriter, r *http.Request) {
 		"allocation_origin": origin, "automatic_memory_gib": automaticMemory, "automatic_cpus": automaticCPUs,
 		"possible_memory_bytes": uint64(max(automaticMemory, memory)) << 30,
 	}
+	// A start that fell back to a smaller boot maximum (cage.PrepareBoot)
+	// said why; the guest keeps that ceiling until the next start.
+	bootNotice := ""
+	if running && maximum > 0 && maximum < int64(memory)<<30 {
+		if data, err := os.ReadFile(filepath.Join(s.instanceDir(), cage.BootNoticeFile)); err == nil && len(data) <= 1024 {
+			bootNotice = strings.TrimSpace(string(data))
+		}
+	}
 	switch {
+	case bootNotice != "":
+		reply["notice"] = bootNotice
 	case origin == cage.OriginLegacyDefault && !automatic && (automaticMemory > memory || automaticCPUs > cpus):
 		// Saved by an older version with its default values: offered, never
 		// imposed, since matching the old rule cannot prove nobody chose it.

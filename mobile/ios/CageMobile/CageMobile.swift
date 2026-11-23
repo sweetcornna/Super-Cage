@@ -20,6 +20,8 @@ struct ConnectedDevice: Identifiable {
     let webView: WKWebView
     /// Set for a virtual machine opened from a Cage server account.
     var account: ServerAccount? = nil
+    /// Set for the example workspace: no connection, answered from memory by ExampleWorkspace.fixture.
+    var isExample = false
 }
 
 final class DeviceWebBridge: NSObject, WKScriptMessageHandler {
@@ -38,7 +40,8 @@ final class DeviceWebBridge: NSObject, WKScriptMessageHandler {
         }
         guard model.showingWorkspace, model.selectedDeviceID == id else {return}
         if action == "home" {model.leaveWorkspace()}
-        if action == "open-url", let raw = body["url"] as? String, raw.utf8.count <= 16384, let url = URL(string: raw),
+        // The example never opens other sites.
+        if action == "open-url", model.devices.first(where: {$0.id == id})?.isExample != true, let raw = body["url"] as? String, raw.utf8.count <= 16384, let url = URL(string: raw),
            ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil, url.user == nil {
             UIApplication.shared.open(url)
         }
@@ -220,7 +223,25 @@ final class ConnectionModel: ObservableObject {
             }
         }
     }
-    func leaveWorkspace() {showingWorkspace = false}
+    func leaveWorkspace() {
+        showingWorkspace = false
+        // The example holds nothing worth resuming: leaving it discards it, and the next visit starts from the sample data again.
+        if selectedDeviceID == ExampleWorkspace.deviceID {
+            DispatchQueue.main.async {self.disconnectDevice(ExampleWorkspace.deviceID)}
+        }
+    }
+    /// Opens the example workspace from the start page. Everything stays in memory.
+    func openExample() {
+        if !devices.contains(where: {$0.id == ExampleWorkspace.deviceID}) {
+            addExample(id: ExampleWorkspace.deviceID, name: ExampleWorkspace.deviceName)
+        }
+        selectDevice(ExampleWorkspace.deviceID)
+    }
+    private func addExample(id: String, name: String) {
+        let example = ExampleWorkspace.makeWebView(model: self, id: id)
+        devices.append(ConnectedDevice(id: id, name: name, host: nil, connection: nil, webView: example.web, isExample: true))
+        navigationDelegates[id] = example.delegate
+    }
     func openArchivedSessions() {
         if let device = selectedDevice {
             selectDevice(device.id)
@@ -291,12 +312,11 @@ final class ConnectionModel: ObservableObject {
             let script = deviceScript(device.id)
             device.webView.configuration.userContentController.removeAllUserScripts()
             device.webView.configuration.userContentController.addUserScript(WKUserScript(source: script, injectionTime: .atDocumentStart, forMainFrameOnly: true))
-            // The preview fixture is installed separately and must survive navigation/reloads.
-            #if targetEnvironment(simulator)
-            if device.connection == nil {
-                device.webView.configuration.userContentController.addUserScript(WKUserScript(source: SimulatorWorkspacePreview.fixture, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            // The example's script is installed separately and must survive the removal above, on every build:
+            // without it the page would ask the network for its data.
+            if device.isExample {
+                device.webView.configuration.userContentController.addUserScript(WKUserScript(source: ExampleWorkspace.fixture, injectionTime: .atDocumentStart, forMainFrameOnly: true))
             }
-            #endif
             device.webView.evaluateJavaScript(script)
         }
     }
@@ -406,14 +426,11 @@ final class ConnectionModel: ObservableObject {
             }
         }
     }
+    /// Simulator only (fake QR scan, -preview-screen): two example devices for screenshots of the device list.
     func startPreview() {
         #if targetEnvironment(simulator)
         for (id, name) in [("preview-mac", "我的电脑 · 模拟器预览"), ("preview-linux", "Linux 工作站 · 模拟器预览")] {
-            if !devices.contains(where: {$0.id == id}) {
-                let preview = SimulatorWorkspacePreview.makeWebView(model: self, id: id)
-                devices.append(ConnectedDevice(id: id, name: name, host: nil, connection: nil, webView: preview.web))
-                navigationDelegates[id] = preview.delegate
-            }
+            if !devices.contains(where: {$0.id == id}) {addExample(id: id, name: name)}
         }
         selectDevice("preview-mac")
         #endif
@@ -999,6 +1016,12 @@ struct CageMobileApp: App {
                         VStack(spacing: 12) {
                             Button {pairing = true} label: {ActionLabel(title: "连接电脑", symbol: "laptopcomputer")}
                             Button {serverSheet = true} label: {ActionLabel(title: "连接服务器", symbol: "server.rack", primary: false)}
+                            Button {model.openExample()} label: {
+                                VStack(spacing: 2) {
+                                    Text("看看示例工作台").font(.body.weight(.medium)).foregroundStyle(CageStyle.clayInk)
+                                    Text("不需要账号，使用演示数据").font(.footnote).foregroundStyle(CageStyle.ink2)
+                                }.frame(maxWidth: .infinity, minHeight: 56).contentShape(Rectangle())
+                            }
                         }
                     }.frame(maxWidth: 300).padding(.top, 24)
                     Spacer(minLength: 12)

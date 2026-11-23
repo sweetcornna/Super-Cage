@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { Archive, ArrowDown, ArrowLeft, Check, Copy, LoaderCircle, Menu, Monitor, RefreshCw, SquarePen } from "lucide-react";
+import { Archive, ArrowDown, ArrowLeft, Check, Copy, History, LoaderCircle, Menu, Monitor, RefreshCw, SquarePen } from "lucide-react";
 import { RemoteDisplay } from "./remote-browser";
 import { CodeNavigation, ProjectTree, WorkspaceDrawer, workspaceCoreTools, workspaceTools } from "./workspace-drawer";
 import { Home } from "./home";
@@ -25,6 +25,9 @@ import { deviceMode, edgeSwipe, openExternal, overlayPop, useDocked, useWebTenan
 import { afterOutcome, HOLD_SECONDS, initialPoll, MIN_SPACING_MS, pollQuery, requestDeadline, requestDeadlineMs } from "../session-poll.mjs";
 import { keepSame } from "../poll-state.mjs";
 import { MessageBody, ToolActivity, TranscriptContext } from "./transcript";
+import { TaskCount, TaskSheet, TaskStrip } from "./task-views";
+import { EarlierSheet } from "./earlier";
+import { earlierCount } from "../earlier-parts.mjs";
 
 // Whether the server holds session reads (its list answers carry
 // "revision"); a transcript read sends wait only then.
@@ -57,9 +60,9 @@ function saveRoute(next, push) {
   writeRoute(next, push);
 }
 
-function Status({ value, awaitingApproval }) {
+function Status({ value, awaitingApproval, children }) {
   const tone = active(value) ? "live" : value === "failed" || value === "interrupted" ? "bad" : "";
-  return <span className={"status-label " + tone} role="status"><i className="status-dot" />{awaitingApproval ? "等待审批" : labels[value] || "就绪"}</span>;
+  return <span className={"status-label " + tone} role="status"><i className="status-dot" />{awaitingApproval ? "等待审批" : labels[value] || "就绪"}{children}</span>;
 }
 function Notice({ children, onRetry, label = "重新读取" }) {
   return <div className="notice" role="alert">{children}
@@ -86,6 +89,7 @@ function App() {
   const [visible, setVisible] = useState(!document.hidden);
   const [creating, setCreating] = useState(false);
   const [sessionAction, setSessionAction] = useState(null);
+  const [earlierSession, setEarlierSession] = useState(null);
   const [actionBusy, setActionBusy] = useState(false);
   const [sessionActionError, setSessionActionError] = useState("");
   const mutationBusy = useRef(false);
@@ -218,11 +222,11 @@ function App() {
   const updateSession = useCallback((snapshot) => {
     setCatalog((old) => {
       if (!old) return old;
-      const { id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, provider } = snapshot;
+      const { id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, provider, running_tasks, earlier_parts } = snapshot;
       if (archivedSessions.current.has(id)) return old;
       const previous = old.sessions.find((s) => s.id === id);
       if (previous && previous.generation === generation && previous.revision >= revision) return old;
-      return { ...old, sessions: [{ id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, ...(provider ? {provider} : {}) }, ...old.sessions.filter((s) => s.id !== id)] };
+      return { ...old, sessions: [{ id, workspace, title, revision, updated_at, generation, pinned, custom_title, metadata_set, active, ...(provider ? {provider} : {}), ...(running_tasks ? {running_tasks} : {}), ...(earlier_parts ? {earlier_parts} : {}) }, ...old.sessions.filter((s) => s.id !== id)] };
     });
   }, []);
   const projects = catalog?.projects || [];
@@ -260,6 +264,7 @@ function App() {
   const chooseSessionAction = (kind, target) => {
     if (mutationBusy.current) return;
     if (kind === "pin") void mutateSession(kind, target, {pinned:!target.pinned});
+    else if (kind === "earlier") setEarlierSession(target);
     else { setSessionActionError(""); setSessionAction({kind, session:target}); }
   };
   const start = async (target, first) => {
@@ -399,6 +404,7 @@ function App() {
         toggle={(path,next) => setExpanded(previous => new Map(previous).set(path,next))}
         emptyHint={serverVM ? "请先在网页工作台打开项目。" : undefined} />}
     </WorkspaceDrawer>}
+    {earlierSession && <EarlierSheet session={earlierSession} onClose={() => setEarlierSession(null)} onSeparated={refreshAll} />}
     {sessionAction && <SessionActionDialog key={sessionAction.kind + sessionAction.session.id} action={sessionAction} busy={actionBusy}
       error={sessionActionError} onCancel={() => setSessionAction(null)} onSubmit={body => mutateSession(sessionAction.kind, sessionAction.session, body)}/>}
   </main>;
@@ -418,6 +424,8 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   const [uncertain, setUncertain] = useState(() => !!drafts.get(id)?.pending);
   const [reload, setReload] = useState(0);
   const [approvalFeedback, setApprovalFeedback] = useState(null);
+  const [tasksOpen, setTasksOpen] = useState(false);
+  const [earlierOpen, setEarlierOpen] = useState(false);
   const checkApproval = useRef(null);
   const readFailures = useRef(0);
   const holdRefused = useRef(false);
@@ -474,7 +482,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       }
       setReadError("");
       readFailures.current = 0; setReadProgress("");
-      const interval = active(latest.current?.turns?.at(-1)?.status) ? 1000 : 4000;
+      const interval = active(latest.current?.turns?.at(-1)?.status) || latest.current?.tasks ? 1000 : 4000;
       if (!wait) return interval;
       const elapsed = Date.now() - started;
       // A 204 well before the wait elapsed was not held: the usual interval.
@@ -641,13 +649,15 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
   };
   return <>
     {titleSlot ? createPortal(<span className="topbar-title-text chat-title"><span className="chat-title-name">{session?.title || assistant + " 会话"}</span>
-      {session && <Status value={last?.status} awaitingApproval={last?.status === "running" && last.approval} />}</span>, titleSlot)
+      {session && <Status value={last?.status} awaitingApproval={last?.status === "running" && last.approval}><TaskCount session={session} /></Status>}</span>, titleSlot)
       : <section className="chat-header">
-        <div className="title-line">{onBack && <button type="button" className="icon-button" aria-label="返回会话列表" onClick={onBack}><ArrowLeft size={18} /></button>}<h1>{session?.title || assistant + " 会话"}</h1>{session && <Status value={last?.status} awaitingApproval={last?.status === "running" && last.approval} />}</div>
+        <div className="title-line">{onBack && <button type="button" className="icon-button" aria-label="返回会话列表" onClick={onBack}><ArrowLeft size={18} /></button>}<h1>{session?.title || assistant + " 会话"}</h1>{session && <Status value={last?.status} awaitingApproval={last?.status === "running" && last.approval}><TaskCount session={session} /></Status>}</div>
         {session && <p className="note">{session.workspace}</p>}
       </section>}
     {!uncertain && (readError || connectionError) && <Notice onRetry={retry} label="再次连接">{readError || connectionError}</Notice>}
     {session && !codex && <SessionAccount id={id} request={request} onChanged={()=>setReload(n=>n+1)} compact />}
+    {session && !codex && earlierCount(session) > 0 && <button type="button" className="earlier-entry" onClick={() => setEarlierOpen(true)}>
+      <History size={14} aria-hidden="true" />清除前的对话 · {earlierCount(session)}</button>}
     {(sendProgress || connectionProgress || readProgress) && <p className="note" role="status">{sendProgress || connectionProgress || readProgress}</p>}
     {session?.connection_notice && <Notice>{session.connection_notice}</Notice>}
     {session?.history_truncated && <p className="note">手机显示的历史已截断，完整内容保存在电脑 {assistant} 中。</p>}
@@ -662,7 +672,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       <TranscriptContext.Provider value={transcriptContext}>{session?.turns?.map((turn) => <React.Fragment key={turn.id}>
         <article className="message user" aria-label="你的消息"><MessageBody text={turn.prompt} /></article>
         <article className="message" aria-label="回复">
-          <ToolActivity tools={turn.tools} />
+          <ToolActivity tools={turn.tools} onTasks={() => setTasksOpen(true)} />
           {turn.text && <MessageBody text={turn.text} />}
           {turn.truncated && <p className="note">本轮输出超过记录上限，仅显示已保存的部分。</p>}
           {!turn.text && !turn.approval && active(turn.status) && <Thinking />}
@@ -677,6 +687,7 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
       </React.Fragment>)}</TranscriptContext.Provider>
     </section>
     <div className="compose">
+      <TaskStrip session={session} onOpen={() => setTasksOpen(true)} />
       {actionError && <Notice onRetry={uncertain ? retry : undefined} label="再次连接">{actionError}</Notice>}
       {session?.single_turn && <p className="note">当前凭据或路由只能验证本轮。请返回会话列表，新建会话后继续。</p>}
       {!ready && <p className="note">环境没有运行。打开侧栏里的「环境」启动后即可继续。</p>}
@@ -686,6 +697,8 @@ function Chat({ id, drafts, ready, visible, refresh, onOpenWeb, onDenied, onMiss
         onSubmit={() => void send()} running={running} stopping={last?.status === "stopping"} onStop={stop} busy={busy}
         canSend={!(busy || confirming || !!readProgress || !!readError || !ready || !session || session.single_turn || session.can_send === false || attachments.uploading || (!draft.trim() && !attachments.items.some(item => item.status === "done")))} />
     </div>
+    {tasksOpen && <TaskSheet session={session} onClose={() => setTasksOpen(false)} />}
+    {earlierOpen && session && <EarlierSheet session={session} onClose={() => setEarlierOpen(false)} />}
   </>;
 }
 

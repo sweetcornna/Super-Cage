@@ -43,6 +43,12 @@ type mobileSummary struct {
 	Deleting      bool      `json:"deleting,omitempty"`
 	Revision      uint64    `json:"revision"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// RunningTasks counts the subagents and background tasks of a terminal
+	// conversation whose CLI is live (from discovery); absent when none run.
+	RunningTasks int `json:"running_tasks,omitempty"`
+	// EarlierParts counts what /clear left behind in this entry's terminal
+	// (清除前的对话); absent when nothing was cleared.
+	EarlierParts int `json:"earlier_parts,omitempty"`
 	// Owner is who writes a Codex session's thread now: "" (nobody), "desktop"
 	// (a terminal of this server), "phone" (a phone turn) or "external" (any
 	// other process). Codex sessions only.
@@ -81,6 +87,9 @@ type mobileSession struct {
 	AccountFailure  string            `json:"account_failure,omitempty"`
 	AccountSwitch   *claudeSwitchView `json:"account_switch,omitempty"`
 	mediaWorkingDir string
+	// missingHistory: a view found no transcript of a conversation the entry
+	// resumes (not stored, not sent).
+	missingHistory string
 	mobileSummary
 	Turns                 []mobileTurn `json:"turns"`
 	SingleTurn            bool         `json:"single_turn,omitempty"`
@@ -91,6 +100,16 @@ type mobileSession struct {
 	AcknowledgedRequestID string       `json:"acknowledged_request_id,omitempty"`
 	TerminalAvailable     bool         `json:"terminal_available,omitempty"`
 	DesktopTerminalID     string       `json:"desktop_terminal_id,omitempty"`
+	// Tasks holds what still runs in a terminal conversation, also when the
+	// turn that started it is no longer in Turns; absent when nothing runs.
+	Tasks *mobileTasks `json:"tasks,omitempty"`
+}
+
+// mobileTasks is the channel helper's running summary: Count in total and the
+// newest at most 16 with their latest call.
+type mobileTasks struct {
+	Count   int                            `json:"count"`
+	Running []cliconversation.ToolActivity `json:"running"`
 }
 type mobileRecord struct {
 	mobileSession
@@ -110,6 +129,25 @@ type mobileRecord struct {
 	Switch           *claudeAccountSwitch `json:"switch,omitempty"`
 	Executions       []claudeExecution    `json:"executions,omitempty"`
 	ResumeTranscript string               `json:"resume_transcript,omitempty"`
+	// SwitchPolicySet: the person chose this session's own rule; otherwise
+	// the session follows 调度设置.
+	SwitchPolicySet bool `json:"switch_policy_set,omitempty"`
+	// HandoffWait: the person chose to wait for this account's reset (unix
+	// seconds); until then the session neither asks nor moves.
+	HandoffWait int64 `json:"handoff_wait,omitempty"`
+	// WaitingReset: under automatic continuation every account that may take
+	// the session was used up; it continues at this first reset.
+	WaitingReset int64 `json:"waiting_reset,omitempty"`
+	// UngroupedHandoff: consent given in this session (its menu's automatic
+	// rule, or 切换并继续 on its question) that accounts without a 接续分组
+	// may continue it. It counts only while the session has its own rule.
+	UngroupedHandoff bool `json:"ungrouped_handoff,omitempty"`
+	// HandoffRefusal: why the last automatic continuation was refused; shown
+	// while the session waits, cleared by a handoff or the end of the limit.
+	HandoffRefusal string `json:"handoff_refusal,omitempty"`
+	// Cleared lists the conversations /clear left behind in this record's
+	// terminal, oldest first (清除前的对话).
+	Cleared []clearedPart `json:"cleared,omitempty"`
 	// CodexAccount is the Codex account whose CODEX_HOME holds the thread;
 	// empty means the environment's own ~/.codex.
 	CodexAccount string `json:"codex_account,omitempty"`
@@ -126,6 +164,27 @@ type claudeExecution struct {
 	Config  string          `json:"config"`
 }
 
+// clearedPart is a conversation a /clear in the same terminal left behind. Its
+// id is also in Executions, so discovery, purge and the account handoff treat
+// it as an earlier execution of the record.
+type clearedPart struct {
+	CLIID     string    `json:"cli_id"`
+	ClearedAt time.Time `json:"cleared_at"`
+	// Empty: the part had no transcript when it was linked (a /clear before
+	// the first prompt), so purge does not expect its history.
+	Empty bool `json:"empty,omitempty"`
+}
+
+// clearedPart returns the record's cleared part with that id, if any.
+func (r *mobileRecord) clearedPart(id string) *clearedPart {
+	for i := range r.Cleared {
+		if r.Cleared[i].CLIID == id {
+			return &r.Cleared[i]
+		}
+	}
+	return nil
+}
+
 type claudeAccountSwitch struct {
 	ID          string          `json:"id"`
 	Phase       string          `json:"phase"`
@@ -136,6 +195,35 @@ type claudeAccountSwitch struct {
 	Connection  string          `json:"connection"`
 	Error       string          `json:"error,omitempty"`
 	Continue    bool            `json:"continue"`
+	// Force stops a working source: the person confirmed it, or the turn
+	// already ended on the account's limit.
+	Force       bool   `json:"force,omitempty"`
+	SourceLabel string `json:"source_label,omitempty"`
+	// Reason is the confirmed window (five_hour, seven_day) of a handoff at a
+	// quota limit, "reset" for continuing on the same account after its
+	// reset, empty for a manual switch.
+	Reason    string `json:"reason,omitempty"`
+	ResetsAt  int64  `json:"resets_at,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
+	At        int64  `json:"at,omitempty"`
+	// Note lists for the resume prompt what the handoff interrupted.
+	Note string `json:"note,omitempty"`
+	// Carry holds the messages the source never took, each delivered once to
+	// the target under its own request id.
+	Carry []claudeCarried `json:"carry,omitempty"`
+	// Wait is the reset the target account waits for (an undo back to a
+	// used-up account), applied where the preparation commits.
+	Wait int64 `json:"wait,omitempty"`
+	// Earlier is the completed handoff this one replaced while it still held
+	// undelivered messages: they go on with this one when it commits, and
+	// it comes back when this one is dropped.
+	Earlier *claudeAccountSwitch `json:"earlier,omitempty"`
+}
+
+type claudeCarried struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	Delivered bool   `json:"delivered,omitempty"`
 }
 
 type claudeSwitchView struct {
@@ -143,6 +231,13 @@ type claudeSwitchView struct {
 	Phase       string `json:"phase"`
 	TargetLabel string `json:"target_label"`
 	Error       string `json:"error,omitempty"`
+	SourceLabel string `json:"source_label,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	ResetsAt    int64  `json:"resets_at,omitempty"`
+	Automatic   bool   `json:"automatic,omitempty"`
+	At          int64  `json:"at,omitempty"`
+	// carry: a message the source never took still waits for the target.
+	carry bool
 }
 type mobileRun struct {
 	record       *mobileRecord
@@ -229,9 +324,22 @@ func (record *mobileRecord) changed() {
 	record.Revision++
 	record.UpdatedAt = time.Now().UTC()
 }
+
+// earlierParts counts the cleared parts that had a transcript.
+func (record *mobileRecord) earlierParts() int {
+	count := 0
+	for _, part := range record.Cleared {
+		if !part.Empty {
+			count++
+		}
+	}
+	return count
+}
+
 func (record *mobileRecord) summary() mobileSummary {
 	view := record.mobileSummary
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 		view.placeholder = !record.Resume && len(record.Turns) == 0
@@ -239,14 +347,34 @@ func (record *mobileRecord) summary() mobileSummary {
 	}
 	return view
 }
+
+// carryReaches: the carried messages of a completed handoff still have the
+// conversation they continue: the target's, or the one a /clear in it began.
+func (record *mobileRecord) carryReaches() bool {
+	sw := record.Switch
+	return sw != nil && (record.CLIID == sw.TargetID || record.clearedPart(sw.TargetID) != nil)
+}
+
 func (record *mobileRecord) snapshot() mobileSession {
 	view := record.mobileSession
 	view.AccountID = record.Account.ID
+	view.EarlierParts = record.earlierParts()
 	if record.codex() {
 		view.CodexAccountID = record.CodexAccount
 	}
 	if sw := record.Switch; sw != nil {
-		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error}
+		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error, SourceLabel: sw.SourceLabel, Reason: sw.Reason, ResetsAt: sw.ResetsAt, Automatic: sw.Automatic, At: sw.At}
+		var left []string
+		for _, message := range sw.Carry {
+			if sw.Phase == "completed" && !message.Delivered {
+				view.AccountSwitch.carry = view.AccountSwitch.carry || record.carryReaches()
+				left = append(left, "「"+message.Text+"」")
+			}
+		}
+		if len(left) > 0 && !record.carryReaches() {
+			view.AccountSwitch.carry = false
+			view.ConnectionNotice = strings.TrimSpace(view.ConnectionNotice + "\n账号交接时未送达的消息：" + strings.Join(left, "、") + "。这段会话已换成另一段对话，消息没有发出：需要时请重新发送。")
+		}
 	}
 	if !record.Terminal {
 		view.Active = record.turnActive()
@@ -312,6 +440,7 @@ func (m *mobileCLIStore) record(profile, id string) (*mobileRecord, error) {
 		turn := &record.Turns[n-1]
 		if turn.Status == "running" || turn.Status == "stopping" {
 			turn.Status, turn.Error = "interrupted", "主机服务重新启动。请检查本轮结果后再发送消息。"
+			turn.Tools = cliconversation.CloseTasks(turn.Tools)
 			record.changed()
 			if err := writePrivate(path, &record); err != nil {
 				return nil, err
@@ -350,6 +479,9 @@ func (m *mobileCLIStore) summaries(profile string, granted map[string]bool, arch
 		}
 		summary.Running = m.running[id] || m.codexLive[id]
 		summary.ClaudeDesktop = summary.Running && m.desktop[id]
+		if !summary.Running {
+			summary.RunningTasks = 0 // nothing outlives its CLI process
+		}
 		if granted[summary.Workspace] && !summary.Deleted && summary.Archived == archived {
 			if summary.CustomTitle != "" {
 				summary.Title = summary.CustomTitle
