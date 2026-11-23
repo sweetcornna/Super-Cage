@@ -5,7 +5,8 @@
 // a full-screen program reads keys nobody pressed. The server says up to
 // which offset its output had reached a viewer (`answered` on the history
 // marker and on the phone's reply); xterm.js leaves the queries in that part
-// unanswered and answers every later one as before.
+// unanswered and answers every later one as before. So with the focus report
+// xterm sends when that part turns focus reports on (`stale`).
 
 // answeredBytes is how many leading bytes of a replay that starts at offset
 // were shown to a viewer before. A server that does not tell answers all.
@@ -45,6 +46,10 @@ export function quietReplayAnswers(terminal) {
     }
     if (quietPart < data.byteLength || callback) terminal.write(quietPart ? data.subarray(quietPart) : data, callback);
   };
+  // stale(data): input xterm sends by itself while it draws the answered
+  // part; the view drops it. A focus report is sent when the output turns
+  // focus reports on (DECSET 1004), and cannot be answered by a handler.
+  write.stale = (data) => quiet > 0 && (data === "\x1b[I" || data === "\x1b[O");
   write.dispose = () => { for (const handler of handlers) handler.dispose(); };
   return write;
 }

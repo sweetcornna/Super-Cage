@@ -477,7 +477,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
           if (plan.reset) terminal.reset();
           // The modes the kept output was written in, when the server no
           // longer keeps the output that set them.
-          if (plan.reset && typeof state.state === "string" && state.state) terminal.write(state.state);
+          if (plan.reset && typeof state.state === "string" && state.state) writeReplay(new TextEncoder().encode(state.state), Infinity);
           stream.offset = plan.offset;
           if (plan.resumable) stream.heartbeats = true;
           replayRemaining = plan.resumable ? plan.size : 0;
@@ -647,6 +647,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       ws.send(JSON.stringify({ type: "input", data }));
     };
     terminal.onData((data) => {
+      if (writeReplay.stale(data)) return;
       if (emittingPaste) send(data);
       else void enqueue(() => send(data)).catch(() => {});
     });

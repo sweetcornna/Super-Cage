@@ -58,6 +58,20 @@ test("queries in the answered part stay unanswered; the rest and later output ar
   assert.equal(fake.handlers.length, 0);
 });
 
+test("a focus report sent while the answered part is drawn is stale", () => {
+  const fake = fakeTerminal();
+  const write = quietReplayAnswers(fake.terminal);
+  const seen = [];
+  fake.terminal.write = (data, callback) => {
+    if (data.byteLength) seen.push([write.stale("\x1b[I"), write.stale("\x1b[O"), write.stale("x")]);
+    callback?.();
+  };
+  write(new Uint8Array([1, 2]), 1);
+  assert.deepEqual(seen, [[true, true, false], [false, false, false]]);
+  assert.equal(write.stale("\x1b[I"), false);
+  write.dispose();
+});
+
 test("only the window size reports of CSI t and colour queries of OSC are muted", () => {
   const fake = fakeTerminal();
   const write = quietReplayAnswers(fake.terminal);

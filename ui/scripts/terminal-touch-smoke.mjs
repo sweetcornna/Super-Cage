@@ -13,7 +13,8 @@ const { chromium } = require(process.env.CAGE_PLAYWRIGHT_MODULE || "playwright")
 // server did not mark answered, a reset read applies the modes in its state,
 // and the phone sends its size again each time it is shown and when its
 // user types.
-// Desktop (1440x900): the wheel does the same three things; a finger drag
+// Both count emoji as two cells. Desktop (1440x900): the wheel does the
+// same three things; a finger drag
 // works there too; a reset replay applies the state of its history marker
 // and answers only the unanswered queries; a view mounted hidden opens its
 // stream only when it is shown, at its own size.
@@ -29,6 +30,7 @@ const until = async (condition, message) => {
 };
 const lines = (from, to, prefix = "LINE-") => Array.from({ length: to - from + 1 }, (_, i) => prefix + String(from + i).padStart(3, "0")).join("\r\n");
 const DA1 = "\x1b[c", DA1_ANSWER = "\x1b[?1;2c", DSR = "\x1b[5n", DSR_ANSWER = "\x1b[0n";
+const WIDE = "\u2705\u{1F680}\u2705", CPR = "\x1b[6n";
 
 async function open(page, html) {
   await page.route("**/api/**", (route) => route.fulfill({ json: { ok: true } }));
@@ -101,13 +103,20 @@ async function phone() {
     assert.ok(resizes[0].cols < 80 && resizes[0].rows > 24, "the phone's own size, not 80x24: " + JSON.stringify(resizes[0]));
 
     // The first read replays history. The query in the part a viewer was
-    // shown before is not answered again; the one after it is.
-    const answeredPart = DA1 + lines(1, 100) + "\r\n";
+    // shown before is not answered again, nor is the focus report xterm sends
+    // when that part turns focus reports on; the query after it is answered.
+    const answeredPart = DA1 + "\x1b[?1004h" + lines(1, 100) + "\x1b[?1004l\r\n";
     await serve({ text: answeredPart + lines(101, 200) + "\r\n" + DSR + "$ ", answered: Buffer.byteLength(answeredPart) });
     await until(async () => (await screenText(page)).includes("LINE-200"), "the replay was not shown");
     await until(() => typed().includes(DSR_ANSWER), "the unanswered query was not answered");
     await sleep(300);
     assert.ok(!typed().includes(DA1_ANSWER), "a query answered before must not be answered again: " + JSON.stringify(typed()));
+    assert.ok(!/\x1b\[[IO]/.test(typed()), "no focus report for a replay: " + JSON.stringify(typed()));
+    // Emoji take two cells, as programs count them: three move the cursor
+    // to column 7 (Unicode 6 widths put it at column 4).
+    await serve({ text: "\r\n" + WIDE + CPR });
+    await until(() => /\x1b\[\d+;\d+R/.test(typed()), "the cursor position was not reported");
+    assert.match(typed(), /\x1b\[\d+;7R/, "wide characters: " + JSON.stringify(typed()));
 
     // (a) Normal screen: the finger pulls older lines down into view, and
     // pushes them back; scrolling types nothing.
@@ -222,6 +231,9 @@ async function desktop() {
     await until(() => typed(first).includes(DSR_ANSWER), "the unanswered query was not answered");
     await sleep(300);
     assert.ok(!typed(first).includes(DA1_ANSWER), "a query answered before must not be answered again");
+    first.socket.send(Buffer.from("\r\n" + WIDE + CPR));
+    await until(() => /\x1b\[\d+;\d+R/.test(typed(first)), "the cursor position was not reported");
+    assert.match(typed(first), /\x1b\[\d+;7R/, "wide characters take two cells");
 
     // (a) Normal screen: the wheel and a finger move the scrollback.
     const bottom = Math.min(...(await shownLines(page)));

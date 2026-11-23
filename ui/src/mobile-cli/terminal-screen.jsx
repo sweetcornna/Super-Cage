@@ -79,6 +79,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     const stopTouch = attachTouchScroll(t, host.current);
     writer.current = quietReplayAnswers(t);
     const data = t.onData((value) => {
+      if (writer.current?.stale(value)) return;
       if (ctrl.current && value.length === 1) {
         const code = value.toUpperCase().charCodeAt(0);
         ctrl.current = false; setCtrlOn(false);
@@ -159,7 +160,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
             if (reply.reset) term.current?.reset();
             // The modes the kept output was written in, when the server no
             // longer keeps the output that set them.
-            if (reply.reset && typeof reply.state === "string" && reply.state) term.current?.write(reply.state);
+            if (reply.reset && typeof reply.state === "string" && reply.state) writer.current?.(new TextEncoder().encode(reply.state), Infinity);
             if (reply.data) {
               // A replay (this view's first read, or after a reset) may hold
               // queries answered when they were first shown.
