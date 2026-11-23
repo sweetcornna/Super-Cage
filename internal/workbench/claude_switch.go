@@ -428,7 +428,6 @@ var claudeSwitchRefusals = map[string]string{
 	"switch:exit":     "原进程尚未退出，未切换：稍后点“重试账号交接”。",
 	"switch:history":  "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。",
 	"switch:project":  "这段会话的历史属于另一个项目文件夹：从那个项目打开它后再切换。",
-	"switch:tools":    "历史仍有结果未确认的工具，不能自动接续。",
 	"switch:cancel":   "原会话的交接已变化：刷新会话后再操作。",
 }
 

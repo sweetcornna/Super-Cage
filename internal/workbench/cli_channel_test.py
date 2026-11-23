@@ -88,7 +88,7 @@ class ChannelTests(unittest.TestCase):
         self.assertFalse(Path(result["transcript"]).exists())
         self.assertTrue(path.exists())
 
-    def test_account_switch_refuses_busy_and_unresolved_tools(self):
+    def test_account_switch_refuses_busy_and_keeps_unfinished_tools(self):
         path=self.history(self.session,self.project,[{"type":"assistant","message":{"content":[{"type":"tool_use","id":"uncertain","name":"Bash","input":{}}]}}])
         connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
         request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id}
@@ -100,10 +100,11 @@ class ChannelTests(unittest.TestCase):
         state["busy"]=False
         channel.save(self.root/connection/"state.json",state)
         completed=type("Result",(),{"returncode":0,"stdout":"[]"})()
+        # A call that a limit interrupted has no result. The resumed CLI reports
+        # it to the model as unknown (TestClaudeCrossAccountResumeOfUnfinishedTool).
         with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
-            with self.assertRaisesRegex(ValueError,"switch:tools"): channel.prepare_account_switch(request)
-        self.assertTrue(path.exists())
-        self.assertFalse((self.root.parent/"cli-account-switches"/switch_id/"history.jsonl").exists())
+            result=channel.prepare_account_switch(request)
+        self.assertEqual(Path(result["transcript"]).read_bytes(),path.read_bytes())
 
     def test_account_switch_follows_the_session_into_subdirectories(self):
         # A session is identified by the folder it started in. Rows recorded in a

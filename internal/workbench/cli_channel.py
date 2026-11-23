@@ -557,26 +557,13 @@ def prepare_account_switch(request):
     path = next((config / "projects").glob("*/" + sid + ".jsonl"), None)
     if path is None or path.is_symlink():
         raise ValueError("switch:history")
-    pending, first = set(), ""
-    for line in path.read_text().splitlines():
-        row = json.loads(line)
-        if row.get("isSidechain"):
-            continue
-        # A session belongs to the folder it started in. Later rows follow the
-        # CLI into subdirectories and worktrees and are not a project identity.
-        first = first or row.get("cwd") or ""
-        blocks = (row.get("message") or {}).get("content", [])
-        if not isinstance(blocks, list):
-            continue
-        for block in blocks:
-            if block.get("type") == "tool_use":
-                pending.add(block["id"])
-            elif block.get("type") == "tool_result":
-                pending.discard(block.get("tool_use_id"))
+    # A session belongs to the folder it started in: its first recorded cwd.
+    # Later rows follow the CLI into subdirectories and worktrees. A tool call
+    # without a result is left to the resumed CLI, which tells the model that
+    # its outcome is unknown and must be checked before it is run again.
+    first = next((row["cwd"] for row in map(json.loads, path.read_text().splitlines()) if row.get("cwd") and not row.get("isSidechain")), "")
     if not workspace_within(first, root):
         raise ValueError("switch:project")
-    if pending:
-        raise ValueError("switch:tools")
     rows = active_sessions(sid, str(config))
     # Any other live worker in this account can represent a background
     # child of the source. The registry does not expose a complete ancestry.
