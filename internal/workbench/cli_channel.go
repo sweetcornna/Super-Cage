@@ -528,10 +528,10 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
 	terminal := s.boundTerminal(record)
-	bound := ""
+	bound, open := "", false
 	if terminal != nil {
 		terminal.mu.Lock()
-		bound = terminal.connectionID
+		bound, open = terminal.connectionID, !terminal.closed
 		terminal.mu.Unlock()
 	}
 	// A reopened entry's first launch leaves its closed connection on this id.
@@ -540,7 +540,10 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		// terminal still runs a conversation: its CLI moved to another id
 		// (/clear, or a /resume inside it). Checked on every view, as the new
 		// id's transcript appears only with the next prompt.
-		if record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
+		// The open terminal's own connection decides. A look can be paced
+		// away, and this view then clears the record's connection, perhaps
+		// after an earlier view saw the old id end: the next view asks again.
+		if open && bound != "" || record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
 			s.followConversationID()
 		}
 	}

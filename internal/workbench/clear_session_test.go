@@ -772,6 +772,48 @@ func TestPhoneFollowsTheClearInTheCLIsOrder(t *testing.T) {
 	}
 }
 
+// The look a view asks for is paced. A view between the CLI's SessionEnd and
+// SessionStart sees the old id ended on its connection; the next one finds no
+// connection on it while the look is paced away, and clears the record's
+// connection. Later views still ask, so the entry follows.
+func TestPhoneFollowsAfterAPacedLook(t *testing.T) {
+	pace := conversationFollowPace
+	conversationFollowPace = 400 * time.Millisecond
+	t.Cleanup(func() { conversationFollowPace = pace })
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	old := terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Connection: f.connection, Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}}
+	look := func() {
+		t.Helper()
+		if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// SessionEnd: the old id is closed on the connection it still has.
+	f.view(t, a, old)
+	look()
+	// SessionStart of the new id, right after a look: the connection left the old id.
+	old.Connection = ""
+	f.view(t, a, old)
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	f.s.conversationFollowAt.Store(time.Now().UnixNano())
+	look()
+	deadline := time.Now().Add(5 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("views after a paced look did not follow the /clear: %+v", f.record(t))
+		}
+		look()
+		time.Sleep(50 * time.Millisecond)
+	}
+	if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+		t.Fatalf("lists: %+v", list)
+	}
+}
+
 // An entry opened again after its terminal closed: the first launch's closed
 // connection is left on the id it ran. After /clear the guest reports the old
 // id on that connection (not running), the new id on the open terminal's.
