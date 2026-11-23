@@ -34,6 +34,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
   const alive = useRef(true);
   const ctrl = useRef(false);
   const lastSize = useRef("");
+  const resend = useRef(null);
   const writer = useRef(null);
   const [ctrlOn, setCtrlOn] = useState(false);
   const [state, setState] = useState({ connecting: true, closed: false, exit: null, error: "" });
@@ -70,6 +71,8 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     t.unicode.activeVersion = "11";
     t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) openExternal(uri); }));
     t.open(host.current);
+    // At the phone's size before the first output is drawn.
+    try { f.fit(); } catch { /* not laid out yet */ }
     term.current = t; fit.current = f;
     // A finger dragged over the terminal scrolls it as a wheel would.
     const stopTouch = attachTouchScroll(t, host.current);
@@ -93,13 +96,17 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       clearTimeout(timer);
       timer = setTimeout(() => { lastSize.current = size; terminals.resize(id, t.cols, t.rows).catch(() => {}); }, 250);
     };
+    // The terminal's size is the last viewer's that set it: a computer
+    // showing it meanwhile may have changed it. Shown again or reconnected,
+    // the phone sends its size even when it did not change.
+    resend.current = () => { lastSize.current = ""; resize(); };
     const observer = new ResizeObserver(resize);
     observer.observe(host.current);
     window.visualViewport?.addEventListener("resize", resize);
     requestAnimationFrame(resize);
     return () => {
       alive.current = false; clearTimeout(timer); observer.disconnect();
-      stopTouch(); writer.current.dispose(); writer.current = null;
+      resend.current = null; stopTouch(); writer.current.dispose(); writer.current = null;
       window.visualViewport?.removeEventListener("resize", resize);
       darkQuery.removeEventListener("change", theme);
       data.dispose(); binary.dispose(); t.dispose();
@@ -118,11 +125,13 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     const controller = new AbortController();
     (async () => {
       let failures = 0;
+      resend.current?.();
       while (!controller.signal.aborted) {
         try {
           const from = after.current;
           const reply = await terminals.output(id, from, { signal: controller.signal });
           if (controller.signal.aborted) return;
+          if (failures) resend.current?.();
           failures = 0;
           setState((s) => s.connecting || s.error ? { ...s, connecting: false, error: "" } : s);
           if (reply) {
