@@ -22,7 +22,7 @@ func TestClaudeAutomaticSwitchRequiresQuotaAndConsent(t *testing.T) {
 	epoch, _ := s.account.access()
 	ctx := context.WithValue(context.Background(), accountEpochKey{}, epoch)
 	for _, scenario := range []struct{ policy, failure, reason string }{{"ask", "rate_limit", "手动确认"}, {"allow", "overloaded", "手动确认"}, {"allow", "rate_limit", "尚未确认"}} {
-		record.SwitchPolicy, record.AccountFailure = scenario.policy, scenario.failure
+		record.SwitchPolicy, record.SwitchPolicySet, record.AccountFailure = scenario.policy, true, scenario.failure
 		if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
 			t.Fatal(err)
 		}
@@ -85,24 +85,33 @@ func TestClaudeSchedulingModesAndPersistence(t *testing.T) {
 
 func TestClaudeSwitchGroupAndDurableBinding(t *testing.T) {
 	a, b := strings.Repeat("a", 24), strings.Repeat("b", 24)
+	now := time.Now()
 	list := claudeAccountList{Accounts: []claudeAccount{{ID: a, Label: "A", Email: "a@example.test", Enabled: true, Status: "ready"}, {ID: b, Label: "B", Email: "b@example.test", Enabled: true, Status: "ready"}}}
 	record := &mobileRecord{Account: claudeSelection{ID: a, GuestID: a, Subject: claudeIdentityHash("a@example.test", "")}}
-	if len(switchCandidates(list, record)) != 0 {
-		t.Fatal("ungrouped history escaped")
+	// Groups limit only automatic continuation, and ungrouped accounts form
+	// one group only after the person said yes to it.
+	if len(automaticSwitchTargets(list, record, false, now)) != 0 {
+		t.Fatal("ungrouped history escaped without a yes")
+	}
+	if got := automaticSwitchTargets(list, record, true, now); len(got) != 1 || got[0].ID != b {
+		t.Fatal("implicit group", got)
 	}
 	for i := range list.Accounts {
 		list.Accounts[i].HandoffGroup = "personal"
 	}
-	if got := switchCandidates(list, record); len(got) != 1 || got[0].ID != b {
+	if got := automaticSwitchTargets(list, record, false, now); len(got) != 1 || got[0].ID != b {
 		t.Fatal(got)
 	}
 	list.Accounts[1].HandoffGroup = "company"
-	if len(switchCandidates(list, record)) != 0 {
+	if len(automaticSwitchTargets(list, record, true, now)) != 0 {
 		t.Fatal("organization boundary escaped")
+	}
+	if got := manualSwitchTargets(list, record, now); len(got) != 1 || got[0].ID != b {
+		t.Fatal("a manual switch must reach an account of another group", got)
 	}
 	list.Accounts[1].HandoffGroup = "personal"
 	record.Account.Subject = "changed"
-	if len(switchCandidates(list, record)) != 0 {
+	if len(automaticSwitchTargets(list, record, true, now)) != 0 || len(manualSwitchTargets(list, record, now)) != 0 {
 		t.Fatal("stale source identity accepted")
 	}
 	record.Switch = &claudeAccountSwitch{ID: "receipt", Phase: "starting", Source: claudeExecution{Config: "private-config"}, Target: claudeSelection{Subject: "private-subject"}}

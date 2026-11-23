@@ -25,7 +25,7 @@ func claudeSwitchGuest(t *testing.T, script string) (*Server, string, *mobileRec
 	if err := os.MkdirAll(filepath.Dir(helper), 0700); err != nil {
 		t.Fatal(err)
 	}
-	code := "import json,sys,pathlib\nmode=sys.argv[1]\nrequest=json.load(sys.stdin)\nwith (pathlib.Path.home()/'calls.jsonl').open('a') as f: f.write(json.dumps({'mode':mode,'switch':request.get('switch_id'),'root':request.get('root')})+'\\n')\n" + script
+	code := "import json,sys,pathlib\nmode=sys.argv[1]\nrequest=json.load(sys.stdin)\nwith (pathlib.Path.home()/'calls.jsonl').open('a') as f: f.write(json.dumps({'mode':mode,'switch':request.get('switch_id'),'root':request.get('root'),'force':request.get('force'),'request':request.get('request_id'),'text':request.get('text')})+'\\n')\n" + script
 	if err := os.WriteFile(helper, []byte(code), 0600); err != nil {
 		t.Fatal(err)
 	}

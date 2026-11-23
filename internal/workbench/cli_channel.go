@@ -566,8 +566,8 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return "", nil, err
 	}
 	record.Terminal, record.Account, record.Launcher = true, selection, launcher
+	// A new session follows the rule in 调度设置 until the person sets its own.
 	if record.SwitchPolicy == "" {
-		record.SwitchPolicy = list.Scheduling.SwitchPolicy
 		if a := list.find(selection.ID); a != nil {
 			record.AccountLabel = a.Label
 		}
@@ -589,6 +589,7 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		payload["resume"] = ""
 		payload["switch_id"] = record.Switch.ID
 		payload["continue_after_switch"] = record.Switch.Continue
+		payload["note"] = record.Switch.Note
 	}
 	if s.macosGuest != nil && record.GuestWorkspace != "" {
 		root := s.cliWorkspace(workspace)
