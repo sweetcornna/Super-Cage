@@ -6,6 +6,11 @@ on:
         description: Exact source commit SHA to build
         required: true
         type: string
+      release:
+        description: Keep false. No release job remains here; true only skips the development artifact
+        required: false
+        type: boolean
+        default: false
       artifact_name:
         description: Name of the resulting workflow artifact
         required: true
@@ -29,10 +34,15 @@ jobs:
       - name: Verify the exact source and Apple Silicon runner
         env:
           BUILD_REF: ${{ inputs.ref }}
+          RELEASE_BUILD: ${{ inputs.release }}
         run: |
           [[ "$BUILD_REF" =~ ^[0-9a-f]{40}$ ]] || { echo 'Pass an exact commit SHA.' >&2; exit 1; }
           [[ "$(git rev-parse HEAD)" == "$BUILD_REF" ]]
           [[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]]
+          if [[ "$RELEASE_BUILD" == true && "$GITHUB_EVENT_NAME" != workflow_dispatch ]]; then
+            echo 'Release candidates require an explicit release dispatch.' >&2
+            exit 1
+          fi
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -103,6 +113,7 @@ jobs:
           "_output/Super Cage.app/Contents/Resources/mihomo" -v
           [[ "$(lipo -archs "_output/Super Cage.app/Contents/MacOS/Cage")" == arm64 ]]
       - name: Archive a complete development App with executable permissions
+        if: ${{ !inputs.release }}
         run: |
           version=$(tr -d '\r\n' < VERSION)
           mkdir -p _output/ci-macos-test
@@ -117,6 +128,7 @@ jobs:
           done
           (cd _output/ci-macos-test && shasum -a 256 "${archive##*/}" > SHA256SUMS)
       - uses: actions/upload-artifact@v4
+        if: ${{ !inputs.release }}
         with:
           name: ${{ inputs.artifact_name }}
           path: _output/ci-macos-test/

@@ -14,14 +14,17 @@ jobs:
     uses: ./.github/workflows/macos-build.yml
     with:
       ref: ${{ github.sha }}
+      release: false
       artifact_name: cage-macos-arm64-test
   windows:
     uses: ./.github/workflows/windows-build.yml
     with:
       ref: ${{ github.sha }}
+      release: false
       artifact_name: cage-windows-amd64-test
   linux:
     uses: ./.github/workflows/linux-build.yml
     with:
       ref: ${{ github.sha }}
+      release: false
       artifact_name: cage-linux-amd64-test
