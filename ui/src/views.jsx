@@ -433,6 +433,10 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     // hiddenSince is when the view was last hidden (0 while shown); a view
     // hidden for terminalSuspendMs is suspended: no stream until it is shown.
     let hiddenSince = visibleRef.current ? 0 : Date.now(), suspended = false, suspendTimer = null;
+    // A view mounted hidden (a tab restored behind another) opens its stream
+    // when it is first shown: until then its xterm cannot take its size, and
+    // a replay drawn at another size stays garbled.
+    let waiting = !visibleRef.current;
     // Bytes still to come in the current replay, or one whole frame from a
     // server without offsets. Replayed output never writes the clipboard.
     // answeredRemaining: the replay's leading bytes a viewer was shown before;
@@ -571,6 +575,11 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
         return;
       }
       hiddenSince = 0;
+      if (waiting) {
+        waiting = false;
+        resize();
+        return void connect();
+      }
       if (!suspended) return;
       suspended = false;
       failures = 0;
@@ -582,7 +591,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     const connect = () => {
       clearTimeout(retryTimer);
       retryTimer = null;
-      if (disposed || ended || ws || suspended) return;
+      if (disposed || ended || ws || suspended || waiting) return;
       // A retry or a wake-up of a view hidden long enough suspends it instead.
       if (dormant()) return void suspendStream();
       const current = new WebSocket(runtimeSocketURL(terminalStreamPath(session.id, stream.offset, terminalViewer(session.id))));

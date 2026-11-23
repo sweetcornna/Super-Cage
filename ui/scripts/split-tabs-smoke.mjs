@@ -69,10 +69,14 @@ try {
   state.terminals.push(term);
   const terminal = page.getByRole("tab", { name: term.title, exact: true });
   await terminal.waitFor();
-  const connections = state.terminalConnections;
   await drag(terminal, 0.75);
   const terminalRight = workspace.locator(".terminal-lane.split-right:visible");
   await terminalRight.getByText(term.title, { exact: true }).waitFor();
+  // A terminal view opens its stream when it is first shown; moving the focus
+  // between the panes below must not open another.
+  for (let i = 0; i < 200 && !state.terminalConnections; i++) await new Promise(resolve => setTimeout(resolve, 25));
+  const connections = state.terminalConnections;
+  assert.ok(connections > 0, "the terminal shown in the split did not connect");
   const browserBox = await workspace.locator(".browser-lane .browser-chrome").boundingBox();
   const terminalBox = await terminalRight.locator("header").boundingBox();
   assert.ok(browserBox.x + browserBox.width <= terminalBox.x + 1);
