@@ -87,6 +87,9 @@ type mobileSession struct {
 	AccountFailure  string            `json:"account_failure,omitempty"`
 	AccountSwitch   *claudeSwitchView `json:"account_switch,omitempty"`
 	mediaWorkingDir string
+	// missingHistory: a view found no transcript of a conversation the entry
+	// resumes (not stored, not sent).
+	missingHistory string
 	mobileSummary
 	Turns                 []mobileTurn `json:"turns"`
 	SingleTurn            bool         `json:"single_turn,omitempty"`

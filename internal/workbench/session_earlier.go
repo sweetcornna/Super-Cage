@@ -172,6 +172,45 @@ func (s *Server) mobileSeparateEarlier(w http.ResponseWriter, r *http.Request) {
 	jsonReply(w, summary)
 }
 
+// terminalAccountProblem says why the Claude account a terminal conversation
+// was recorded under cannot resume it and what fixes that, or "" when nothing
+// is known to be wrong (the guest still checks the login at launch).
+func (s *Server) terminalAccountProblem(record *mobileRecord) string {
+	selection := record.Account
+	if !record.Terminal || selection.ID == "" {
+		return ""
+	}
+	s.claudeAccounts.mu.Lock()
+	list, err := s.loadClaudeAccounts()
+	s.claudeAccounts.mu.Unlock()
+	if err != nil {
+		return ""
+	}
+	account := list.find(selection.ID)
+	label := record.AccountLabel
+	if account != nil && account.Label != "" {
+		label = account.Label
+	}
+	if label == "" {
+		label = "原账号"
+	}
+	var reason, fix string
+	switch {
+	case account == nil:
+		reason, fix = "已从 Super Cage 移除", "重新添加并登录这个账号"
+	case !account.Enabled:
+		reason, fix = "已停用", "启用这个账号"
+	case account.Status == "signed_out":
+		reason, fix = "已退出登录", "重新登录这个账号"
+	case account.Status == "changed" || account.Status == "duplicate" || account.guestID() != selection.GuestID ||
+		account.Email != "" && claudeIdentityHash(account.Email, account.Organization) != selection.Subject:
+		reason, fix = "登录的身份已变化", "用原来的身份重新登录这个账号"
+	default:
+		return ""
+	}
+	return "这段会话记录在 Claude 账号「" + label + "」下，该账号" + reason + "，无法接续。请在「Claude 账号管理」中" + fix + "后再打开。"
+}
+
 func (s *Server) separateEarlier(id, cliID, title string) (mobileSummary, error) {
 	m := &s.mobileCLI
 	m.mu.Lock()

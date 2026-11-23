@@ -386,6 +386,162 @@ func TestEarlierPartsAreListedReadAndSeparated(t *testing.T) {
 	}
 }
 
+// openRequests posts the open of the fixture's entry and returns the response
+// and the guest requests it made.
+func (f *clearFixture) open(t *testing.T) (code int, body, recovery string, modes []string) {
+	t.Helper()
+	before := f.modes(t)
+	w := request(f.s, "POST", "/api/cli/sessions/"+f.id+"/open", f.s.origin, "{}", true)
+	return w.Code, w.Body.String(), w.Header().Get("X-Cage-Recovery"), f.modes(t)[len(before):]
+}
+
+func (f *clearFixture) modes(t *testing.T) []string {
+	t.Helper()
+	data, err := os.ReadFile(f.requests)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	var modes []string
+	for line := range strings.Lines(string(data)) {
+		var entry []json.RawMessage
+		var mode string
+		if json.Unmarshal([]byte(line), &entry) == nil && len(entry) == 2 && json.Unmarshal(entry[0], &mode) == nil {
+			modes = append(modes, mode)
+		}
+	}
+	return modes
+}
+
+// The terminal is gone (an app or environment restart, or the person closed it).
+func (f *clearFixture) closeTerminal(t *testing.T) {
+	t.Helper()
+	f.s.terminals.mu.Lock()
+	delete(f.s.terminals.sessions, f.terminal.id)
+	f.s.terminals.mu.Unlock()
+}
+
+func TestReopenOfATerminalConversationResumesItsHistory(t *testing.T) {
+	f := newClearFixture(t)
+	f.closeTerminal(t)
+	record := f.record(t)
+	cli := record.CLIID
+	// Started fresh in a desktop terminal (--session-id), prompted there, never
+	// read on the phone: the record still says new.
+	record.Resume = false
+	if err := writePrivate(mobileRecordPath(f.s.profile, f.id), record); err != nil {
+		t.Fatal(err)
+	}
+	f.view(t, cli, terminalConversation{CLIID: cli, Config: filepath.Join(f.home, ".claude"), Workspace: guestPath(f.project), Title: "整理发布流程", HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: "t1", Prompt: "整理发布流程", Text: "好的", Status: "completed"}}})
+	_, _, _, modes := f.open(t)
+	if !slices.Contains(modes, "view") || !f.record(t).Resume {
+		t.Fatalf("the open did not learn the history: modes %v, resume %v", modes, f.record(t).Resume)
+	}
+	script, _, err := f.s.prepareTerminalConversation(f.project, claudeSelection{}, f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, `\"resume\": \"`+cli+`\"`) && !strings.Contains(script, `"resume":"`+cli+`"`) {
+		t.Fatalf("the launch does not resume %s: %s", cli, script)
+	}
+	// A launch that fails (exit 1: "No conversation found", "already in use",
+	// a refused login) leaves a shell that says so; leaving Claude Code exits 0.
+	if !strings.Contains(script, "|| printf") || !strings.Contains(script, "未能启动或接续") {
+		t.Fatalf("no note after a failed launch: %s", script)
+	}
+}
+
+func TestReopenOfATerminalNeverPromptedStaysNew(t *testing.T) {
+	f := newClearFixture(t)
+	f.closeTerminal(t)
+	record := f.record(t)
+	record.Resume = false
+	if err := writePrivate(mobileRecordPath(f.s.profile, f.id), record); err != nil {
+		t.Fatal(err)
+	}
+	f.view(t, record.CLIID, terminalConversation{CLIID: record.CLIID, Config: filepath.Join(f.home, ".claude"), Workspace: guestPath(f.project), Title: "Claude Code"})
+	if _, _, _, modes := f.open(t); !slices.Contains(modes, "view") || f.record(t).Resume {
+		t.Fatalf("modes %v, resume %v", modes, f.record(t).Resume)
+	}
+	script, _, err := f.s.prepareTerminalConversation(f.project, claudeSelection{}, f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(script, "resume") && strings.Contains(script, record.CLIID+`"`) && strings.Contains(script, `"resume":"`) {
+		t.Fatalf("a conversation without history was resumed: %s", script)
+	}
+}
+
+func TestReopenUnderAnUnusableAccountSaysWhichAndWhy(t *testing.T) {
+	f := newClearFixture(t)
+	f.closeTerminal(t)
+	f.observe()
+	record := f.record(t)
+	subject := claudeIdentityHash("a@example.test", "")
+	accountID := "a1b2c3d4e5f6a7b8c9d0e1f2"
+	record.Account = claudeSelection{ID: accountID, GuestID: accountID, Subject: subject}
+	record.AccountLabel = "工作账号"
+	if err := writePrivate(mobileRecordPath(f.s.profile, f.id), record); err != nil {
+		t.Fatal(err)
+	}
+	ready := claudeAccount{ID: accountID, Label: "工作账号", Enabled: true, Status: "ready", Email: "a@example.test"}
+	for _, step := range []struct {
+		name     string
+		accounts []claudeAccount
+		says     string
+	}{
+		{"removed", []claudeAccount{}, "已从 Super Cage 移除"},
+		{"disabled", []claudeAccount{func(a claudeAccount) claudeAccount { a.Enabled = false; return a }(ready)}, "已停用"},
+		{"signed out", []claudeAccount{func(a claudeAccount) claudeAccount { a.Status = "signed_out"; return a }(ready)}, "已退出登录"},
+		{"another login", []claudeAccount{func(a claudeAccount) claudeAccount { a.Email = "b@example.test"; return a }(ready)}, "登录的身份已变化"},
+	} {
+		if err := f.s.saveClaudeAccounts(claudeAccountList{Accounts: step.accounts}); err != nil {
+			t.Fatal(err)
+		}
+		code, body, recovery, modes := f.open(t)
+		if code != 409 || !strings.Contains(body, "「工作账号」") || !strings.Contains(body, step.says) || !strings.Contains(body, "Claude 账号管理") || recovery != "claude-account" {
+			t.Fatalf("%s: %d %q recovery %q", step.name, code, body, recovery)
+		}
+		if slices.Contains(modes, "active") || slices.Contains(modes, "launch") {
+			t.Fatalf("%s: the guest was asked %v before the account was usable", step.name, modes)
+		}
+		if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+			t.Fatalf("%s: the entry left the list: %+v", step.name, list)
+		}
+	}
+	if err := f.s.saveClaudeAccounts(claudeAccountList{Accounts: []claudeAccount{ready}}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body, recovery, _ := f.open(t); recovery != "" || strings.Contains(body, "无法接续") {
+		t.Fatalf("a usable account was refused: %d %q", code, body)
+	}
+}
+
+func TestReopenOfAConversationWhoseRecordIsGoneSaysSo(t *testing.T) {
+	f := newClearFixture(t)
+	f.closeTerminal(t)
+	f.observe()
+	record := f.record(t)
+	config := filepath.Join(f.home, ".claude")
+	// Claude Code removed the transcript (its retention period) or someone deleted it.
+	f.view(t, record.CLIID, terminalConversation{CLIID: record.CLIID, Config: config, Workspace: guestPath(f.project), Title: "Claude Code"})
+	code, body, recovery, modes := f.open(t)
+	if code != 409 || recovery != "conversation-missing" || !strings.Contains(body, "找不到这段会话") || !strings.Contains(body, config) {
+		t.Fatalf("%d %q %q", code, body, recovery)
+	}
+	if slices.Contains(modes, "active") {
+		t.Fatalf("the guest was asked %v", modes)
+	}
+	if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+		t.Fatalf("the entry left the list: %+v", list)
+	}
+	// A transcript without readable turns is still there: the CLI resumes it.
+	f.view(t, record.CLIID, terminalConversation{CLIID: record.CLIID, Config: config, Workspace: guestPath(f.project), Title: "Claude Code", NativeHistory: true})
+	if _, body, recovery, _ := f.open(t); recovery == "conversation-missing" {
+		t.Fatalf("a present transcript was called missing: %q", body)
+	}
+}
+
 func TestResumeFromAFolderThatIsGoneStartsInTheProject(t *testing.T) {
 	root := t.TempDir()
 	sub := filepath.Join(root, ".claude/worktrees/done")

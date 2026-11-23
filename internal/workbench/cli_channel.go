@@ -542,7 +542,11 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 			m.catalog[id] = record.summary()
 		}
 	}
-	return record.snapshot(), nil
+	view := record.snapshot()
+	if record.Resume && !current.HasHistory && !current.NativeHistory && current.Config != "" && record.ResumeTranscript == "" && record.Switch == nil {
+		view.missingHistory = current.Config
+	}
+	return view, nil
 }
 
 func (s *Server) terminalConversationAction(ctx context.Context, id string, input map[string]any) (mobileSession, error) {
@@ -738,7 +742,7 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		}
 		return string(data), record, nil
 	}
-	body := s.cliHelperCommand("launch", string(data)) + "; exec bash -i"
+	body := s.cliHelperCommand("launch", string(data)) + " || printf '\\n%s\\n' " + shellescape.Quote(terminalLaunchFailed) + "; exec bash -i"
 	root := s.cliWorkspace(workspace)
 	directory := record.GuestWorkspace
 	if directory == "" {
@@ -757,6 +761,10 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 	script := terminalDirectory(directory, root) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
 	return script, record, nil
 }
+
+// terminalLaunchFailed follows a launch that ended in an error (the CLI exits 0
+// when the person leaves it): its own message is just above.
+const terminalLaunchFailed = "Super Cage：Claude Code 未能启动或接续这段会话，原因见上方。会话仍在列表中，可以再次打开；这个终端现在是普通命令行。"
 
 // terminalDirectory enters the folder the conversation last worked in, or the
 // project when that folder is gone (a removed worktree): the CLI finds the

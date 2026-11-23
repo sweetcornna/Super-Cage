@@ -95,6 +95,18 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "主机启动命令与原会话不一致，请恢复原配置后重试", 422)
 			return
 		}
+		if problem := s.terminalAccountProblem(record); problem != "" {
+			// The account handoff (claude_switch.go) can offer another account here.
+			w.Header().Set("X-Cage-Recovery", "claude-account")
+			http.Error(w, problem, 409)
+			return
+		}
+		if view.missingHistory != "" && s.windowsGuest == nil && s.macosGuest == nil {
+			// The CLI would say "No conversation found" and leave a shell.
+			w.Header().Set("X-Cage-Recovery", "conversation-missing")
+			http.Error(w, "电脑上找不到这段会话的 Claude Code 记录（"+view.missingHistory+" 中没有它），无法接续。Claude Code 会按保留期自动删除较早的会话记录，记录也可能已被删除。这个条目仍然保留，可以归档它，或新建会话继续工作。", 409)
+			return
+		}
 	}
 	if (record.Resume || record.Connection != "") && needsTerminal {
 		var state struct {
