@@ -13,6 +13,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
+import { attachTouchScroll } from "./terminal-touch-scroll.mjs";
 import { api, writeClipboard, nativeAvailable } from "./api";
 import { runtimeSocketURL } from "./client-context.mjs";
 import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareClipboardPaste, sendImage } from "./image-transfer";
@@ -371,6 +372,8 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     terminal.open(box.current);
     instance.current = terminal;
     fit.current = fitter;
+    // A finger dragged over the terminal scrolls it as a wheel would.
+    const stopTouch = attachTouchScroll(terminal, box.current);
     // WebGL draws the grid off the main thread's layout work; the DOM
     // renderer stays as the fallback. See terminal-renderer.mjs.
     const perf = cagePerf().terminal(session.id);
@@ -786,6 +789,7 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       revealStartup.current = null;
       startupRender.dispose();
       clipboardHandler.dispose();
+      stopTouch();
       host.removeEventListener("paste", onPaste, true);
       host.removeEventListener("copy", onCopy, true);
       host.removeEventListener("dragover", onDragOver);

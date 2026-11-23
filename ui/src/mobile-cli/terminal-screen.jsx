@@ -12,6 +12,7 @@ import { openExternal } from "./web-shell.mjs";
 import { Confirm } from "./sheet";
 import { kindInfo } from "./terminals";
 import { takeInput } from "../terminal-input-chunks.mjs";
+import { attachTouchScroll } from "../terminal-touch-scroll.mjs";
 
 const light = { background: "#faf9f5", foreground: "#1f1e1d", cursor: "#d97757", cursorAccent: "#faf9f5", selectionBackground: "#e9d3c6",
   black: "#1f1e1d", red: "#b3261e", green: "#2e7d4f", yellow: "#8a5a00", blue: "#2f5d8a", magenta: "#8c3f72", cyan: "#2c6e6e", white: "#d9d4c7",
@@ -68,6 +69,8 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     t.loadAddon(new WebLinksAddon((event, uri) => { if (!deviceCommand("open-url", { url: uri })) openExternal(uri); }));
     t.open(host.current);
     term.current = t; fit.current = f;
+    // A finger dragged over the terminal scrolls it as a wheel would.
+    const stopTouch = attachTouchScroll(t, host.current);
     const data = t.onData((value) => {
       if (ctrl.current && value.length === 1) {
         const code = value.toUpperCase().charCodeAt(0);
@@ -93,6 +96,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
     requestAnimationFrame(resize);
     return () => {
       alive.current = false; clearTimeout(timer); observer.disconnect();
+      stopTouch();
       window.visualViewport?.removeEventListener("resize", resize);
       darkQuery.removeEventListener("change", theme);
       data.dispose(); binary.dispose(); t.dispose();

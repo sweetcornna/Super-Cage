@@ -50,6 +50,8 @@
   flex: 1;
   min-height: 0;
   width: 100%;
+  /* A drag scrolls the terminal (terminal-touch-scroll.mjs), not the page. */
+  touch-action: none;
 }
 .terminal-host.terminal-preparing { visibility: hidden; }
 .terminal-startup {
