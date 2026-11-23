@@ -236,7 +236,7 @@ Windows 与 Linux 版暂不支持应用内自动安装更新，发现新版时�
 - **手机浏览器（直连服务器门户）**：直接打开门户地址并登录，进入虚拟机即自动呈现手机界面；iPhone Safari 与 Android Chrome 均可「添加到主屏幕」。网页版仅连接服务器，不支持配对电脑，也不包含远程浏览器与 Claude Desktop 入口（需要时可切至桌面版）。
 - **原生手机客户端**：支持「连接服务器」（门户账号登录）与「连接电脑」（扫描电脑「设置 → 设备 → 添加设备」二维码或粘贴长配对码）。手机仅负责展示与交互，命令均在电脑或服务器环境中执行。
   - **iPhone**（iOS 17+）：通过 TestFlight 分发 —— <https://testflight.apple.com/join/qCbA6gMQ>（Apple 测试版审核通过后生效）。
-  - **Android**（8.0+，arm64）：发布页暂不提供预编译 APK，可按 [移动端说明](mobile/README.md#android-构建与签名) 执行 `bash mobile/build.sh android` 自行构建。
+  - **Android**（8.0+，arm64）：下载 [`Super-Cage-0.1.17-android-arm64.apk`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-android-arm64.apk)，对照 `SHA256SUMS` 校验后按系统提示允许安装；之后可在「设置 → 应用更新」里更新。也可按 [移动端说明](mobile/README.md#android-构建与签名) 自行构建。
 
 ---
 
