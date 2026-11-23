@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"github.com/sylvinus/agent-vm/internal/cage"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -268,7 +269,7 @@ func sharedCLIWorkbench(t *testing.T) (*Server, string, *atomic.Bool) {
 	actual, _ := filepath.EvalSymlinks(binary)
 	personal, _ := os.UserHomeDir()
 	quote := func(value string) string { b, _ := json.Marshal(value); return string(b) }
-	policy := "(version 1)(allow default)(deny mach-lookup)(deny file-read-data (subpath " + quote(personal) + ") (subpath \"/Library/Keychains\"))(allow file-read* (literal " + quote(actual) + "))(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))"
+	policy := "(version 1)(allow default)(deny mach-lookup)(deny file-read-data (subpath " + quote(personal) + ") (subpath \"/Library/Keychains\"))(allow file-read* (literal " + quote(actual) + "))(deny file-write* (subpath " + quote(personal) + "))(deny network-outbound)(allow network-outbound (remote ip \"localhost:*\"))"
 	debug := filepath.Join(home, "cli-debug.log")
 	t.Cleanup(func() {
 		if t.Failed() {
@@ -310,6 +311,15 @@ func sharedCLIWorkbench(t *testing.T) (*Server, string, *atomic.Bool) {
 	var resumed atomic.Bool
 	model := mobileTestModel(t, &resumed)
 	t.Cleanup(model.Close)
+	// The guest installs the client runtime component the channel helper
+	// imports (/usr/local/bin/client_runtime.py); the helper also looks next to itself.
+	runtimeDir := filepath.Join(home, ".local/share/cage/cli-channel-code")
+	if err := os.MkdirAll(runtimeDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "client_runtime.py"), []byte(cage.ClientRuntimeHelper), 0600); err != nil {
+		t.Fatal(err)
+	}
 	mobileTestSSH(t, s, home, []string{"HOME=" + home, "PATH=" + bin + ":/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + filepath.Join(home, ".claude"),
 		"ANTHROPIC_API_KEY=" + key, "ANTHROPIC_BASE_URL=" + model.URL, "DISABLE_AUTOUPDATER=1", "TERM=xterm-256color",
 		"HTTPS_PROXY=http://127.0.0.1:1", "HTTP_PROXY=http://127.0.0.1:1", "NO_PROXY=127.0.0.1,localhost"})
