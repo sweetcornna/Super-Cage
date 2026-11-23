@@ -35,7 +35,7 @@ jobs:
           node scripts/check-repository-files.mjs
           node scripts/check-version.mjs
       - name: Script tests
-        run: node --test scripts/release-version.test.mjs scripts/esigner.test.mjs scripts/fetch-build-artifact.test.mjs scripts/windows-native-bridge.test.mjs
+        run: node --test scripts/release-version.test.mjs scripts/release/release-tool.test.mjs scripts/esigner.test.mjs scripts/fetch-build-artifact.test.mjs scripts/windows-native-bridge.test.mjs
       - name: Guest creation preference contracts
         run: |
           node scripts/guest-os/tests/browser-profile.test.mjs

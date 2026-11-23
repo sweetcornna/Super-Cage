@@ -1,0 +1,45 @@
+name: Keep the Windows release caches warm
+# release-build.yml needs the verified QEMU runtime and its corresponding
+# sources from the cache: with them the Windows job takes about 15 minutes,
+# without them about 30. GitHub evicts a cache nobody reads for 7 days, and the
+# fast CI no longer builds on Windows, so read both every few days. The paths
+# must stay identical to .github/actions/windows-toolchain, or the restore
+# looks for a different cache version and finds nothing.
+on:
+  schedule:
+    - cron: '23 4 */3 * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  touch:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Read the verified dependency cache
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            _output/windows-deps
+            _output/linux-deps/mihomo-*.gz
+          key: windows-deps-v2-${{ hashFiles('packaging/windows/dependencies.json', 'packaging/linux/dependencies.json', 'patches/qemu/**', 'scripts/build-qemu-windows.*') }}
+      - name: Read the newest corresponding-source cache
+        id: sources
+        uses: actions/cache/restore@v4
+        with:
+          path: _output/windows-qemu-sources
+          key: cage-qemu-sources-none
+          restore-keys: cage-qemu-sources-
+      - name: Report
+        shell: pwsh
+        env:
+          DEPS: ${{ steps.deps.outputs.cache-hit }}
+          SOURCES: ${{ steps.sources.outputs.cache-matched-key }}
+        run: |
+          if ($env:DEPS -ne 'true') { Write-Warning 'No dependency cache for the current QEMU inputs: the next release build fills it (about 15 extra minutes).' }
+          if (-not $env:SOURCES) { Write-Warning 'No corresponding-source cache: the next release build fills it.' }
+          "deps hit: $env:DEPS; sources: $env:SOURCES"

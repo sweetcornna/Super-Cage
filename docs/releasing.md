@@ -8,7 +8,7 @@
 
 - 工具：Xcode、Go、Node、uv、已登录的 `gh`。Android 安装包还需要 Android SDK（build-tools 35）和 JDK 21。
 - 配置文件 `~/.config/super-cage/release.env`，从 [`scripts/release/release.env.example`](../scripts/release/release.env.example) 复制后 `chmod 600`。文件里写 Developer ID 签名身份、公证用的 App Store Connect API 密钥（.p8 路径、key id、issuer）、Android 密钥库和密码文件的路径。环境变量优先于文件。密码不写进文件，只写保存密码的文件路径。
-- 默认分支上要有 GitHub 工作流 `release-build.yml`。它按指定提交构建 Windows 安装器、Linux .deb 和服务器包。
+- 默认分支上要有 GitHub 工作流 `release-build.yml`。它按指定提交构建 Windows 安装器、Linux .deb 和服务器包。Windows 部分依赖缓存里的 QEMU 运行时和对应源码（命中时约 15 分钟，未命中约 30 分钟）；`keep-release-caches.yml` 每 3 天读一次这两份缓存，防止 GitHub 在 7 天无人读取后清掉它们。
 
 ## 步骤
 
