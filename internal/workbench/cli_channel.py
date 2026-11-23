@@ -789,7 +789,9 @@ def launch(request):
         expected = ROOT.parent / "cli-account-switches" / identifier(request["switch_id"]) / "history.jsonl"
         if Path(request["resume_transcript"]) != expected or not expected.is_file():
             raise ValueError("账号交接历史无效")
-        args += ["--resume", _runtime["path"](expected), "--fork-session", "--session-id", session_id]
+        # Alias the folder, not the file: the CLI resumes a path only when it
+        # ends in .jsonl and searches its session list for anything else.
+        args += ["--resume", str(Path(_runtime["path"](expected.parent)) / expected.name), "--fork-session", "--session-id", session_id]
     else:
         args += ["--resume", session_id] if request.get("resume") else ["--session-id", session_id]
     if state.get("handoff_permission_mode") == "manual":

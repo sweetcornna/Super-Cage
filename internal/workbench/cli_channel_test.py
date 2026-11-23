@@ -236,6 +236,22 @@ class ChannelTests(unittest.TestCase):
         self.assertEqual(execute.call_args.args[1][-2:],["--permission-mode","manual"])
         self.assertTrue(channel.read_json(self.root / connection / "state.json")["resume_task"])
 
+    def test_launch_resumes_a_frozen_history_by_a_jsonl_path(self):
+        # The official CLI resumes a path only when it ends in .jsonl; any other
+        # value opens its session picker as a search (seen with 2.1.330).
+        switch_id,connection=str(uuid.uuid4()),str(uuid.uuid4())
+        frozen=self.root.parent/"cli-account-switches"/switch_id/"history.jsonl"
+        frozen.parent.mkdir(parents=True)
+        frozen.write_text("{}\n")
+        channel.save(frozen.with_name("receipt.json"),{"binding":{},"requests":{}})
+        with patch.object(channel,"migrate_cage_policy"), patch.object(channel.os,"execvpe") as execute:
+            channel.launch({"id":connection,"session_id":self.session,"prefix":["claude"],"resume_transcript":str(frozen),"switch_id":switch_id})
+        args=execute.call_args.args[1]
+        resumed=args[args.index("--resume")+1]
+        self.assertTrue(resumed.endswith("/history.jsonl"),resumed)
+        self.assertNotIn("cage",resumed.lower())
+        self.assertEqual(Path(resumed).resolve(),frozen.resolve())
+
     def test_launch_selects_the_configured_session_channel(self):
         connection = str(uuid.uuid4())
         with patch.object(channel, "migrate_cage_policy"), patch.object(channel.os, "execvpe") as execute:
