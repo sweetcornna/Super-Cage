@@ -6,10 +6,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { Readable } from 'node:stream';
-import { compareVersions, nextVersion, parseVersion, versionFiles } from './release-version.mjs';
+import { compareVersions, iosProjectPath, nextVersion, parseVersion, versionFiles } from './release-version.mjs';
 import { prepareReleaseAssets } from './prepare-release-assets.mjs';
 
-export const versionPaths = ['VERSION', 'ui/package.json', 'ui/package-lock.json', 'www/package.json', 'www/package-lock.json'];
+export const versionPaths = ['VERSION', 'ui/package.json', 'ui/package-lock.json', 'www/package.json', 'www/package-lock.json', iosProjectPath];
 const repoRoot = fileURLToPath(new URL('../', import.meta.url));
 const shaPattern = /^[0-9a-f]{40}$/;
 const platforms = ['macos', 'windows', 'linux'];
@@ -81,7 +81,7 @@ export async function verifyCandidate(api, context, expected) {
   const diff = await api('GET', `${base}/compare/${context.sourceSha}...${context.commitSha}`);
   if (diff.status !== 'ahead' || diff.ahead_by !== 1 || diff.files?.length !== versionPaths.length ||
       diff.files.some(file => file.status !== 'modified' || !versionPaths.includes(file.filename))) {
-    throw new Error('Release candidate must change only the five application version files.');
+    throw new Error('Release candidate must change only the six application version files.');
   }
   for (const [path, content] of expected) {
     const file = await api('GET', `${base}/contents/${path}?ref=${context.commitSha}`);

@@ -9,6 +9,7 @@ import {
   assembleRelease, expectedFiles, prepareRelease, publishRelease, releaseFiles,
   verifyCandidate, versionPaths, workflowContext, releaseNotes,
 } from './release-control.mjs';
+import { iosProjectPath } from './release-version.mjs';
 
 const repository = 'Lee-xeo/Claude-Cage';
 const base = `/repos/${repository}`;
@@ -46,6 +47,8 @@ async function repositoryFixture(t) {
     await writeFile(join(root, directory, 'package.json'), JSON.stringify(manifest, null, 2) + '\n');
     await writeFile(join(root, directory, 'package-lock.json'), JSON.stringify(lock, null, 2) + '\n');
   }
+  await mkdir(join(root, dirname(iosProjectPath)), { recursive: true });
+  await writeFile(join(root, iosProjectPath), `{\n\t\t01 = {buildSettings = {MARKETING_VERSION = ${currentVersion}; CURRENT_PROJECT_VERSION = 1;}; name = Debug;};\n\t\t02 = {buildSettings = {MARKETING_VERSION = ${currentVersion}; CURRENT_PROJECT_VERSION = 1;}; name = Release;};\n}\n`);
   git(['add', '--', ...versionPaths]);
   git(['commit', '--quiet', '-m', 'Fixture source']);
   const sourceSha = git(['rev-parse', 'HEAD']);
@@ -256,7 +259,7 @@ test('candidate verification rejects extra files and dependency edits hidden in 
     const treeSha = await f.tree(f.git(['rev-parse', `${candidate.sourceSha}^{tree}`]), [...changed].map(([path, content]) => ({ path, content })));
     const message = f.git(['show', '-s', '--format=%B', candidate.commitSha]);
     const commitSha = f.git(['commit-tree', treeSha, '-p', candidate.sourceSha], { input: message });
-    await assert.rejects(verifyCandidate(f.api, { ...candidate, commitSha }, expected), /only the five|unexpected change/);
+    await assert.rejects(verifyCandidate(f.api, { ...candidate, commitSha }, expected), /only the six|unexpected change/);
   });
 });
 
