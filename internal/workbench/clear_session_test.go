@@ -738,6 +738,50 @@ func TestPhoneFollowsTheClearInTheCLIsOrder(t *testing.T) {
 	}
 }
 
+// An entry opened again after its terminal closed: the first launch's closed
+// connection is left on the id it ran. After /clear the guest reports the old
+// id on that connection (not running), the new id on the open terminal's.
+// Views alone follow the /clear, and the old connection never resumes the part.
+func TestClearAfterReopeningFollowsPastTheFirstLaunch(t *testing.T) {
+	pace := conversationFollowPace
+	conversationFollowPace = 0
+	t.Cleanup(func() { conversationFollowPace = pace })
+	f := newClearFixture(t)
+	a, b, first := f.record(t).CLIID, uuid.NewString(), uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	stale := terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Connection: first, Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}}
+	f.view(t, a, stale)
+	// /clear: the new id is known only from the channel state; a list meanwhile
+	// takes the old id's leftover connection.
+	f.observe(f.item(a, first, "整理发布流程", false), f.item(b, f.connection, untitledTitle, true))
+	f.list(t)
+	if record := f.record(t); record.CLIID != a {
+		t.Fatalf("linked before the transcript: %+v", record)
+	}
+	// The guest lists the newest first.
+	f.observe(f.item(b, f.connection, clearedTitle, true), f.item(a, first, "整理发布流程", false))
+	deadline := time.Now().Add(10 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("views alone did not follow the /clear: %+v", f.record(t))
+		}
+		if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range 3 {
+		if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+			t.Fatalf("lists: %+v", list)
+		}
+	}
+	if record := f.record(t); record.CLIID != b || len(record.Cleared) != 1 || record.Cleared[0].CLIID != a {
+		t.Fatalf("the old connection resumed the earlier part: %+v", record)
+	}
+}
+
 // After a restart nothing has loaded the catalog when the phone, already inside
 // the conversation, polls only its view: the follow-up look loads it itself
 // (a discovery on an unloaded catalog would panic on a new entry).

@@ -392,7 +392,9 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 			continue
 		}
 		if known[item.CLIID] != nil {
-			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil {
+			// Only a running CLI resumes: a reopened entry's first launch leaves
+			// its closed connection on the id it ran, which is now a part.
+			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil && item.Running {
 				s.resumeEarlierPart(m, owner, item.CLIID, present)
 			}
 			continue
@@ -506,12 +508,20 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
-	if current.Connection == "" {
-		// The guest has no connection on this id while the entry's terminal
-		// still runs a conversation: its CLI moved to another id (/clear, or a
-		// /resume inside it). Checked on every view, as the new id's transcript
-		// appears only with the next prompt.
-		if terminal := s.boundTerminal(record); record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
+	terminal := s.boundTerminal(record)
+	bound := ""
+	if terminal != nil {
+		terminal.mu.Lock()
+		bound = terminal.connectionID
+		terminal.mu.Unlock()
+	}
+	// A reopened entry's first launch leaves its closed connection on this id.
+	if current.Connection == "" || !current.Running && bound != "" && bound != current.Connection {
+		// The guest has no live connection on this id while the entry's
+		// terminal still runs a conversation: its CLI moved to another id
+		// (/clear, or a /resume inside it). Checked on every view, as the new
+		// id's transcript appears only with the next prompt.
+		if record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
 			s.followConversationID()
 		}
 	}
