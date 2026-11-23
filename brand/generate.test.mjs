@@ -107,7 +107,6 @@ test("PNG outputs have the expected size and channels", () => {
     assert.deepEqual([info.width, info.height, info.colorType], [px, px, colorType], path);
   };
   for (const [px, name] of MAC_SIZES) expect(PATHS.macIconset + "/" + name + ".png", px, 6);
-  expect(PATHS.logo, 1024, 6);
   for (const px of LINUX_SIZES) expect(PATHS.linuxIcons + "/hicolor/" + px + "x" + px + "/apps/" + PATHS.linuxName + ".png", px, 6);
   expect(PATHS.catalog + "/AppIcon.appiconset/AppIcon.png", 1024, 2); // RGB: the App Store rejects an alpha channel
   for (const { dir, png, extra } of WEB_DIRS) {

@@ -44,7 +44,7 @@ body:
     id: host-system
     attributes:
       label: 主机系统
-      description: 主机是运行 Super Cage 的电脑。Issue 会按所选系统添加标签，交给对应平台的维护者。
+      description: 主机是运行 Super Cage 的电脑。
       options:
         - macOS
         - Windows

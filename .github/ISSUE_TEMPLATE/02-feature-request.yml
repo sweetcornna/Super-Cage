@@ -31,7 +31,7 @@ body:
     id: host-systems
     attributes:
       label: 涉及的主机系统
-      description: 主机是运行 Super Cage 的电脑，可多选；适用于所有平台时全部选中。Issue 会按所选系统添加标签，交给对应平台的维护者。
+      description: 主机是运行 Super Cage 的电脑，可多选；适用于所有平台时全部选中。
       multiple: true
       options:
         - macOS

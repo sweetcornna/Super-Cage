@@ -48,11 +48,6 @@ export function inspectDependency(name, prefix) {
   return { spec, formula, receipt: { ...selected, source: { spec: 'stable', version: spec.version, tap: receipt.source.tap, tap_git_head: receipt.source.tap_git_head } } };
 }
 
-function isIntel() {
-  const arch = process.env.CAGE_MACOS_GUEST_ARCH || process.arch;
-  return arch === 'x86_64' || arch === 'x64';
-}
-
 function brewDependency(name) {
   let prefix;
   try { prefix = realpathSync(run('brew', ['--prefix', name]).trim()); }
@@ -71,7 +66,7 @@ function brewDependency(name) {
 
 export function checkDependencies() {
   const problems = [];
-  for (const name of isIntel() ? ['gettext'] : Object.keys(inputs)) {
+  for (const name of Object.keys(inputs)) {
     try { brewDependency(name); }
     catch (error) { problems.push(error.message); }
   }
@@ -111,20 +106,10 @@ export function extractLicenses(archive, output, component) {
 export function prepare(sdk, output) {
   if (existsSync(output)) throw new Error('Source materials destination already exists.');
   // Resolve and verify all installed recipes before downloading or compiling.
-  const intel = isIntel();
-  const installed = Object.fromEntries(['glib', 'gettext', 'pcre2'].map(name => {
-    if (intel && name !== 'gettext') {
-      const prefix = resolve(here, '../../_output/intel-runtime/dependencies');
-      const spec = lock.intel[name];
-      if (!existsSync(join(prefix, 'lib', name === 'glib' ? 'libglib-2.0.a' : 'libpcre2-8.a'))) throw new Error('Build the Intel runtime dependencies before packaging SSHFS.');
-      return [name, { prefix, spec, receipt: { source: { spec: 'stable', version: spec.version }, arch: 'x86_64', builder: 'scripts/build-intel-macos-runtime.sh', minimum_macos: '14.0' } }];
-    }
-    return [name, brewDependency(name)];
-  }));
+  const installed = Object.fromEntries(['glib', 'gettext', 'pcre2'].map(name => [name, brewDependency(name)]));
   mkdirSync(output, { recursive: true });
   copy(join(here, 'rebuild-macos-sshfs.sh'), join(output, 'rebuild-macos-sshfs.sh'));
   copy(join(here, 'macos-guest-arch.sh'), join(output, 'macos-guest-arch.sh'));
-  if (intel) copy(join(here, '../build-intel-macos-runtime.sh'), join(output, 'cage/build-intel-macos-runtime.sh'));
   copy(join(here, '../../LICENSE'), join(output, 'cage/LICENSE'));
   for (const file of ['sshfs-openwith.patch', 'macos-fuse-media.sh', 'macos-sshfs-dependencies.json']) copy(join(here, file), join(output, 'cage', file));
   copy(join(here, 'macos-sshfs-source-README'), join(output, 'README'));

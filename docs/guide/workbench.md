@@ -28,8 +28,8 @@ Linux 环境默认缓存项目文件的名称与属性，减少每次读取都�
 共享文件在环境内显示为当前用户所有，Git 可正常读取已打开项目的状态与历史。文件内容仍属于原来的主机目录，Git 元数据与项目一起共享，环境中的 Git 操作会直接更新主机仓库。授权目录内的隐藏文件、工具配置、Git 配置和钩子均按普通项目文件共享。Super Cage 不按文件名额外隐藏文件或禁止写入；云端共享的整目录只读授权仍然生效。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/first-start.jpg" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/first-start.jpg" alt="工作台侧栏、默认项目与终端入口（环境未启动）" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>工作台侧栏、默认项目与终端入口（环境未启动）。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/first-start.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/first-start.jpg" target="_blank" rel="noopener"><img src="images/first-start.jpg" alt="工作台侧栏、默认项目与终端入口（环境未启动）" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>工作台侧栏、默认项目与终端入口（环境未启动）。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/first-start.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## Git 提交与 GitHub 登录

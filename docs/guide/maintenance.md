@@ -12,8 +12,8 @@ keywords: 更新 升级 卸载 备份 迁移 存储 D盘 内存 CPU OOM 资源 �
 云端的数据在服务器上，包含配置、项目及容器引擎的持久文件系统。本机只保留连接和明确下载的副本。不要仅备份一份账户文件，或把重建账户当作恢复。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/environment-maintenance.jpg" target="_blank" rel="noopener" aria-label="查看原图：环境存储位置与版本组件入口"><img src="../../www/public/docs/screenshots/environment-maintenance.jpg" alt="环境存储位置与版本组件入口" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>环境存储位置与版本组件入口。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/environment-maintenance.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/environment-maintenance.jpg" target="_blank" rel="noopener" aria-label="查看原图：环境存储位置与版本组件入口"><img src="images/environment-maintenance.jpg" alt="环境存储位置与版本组件入口" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>环境存储位置与版本组件入口。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/environment-maintenance.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 环境清理
@@ -45,8 +45,8 @@ keywords: 更新 升级 卸载 备份 迁移 存储 D盘 内存 CPU OOM 资源 �
 目标盘须有足够空间并支持权限和稀疏文件。外接盘以后每次启动前都要接回；找不到磁盘时先连接原盘，不要新建环境覆盖状态。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/resources-manual.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动调整内存与 CPU 上限的表单"><img src="../../www/public/docs/screenshots/resources-manual.jpg" alt="手动调整内存与 CPU 上限的表单" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>手动调整内存与 CPU 上限的表单。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/resources-manual.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/resources-manual.jpg" target="_blank" rel="noopener" aria-label="查看原图：手动调整内存与 CPU 上限的表单"><img src="images/resources-manual.jpg" alt="手动调整内存与 CPU 上限的表单" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>手动调整内存与 CPU 上限的表单。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/resources-manual.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 设置 CPU 与内存
@@ -78,8 +78,8 @@ Windows 自动安装失败时，会先核对原程序是否完整；原程序完
 Windows v0.1.7 升级到包含自动更新修复的后续版本时，需要手动安装一次完整安装包：先保存工作、停止环境并退出 Super Cage，再运行修正版安装器，沿用原安装目录和同一 Windows 用户。安装会保留账户、配置、登录凭据、项目和原有环境磁盘。重新打开后核对账户、项目与环境；此后的版本可继续通过应用内更新。若旧更新已留下待处理的恢复回执，先按下文的恢复说明处理。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/windows-native-storage.png" target="_blank" rel="noopener" aria-label="查看原图：Windows 原生应用的版本与环境维护"><img src="../../www/public/docs/screenshots/windows-native-storage.png" alt="Windows 原生应用的版本与环境维护" width="1259" height="759" loading="lazy" decoding="async" /></a>
-  <figcaption>Windows 原生应用的版本与环境维护。截图版本：0.1.5-alpha.2（测试构建） · Windows 11 x64 原生应用 · 2026-11-06。<a href="../../www/public/docs/screenshots/windows-native-storage.png" target="_blank" rel="noopener">查看原图（1259 × 759） ↗</a></figcaption>
+  <a href="images/windows-native-storage.png" target="_blank" rel="noopener" aria-label="查看原图：Windows 原生应用的版本与环境维护"><img src="images/windows-native-storage.png" alt="Windows 原生应用的版本与环境维护" width="1259" height="759" loading="lazy" decoding="async" /></a>
+  <figcaption>Windows 原生应用的版本与环境维护。截图版本：0.1.5-alpha.2（测试构建） · Windows 11 x64 原生应用 · 2026-11-06。<a href="images/windows-native-storage.png" target="_blank" rel="noopener">查看原图（1259 × 759） ↗</a></figcaption>
 </figure>
 
 ## 恢复配置与导出诊断
