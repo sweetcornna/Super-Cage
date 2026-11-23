@@ -273,9 +273,14 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 		// headroom under host pressure never reads as a shortage).
 		// A nested guest under pressure that its machine cannot back is a
 		// shortage too; a nested guest that only lacks headroom is not.
+		// A nested guest's start (NestedStart) is short too, so that it also
+		// grows while the host is in pressure, but its need is exact: what it
+		// must map beyond this working set, with no growth step on top.
 		if entry.GuestStall >= memoryShortStall || in.swapIn[id] || entry.GuestAvailable < memoryMinHeadroom/2 || entry.NestedPressure && entry.NestedShort > 0 {
 			short[id] = true
-			d = max(d, entry.Limit+max(int64(memoryShrinkStep), entry.Limit/4))
+			if !entry.NestedStart || entry.GuestStall >= memoryShortStall || in.swapIn[id] || entry.GuestAvailable < memoryMinHeadroom/2 {
+				d = max(d, entry.Limit+max(int64(memoryShrinkStep), entry.Limit/4))
+			}
 		}
 		d += max(entry.NestedShort, 0)
 		d = min(ceiling, max(guarantee, roundUpMemory(d)))
