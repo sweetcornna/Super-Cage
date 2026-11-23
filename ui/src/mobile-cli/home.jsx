@@ -5,6 +5,7 @@ import { Composer, useAttachments } from "./composer";
 import { InlineSelect } from "./inline-select";
 import { ProviderBadge } from "./session-row";
 import { environmentSummary } from "./environment-state.mjs";
+import { runningText } from "./tasks.mjs";
 
 export function greeting(date = new Date()) {
   const h = date.getHours();
@@ -66,9 +67,10 @@ export function Home({ catalog, project, onProject, provider, onProvider, creati
     </nav>
     {recent.length > 0 && <section className="recent" aria-label="最近的对话">
       <h2>最近</h2>
-      <ul>{recent.map((s) => <li key={s.id}><button type="button" aria-label={s.title || "新会话"} onClick={() => onSession(s.workspace, s.id)}>
+      <ul>{recent.map((s) => <li key={s.id}><button type="button" aria-label={(s.title || "新会话") + (s.running_tasks > 0 ? "，" + runningText(s.running_tasks) : "")} onClick={() => onSession(s.workspace, s.id)}>
         <span className="recent-title">{s.title || "新会话"}</span>
         <small><ProviderBadge provider={s.provider} />{names.get(s.workspace) || ""}{s.updated_at ? " · " + formatTime(s.updated_at) : ""}</small>
+        {s.running_tasks > 0 && <small className="task-marker">{runningText(s.running_tasks)}</small>}
         {s.active && <i className="live-dot" aria-label="正在运行" />}
       </button></li>)}</ul>
     </section>}

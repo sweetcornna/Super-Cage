@@ -1,6 +1,7 @@
 import React, { useRef, useState } from "react";
 import { Archive, LoaderCircle, MoreHorizontal, Pencil, Pin, PinOff, Terminal } from "lucide-react";
 import { useBackDismiss } from "./web-shell.mjs";
+import { runningText } from "./tasks.mjs";
 
 export function ProviderBadge({ provider }) {
   return provider === "codex" ? <span className="provider-badge codex">Codex</span> : null;
@@ -68,9 +69,10 @@ export function SessionRow({ session, current, disabled, onSelect, onAction, det
         if (event.key === "ArrowLeft") { event.preventDefault(); setRevealed(true); }
         if (event.key === "ArrowRight" || event.key === "Escape" && revealed) { event.preventDefault(); event.stopPropagation(); setRevealed(false); }
       }}>
-      <button ref={selection} type="button" className="session-select" aria-label={session.title || "新会话"} aria-current={current ? "page" : undefined} disabled={disabled}
+      <button ref={selection} type="button" className="session-select" aria-label={(session.title || "新会话") + (session.running_tasks > 0 ? "，" + runningText(session.running_tasks) : "")} aria-current={current ? "page" : undefined} disabled={disabled}
         onClick={() => { if (revealed) setRevealed(false); else onSelect(); }}>
-        <Terminal size={15}/><span className="row-detail"><strong>{session.title || "新会话"}</strong>{detail && <small>{detail}</small>}</span>
+        <Terminal size={15}/><span className="row-detail"><strong>{session.title || "新会话"}</strong>{detail && <small>{detail}</small>}
+          {session.running_tasks > 0 && <small className="task-marker">{runningText(session.running_tasks)}</small>}</span>
         <ProviderBadge provider={session.provider} />
         {session.pinned && <Pin size={12} aria-label="已置顶"/>}
         {session.active && <LoaderCircle size={13} className="spin" role="img" aria-label="会话正在运行"/>}
