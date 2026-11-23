@@ -101,9 +101,33 @@ class ChannelTests(unittest.TestCase):
         channel.save(self.root/connection/"state.json",state)
         completed=type("Result",(),{"returncode":0,"stdout":"[]"})()
         with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
-            with self.assertRaisesRegex(ValueError,"工具"): channel.prepare_account_switch(request)
+            with self.assertRaisesRegex(ValueError,"switch:tools"): channel.prepare_account_switch(request)
         self.assertTrue(path.exists())
         self.assertFalse((self.root.parent/"cli-account-switches"/switch_id/"history.jsonl").exists())
+
+    def test_account_switch_follows_the_session_into_subdirectories(self):
+        # A session is identified by the folder it started in. Rows recorded in a
+        # subdirectory or worktree of the project must not refuse the handoff.
+        sub=self.project+"/packages/app"
+        path=self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
+        with path.open("a") as stream:
+            stream.write(json.dumps({"cwd":sub,"uuid":str(uuid.uuid4()),"type":"assistant","message":{"content":"working below"}})+"\n")
+        connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":sub,"root":self.project,"target_cli_id":target,"switch_id":switch_id}
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":sub})
+        completed=type("Result",(),{"returncode":0,"stdout":"[]"})()
+        with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
+            result=channel.prepare_account_switch(request)
+        self.assertEqual(result["workspace"],self.project)
+        self.assertEqual(Path(result["transcript"]).read_bytes(),path.read_bytes())
+        # A history that started in another project still does not continue here.
+        other=str(uuid.uuid4())
+        self.history(other,str(self.home/"elsewhere"),[{"type":"user","message":{"content":"start"}}])
+        connection=str(uuid.uuid4())
+        request={**request,"cli_id":other,"connection":connection,"switch_id":str(uuid.uuid4()),"workspace":self.project}
+        channel.save(self.root/connection/"state.json",{"cli_id":other,"config":request["config"],"workspace":self.project})
+        with patch.object(channel,"active_sessions",return_value=[]),patch.object(channel.subprocess,"run",return_value=completed):
+            with self.assertRaisesRegex(ValueError,"switch:project"): channel.prepare_account_switch(request)
 
     def test_failure_hook_reports_kind_and_new_turn_clears_it(self):
         payload={"hook_event_name":"StopFailure","session_id":self.session,"error":"rate_limit","error_details":"private upstream diagnostic"}

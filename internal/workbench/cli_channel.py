@@ -549,16 +549,16 @@ def prepare_account_switch(request):
     if receipt.exists():
         saved = read_json(receipt)
         if saved["binding"] != binding:
-            raise ValueError("账号交接编号已用于另一项操作")
-        return {"transcript": str(folder / "history.jsonl")}
+            raise ValueError("switch:reused")
+        return {"transcript": str(folder / "history.jsonl"), "workspace": saved.get("workspace", "")}
     with state_file(connection) as state:
-        if state.get("cli_id") != sid or state.get("config") != str(config) or state.get("workspace") != workspace:
-            raise ValueError("原会话身份或项目已变化，请刷新后重试")
+        if state.get("cli_id") != sid or state.get("config") != str(config) or not workspace_within(state.get("workspace", ""), request.get("root", workspace)):
+            raise ValueError("switch:changed")
         if state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent"):
-            raise ValueError("原会话仍有任务、待发消息或审批，请结束后再切换账号")
+            raise ValueError("switch:busy")
         existing = state.get("account_switch")
         if existing and existing != switch_id:
-            raise ValueError("此会话已有账号交接尚未完成")
+            raise ValueError("switch:pending")
         state["account_switch"] = switch_id
         save(ROOT / connection / "state.json", state)
     rows = active_sessions(sid, str(config))
@@ -566,12 +566,12 @@ def prepare_account_switch(request):
     # child of the source. The registry does not expose a complete ancestry.
     listing = subprocess.run(["claude", "agents", "--json"], env={**os.environ, "CLAUDE_CONFIG_DIR": str(config)}, capture_output=True, text=True, timeout=10)
     if listing.returncode != 0:
-        raise ValueError("无法确认后台任务，未切换账号")
+        raise ValueError("switch:listing")
     if any(row.get("sessionId") != sid and live(row.get("pid")) for row in json.loads(listing.stdout)):
-        raise ValueError("原账号仍有其他执行任务，请结束后台任务后再交接")
+        raise ValueError("switch:siblings")
     for row in rows:
         if row.get("cwd") != workspace or row.get("status") != "idle" or row.get("kind") != "interactive":
-            raise ValueError("原 Claude Code 尚未安全停止，请先结束本轮任务")
+            raise ValueError("switch:running")
     pid = state.get("pid")
     fingerprint = process_fingerprint(pid) if live(pid) else ""
     def executing():
@@ -582,7 +582,7 @@ def prepare_account_switch(request):
         status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
         return bool(status.stdout.strip()) and not status.stdout.lstrip().startswith("Z")
     if executing() and not any(row.get("pid") == pid for row in rows):
-        raise ValueError("无法核对原进程状态，请先退出原 Claude Code 后重试")
+        raise ValueError("switch:process")
     for row in rows:
         terminate_cli(row["pid"])
     deadline = time.monotonic() + 5
@@ -599,17 +599,18 @@ def prepare_account_switch(request):
             while executing() and time.monotonic() < deadline:
                 time.sleep(.05)
     if executing():
-        raise ValueError("原进程尚未退出，未启动目标账号")
+        raise ValueError("switch:exit")
     path = next((config / "projects").glob("*/" + sid + ".jsonl"), None)
     if path is None or path.is_symlink():
-        raise ValueError("原会话历史不可用，未切换账号")
-    pending = set()
+        raise ValueError("switch:history")
+    pending, first = set(), ""
     for line in path.read_text().splitlines():
         row = json.loads(line)
         if row.get("isSidechain"):
             continue
-        if row.get("cwd") and row["cwd"] != workspace:
-            raise ValueError("历史项目与当前项目不一致")
+        # A session belongs to the folder it started in. Later rows follow the
+        # CLI into subdirectories and worktrees and are not a project identity.
+        first = first or row.get("cwd") or ""
         blocks = (row.get("message") or {}).get("content", [])
         if not isinstance(blocks, list):
             continue
@@ -618,18 +619,20 @@ def prepare_account_switch(request):
                 pending.add(block["id"])
             elif block.get("type") == "tool_result":
                 pending.discard(block.get("tool_use_id"))
+    if not workspace_within(first, request.get("root", workspace)):
+        raise ValueError("switch:project")
     if pending:
-        raise ValueError("历史仍有结果未确认的工具，不能自动接续")
+        raise ValueError("switch:tools")
     folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
     target = folder / "history.jsonl"
     with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:
         stream.write(path.read_bytes())
         temporary = stream.name
     os.replace(temporary, target)
-    save(receipt, {"binding": binding, "requests": state.get("requests", {})})
+    save(receipt, {"binding": binding, "requests": state.get("requests", {}), "workspace": first})
     with state_file(connection) as state:
         state["closed"] = True
-    return {"transcript": str(target)}
+    return {"transcript": str(target), "workspace": first}
 
 
 def cancel_account_switch(request):
@@ -637,7 +640,7 @@ def cancel_account_switch(request):
     switch_id = identifier(request["switch_id"])
     with state_file(connection) as state:
         if state.get("cli_id") != identifier(request["cli_id"]) or state.get("account_switch") not in (None, switch_id):
-            raise ValueError("原会话交接已变化")
+            raise ValueError("switch:cancel")
         state.pop("account_switch", None)
     # The source may already be stopped, but it remains resumable. Remove only
     # this operation's frozen copy so a later retry cannot use stale history.

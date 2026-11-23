@@ -252,21 +252,28 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		}
 		var result struct {
 			Transcript string `json:"transcript"`
+			Workspace  string `json:"workspace"`
 			Error      string `json:"error"`
 		}
 		if sw.Source.Config == "" || sw.Connection == "" {
 			return fail(errors.New("原会话连接尚未就绪，请先打开原会话"))
 		}
-		query := map[string]any{"cli_id": sw.Source.CLIID, "config": sw.Source.Config, "connection": sw.Connection, "workspace": record.GuestWorkspace, "target_cli_id": sw.TargetID, "switch_id": sw.ID}
+		// The session's project, not the folder its CLI is in now, decides
+		// whether its history may continue here.
+		root := s.cliConversationRoot(record)
+		query := map[string]any{"cli_id": sw.Source.CLIID, "config": sw.Source.Config, "connection": sw.Connection, "workspace": record.GuestWorkspace, "root": root, "target_cli_id": sw.TargetID, "switch_id": sw.ID}
 		if err := s.windowsConversationInput(record, query); err != nil {
 			return fail(err)
+		}
+		if s.windowsGuest != nil {
+			delete(query, "root") // the workspace is the registered project folder
 		}
 		err = s.runCLIChannel(ctx, "account-switch", query, &result)
 		if err != nil {
 			return fail(err)
 		}
 		if result.Error != "" {
-			return fail(errors.New(result.Error))
+			return fail(claudeSwitchRefusal(result.Error))
 		}
 		if !strings.HasPrefix(result.Transcript, "/") && !(s.windowsGuest != nil && windowsCLIAbsolutePath(result.Transcript)) {
 			return fail(errors.New("原会话历史未确认，未启动目标账号"))
@@ -279,6 +286,9 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		record.GuestConfig, record.Connection, record.TerminalID = "", "", ""
 		record.Resume, record.TerminalRunning, record.Active = false, false, false
 		record.ResumeTranscript = result.Transcript
+		if result.Workspace != "" && cliWorkspaceWithin(result.Workspace, root, s.windowsGuest != nil) {
+			record.GuestWorkspace = result.Workspace // the target starts in the session's own folder
+		}
 		record.AccountFailure = ""
 		sw.Phase, sw.Error = "prepared", ""
 		if err := s.saveClaudeSwitch(record); err != nil {
@@ -366,10 +376,36 @@ func (s *Server) cancelClaudeSwitch(ctx context.Context, id, requestID string) e
 		return err
 	}
 	if !response.OK {
-		return errors.New(response.Error)
+		return claudeSwitchRefusal(response.Error)
 	}
 	record.Switch = nil
 	return s.saveClaudeSwitch(record)
+}
+
+// The guest helper names a refusal with a short code, which keeps its
+// embedded command within Windows' command-line limit. The host says it in
+// one sentence that names the thing and the next step, the same on every device.
+var claudeSwitchRefusals = map[string]string{
+	"switch:reused":   "这次交接的编号已用于另一项操作：刷新会话后重新选择目标账号。",
+	"switch:changed":  "原会话的身份或项目已变化：刷新会话后再切换。",
+	"switch:busy":     "原会话仍有任务、待发消息或审批：等本轮结束后再切换。",
+	"switch:pending":  "这段会话还有一次账号交接没有完成：点“重试账号交接”。",
+	"switch:listing":  "无法读取原账号的运行列表，未切换：稍后重试。",
+	"switch:siblings": "原账号仍有其他执行任务，请结束后台任务后再交接。",
+	"switch:running":  "原会话的 Claude Code 仍在执行本轮任务：等它结束后再切换。",
+	"switch:process":  "无法确认原会话的 Claude Code 进程：在原终端退出 Claude Code 后再切换。",
+	"switch:exit":     "原进程尚未退出，未切换：稍后点“重试账号交接”。",
+	"switch:history":  "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。",
+	"switch:project":  "这段会话的历史属于另一个项目文件夹：从那个项目打开它后再切换。",
+	"switch:tools":    "历史仍有结果未确认的工具，不能自动接续。",
+	"switch:cancel":   "原会话的交接已变化：刷新会话后再操作。",
+}
+
+func claudeSwitchRefusal(message string) error {
+	if sentence, ok := claudeSwitchRefusals[message]; ok {
+		return errors.New(sentence)
+	}
+	return errors.New(message)
 }
 
 // Preserve metadata written concurrently while committing execution ownership.

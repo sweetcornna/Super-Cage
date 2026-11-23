@@ -37,6 +37,17 @@ func TestClaudeAutomaticSwitchRequiresQuotaAndConsent(t *testing.T) {
 	}
 }
 
+func TestClaudeSwitchRefusalNamesTheNextStep(t *testing.T) {
+	for code, sentence := range claudeSwitchRefusals {
+		if got := claudeSwitchRefusal(code).Error(); got != sentence || !strings.Contains(got, "：") && !strings.Contains(got, "，") {
+			t.Fatal(code, got)
+		}
+	}
+	if got := claudeSwitchRefusal("older helper text").Error(); got != "older helper text" {
+		t.Fatal("an older guest helper's sentence must pass through", got)
+	}
+}
+
 func TestClaudeSchedulingModesAndPersistence(t *testing.T) {
 	s := testServer(t)
 	a, b := strings.Repeat("a", 24), strings.Repeat("b", 24)

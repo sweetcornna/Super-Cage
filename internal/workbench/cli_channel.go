@@ -338,13 +338,7 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
-	root := s.cliWorkspace(record.Workspace)
-	if legacy := s.macOSLegacyWorkspace(record); legacy != "" {
-		root = legacy
-	}
-	if s.windowsGuest != nil {
-		root = record.GuestWorkspace
-	}
+	root := s.cliConversationRoot(record)
 	if current.Workspace == "" && !current.HasHistory && record.TerminalID != "" {
 		if record.Switch != nil && record.Switch.Phase == "starting" && !current.Running {
 			if owner := s.terminals.get(record.TerminalID); owner == nil || !owner.ownsConversation() {
@@ -427,6 +421,18 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		}
 	}
 	return record.snapshot(), nil
+}
+
+// cliConversationRoot is the guest folder of the project a terminal
+// conversation is bound to; its CLI may work in a folder below it.
+func (s *Server) cliConversationRoot(record *mobileRecord) string {
+	if s.windowsGuest != nil {
+		return record.GuestWorkspace
+	}
+	if legacy := s.macOSLegacyWorkspace(record); legacy != "" {
+		return legacy
+	}
+	return s.cliWorkspace(record.Workspace)
 }
 
 func (s *Server) terminalConversationAction(ctx context.Context, id string, input map[string]any) (mobileSession, error) {
