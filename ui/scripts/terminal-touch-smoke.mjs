@@ -188,6 +188,7 @@ async function phone() {
     await page.keyboard.type("y");
     await sleep(400);
     assert.equal(resizes.length, typedSized + 1, "at most one size every five seconds");
+    await until(() => typed().endsWith("xy"), "the typed keys did not reach the terminal");
     assert.deepEqual(errors, []);
   } finally {
     await context.close();
