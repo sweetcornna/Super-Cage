@@ -116,7 +116,12 @@ async function newPage(hide = true) {
 const net = page => page.evaluate(() => window.__net);
 const bridge = page => page.evaluate(() => window.__bridge);
 let shotNumber = 0;
-const shot = async (page, name) => { await page.screenshot({ path: join(shots, String(++shotNumber).padStart(2, "0") + "-" + name + ".png") }); };
+// Taken once the page has settled: a closing drawer or an opening sheet is waited out, except the drawer shot itself.
+const shot = async (page, name, { opened = false } = {}) => {
+  if (!opened) await page.waitForFunction(() => !document.querySelector("dialog.workspace-drawer")?.open);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: join(shots, String(++shotNumber).padStart(2, "0") + "-" + name + ".png") });
+};
 let lastPage = null;
 const step = async (name, run) => {
   process.stdout.write("  " + name + " ... ");
@@ -180,7 +185,7 @@ await step("side panel shows the device name, projects and sessions", async () =
   await openDrawer(page);
   assert.match(await drawer(page).locator(".drawer-brand small").innerText(), /示例工作台 · 演示数据/);
   for (const title of ["把首页标题改得更醒目", "运行测试（审批示例）"]) await drawer(page).getByRole("button", { name: title, exact: true }).waitFor();
-  await shot(page, "drawer");
+  await shot(page, "drawer", { opened: true });
   await drawer(page).getByRole("button", { name: "项目 读书笔记", exact: true }).tap();
   await drawer(page).getByRole("button", { name: "整理本周读书计划", exact: true }).waitFor();
 });
