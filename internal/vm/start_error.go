@@ -84,5 +84,18 @@ func vmStartError(cause error, instanceDir string, since time.Time) error {
 	if len(summary) > 2048 {
 		summary = strings.ToValidUTF8(summary[:2048], "")
 	}
+	if qemuMemoryFailure(summary) {
+		return fmt.Errorf("QEMU 启动失败：内存不足，这台机器现在映射不了环境的内存上限（%s）；%w", summary, cause)
+	}
 	return fmt.Errorf("QEMU 启动失败：%s；%w", summary, cause)
+}
+
+// qemuMemoryFailure reports QEMU's stderr when the kernel refused the guest's
+// memory (vm.overcommit_memory: one mapping larger than the machine can
+// commit). cage.PrepareBoot avoids it; it can still happen when the machine
+// shrinks between that check and QEMU's start.
+func qemuMemoryFailure(message string) bool {
+	lower := strings.ToLower(message)
+	return strings.Contains(lower, "cannot set up guest memory") ||
+		strings.Contains(lower, "cannot allocate memory") && (strings.Contains(lower, "pc.ram") || strings.Contains(lower, "memory-backend") || strings.Contains(lower, "guest memory"))
 }

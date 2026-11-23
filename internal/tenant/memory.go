@@ -78,6 +78,10 @@ type InstanceMemory struct {
 	// NestedPressure: the nested guest is under memory pressure itself, so its
 	// shortfall is a shortage, not missing headroom.
 	NestedPressure bool
+	// NestedStart: NestedShort is what a nested guest that is about to start
+	// needs to map its boot maximum (cage.PrepareBoot): the environment is
+	// stopped and its start waits for this VM to grow.
+	NestedStart bool
 	// Active is set by the balancer, not by the runtime: the workspace was
 	// used (browser traffic, a portal open, guest CPU) within memoryActiveWindow.
 	Active bool

@@ -306,6 +306,9 @@ type machineMemoryReport struct {
 	// Pressure: the guest is under memory pressure (or stopped answering
 	// after being so), so the shortfall is a shortage, not missing headroom.
 	Pressure bool `json:"pressure,omitempty"`
+	// Reason is BootRequestReason while a start waits for the machine to
+	// grow (PrepareBoot); empty from the running guest's host agent.
+	Reason string `json:"reason,omitempty"`
 }
 
 // allocationContext is what the host agent learns once at start from the
