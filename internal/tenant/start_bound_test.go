@@ -197,3 +197,38 @@ func TestStartRequestRearmsAfterItHasBeenGone(t *testing.T) {
 		t.Fatalf("a running guest's report changed: %+v %+v", state.Instances[a], seen)
 	}
 }
+
+// The environment is started again a few minutes after its first start (it
+// was stopped, or its start failed and is retried): the request was gone in
+// between, so the second one is a start too, for a whole wait. A request
+// that then stays is still bounded.
+func TestSecondStartSoonAfterTheFirstIsStillAStart(t *testing.T) {
+	id, begin := vmID(1), time.Unix(1e9, 0)
+	seen, held := map[string]startSight{}, map[string]demandState{}
+	look := func(at time.Duration, asks bool) bool {
+		state := MemoryState{Instances: map[string]InstanceMemory{id: {Status: "Running", Limit: 2048 * testMiB, NestedStart: asks, NestedPressure: asks}}}
+		if asks {
+			entry := state.Instances[id]
+			entry.NestedShort = 6 * testGiB
+			state.Instances[id] = entry
+		}
+		seen, _ = boundStarts(begin.Add(at), state, seen, held)
+		return state.Instances[id].NestedStart
+	}
+	for at := time.Duration(0); at <= 30*time.Second; at += 15 * time.Second {
+		if !look(at, true) {
+			t.Fatalf("the first start was ignored at %s", at)
+		}
+	}
+	for at := 45 * time.Second; at < 200*time.Second; at += 15 * time.Second {
+		look(at, false)
+	}
+	for at := 200 * time.Second; at <= 275*time.Second; at += 15 * time.Second {
+		if !look(at, true) {
+			t.Fatalf("a second start was ignored %s after the first", at)
+		}
+	}
+	if look(290*time.Second, true) || look(305*time.Second, true) {
+		t.Fatal("a request that stays is no longer bounded")
+	}
+}

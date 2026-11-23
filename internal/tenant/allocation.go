@@ -61,7 +61,9 @@ const (
 // so it is ignored altogether: no priority while the host is in pressure, no
 // demand, and the held demand it raised is dropped so the idle return and
 // the others' fair shares see only the VM's own working set. A request opens
-// a new window once it has been gone for startRearm.
+// a new window once it has been gone for startRearm. The window counts the
+// time the request was there: a time without it counts as startGap at most,
+// so a second start soon after the first one is still a start.
 const (
 	// startWindow is two of the host agent's waits: one start, an immediate
 	// retry after it failed, and gateway rounds delayed by slow guests.
@@ -69,13 +71,18 @@ const (
 	// startRearm is the held demand's hold: a second start within it finds
 	// the first one's grant still held; after it, it is honoured again.
 	startRearm = memoryDemandHold
+	// startGap is the request's own age bound (cage): sightings farther
+	// apart than this are separate starts.
+	startGap = 45 * time.Second
 )
 
 // startSight is when a VM's start request was first and last seen, and
 // whether it outlived its window.
 type startSight struct {
 	first, last time.Time
-	expired     bool
+	// spent is how long the request has been there, over its sightings.
+	spent   time.Duration
+	expired bool
 }
 
 // boundStarts applies startWindow and startRearm to one reading: it clears
@@ -99,9 +106,11 @@ func boundStarts(now time.Time, state MemoryState, seen map[string]startSight, h
 		sight, ok := next[id]
 		if !ok {
 			sight = startSight{first: now}
+		} else {
+			sight.spent += min(now.Sub(sight.last), startGap)
 		}
 		sight.last = now
-		if now.Sub(sight.first) > startWindow {
+		if sight.spent > startWindow {
 			if !sight.expired {
 				sight.expired = true
 				delete(held, id)

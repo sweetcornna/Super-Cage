@@ -738,9 +738,14 @@ anything back. Now:
   taken from others for it (TestStartRequestThatNeverEndsBecomesOrdinaryDemand: rewritten every 30 s for 10
   minutes on a 16 GiB host, the VM is back at the guarantee and a neighbour that grows at five minutes gets its
   whole demand; without the bound the neighbour stays 1.5 GiB short).
-- A request must have been gone for startRearm = 5 min before it is a start again. That is the held demand's hold:
-  a second start within it finds the first start's grant still held, so it needs no priority; after it, it is
-  honoured as a start again (TestStartRequestRearmsAfterItHasBeenGone).
+- The window counts the time the request was there, over the gateway's sightings of it; a time without it counts
+  as startGap = 45 s at most (the request's own age bound). So a second start a few minutes after the first (the
+  environment was stopped, or its start failed and is retried) is still a start for a whole wait, also when host
+  pressure took the first grant back meanwhile (TestSecondStartSoonAfterTheFirstIsStillAStart); a request that
+  comes and goes spends its 150 s at 45 s per appearance at least.
+- A request whose window is over must have been gone for startRearm = 5 min before it is a start again. That is
+  the held demand's hold: a second start within it finds the first start's grant still held, so it needs no
+  priority; after it, it is honoured as a start again (TestStartRequestRearmsAfterItHasBeenGone).
 - What remains: a workspace that writes a request for less than 150 s, removes it for 5 minutes and starts over is
   treated each time like a real start (a person starting the environment every 7.5 minutes): at most 150 s of
   priority per 7.5 minutes, its ceiling and max-min fairness. A running guest's own report (no reason) is not
