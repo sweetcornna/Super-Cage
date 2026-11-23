@@ -81,7 +81,7 @@ Super Cage 有桌面版（macOS、Windows、Linux）和 Linux 服务器版。桌
 | 电脑 | 安装包 | 要求 |
 | --- | --- | --- |
 | Mac | [`Super-Cage-0.1.17-macos-arm64.dmg`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-macos-arm64.dmg) | Apple Silicon，macOS 14 或更新 |
-| Windows | [`Super-Cage-0.1.17-windows-amd64-setup-unsigned.exe`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-windows-amd64-setup-unsigned.exe)（未签名的预览版） | Windows 10 22H2 或 Windows 11，x64 |
+| Windows | 0.1.17 的安装器稍后补充到发布页；在此之前可用上一版的未签名预览版 [`Super-Cage-0.1.16-windows-amd64-setup-unsigned.exe`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.16/Super-Cage-0.1.16-windows-amd64-setup-unsigned.exe) | Windows 10 22H2 或 Windows 11，x64 |
 | Linux | [`Super-Cage-0.1.17-linux-amd64.deb`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.17/Super-Cage-0.1.17-linux-amd64.deb) | Debian 12、Ubuntu 22.04 或 24.04，x86-64，需要 KVM |
 
 Intel Mac、Windows ARM64 和 Linux ARM64 暂不支持。
