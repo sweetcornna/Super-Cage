@@ -169,6 +169,11 @@ jobs:
         run: |
           bash deploy/tenant/package-server.sh
           bash deploy/tenant/package-novirt.sh
+      - name: Show the no-virtualization build logs
+        if: failure()
+        run: |
+          shopt -s nullglob
+          for log in _output/tenant-novirt.*/make-*.log; do echo "== $log"; tail -n 200 "$log"; done
       - name: Collect and check the release assets
         run: |
           version=$(tr -d '\r\n' < VERSION)
