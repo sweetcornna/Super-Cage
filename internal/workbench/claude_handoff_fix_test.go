@@ -339,6 +339,43 @@ func TestClaudeUndoKeepsItsWaitAcrossARetry(t *testing.T) {
 
 // --- Finding 5: a refused automatic continuation is not repeated every check ---
 
+// A refusal that usually passes by itself (the source CLI still exiting) is
+// tried again on the next checks, a few times, and then waits like the others:
+// a slow guest does not hold the continuation back for the whole backoff.
+func TestClaudeTransientRefusalIsTriedAgainOnTheNextChecks(t *testing.T) {
+	s, id, record, home := claudeSwitchGuest(t, strings.Replace(refusingGuest, "switch:history", "switch:exit", 1))
+	ungroupedLimited(t, s, id, record, claudeScheduling{Mode: "balanced", SwitchPolicy: "allow", SwitchAnswered: true, UngroupedHandoff: true})
+	clock := time.Now()
+	s.claudeAccounts.now = func() time.Time { return clock }
+	monitor := &claudeMonitor{lastUsageCheck: time.Now(), started: true}
+	tick := func() {
+		s.maybeSwitchClaudeAccount(claudeSwitchContext(s), id, monitor)
+		clock = clock.Add(10 * time.Second)
+	}
+	for range 3 {
+		tick()
+	}
+	if n := len(guestCalls(t, home, "account-switch")); n != 3 {
+		t.Fatalf("a refusal that passes by itself was tried %d times in three checks", n)
+	}
+	for range 15 { // it never passes: the attempts are bounded
+		tick()
+	}
+	if n := len(guestCalls(t, home, "account-switch")); n != claudeTransientAttempts {
+		t.Fatalf("tried %d times, want %d", n, claudeTransientAttempts)
+	}
+	stored, _ := s.mobileCLI.record(s.profile, id)
+	list, _ := s.loadClaudeAccounts()
+	if state := claudeHandoffState(list, stored, clock); state.Waiting != "refused" || !strings.Contains(state.Refusal, "还没有退出") {
+		t.Fatalf("the refusal is not shown: %+v", state)
+	}
+	clock = clock.Add(16 * time.Minute)
+	tick()
+	if n := len(guestCalls(t, home, "account-switch")); n != claudeTransientAttempts+1 {
+		t.Fatal("the backoff did not allow a new attempt:", n)
+	}
+}
+
 const refusingGuest = `if mode=='account-switch':
     print(json.dumps({'error':'switch:history'}))
 elif mode=='view':

@@ -947,11 +947,29 @@ type claudeMonitor struct {
 	// or claudeRefusalBackoff has passed.
 	refused   string
 	refusedAt time.Time
+	// attempts counts that attempt's refusals in a row; retry: the last one
+	// usually passes by itself, so the next check tries again.
+	attempts int
+	retry    bool
 }
 
 // claudeRefusalBackoff: how long an automatic continuation that was refused
 // waits before it is tried again with nothing changed.
 const claudeRefusalBackoff = 15 * time.Minute
+
+// claudeTransientAttempts: a refusal that usually passes by itself (the source
+// CLI still exiting, its process not confirmed yet, a guest request that
+// failed) is tried again on the next checks, this many times in all, before
+// it waits like any other refusal.
+const claudeTransientAttempts = 6
+
+func claudeTransientRefusal(err error) bool {
+	switch err.Error() {
+	case claudeSwitchRefusals["switch:exit"], claudeSwitchRefusals["switch:process"], claudeSwitchGeneric:
+		return true
+	}
+	return false
+}
 
 func (s *Server) claudeNow() time.Time {
 	if s.claudeAccounts.now != nil {
@@ -1057,15 +1075,20 @@ func claudeAttemptKey(list claudeAccountList, record *mobileRecord, target strin
 // A refusal is kept on the record and shown while the session waits.
 func (s *Server) tryAutomaticSwitch(ctx context.Context, id string, list claudeAccountList, record *mobileRecord, target string, wake bool, monitor *claudeMonitor, now time.Time) {
 	key := claudeAttemptKey(list, record, target, wake, now)
-	if monitor.refused == key && now.Sub(monitor.refusedAt) < claudeRefusalBackoff {
+	if monitor.refused == key && !monitor.retry && now.Sub(monitor.refusedAt) < claudeRefusalBackoff {
 		return
 	}
 	err := s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, wake: wake}, true)
 	if err == nil || errors.Is(err, errTerminalBusy) || errors.Is(err, errMobileLocked) || errors.Is(err, errTerminalNotReady) || ctx.Err() != nil {
-		monitor.refused = "" // done, or a passing state: the next check tries again
+		monitor.refused, monitor.attempts, monitor.retry = "", 0, false // done, or a passing state: the next check tries again
 		return
 	}
+	if monitor.refused != key || now.Sub(monitor.refusedAt) >= claudeRefusalBackoff {
+		monitor.attempts = 0
+	}
+	monitor.attempts++
 	monitor.refused, monitor.refusedAt = key, now
+	monitor.retry = claudeTransientRefusal(err) && monitor.attempts < claudeTransientAttempts
 	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
 		if record.Switch == nil || record.Switch.Phase == "completed" {
 			record.HandoffRefusal = err.Error()
@@ -1088,7 +1111,7 @@ func (s *Server) settleClaudeWait(ctx context.Context, id, failure string, monit
 		record.WaitingReset, record.HandoffRefusal = 0, ""
 		return nil
 	}) == nil {
-		monitor.waiting, monitor.refused = false, ""
+		monitor.waiting, monitor.refused, monitor.attempts, monitor.retry = false, "", 0, false
 	}
 }
 
