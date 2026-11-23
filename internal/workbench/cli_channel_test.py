@@ -166,6 +166,43 @@ class ChannelTests(unittest.TestCase):
             other={**request,"switch_id":str(uuid.uuid4())}
             with self.assertRaisesRegex(ValueError,"switch:pending"): channel.prepare_account_switch(other)
 
+    def test_descendants_follow_process_parentage(self):
+        tree=subprocess.Popen(["/bin/sh","-c","sleep 30 & (sleep 30 & wait) & wait"])
+        unrelated=subprocess.Popen(["/bin/sleep","30"])
+        self.addCleanup(lambda:[p.kill() or p.wait() for p in (tree,unrelated)])
+        deadline=time.monotonic()+5
+        while len(channel.descendants(tree.pid))<3 and time.monotonic()<deadline:time.sleep(.05)
+        found=channel.descendants(tree.pid)
+        self.assertEqual(len(found),3,found)
+        self.assertNotIn(str(unrelated.pid),[pid for pid,_ in found])
+        self.assertTrue(all(mark==channel.process_fingerprint(pid) for pid,mark in found))
+        self.assertEqual(channel.descendants(None),[])
+
+    def test_account_switch_stops_only_the_source_and_its_children(self):
+        # A second, unrelated session of the same account never blocks and is
+        # not stopped; the source's own background command stops with it.
+        self.history(self.session,self.project,[{"type":"user","message":{"content":"start"}}])
+        source=subprocess.Popen(["/bin/sh","-c","sleep 30 & wait"])
+        sibling=subprocess.Popen(["/bin/sleep","30"])
+        self.addCleanup(lambda:[p.kill() or p.wait() for p in (source,sibling)])
+        deadline=time.monotonic()+5
+        while not channel.descendants(source.pid) and time.monotonic()<deadline:time.sleep(.05)
+        child=int(channel.descendants(source.pid)[0][0])
+        connection,switch_id,target=[str(uuid.uuid4()) for _ in range(3)]
+        request={"cli_id":self.session,"config":str(self.home/".claude"),"connection":connection,"workspace":self.project,"target_cli_id":target,"switch_id":switch_id}
+        channel.save(self.root/connection/"state.json",{"cli_id":self.session,"config":request["config"],"workspace":self.project,"pid":source.pid})
+        rows=[{"pid":source.pid,"sessionId":self.session,"cwd":self.project,"status":"idle","kind":"interactive"}]
+        def reap(pid,force=False):
+            os.kill(int(pid),9 if force else 15)
+            if int(pid)==source.pid:source.wait()
+        with patch.object(channel,"active_sessions",return_value=rows),patch.object(channel,"terminate_cli",side_effect=reap):
+            result=channel.prepare_account_switch(request)
+        self.assertTrue(Path(result["transcript"]).is_file())
+        deadline=time.monotonic()+5
+        while channel.live(child) and time.monotonic()<deadline:time.sleep(.05)
+        self.assertFalse(channel.live(child),"the source's background command kept running")
+        self.assertIsNone(sibling.poll(),"an unrelated session of the account was stopped")
+
     def test_failure_hook_reports_kind_and_new_turn_clears_it(self):
         payload={"hook_event_name":"StopFailure","session_id":self.session,"error":"rate_limit","error_details":"private upstream diagnostic"}
         with patch.object(channel.sys,"stdin",io.StringIO(json.dumps(payload))):channel.hook(self.session)

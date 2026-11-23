@@ -531,6 +531,20 @@ def handoff_session(request):
     return {"running": bool(rows)}
 
 
+def descendants(pid):
+    # Process parentage is the ancestry of a CLI's own work: its background
+    # commands and any CLI it started. Read it before the CLI exits, since its
+    # children are then reparented. Windows runs the CLI in a kill-on-close
+    # job, which stops its descendants with it.
+    if os.name == "nt" or not live(pid):
+        return []
+    table = [line.split() for line in subprocess.run(["ps", "-A", "-o", "pid=,ppid="], capture_output=True, text=True).stdout.splitlines()]
+    found = {str(pid)}
+    for _ in range(9):
+        found |= {row[0] for row in table if row[1:] and row[1] in found}
+    return [(child, process_fingerprint(child)) for child in found - {str(pid)}]
+
+
 def handoff_receipt(config, session_id):
     key = hashlib.sha256((str(config) + "\n" + session_id).encode()).hexdigest()
     return ROOT.parent / "cli-handoffs" / (key + ".json")
@@ -564,26 +578,17 @@ def prepare_account_switch(request):
     first = next((row["cwd"] for row in map(json.loads, path.read_text().splitlines()) if row.get("cwd") and not row.get("isSidechain")), "")
     if not workspace_within(first, root):
         raise ValueError("switch:project")
+    # Other live sessions of the same account are unrelated and never block;
+    # the source's own children are found by ancestry and stopped with it.
     rows = active_sessions(sid, str(config))
-    # Any other live worker in this account can represent a background
-    # child of the source. The registry does not expose a complete ancestry.
-    listing = subprocess.run(["claude", "agents", "--json"], env={**os.environ, "CLAUDE_CONFIG_DIR": str(config)}, capture_output=True, text=True, timeout=10)
-    if listing.returncode != 0:
-        raise ValueError("switch:listing")
-    if any(row.get("sessionId") != sid and live(row.get("pid")) for row in json.loads(listing.stdout)):
-        raise ValueError("switch:siblings")
     for row in rows:
         if not workspace_within(row.get("cwd", ""), root) or row.get("status") != "idle" or row.get("kind") != "interactive":
             raise ValueError("switch:running")
     pid = read_json(ROOT / connection / "state.json", {}).get("pid")
-    fingerprint = process_fingerprint(pid) if live(pid) else ""
+    fingerprint = process_fingerprint(pid)
     def executing():
-        if not live(pid):
-            return False
-        if os.name == "nt":
-            return True
-        status = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2)
-        return bool(status.stdout.strip()) and not status.stdout.lstrip().startswith("Z")
+        # A zombie has exited; Windows reports only live processes.
+        return live(pid) and (os.name == "nt" or subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout.strip()[:1] not in ("", "Z"))
     if executing() and not any(row.get("pid") == pid for row in rows):
         raise ValueError("switch:process")
     with state_file(connection) as state:
@@ -598,6 +603,7 @@ def prepare_account_switch(request):
         state["account_switch"] = switch_id
         save(ROOT / connection / "state.json", state)
     try:
+        children = descendants(pid)
         for row in rows:
             terminate_cli(row["pid"])
         deadline = time.monotonic() + 5
@@ -615,6 +621,9 @@ def prepare_account_switch(request):
                     time.sleep(.05)
         if executing():
             raise ValueError("switch:exit")
+        for child, mark in children:
+            if live(child) and process_fingerprint(child) == mark:
+                terminate_cli(child, True)
         folder.mkdir(mode=PRIVATE_MODE, parents=True, exist_ok=True)
         target = folder / "history.jsonl"
         with tempfile.NamedTemporaryFile(dir=folder, delete=False) as stream:

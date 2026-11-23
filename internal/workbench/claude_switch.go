@@ -417,18 +417,16 @@ func (s *Server) dropClaudeSwitch(ctx context.Context, record *mobileRecord) err
 // embedded command within Windows' command-line limit. The host says it in
 // one sentence that names the thing and the next step, the same on every device.
 var claudeSwitchRefusals = map[string]string{
-	"switch:reused":   "这次交接的编号已用于另一项操作：刷新会话后重新选择目标账号。",
-	"switch:changed":  "原会话的身份或项目已变化：刷新会话后再切换。",
-	"switch:busy":     "原会话仍有任务、待发消息或审批：等本轮结束后再切换。",
-	"switch:pending":  "这段会话还有一次账号交接没有完成：点“重试账号交接”。",
-	"switch:listing":  "无法读取原账号的运行列表，未切换：稍后重试。",
-	"switch:siblings": "原账号仍有其他执行任务，请结束后台任务后再交接。",
-	"switch:running":  "原会话的 Claude Code 仍在执行本轮任务：等它结束后再切换。",
-	"switch:process":  "无法确认原会话的 Claude Code 进程：在原终端退出 Claude Code 后再切换。",
-	"switch:exit":     "原进程尚未退出，未切换：稍后点“重试账号交接”。",
-	"switch:history":  "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。",
-	"switch:project":  "这段会话的历史属于另一个项目文件夹：从那个项目打开它后再切换。",
-	"switch:cancel":   "原会话的交接已变化：刷新会话后再操作。",
+	"switch:reused":  "这次交接的编号已用于另一项操作：刷新会话后重新选择目标账号。",
+	"switch:changed": "原会话的身份或项目已变化：刷新会话后再切换。",
+	"switch:busy":    "原会话仍有任务、待发消息或审批：等本轮结束后再切换。",
+	"switch:pending": "这段会话还有一次账号交接没有完成：点“重试账号交接”。",
+	"switch:running": "原会话的 Claude Code 仍在执行本轮任务：等它结束后再切换。",
+	"switch:process": "无法确认原会话的 Claude Code 进程：在原终端退出 Claude Code 后再切换。",
+	"switch:exit":    "原进程尚未退出，未切换：稍后点“重试账号交接”。",
+	"switch:history": "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。",
+	"switch:project": "这段会话的历史属于另一个项目文件夹：从那个项目打开它后再切换。",
+	"switch:cancel":  "原会话的交接已变化：刷新会话后再操作。",
 }
 
 func claudeSwitchRefusal(message string) error {
