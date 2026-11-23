@@ -580,6 +580,8 @@ def first_workspace(path):
                         break
         except OSError:
             return ""
+        if not found:
+            return ""  # not cached: the first row with a cwd may be written yet
         if len(origins) >= SUMMARY_LIMIT:
             origins.clear()
         origins[key] = found

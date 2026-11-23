@@ -485,8 +485,15 @@ func TestReopenOfATerminalConversationResumesItsHistory(t *testing.T) {
 	}
 	// A launch that fails (exit 1: "No conversation found", "already in use",
 	// a refused login) leaves a shell that says so; leaving Claude Code exits 0.
-	if !strings.Contains(script, "|| printf") || !strings.Contains(script, "未能启动或接续") {
+	if !strings.Contains(script, "[ $? -ne 1 ] || printf") || !strings.Contains(script, "未能启动或接续") {
 		t.Fatalf("no note after a failed launch: %s", script)
+	}
+	// The note's own shell: status 1 prints it, 0 and a signal's 143 do not.
+	for status, prints := range map[int]bool{1: true, 0: false, 143: false} {
+		out, _ := exec.Command("/bin/bash", "-c", fmt.Sprintf("(exit %d); [ $? -ne 1 ] || printf '%%s\\n' note", status)).Output()
+		if strings.Contains(string(out), "note") != prints {
+			t.Fatalf("status %d: %q", status, out)
+		}
 	}
 }
 
@@ -635,6 +642,60 @@ func TestPhoneInsideTheConversationFollowsTheClear(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if list, _ := f.s.mobileCLI.summaries(f.s.profile, map[string]bool{f.project: true}, false); len(list) != 1 {
+		t.Fatalf("lists: %+v", list)
+	}
+}
+
+// The order the CLI gives: at /clear the channel moves to an id without a
+// transcript; the transcript (titled "/clear") appears only with the next
+// prompt. A phone inside the conversation polls only views meanwhile.
+func TestPhoneFollowsTheClearInTheCLIsOrder(t *testing.T) {
+	pace := conversationFollowPace
+	conversationFollowPace = 0
+	t.Cleanup(func() { conversationFollowPace = pace })
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.view(t, a, terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}})
+	settle := func() {
+		t.Helper()
+		for !f.s.conversationFollow.CompareAndSwap(false, true) {
+			time.Sleep(20 * time.Millisecond)
+		}
+		f.s.conversationFollow.Store(false)
+	}
+	// /clear: the new id is known only from the channel state.
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, untitledTitle, true))
+	if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	settle()
+	if record := f.record(t); record.CLIID != a {
+		t.Fatalf("linked before the transcript: %+v", record)
+	}
+	// Two more views while nothing changes, then the first prompt writes the transcript.
+	for range 2 {
+		if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+			t.Fatal(err)
+		}
+		settle()
+	}
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	deadline := time.Now().Add(10 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("views alone did not follow the /clear: %+v", f.record(t))
+		}
+		if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	settle()
+	if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
 		t.Fatalf("lists: %+v", list)
 	}
 }

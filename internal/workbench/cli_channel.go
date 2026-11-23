@@ -437,14 +437,22 @@ func (s *Server) resumeEarlierPart(m *mobileCLIStore, owner *mobileRecord, id st
 	}
 }
 
+// conversationFollowPace is the least time between two follow-up looks (the
+// clients' own list pace): a CLI that sits after /clear costs at most that.
+var conversationFollowPace = 5 * time.Second
+
 // followConversationID looks at the guest's sessions once more when a view
 // finds that the record's terminal no longer runs the record's id (a /clear or
 // a /resume inside the CLI): a phone inside a conversation polls only its view,
 // so the list's discovery would not link it. One look runs at a time.
 func (s *Server) followConversationID() {
+	if last := s.conversationFollowAt.Load(); last != 0 && time.Since(time.Unix(0, last)) < conversationFollowPace {
+		return
+	}
 	if !s.conversationFollow.CompareAndSwap(false, true) {
 		return
 	}
+	s.conversationFollowAt.Store(time.Now().UnixNano())
 	go func() {
 		defer s.conversationFollow.Store(false)
 		paths, err := s.projectPaths()
@@ -490,8 +498,14 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
-	if record.Connection != "" && current.Connection == "" && s.terminals.forConversation(record.Connection) != nil {
-		s.followConversationID()
+	if current.Connection == "" {
+		// The guest has no connection on this id while the entry's terminal
+		// still runs a conversation: its CLI moved to another id (/clear, or a
+		// /resume inside it). Checked on every view, as the new id's transcript
+		// appears only with the next prompt.
+		if terminal := s.boundTerminal(record); record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
+			s.followConversationID()
+		}
 	}
 	root := s.cliWorkspace(record.Workspace)
 	if legacy := s.macOSLegacyWorkspace(record); legacy != "" {
@@ -782,7 +796,9 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		}
 		return string(data), record, nil
 	}
-	body := s.cliHelperCommand("launch", string(data)) + " || printf '\\n%s\\n' " + shellescape.Quote(terminalLaunchFailed) + "; exec bash -i"
+	// Only status 1: what every refusal gives (the CLI, the account wrapper, the
+	// helper); a CLI ended by a signal (a hand-over: 143) or left (0) says nothing.
+	body := s.cliHelperCommand("launch", string(data)) + "; [ $? -ne 1 ] || printf '\\n%s\\n' " + shellescape.Quote(terminalLaunchFailed) + "; exec bash -i"
 	root := s.cliWorkspace(workspace)
 	directory := record.GuestWorkspace
 	if directory == "" {
@@ -802,8 +818,8 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 	return script, record, nil
 }
 
-// terminalLaunchFailed follows a launch that ended in an error (the CLI exits 0
-// when the person leaves it): its own message is just above.
+// terminalLaunchFailed follows a launch that ended with status 1 (the CLI exits
+// 0 when the person leaves it): its own message is just above.
 const terminalLaunchFailed = "Super Cage：Claude Code 未能启动或接续这段会话，原因见上方。会话仍在列表中，可以再次打开；这个终端现在是普通命令行。"
 
 // terminalDirectory enters the folder the conversation last worked in, or the
