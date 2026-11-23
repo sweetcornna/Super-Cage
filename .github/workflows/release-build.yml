@@ -1,0 +1,208 @@
+name: Release build of the non-Mac assets
+# Builds, from one exact commit, every release asset that does not need the
+# Mac: the unsigned Windows installer and its source archives, the Linux
+# Debian package, and the server tarballs. Build, package and cheap checks
+# only; the test suites run in the other workflows. Nothing is published
+# here: the release script downloads the three artifacts and writes the
+# checksum lists.
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: Exact 40-character commit SHA to build
+        required: true
+        type: string
+  # Temporary, while this workflow is developed on its branch.
+  push:
+    branches: [release-ci]
+permissions:
+  contents: read
+env:
+  CAGE_BUILD_REF: ${{ inputs.sha || github.sha }}
+jobs:
+  windows:
+    name: Windows installer and sources
+    runs-on: windows-2025
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check the requested commit
+        run: if ($env:CAGE_BUILD_REF -cnotmatch '^[0-9a-f]{40}$') { throw 'sha must be a complete lowercase 40-character commit SHA.' }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CAGE_BUILD_REF }}
+          persist-credentials: false
+      - uses: ./.github/actions/windows-toolchain
+        with:
+          corresponding-sources: true
+      - name: Build and package the unsigned installer
+        run: ./scripts/ci-windows-build.ps1 -ReleaseAssets
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: _output/release-windows/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  linux:
+    name: Linux Debian package
+    # Build with glibc 2.35 so the same package installs on Ubuntu 22.04 and later.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    container:
+      image: ubuntu:22.04
+      options: --init --dns 1.1.1.1 --dns 8.8.8.8
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the requested commit
+        run: |
+          [[ "$CAGE_BUILD_REF" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha must be a complete lowercase 40-character commit SHA.' >&2; exit 1; }
+      - name: Install the build tools
+        run: |
+          # archive.ubuntu.com can crawl from hosted runners (one CI run spent
+          # its whole hour in apt). Use the Azure mirror of the runner image.
+          sed -i -E 's#http://(archive|security)\.ubuntu\.com/ubuntu/?#http://azure.archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list
+          apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            build-essential pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libjson-glib-dev dpkg-dev curl ca-certificates git
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CAGE_BUILD_REF }}
+          persist-credentials: false
+      - name: Verify the checkout
+        run: |
+          # The container builds as root in a checkout the runner user owns.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          [[ "$(git rev-parse HEAD)" == "$CAGE_BUILD_REF" ]] || { echo 'Checkout differs from the requested commit.' >&2; exit 1; }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Build and package
+        run: |
+          node scripts/check-version.mjs
+          bash scripts/build-linux.sh
+          bash scripts/package-linux.sh --skip-build
+      - name: Collect and check the release assets
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          source=$(node -p 'require("./packaging/linux/dependencies.json").mihomoSource.file')
+          deb="Super-Cage-$version-linux-amd64.deb"
+          metadata=linux-desktop-build-metadata.json
+          out=_output/release-linux
+          mkdir "$out"
+          cp "_output/releases/$version/linux/$deb" "_output/releases/$version/linux/$source" "$out/"
+          node scripts/release-version.mjs metadata linux "$out/$metadata"
+          diff <(printf '%s\n' "$deb" "$source" "$metadata" | sort) <(find "$out" -mindepth 1 -printf '%f\n' | sort)
+          dpkg-deb --info "$out/$deb"
+          deb_version="${version/-/\~}" # as package-linux.sh writes it
+          [[ "$(dpkg-deb --field "$out/$deb" Package)/$(dpkg-deb --field "$out/$deb" Version)/$(dpkg-deb --field "$out/$deb" Architecture)" == "claude-cage/$deb_version/amd64" ]] ||
+            { echo 'Unexpected package name, version or architecture.' >&2; exit 1; }
+          paths=$(dpkg-deb --contents "$out/$deb" | awk '{print $6}')
+          if grep -E '(^|/)\._' <<< "$paths"; then echo 'AppleDouble entries in the package' >&2; exit 1; fi
+          for path in ./usr/bin/claude-cage ./usr/lib/claude-cage/cage ./usr/lib/claude-cage/cage-attach ./usr/lib/claude-cage/cage-desktop ./usr/lib/claude-cage/mihomo; do
+            grep -Fxq "$path" <<< "$paths" || { echo "The package lacks $path" >&2; exit 1; }
+          done
+          echo "Package entries: $(wc -l <<< "$paths")"
+          if tar -tzf "$out/$source" | grep -E '(^|/)\._'; then echo 'AppleDouble entries in the Mihomo sources' >&2; exit 1; fi
+          VERSION="$version" node -e '
+            const actual = require("fs").readFileSync(process.argv[1], "utf8");
+            const expected = { schema: 1, platform: "linux", version: process.env.VERSION, commitSha: process.env.CAGE_BUILD_REF };
+            if (JSON.stringify(JSON.parse(actual)) !== JSON.stringify(expected)) throw new Error("Unexpected build metadata: " + actual);
+          ' "$out/$metadata"
+          {
+            echo '| Linux release asset | Bytes | SHA-256 |'
+            echo '| --- | ---: | --- |'
+            for name in "$deb" "$source" "$metadata"; do
+              printf '| %s | %s | %s |\n' "$name" "$(stat -c %s "$out/$name")" "$(sha256sum "$out/$name" | cut -d ' ' -f 1)"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux
+          path: _output/release-linux/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  server:
+    name: Server and no-virtualization packages
+    # The binaries are static (CGO_ENABLED=0), so the runner release does not matter.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check the requested commit
+        run: |
+          [[ "$CAGE_BUILD_REF" =~ ^[0-9a-f]{40}$ ]] || { echo 'sha must be a complete lowercase 40-character commit SHA.' >&2; exit 1; }
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CAGE_BUILD_REF }}
+          persist-credentials: false
+      - name: Verify the checkout
+        run: |
+          [[ "$(git rev-parse HEAD)" == "$CAGE_BUILD_REF" ]] || { echo 'Checkout differs from the requested commit.' >&2; exit 1; }
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: astral-sh/setup-uv@v10.3.3
+      # Both scripts refuse a checkout with any change or untracked file, so
+      # nothing may write outside _output before them.
+      - name: Package the server and no-virtualization editions
+        run: |
+          bash deploy/tenant/package-server.sh
+          bash deploy/tenant/package-novirt.sh
+      - name: Collect and check the release assets
+        run: |
+          version=$(tr -d '\r\n' < VERSION)
+          out=_output/release-server
+          mkdir "$out"
+          cp _output/tenant-server.*/"Super-Cage-Server-$version-linux-"*.tar.gz _output/tenant-novirt.*/"Super-Cage-NoVirt-$version-linux-"*.tar.gz "$out/"
+          names=()
+          for edition in Server NoVirt; do
+            for arch in amd64 arm64; do names+=("Super-Cage-$edition-$version-linux-$arch.tar.gz"); done
+          done
+          diff <(printf '%s\n' "${names[@]}" | sort) <(find "$out" -mindepth 1 -printf '%f\n' | sort)
+          for name in "${names[@]}"; do
+            top=${name%.tar.gz}
+            listing=$(tar -tzf "$out/$name")
+            if grep -E '(^|/)\._' <<< "$listing"; then echo "AppleDouble entries in $name" >&2; exit 1; fi
+            outside=$(awk -v top="$top" 'index($0, top "/") != 1 && $0 != top' <<< "$listing")
+            [[ -z $outside ]] || { echo "Entries outside $top/ in $name: $outside" >&2; exit 1; }
+            required=(cage-tenant ui/tenant/index.html)
+            [[ $name == *-NoVirt-* ]] && required+=(cage install.sh)
+            for file in "${required[@]}"; do
+              grep -Fxq "$top/$file" <<< "$listing" || { echo "$name lacks $file" >&2; exit 1; }
+            done
+          done
+          {
+            echo '| Server release asset | Bytes | SHA-256 |'
+            echo '| --- | ---: | --- |'
+            for name in "${names[@]}"; do
+              printf '| %s | %s | %s |\n' "$name" "$(stat -c %s "$out/$name")" "$(sha256sum "$out/$name" | cut -d ' ' -f 1)"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-server
+          path: _output/release-server/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
