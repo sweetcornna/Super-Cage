@@ -384,6 +384,7 @@ func TestClaudeLimitHandoffEndToEnd(t *testing.T) {
 	if len(h.running(marker)) == 0 {
 		t.Fatal("the background command is not running")
 	}
+	h.registryRowsDescendFrom(h.record(id).CLIID)
 	// The channel admits a message only between turns; the one sent at the
 	// limit is the message the CLI's limit menu leaves unsubmitted.
 	h.limited.Store("seven_day")
@@ -466,6 +467,7 @@ func TestClaudeManualSwitchDuringWorkEndToEnd(t *testing.T) {
 	h.wait(id, "the running subagent", func(v mobileSession) bool {
 		return len(v.Turns) == 1 && len(v.Turns[0].Tools) == 1 && v.Turns[0].Tools[0].Name == "Agent" && v.Turns[0].Tools[0].Status == "called"
 	})
+	h.registryRowsDescendFrom(h.record(id).CLIID)
 	account := func(body map[string]any) (int, string) {
 		raw, _ := json.Marshal(body)
 		response := request(h.s, "POST", "/api/mobile/cli/sessions/"+id+"/account", h.s.origin, string(raw), true)
@@ -506,4 +508,55 @@ func TestClaudeManualSwitchDuringWorkEndToEnd(t *testing.T) {
 		t.Fatal("the resume prompt does not name the subagent:", resumed)
 	}
 	t.Logf("manual switch during work: confirm asked once, %s from the confirmed request to B ready", took.Round(time.Millisecond))
+}
+
+// registryRowsDescendFrom checks the assumption behind stopping a source with
+// its children: every live registry row of the session (claude agents
+// --json, what the guest reads) is the source CLI or one of its descendants.
+func (h *limitHarness) registryRowsDescendFrom(session string) {
+	h.t.Helper()
+	config := filepath.Join(h.home, ".local/share/cage/claude-accounts", h.list.Accounts[0].ID, "config")
+	listing := exec.Command(filepath.Join(h.home, "bin", "claude"), "agents", "--json")
+	listing.Dir, listing.Env = h.project, []string{"HOME=" + h.home, "PATH=" + filepath.Join(h.home, "bin") + ":/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + config}
+	raw, err := listing.Output()
+	var rows []map[string]any
+	if err != nil || json.Unmarshal(raw, &rows) != nil {
+		h.t.Fatalf("agents --json: %v %s", err, raw)
+	}
+	table, _ := exec.Command("ps", "-A", "-o", "pid=,ppid=").Output()
+	parent := map[string]string{}
+	for _, line := range strings.Split(string(table), "\n") {
+		if fields := strings.Fields(line); len(fields) == 2 {
+			parent[fields[0]] = fields[1]
+		}
+	}
+	var source string
+	mine := []map[string]any{}
+	for _, row := range rows {
+		if row["sessionId"] == session {
+			mine = append(mine, row)
+			if row["kind"] == "interactive" {
+				source = fmt.Sprint(row["pid"])
+			}
+		}
+	}
+	if source == "" {
+		h.t.Fatalf("no interactive row for the session: %s", raw)
+	}
+	for _, row := range mine {
+		pid, chain := fmt.Sprint(row["pid"]), []string{}
+		for at := pid; at != "" && at != "1" && at != source && len(chain) < 12; at = parent[at] {
+			chain = append(chain, at)
+		}
+		if pid != source && (len(chain) == 12 || parent[chain[len(chain)-1]] != source) {
+			h.t.Fatalf("registry row %v is not a descendant of the source %s: %v", row, source, chain)
+		}
+	}
+	h.t.Logf("registry rows of the session: %d (kinds %v), all the source CLI or its descendants", len(mine), func() []any {
+		kinds := []any{}
+		for _, row := range mine {
+			kinds = append(kinds, row["kind"])
+		}
+		return kinds
+	}())
 }

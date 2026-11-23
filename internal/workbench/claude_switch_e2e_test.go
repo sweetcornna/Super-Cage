@@ -253,7 +253,7 @@ func testClaudeAccountSwitchThroughSharedSession(t *testing.T, automatic bool) {
 	}
 	switchStarted := time.Now()
 	response = request(s, "POST", "/api/cli/sessions/"+id+"/account", s.origin, string(raw), true)
-	if response.Code == 409 && strings.Contains(response.Body.String(), "原进程尚未退出") {
+	if response.Code == 409 && strings.Contains(response.Body.String(), "还没有退出") {
 		// Shutdown can wait for a last hook. Reuse the same durable operation;
 		// the retry must never create a second source or target execution.
 		response = request(s, "POST", "/api/cli/sessions/"+id+"/account", s.origin, string(raw), true)
