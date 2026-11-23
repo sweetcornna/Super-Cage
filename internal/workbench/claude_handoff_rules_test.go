@@ -3,6 +3,7 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -528,5 +529,113 @@ func TestClaudeSessionRuleFollowsSchedulingUntilSet(t *testing.T) {
 	}
 	if policy, own := inspect(`{"action":"policy","policy":"default"}`); policy != "allow" || own {
 		t.Fatal("back to 调度设置", policy, own)
+	}
+}
+
+// Under the automatic rule, when the source resets before any other account,
+// the session continues on the source in a fresh CLI with the same history.
+func TestClaudeWakeContinuesOnTheSourceAfterItsReset(t *testing.T) {
+	s, id, record, home := claudeSwitchGuest(t, handoffGuest)
+	list, _ := s.loadClaudeAccounts()
+	list.Scheduling.SwitchPolicy = "allow"
+	if err := s.saveClaudeAccounts(list); err != nil {
+		t.Fatal(err)
+	}
+	record.AccountFailure, record.WaitingReset = "rate_limit", time.Now().Add(-time.Minute).Unix()
+	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+		t.Fatal(err)
+	}
+	before := record.CLIID
+	if err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: before, Target: list.Accounts[0].ID, wake: true}, true); err != nil {
+		t.Fatal(err)
+	}
+	woke, _ := s.mobileCLI.record(s.profile, id)
+	calls := guestCalls(t, home, "account-switch")
+	if woke.Account.ID != list.Accounts[0].ID || woke.CLIID == before || woke.Switch.Reason != "reset" || !woke.Switch.Continue || len(calls) != 1 || calls[0]["force"] != true || woke.WaitingReset != 0 {
+		t.Fatalf("wake: %+v %v", woke.Switch, calls)
+	}
+	// Without a reset that was waited for, the same request is refused.
+	woke.AccountFailure, woke.Switch.Phase = "rate_limit", "completed"
+	if err := writePrivate(mobileRecordPath(s.profile, id), woke); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: woke.CLIID, Target: list.Accounts[0].ID}, true); err == nil {
+		t.Fatal("an automatic switch onto the same account without a wake")
+	}
+}
+
+// A wait for the first reset ends with the limit that set it: a later,
+// different limit is never taken for that reset.
+func TestClaudeWaitForResetEndsWithItsLimit(t *testing.T) {
+	s, id, record, _ := claudeSwitchGuest(t, handoffGuest)
+	record.WaitingReset = time.Now().Add(-time.Minute).Unix()
+	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+		t.Fatal(err)
+	}
+	monitor := &claudeMonitor{waiting: true, started: true}
+	s.settleClaudeWait(claudeSwitchContext(s), id, "rate_limit", monitor)
+	if stored, _ := s.mobileCLI.record(s.profile, id); stored.WaitingReset == 0 || !monitor.waiting {
+		t.Fatal("cleared while still limited")
+	}
+	s.settleClaudeWait(claudeSwitchContext(s), id, "", monitor)
+	stored, _ := s.mobileCLI.record(s.profile, id)
+	if stored.WaitingReset != 0 || monitor.waiting {
+		t.Fatal("a finished limit left its wait behind")
+	}
+	list, _ := s.loadClaudeAccounts()
+	list.Scheduling.SwitchPolicy = "allow"
+	stored.AccountFailure = "rate_limit" // a later model-specific limit: no window
+	if target, _, _ := claudeAutomaticStep(list, stored, nil, nil, "", time.Now()); target != "" {
+		t.Fatal("a later limit restarted the source")
+	}
+}
+
+// A signed-out or held source can still hand its history away by hand; only
+// a different identity in its directory stops it.
+func TestClaudeManualSwitchAwayFromABrokenLogin(t *testing.T) {
+	for name, probe := range map[string]claudeGuestSnapshot{
+		"signed out": {LoggedIn: false},
+		"other one":  {LoggedIn: true, Email: "someone-else@example.test"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, id, record, home := claudeSwitchGuest(t, handoffGuest)
+			b := strings.Repeat("b", 24)
+			s.claudeAccounts.probe = func(_ context.Context, guest string) (claudeGuestSnapshot, error) {
+				if guest[:1] == "a" {
+					return probe, nil
+				}
+				return claudeGuestSnapshot{LoggedIn: true, Email: "b@example.test"}, nil
+			}
+			record.AccountFailure = "authentication_failed"
+			if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
+				t.Fatal(err)
+			}
+			err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: b, Confirm: true}, false)
+			if name == "signed out" && (err != nil || len(guestCalls(t, home, "account-switch")) != 1) {
+				t.Fatal("a signed-out source could not hand its history away:", err)
+			}
+			if name == "other one" && (err == nil || !strings.Contains(err.Error(), "登录身份已改变") || len(readGuestCalls(t, home)) != 0) {
+				t.Fatal("a different identity in the source directory must stop the switch:", err)
+			}
+		})
+	}
+}
+
+// Choosing automatic continuation, in 调度设置 or in a session, is the yes
+// that lets ungrouped accounts continue one another.
+func TestClaudeChoosingAutomaticIsTheYes(t *testing.T) {
+	s, id, _, _ := claudeSwitchGuest(t, handoffGuest)
+	if response := request(s, "POST", "/api/mobile/cli/sessions/"+id+"/account", s.origin, `{"action":"policy","policy":"allow"}`, true); response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	if list, _ := s.loadClaudeAccounts(); !list.Scheduling.UngroupedHandoff || list.Scheduling.SwitchPolicy != "ask" {
+		t.Fatalf("session choice: %+v", list.Scheduling)
+	}
+	s2 := testServer(t)
+	if response := request(s2, "POST", "/api/claude-accounts", s2.origin, `{"action":"scheduling","scheduling":{"mode":"balanced","switch_policy":"allow"}}`, true); response.Code != 200 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	if list, _ := s2.loadClaudeAccounts(); !list.Scheduling.UngroupedHandoff || !list.Scheduling.answered() {
+		t.Fatalf("调度设置 choice: %+v", list.Scheduling)
 	}
 }

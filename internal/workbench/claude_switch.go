@@ -255,6 +255,21 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "切换授权无效", 400)
 			return
 		}
+		if input.Policy == "allow" {
+			// Choosing automatic continuation is the yes that lets ungrouped
+			// accounts continue one another.
+			s.claudeAccounts.mu.Lock()
+			list, err := s.loadClaudeAccounts()
+			if err == nil && !list.Scheduling.UngroupedHandoff {
+				list.Scheduling.UngroupedHandoff = true
+				err = s.saveClaudeAccounts(list)
+			}
+			s.claudeAccounts.mu.Unlock()
+			if err != nil {
+				requestError(w, err)
+				return
+			}
+		}
 		if err := s.changeClaudeSession(r.Context(), view.ID, func(record *mobileRecord) error {
 			if record.Switch != nil && record.Switch.Phase != "completed" {
 				return errors.New("账号交接中，请等待完成后修改授权")
@@ -556,8 +571,9 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		if probeErr != nil || status.subject() != selection.Subject {
 			return errors.New("无法确认 " + target.Label + " 的登录：在账号管理中点“检查状态”，需要时重新登录。")
 		}
-		sourceStatus, sourceErr := s.probeClaude(ctx, record.Account.GuestID)
-		if sourceErr != nil || sourceStatus.subject() != record.Account.Subject {
+		// A source that is signed out or on hold can still hand its history
+		// away; only a different identity in its directory stops the switch.
+		if sourceStatus, sourceErr := s.probeClaude(ctx, record.Account.GuestID); sourceErr == nil && sourceStatus.subject() != "" && sourceStatus.subject() != record.Account.Subject {
 			return errors.New("原账号的登录身份已改变：在账号管理中检查 " + source.Label + "，重新登录后再切换。")
 		}
 		force := input.Force || automatic || limited
@@ -799,7 +815,7 @@ func (s *Server) monitorClaudeAccount(terminal *terminalSession, id string) {
 	go func() {
 		defer s.activities.Done()
 		defer cancel()
-		var lastUsageCheck time.Time
+		var monitor claudeMonitor
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -818,11 +834,19 @@ func (s *Server) monitorClaudeAccount(terminal *terminalSession, id string) {
 			// terminal. Cancel an in-flight attempt if its access epoch ends.
 			attempt, finish := context.WithCancel(context.WithValue(ctx, accountEpochKey{}, epoch))
 			stop := context.AfterFunc(epoch, finish)
-			s.maybeSwitchClaudeAccount(attempt, id, &lastUsageCheck)
+			s.maybeSwitchClaudeAccount(attempt, id, &monitor)
 			stop()
 			finish()
 		}
 	}()
+}
+
+// claudeMonitor is what one terminal's check remembers between ticks.
+type claudeMonitor struct {
+	lastUsageCheck time.Time
+	// waiting: the record holds a WaitingReset, to be cleared when the limit
+	// that set it is over. Read once from the record when the check starts.
+	waiting, started bool
 }
 
 func (s *Server) claudeNow() time.Time {
@@ -834,12 +858,20 @@ func (s *Server) claudeNow() time.Time {
 
 // maybeSwitchClaudeAccount runs on the terminal's existing ten-second check.
 // While nothing is limited it only reads the view that check already reads.
-func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUsageCheck *time.Time) {
+func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monitor *claudeMonitor) {
 	view, err := s.terminalConversationView(ctx, id)
 	if err != nil {
 		return
 	}
 	s.deliverClaudeCarry(ctx, id, view)
+	if !monitor.started {
+		monitor.started = true
+		s.mobileCLI.mu.Lock()
+		record, err := s.mobileCLI.record(s.profile, id)
+		s.mobileCLI.mu.Unlock()
+		monitor.waiting = err == nil && record.WaitingReset > 0
+	}
+	s.settleClaudeWait(ctx, id, view.AccountFailure, monitor)
 	if view.AccountFailure != "rate_limit" || view.AccountSwitch != nil && view.AccountSwitch.Phase != "completed" {
 		return
 	}
@@ -852,17 +884,19 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUs
 	s.mobileCLI.mu.Lock()
 	record, err := s.mobileCLI.record(s.profile, id)
 	s.mobileCLI.mu.Unlock()
-	if err != nil || record.switchPolicy(list) != "allow" || claudeSwitchSource(list, record) == nil {
-		return // nothing moves before the person said yes
+	if err != nil {
+		return
+	}
+	source := claudeSwitchSource(list, record)
+	if source == nil {
+		return
 	}
 	now := s.claudeNow()
-	if now.Unix() < record.HandoffWait {
-		return // the person chose to wait for this account
-	}
-	// One bounded quota refresh on the failure path. The CLI owns this
-	// query and its tokens; no model prompt is generated for probing.
-	if time.Since(*lastUsageCheck) >= claudeUsageInterval {
-		*lastUsageCheck = time.Now()
+	// Whatever the rule, the session must know whether its account is really
+	// used up: one bounded quota refresh while the limit is unconfirmed. The
+	// CLI owns this query and its tokens; no model prompt is generated.
+	if window, _ := source.exhaustedWindow(now); window == "" && time.Since(monitor.lastUsageCheck) >= claudeUsageInterval {
+		monitor.lastUsageCheck = time.Now()
 		_ = s.refreshClaudeUsage(ctx, claudeAccountInput{Action: "refresh", ID: record.Account.ID})
 		s.claudeAccounts.mu.Lock()
 		list, err = s.loadClaudeAccounts()
@@ -870,6 +904,9 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUs
 		if err != nil {
 			return
 		}
+	}
+	if record.switchPolicy(list) != "allow" || now.Unix() < record.HandoffWait {
+		return // nothing moves before the person said yes, or while they wait
 	}
 	active, logins := s.mobileCLI.activeAccounts(), map[string]bool{}
 	for _, terminal := range s.terminals.snapshot() {
@@ -886,13 +923,30 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, lastUs
 	s.claudeAccounts.mu.Unlock()
 	target, wake, waitUntil := claudeAutomaticStep(list, record, active, logins, last, now)
 	if waitUntil != record.WaitingReset {
-		_ = s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
 			record.WaitingReset = waitUntil
 			return nil
-		})
+		}) == nil {
+			monitor.waiting = waitUntil > 0
+		}
 	}
 	if target != "" {
 		_ = s.switchClaudeAccount(ctx, id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: target, wake: wake}, true)
+	}
+}
+
+// settleClaudeWait forgets a wait for the first reset once the limit that
+// set it is over (the person went on in the CLI, or a handoff happened), so a
+// later, different limit is never taken for that reset.
+func (s *Server) settleClaudeWait(ctx context.Context, id, failure string, monitor *claudeMonitor) {
+	if !monitor.waiting || failure == "rate_limit" {
+		return
+	}
+	if s.changeClaudeSession(ctx, id, func(record *mobileRecord) error {
+		record.WaitingReset = 0
+		return nil
+	}) == nil {
+		monitor.waiting = false
 	}
 }
 

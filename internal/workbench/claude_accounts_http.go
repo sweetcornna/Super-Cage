@@ -35,6 +35,9 @@ type claudeSchedulingInput struct {
 func (input claudeSchedulingInput) apply(p claudeScheduling) claudeScheduling {
 	// Choosing a rule in 调度设置 is a standing answer.
 	p.SwitchAnswered = p.answered() || input.SwitchPolicy != p.SwitchPolicy
+	// Choosing automatic continuation is the yes that lets ungrouped accounts
+	// continue one another.
+	p.UngroupedHandoff = p.UngroupedHandoff || input.SwitchPolicy == "allow" && p.SwitchPolicy != "allow"
 	p.Mode, p.SwitchPolicy = input.Mode, input.SwitchPolicy
 	if input.SwitchAnswered != nil {
 		p.SwitchAnswered = *input.SwitchAnswered

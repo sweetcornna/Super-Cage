@@ -240,8 +240,7 @@ func testClaudeAccountSwitchThroughSharedSession(t *testing.T, automatic bool) {
 		}
 		epoch, _ := s.account.access()
 		ctx := context.WithValue(context.Background(), accountEpochKey{}, epoch)
-		lastUsage := time.Now()
-		s.maybeSwitchClaudeAccount(ctx, id, &lastUsage)
+		s.maybeSwitchClaudeAccount(ctx, id, &claudeMonitor{lastUsageCheck: time.Now(), started: true})
 		m.mu.Lock()
 		latest, err := m.record(s.profile, id)
 		m.mu.Unlock()

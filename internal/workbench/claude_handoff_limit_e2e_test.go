@@ -560,3 +560,71 @@ func (h *limitHarness) registryRowsDescendFrom(session string) {
 		return kinds
 	}())
 }
+
+// With the default rule and no quota reading stored, a real limit brings the
+// first-time question: the session's own check reads the usage, nothing moves
+// before the answer, the answer from the phone route moves it, the message
+// sent at the limit arrives once on B, and the desktop's late answer changes
+// nothing.
+func TestClaudeLimitQuestionEndToEnd(t *testing.T) {
+	h := newLimitHarness(t)
+	h.script = func(account, _ string) (string, map[string]any) {
+		return "end_turn", map[string]any{"type": "text", "text": "ok from " + account}
+	}
+	id := h.start()
+	h.send(id, "hello before the limit")
+	h.wait(id, "first answer", func(v mobileSession) bool { return len(v.Turns) == 1 && v.Turns[0].Status == "completed" })
+	h.limited.Store("seven_day")
+	limitedAt := time.Now()
+	h.send(id, "this one hits the limit")
+	h.wait(id, "the limit", func(v mobileSession) bool { return v.AccountFailure == "rate_limit" })
+	h.send(id, "sent while the question is open")
+	type inspect struct {
+		Source  string            `json:"source_id"`
+		Handoff claudeHandoffView `json:"handoff"`
+	}
+	ask := func(route string, body map[string]any) (int, string) {
+		raw, _ := json.Marshal(body)
+		response := request(h.s, "POST", route+id+"/account", h.s.origin, string(raw), true)
+		return response.Code, response.Body.String()
+	}
+	var view inspect
+	deadline := time.Now().Add(40 * time.Second)
+	for view.Handoff.Question == nil && time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		_, reply := ask("/api/mobile/cli/sessions/", map[string]any{"action": "inspect"})
+		_ = json.Unmarshal([]byte(reply), &view)
+	}
+	asked := time.Since(limitedAt)
+	if q := view.Handoff.Question; q == nil || q.Label != "B" || view.Handoff.Window != "seven_day" || view.Handoff.ResetsAt != h.resetsAt.Load() {
+		t.Fatalf("no first-time question: %+v", view.Handoff)
+	}
+	// Nothing moves before the answer, across another check.
+	time.Sleep(11 * time.Second)
+	if r := h.record(id); r.Account.ID != h.list.Accounts[0].ID || r.Switch != nil || len(h.requests("b")) != 0 {
+		t.Fatal("the session moved before an answer")
+	}
+	code, reply := ask("/api/mobile/cli/sessions/", map[string]any{"action": "answer", "answer": "once", "request_id": uuid.NewString(), "source_id": view.Source, "confirm": true})
+	if code != 200 {
+		t.Fatal(code, reply)
+	}
+	if code, reply := ask("/api/cli/sessions/", map[string]any{"action": "answer", "answer": "wait_once", "request_id": uuid.NewString(), "source_id": view.Source, "confirm": true}); code != 409 || !strings.Contains(reply, "另一台设备") {
+		t.Fatal("the late answer from the desktop:", code, reply)
+	}
+	h.wait(id, "the answered handoff", func(v mobileSession) bool {
+		return v.AccountSwitch != nil && v.AccountSwitch.Phase == "completed" && v.AccountID == h.list.Accounts[1].ID && !v.Active
+	})
+	h.wait(id, "the message sent at the limit answered on B", func(v mobileSession) bool {
+		return strings.Contains(h.lastBody("b", "sent while the question is open"), "ok from b") && !v.Active
+	})
+	final := h.lastBody("b", "sent while the question is open")
+	for _, text := range []string{"this one hits the limit", "sent while the question is open"} {
+		if n := strings.Count(final, text); n != 1 {
+			t.Fatalf("%q reached B %d times", text, n)
+		}
+	}
+	if list, _ := h.s.loadClaudeAccounts(); list.Scheduling.SwitchPolicy != "ask" || list.Scheduling.UngroupedHandoff {
+		t.Fatal("a one-time answer changed the rule", list.Scheduling)
+	}
+	t.Logf("question shown %s after the limit (%d usage reports for A); answered once from the phone route", asked.Round(time.Millisecond), h.usage["a"])
+}
