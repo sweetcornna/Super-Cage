@@ -15,8 +15,8 @@ type ToolActivity struct {
 	Name   string `json:"name"`
 	Detail string `json:"detail,omitempty"`
 	Status string `json:"status"`
-	// Subagents and background tasks only, as in the channel helper's entries
-	// (cli_channel.py): what the call started, whether it still runs, when, and
+	// Subagents and background tasks only, as in the resident helper's entries
+	// (cli_discovery.py view_tasks): what the call started, whether it still runs, when, and
 	// for a running subagent its latest tool call and how many it made.
 	Kind         string   `json:"kind,omitempty"`  // "subagent", "background_agent" or "background_command"
 	State        string   `json:"state,omitempty"` // "running", "completed", "failed" or "stopped"

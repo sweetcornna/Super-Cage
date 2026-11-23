@@ -95,7 +95,8 @@ type terminalConversation struct {
 	Active              bool         `json:"active"`
 	ConnectionNotice    string       `json:"connection_notice"`
 	HistoryTruncated    bool         `json:"history_truncated"`
-	// Tasks comes with a view, RunningTasks with a discovered session.
+	// Tasks comes with a view, RunningTasks with a discovered session; only the
+	// resident helper (cli_discovery.py) sends them.
 	Tasks        *mobileTasks `json:"tasks"`
 	RunningTasks int          `json:"running_tasks"`
 	// WatchKey comes only from the resident helper: view-wait answers when
