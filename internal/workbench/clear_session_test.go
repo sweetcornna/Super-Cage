@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -382,6 +383,36 @@ func TestEarlierPartsAreListedReadAndSeparated(t *testing.T) {
 	f.s.mobileCLI.mu.Unlock()
 	if err != nil || separated.CLIID != a || !separated.Resume || !separated.Terminal || separated.Title != "整理发布流程" {
 		t.Fatalf("separated record: %+v %v", separated, err)
+	}
+}
+
+func TestResumeFromAFolderThatIsGoneStartsInTheProject(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, ".claude/worktrees/done")
+	if err := os.MkdirAll(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	run := func(directory string) string {
+		t.Helper()
+		out, err := exec.Command("/bin/bash", "-c", terminalDirectory(directory, root)+" && pwd -P").CombinedOutput()
+		if err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	real := func(path string) string { path, _ = filepath.EvalSymlinks(path); return path }
+	if got := run(sub); got != real(sub) {
+		t.Fatalf("an existing folder: %s", got)
+	}
+	if got := run(root); got != real(root) {
+		t.Fatalf("the project: %s", got)
+	}
+	if err := os.RemoveAll(sub); err != nil {
+		t.Fatal(err)
+	}
+	got := run(sub)
+	if lines := strings.Split(got, "\n"); len(lines) != 2 || !strings.Contains(lines[0], "已不存在") || lines[1] != real(root) {
+		t.Fatalf("a removed worktree: %q", got)
 	}
 }
 

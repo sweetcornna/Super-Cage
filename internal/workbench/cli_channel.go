@@ -438,6 +438,11 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	}
 	var current terminalConversation
 	input := map[string]any{"cli_id": record.CLIID, "config": record.GuestConfig, "connection": record.Connection, "account": record.Account.GuestID}
+	if s.windowsGuest == nil && s.macosGuest == nil {
+		// The resident helper keeps a session the CLI filed under this project
+		// in it when its latest folder lies elsewhere (cli_discovery.py).
+		input["project"] = s.cliWorkspace(record.Workspace)
+	}
 	if err := s.windowsConversationInput(record, input); err != nil {
 		return mobileSession{}, err
 	}
@@ -734,9 +739,10 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return string(data), record, nil
 	}
 	body := s.cliHelperCommand("launch", string(data)) + "; exec bash -i"
+	root := s.cliWorkspace(workspace)
 	directory := record.GuestWorkspace
 	if directory == "" {
-		directory = s.cliWorkspace(workspace)
+		directory = root
 	}
 	record.GuestWorkspace = directory
 	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
@@ -748,8 +754,19 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		}
 		return s.macOSClaudeLaunch(workspace, string(data)), record, nil
 	}
-	script := "cd " + shellescape.Quote(directory) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
+	script := terminalDirectory(directory, root) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lic " + shellescape.Quote(body)
 	return script, record, nil
+}
+
+// terminalDirectory enters the folder the conversation last worked in, or the
+// project when that folder is gone (a removed worktree): the CLI finds the
+// transcript by its id from any folder, so the resume goes on and says where.
+func terminalDirectory(directory, root string) string {
+	if directory == root {
+		return "cd " + shellescape.Quote(root)
+	}
+	notice := shellescape.Quote("会话上次所在的文件夹已不存在，已在项目文件夹中继续：" + root)
+	return "{ cd " + shellescape.Quote(directory) + " 2>/dev/null || { cd " + shellescape.Quote(root) + " && printf '%s\n' " + notice + "; }; }"
 }
 
 func (s *Server) isTerminalConversation(id string) bool {
