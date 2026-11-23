@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -20,31 +21,41 @@ import (
 
 type terminalParse uint8
 
+// The states of xterm.js's parser (EscapeSequenceParser, the VT500 table).
 const (
 	parseGround terminalParse = iota
 	parseEscape
-	parseCharset // ESC ( ) * + and the designation still to come
-	parseCSI
-	parseString // OSC, DCS, APC, PM, SOS until BEL or ST
-	parseStringEscape
+	parseEscapeIntermediate
+	parseCSIEntry
+	parseCSIParam
+	parseCSIIntermediate
+	parseCSIIgnore
+	parseOSC
+	parseDCSEntry
+	parseDCSParam
+	parseDCSIntermediate
+	parseDCSIgnore
+	parseDCSPassthrough
+	parseIgnoredString // SOS, PM, APC
 )
 
-// terminalModeParams bounds the parameters of one control sequence; more are
-// ignored, as programs never set that many modes at once.
-const terminalModeParams = 16
+// terminalModeParams is how many parameters of one sequence xterm.js keeps
+// (Params.maxLength); the digits of later ones are dropped.
+const terminalModeParams = 32
+
+// terminalParamMax is the largest parameter value xterm.js stores.
+const terminalParamMax = 0x7fffffff
 
 type terminalModes struct {
 	parse   terminalParse
-	utf8    uint8 // continuation bytes still owed by a multi-byte character
-	g0      bool  // the charset being designated is G0
-	private bool  // CSI with the ? prefix
-	other   bool  // CSI with another prefix (<, =, >): not a mode
-	space   bool  // CSI with a space intermediate (DECSCUSR)
-	bang    bool  // CSI with a ! intermediate (DECSTR)
-	inter   bool  // CSI with any other intermediate
-	params  [terminalModeParams]uint16
-	count   uint8 // parameters started
-	value   uint32
+	need    uint8  // UTF-8 continuation bytes still owed
+	lead    uint8  // bytes of the character being decoded (2, 3 or 4)
+	code    uint32 // the code point they complete
+	collect uint32 // prefix and intermediates, collected as xterm.js does
+	params  [terminalModeParams]uint32
+	count   uint8 // parameters kept, at most terminalModeParams
+	reject  bool  // more parameters than kept: their digits are dropped
+	sub     bool  // digits go to a sub-parameter
 
 	alt, cursorKeys, keypad, noWrap, hidden, focus, paste, lineDrawing bool
 	mouse, encoding                                                    uint16
@@ -54,167 +65,263 @@ type terminalModes struct {
 // feed reads output bytes in order.
 func (m *terminalModes) feed(data []byte) {
 	for _, b := range data {
-		m.step(b)
+		m.byte(b)
 	}
 }
 
 // ground reports a boundary between sequences and characters: a replay may
 // start after it.
-func (m *terminalModes) ground() bool { return m.parse == parseGround && m.utf8 == 0 }
+func (m *terminalModes) ground() bool { return m.parse == parseGround && m.need == 0 }
 
 // finish reads the start of data until the sequence or character cut in half
-// at its front is complete, and returns how many bytes that took. The modes
-// that sequence sets count. A viewer is shown data from there.
-func (m *terminalModes) finish(data []byte) int {
-	n := 0
-	for n < len(data) && !m.ground() {
-		m.step(data[n])
+// at its front is complete, and returns how many bytes that took; the modes
+// that sequence sets count. A viewer is shown data from there. When the cut
+// sequence does not end within data (a string left open, then plain output),
+// ok is false and m is unchanged: the viewer is shown all of data, as
+// before this tracker, rather than nothing.
+func (m *terminalModes) finish(data []byte) (n int, ok bool) {
+	probe := *m
+	for n < len(data) && !probe.ground() {
+		probe.byte(data[n])
 		n++
 	}
-	return n
+	if !probe.ground() {
+		return 0, false
+	}
+	*m = probe
+	return n, true
 }
 
+// reset is a full reset (RIS); the parser state is kept.
 func (m *terminalModes) reset() {
-	*m = terminalModes{parse: m.parse, utf8: m.utf8}
+	*m = terminalModes{parse: m.parse, need: m.need, lead: m.lead, code: m.code, collect: m.collect, params: m.params, count: m.count, reject: m.reject, sub: m.sub}
 }
 
-func (m *terminalModes) step(b byte) {
-	switch b {
-	case 0x18, 0x1a: // CAN, SUB end any sequence
-		m.parse, m.utf8 = parseGround, 0
+// byte decodes UTF-8 as xterm.js does (Utf8ToUtf32): a broken character is
+// dropped and the byte that broke it read again; C1 controls arrive as
+// U+0080..U+009F.
+func (m *terminalModes) byte(b byte) {
+	if m.need > 0 {
+		if b&0xc0 == 0x80 {
+			m.code = m.code<<6 | uint32(b&0x3f)
+			if m.need--; m.need == 0 {
+				switch c := m.code; {
+				case m.lead == 2 && c >= 0x80,
+					m.lead == 3 && c >= 0x800 && (c < 0xd800 || c > 0xdfff) && c != 0xfeff,
+					m.lead == 4 && c >= 0x10000 && c <= 0x10ffff:
+					m.step(c)
+				}
+			}
+			return
+		}
+		m.need = 0
+	}
+	switch {
+	case b < 0x80:
+		m.step(uint32(b))
+	case b&0xe0 == 0xc0:
+		m.need, m.lead, m.code = 1, 2, uint32(b&0x1f)
+	case b&0xf0 == 0xe0:
+		m.need, m.lead, m.code = 2, 3, uint32(b&0x0f)
+	case b&0xf8 == 0xf0:
+		m.need, m.lead, m.code = 3, 4, uint32(b&0x07)
+	}
+}
+
+// clear starts a new sequence: one parameter, 0, nothing collected.
+func (m *terminalModes) clear() {
+	m.collect, m.params[0], m.count, m.reject, m.sub = 0, 0, 1, false, false
+}
+
+// step reads one code point, with the transitions of xterm.js.
+func (m *terminalModes) step(c uint32) {
+	// Anywhere: CAN and SUB end what is open, ESC starts a sequence (and
+	// ends a string), C1 controls act as their ESC forms.
+	switch {
+	case c == 0x18 || c == 0x1a:
+		m.parse = parseGround
+		return
+	case c == 0x1b:
+		m.parse = parseEscape
+		m.clear()
+		return
+	case c >= 0x80 && c < 0xa0:
+		switch c {
+		case 0x90:
+			m.parse = parseDCSEntry
+			m.clear()
+		case 0x9b:
+			m.parse = parseCSIEntry
+			m.clear()
+		case 0x9d:
+			m.parse = parseOSC
+		case 0x98, 0x9e, 0x9f:
+			m.parse = parseIgnoredString
+		default: // ST and the C1 controls that execute
+			m.parse = parseGround
+		}
 		return
 	}
+	// Code points past C1 are printable; a sequence that is not a string
+	// ends on one (xterm.js's error transition).
+	wide := c >= 0xa0
+	control := c < 0x20
 	switch m.parse {
 	case parseGround:
-		switch {
-		case m.utf8 > 0 && b&0xc0 == 0x80:
-			m.utf8--
-		case b == 0x1b:
-			m.parse, m.utf8 = parseEscape, 0
-		case b >= 0xf0 && b < 0xf8:
-			m.utf8 = 3
-		case b >= 0xe0 && b < 0xf0:
-			m.utf8 = 2
-		case b >= 0xc0 && b < 0xe0:
-			m.utf8 = 1
-		default:
-			m.utf8 = 0
-		}
 	case parseEscape:
-		m.parse = parseGround
-		switch b {
-		case '[':
-			m.parse, m.private, m.other, m.space, m.bang, m.inter, m.count, m.value = parseCSI, false, false, false, false, false, 0, 0
-		case ']', 'P', '_', '^', 'X':
-			m.parse = parseString
-		case '(', ')', '*', '+':
-			m.parse, m.g0 = parseCharset, b == '('
-		case 'c': // RIS
-			m.reset()
+		switch {
+		case control || c == 0x7f:
+		case wide:
+			m.parse = parseGround
+		case c < 0x30:
+			m.collect = m.collect<<8 | c
+			m.parse = parseEscapeIntermediate
+		case c == '[':
+			m.parse = parseCSIEntry
+			m.clear()
+		case c == ']':
+			m.parse = parseOSC
+		case c == 'P':
+			m.parse = parseDCSEntry
+			m.clear()
+		case c == 'X' || c == '^' || c == '_':
+			m.parse = parseIgnoredString
+		default:
+			m.escape(c)
+			m.parse = parseGround
+		}
+	case parseEscapeIntermediate:
+		switch {
+		case control || c == 0x7f:
+		case wide:
+			m.parse = parseGround
+		case c < 0x30:
+			m.collect = m.collect<<8 | c
+		default:
+			m.escape(c)
+			m.parse = parseGround
+		}
+	case parseCSIEntry, parseCSIParam, parseCSIIntermediate:
+		switch {
+		case control || c == 0x7f:
+		case wide:
+			m.parse = parseGround
+		case c >= 0x40:
+			m.csi(c)
+			m.parse = parseGround
+		case c < 0x30:
+			m.collect = m.collect<<8 | c
+			m.parse = parseCSIIntermediate
+		case m.parse == parseCSIIntermediate:
+			m.parse = parseCSIIgnore
+		case c >= 0x3c: // a prefix: first, or ignored
+			if m.parse == parseCSIEntry {
+				m.collect = m.collect<<8 | c
+				m.parse = parseCSIParam
+			} else {
+				m.parse = parseCSIIgnore
+			}
+		default:
+			m.param(c)
+			m.parse = parseCSIParam
+		}
+	case parseCSIIgnore:
+		if c >= 0x40 && c < 0x7f {
+			m.parse = parseGround
+		}
+	case parseOSC:
+		if c == 0x07 {
+			m.parse = parseGround
+		}
+	case parseDCSEntry, parseDCSParam, parseDCSIntermediate:
+		switch {
+		case control || c == 0x7f:
+		case wide:
+			m.parse = parseGround
+		case c >= 0x40:
+			m.parse = parseDCSPassthrough
+		case c < 0x30:
+			m.parse = parseDCSIntermediate
+		case m.parse == parseDCSIntermediate || c >= 0x3c && m.parse == parseDCSParam:
+			m.parse = parseDCSIgnore
+		default:
+			m.parse = parseDCSParam
+		}
+	case parseDCSIgnore, parseDCSPassthrough:
+		// Only ESC, ST, CAN and SUB end them, above.
+	case parseIgnoredString:
+		if wide {
+			m.parse = parseGround
+		}
+	}
+}
+
+// param reads a digit, ";" or ":" of a CSI sequence, as xterm.js's Params.
+func (m *terminalModes) param(c uint32) {
+	switch c {
+	case ';':
+		m.sub = false
+		if m.count >= terminalModeParams {
+			m.reject = true
+			return
+		}
+		m.params[m.count] = 0
+		m.count++
+	case ':':
+		m.sub = true
+	default:
+		if m.reject || m.sub || m.count == 0 {
+			return
+		}
+		v := &m.params[m.count-1]
+		*v = uint32(min(uint64(*v)*10+uint64(c-'0'), terminalParamMax))
+	}
+}
+
+// terminalCharsets are the character sets xterm.js designates (CHARSETS).
+const terminalCharsets = "0AB4C5RQKYE6ZH7="
+
+// escape dispatches ESC sequences that set modes.
+func (m *terminalModes) escape(final uint32) {
+	switch m.collect {
+	case 0:
+		switch final {
 		case '=':
 			m.keypad = true
 		case '>':
 			m.keypad = false
-		case 0x1b:
-			m.parse = parseEscape
-		default:
-			if b >= 0x20 && b <= 0x2f {
-				// ESC with an intermediate: its final byte ends it.
-				m.parse = parseCharset
-				m.g0 = false
-			}
+		case 'c': // RIS
+			m.reset()
 		}
-	case parseCharset:
-		if b >= 0x20 && b <= 0x2f {
-			return
+	case '(':
+		if strings.ContainsRune(terminalCharsets, rune(final)) {
+			m.lineDrawing = final == '0'
 		}
-		if m.g0 {
-			m.lineDrawing = b == '0'
+	case '%':
+		if final == '@' || final == 'G' { // the default character set
+			m.lineDrawing = false
 		}
-		m.parse = parseGround
-		if b == 0x1b {
-			m.parse = parseEscape
-		}
-	case parseCSI:
-		switch {
-		case b >= '0' && b <= '9':
-			if m.count == 0 {
-				m.count = 1
-			}
-			if m.value < 1<<16 {
-				m.value = m.value*10 + uint32(b-'0')
-			}
-		case b == ';' || b == ':':
-			m.param()
-			m.count++
-		case b >= '<' && b <= '?':
-			if b == '?' {
-				m.private = true
-			} else {
-				m.other = true
-			}
-		case b >= 0x20 && b <= 0x2f:
-			switch b {
-			case ' ':
-				m.space = true
-			case '!':
-				m.bang = true
-			default:
-				m.inter = true
-			}
-		case b >= 0x40 && b <= 0x7e:
-			m.param()
-			m.dispatch(b)
-			m.parse = parseGround
-		case b == 0x1b:
-			m.parse = parseEscape
-		}
-		// Other C0 controls inside a sequence act and leave it open.
-	case parseString:
-		switch b {
-		case 0x07:
-			m.parse = parseGround
-		case 0x1b:
-			m.parse = parseStringEscape
-		}
-	case parseStringEscape:
-		if b == '\\' {
-			m.parse = parseGround
-			return
-		}
-		// Another sequence ends the string and starts itself.
-		m.parse = parseEscape
-		m.step(b)
 	}
 }
 
-// param stores the parameter being read, if there is room.
-func (m *terminalModes) param() {
-	if m.count > 0 && int(m.count) <= terminalModeParams {
-		m.params[m.count-1] = uint16(min(m.value, 1<<16-1))
-	}
-	m.value = 0
-}
-
-func (m *terminalModes) dispatch(final byte) {
-	n := min(int(m.count), terminalModeParams)
+// csi dispatches CSI sequences that set modes.
+func (m *terminalModes) csi(final uint32) {
 	switch {
-	case m.bang && final == 'p' && !m.private && !m.other: // DECSTR
-		m.cursorKeys, m.keypad, m.noWrap, m.hidden, m.lineDrawing = false, false, false, false, false
-	case m.space && final == 'q' && !m.private && !m.other && !m.inter: // DECSCUSR
-		m.cursorStyle = 0
-		if n > 0 {
-			m.cursorStyle = uint8(min(m.params[0], 6))
-		}
-	case m.private && !m.other && !m.space && !m.bang && !m.inter && (final == 'h' || final == 'l'):
-		for _, p := range m.params[:n] {
+	case m.collect == '?' && (final == 'h' || final == 'l'):
+		for _, p := range m.params[:m.count] {
 			m.set(p, final == 'h')
 		}
+	case m.collect == ' ' && final == 'q': // DECSCUSR
+		if p := m.params[0]; p <= 6 {
+			m.cursorStyle = uint8(p)
+		}
+	case m.collect == '!' && final == 'p': // DECSTR: xterm.js resets its DEC private modes
+		m.cursorKeys, m.keypad, m.noWrap, m.hidden, m.focus, m.paste, m.lineDrawing, m.cursorStyle = false, false, false, false, false, false, false, 0
 	}
 }
 
 // set applies one DEC private mode, the way xterm.js does.
-func (m *terminalModes) set(mode uint16, on bool) {
+func (m *terminalModes) set(mode uint32, on bool) {
 	switch mode {
 	case 1:
 		m.cursorKeys = on
@@ -229,12 +336,12 @@ func (m *terminalModes) set(mode uint16, on bool) {
 	case 9, 1000, 1002, 1003:
 		m.mouse = 0
 		if on {
-			m.mouse = mode
+			m.mouse = uint16(mode)
 		}
-	case 1005, 1006, 1015, 1016:
+	case 1006, 1016: // xterm.js has no 1005 and 1015
 		m.encoding = 0
 		if on {
-			m.encoding = mode
+			m.encoding = uint16(mode)
 		}
 	case 1004:
 		m.focus = on
@@ -310,7 +417,9 @@ func (t *terminalSession) replayFromOldestLocked(limit int) terminalReplay {
 	modes := t.trimmed
 	skip := 0
 	if oldest > 0 {
-		skip = modes.finish(t.history)
+		// A string left open past the history (ok false) starts the replay
+		// at the oldest kept byte, as before: never nothing.
+		skip, _ = modes.finish(t.history)
 	}
 	end := min(len(t.history), skip+limit)
 	replay := terminalReplay{data: append(make([]byte, 0, end-skip), t.history[skip:end]...), offset: oldest + uint64(skip)}
@@ -327,11 +436,15 @@ func (t *terminalSession) replayFromOldestLocked(limit int) terminalReplay {
 // one row less before it is given its size back.
 var terminalRepaintGap = 120 * time.Millisecond
 
-// markShown records that output up to next reached a viewer.
+// markShown records that output up to next was written to a viewer that
+// answers its queries: a socket write that succeeded, or a phone that asks
+// for what follows it.
 func (t *terminalSession) markShown(next uint64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.shown = max(t.shown, next)
+	if next <= t.written {
+		t.shown = max(t.shown, next)
+	}
 }
 
 // repaint makes a full-screen program draw its whole screen again, for a
