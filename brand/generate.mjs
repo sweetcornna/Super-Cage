@@ -269,7 +269,6 @@ export function buildIco(frames) {
 
 // ---------------------------------------------------------------- outputs
 export const PATHS = {
-  logo: "logo.png",
   macIconset: "packaging/macos/Cage.iconset",
   winIco: "packaging/windows/Cage.ico",
   linuxIcons: "packaging/linux/icons",
@@ -411,7 +410,6 @@ export async function rasterOutputs(masters, renderer) {
 
   // macOS iconset: 824/1024 tile, transparent margin.
   for (const [px, name] of MAC_SIZES) out.set(join(PATHS.macIconset, name + ".png"), (await png({ px, tile: "mac", alpha: true })).png);
-  out.set(PATHS.logo, (await png({ px: 1024, tile: "mac", alpha: true })).png);
 
   // Windows: full-bleed rounded square, PNG frames.
   out.set(PATHS.winIco, buildIco(await Promise.all(WIN_SIZES.map(async (size) => ({ size, png: (await png({ px: size, tile: "bleed", alpha: true })).png })))));
