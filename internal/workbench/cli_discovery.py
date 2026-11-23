@@ -287,10 +287,14 @@ def settle_tasks(tasks, alive, since):
 
 def child_activity(path):
     """The tool calls of a subagent file: count, whether counted from a tail only, and the latest two."""
+    with child_lock:
+        return read_activity(path)
+
+
+def read_activity(path):
     info = os.stat(path)
     identity = (info.st_dev, info.st_ino)
-    with child_lock:
-        cached = child_scans.get(str(path))
+    cached = child_scans.get(str(path))
     if cached is None or cached[0] != identity or cached[1] > info.st_size or info.st_size - cached[1] > CHILD_TAIL:
         start = max(0, info.st_size - CHILD_TAIL)
         cached = (identity, start, 0, start > 0, [], start == 0)
@@ -317,10 +321,9 @@ def child_activity(path):
                     calls += 1
                     recent = (recent + [(block["name"], tool_detail(block.get("input")))])[-2:]
         offset += end
-    with child_lock:
-        if len(child_scans) > 256:
-            child_scans.clear()
-        child_scans[str(path)] = (identity, offset, calls, partial, recent, True)
+    if len(child_scans) > 256:
+        child_scans.clear()
+    child_scans[str(path)] = (identity, offset, calls, partial, recent, True)
     shown = recent[-2] if len(recent) == 2 and recent[-1][0] in WAIT_TOOLS else recent[-1] if recent else None
     activity = {"calls": calls}
     if partial:
@@ -385,9 +388,11 @@ def read_children(tasks, folder, watch, activity=True):
 def scanned_tasks(path):
     """A copy of the task index of a transcript, read from where the previous
     call stopped (a bounded tail on the first call), so this process rereads nothing."""
-    info = path.stat()
-    identity = (info.st_dev, info.st_ino)
+    # A list and a view can read the same growing transcript at once: the size
+    # is taken under the lock, so an older size never resets a newer index.
     with scan_lock:
+        info = path.stat()
+        identity = (info.st_dev, info.st_ino)
         cached = task_scans.get(str(path))
         if cached is None or cached[0] != identity or cached[1] > info.st_size:
             start = max(0, info.st_size - SCAN_TAIL)
