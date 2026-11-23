@@ -38,6 +38,9 @@ type terminalSession struct {
 	exitCode              int
 	history               []byte
 	written               uint64        // bytes ever appended to history
+	trimmed               terminalModes // the modes and parser state of the output before history[0]
+	shown                 uint64        // output up to this offset has reached a viewer, whose terminal answered its queries
+	repaintAt             time.Time     // when repaint last ran; guarded by mu
 	changed               chan struct{} // closed and replaced on output and exit
 	ended                 bool          // exitCode is final
 	sequence              int
@@ -358,13 +361,20 @@ type terminalSubscription struct {
 	// History is the output sent before live output. HistoryOffset is the
 	// absolute offset of its first byte; HistoryReset reports that it does
 	// not continue from the offset the viewer asked to resume after.
-	History       []byte
-	HistoryOffset uint64
-	HistoryReset  bool
-	CLIStartup    <-chan struct{}
-	CLIStarting   bool
-	session       *terminalSession
-	viewer        *terminalViewer
+	// HistoryState is what the viewer sets before History when the kept
+	// output was trimmed (see terminalModes). History below HistoryAnswered
+	// was shown to a viewer before: its queries were answered then.
+	// Repaint asks the full-screen program for a whole screen afterwards.
+	History         []byte
+	HistoryOffset   uint64
+	HistoryReset    bool
+	HistoryState    []byte
+	HistoryAnswered uint64
+	Repaint         bool
+	CLIStartup      <-chan struct{}
+	CLIStarting     bool
+	session         *terminalSession
+	viewer          *terminalViewer
 }
 
 // terminalBatch is the next output for one viewer.
@@ -373,6 +383,7 @@ type terminalBatch struct {
 	Offset uint64 // absolute offset of Data[0]
 	Resync bool   // the viewer fell behind; Data restarts it from history
 	Reset  bool   // Data does not continue from the output sent before
+	State  []byte // with Reset: the modes to set before Data
 	Done   bool   // nothing more will arrive
 	Ended  bool   // the session ended
 }
@@ -400,9 +411,14 @@ func (t *terminalSession) subscribeFrom(after *uint64) *terminalSubscription {
 	case after != nil:
 		out := t.outputAfterLocked(*after, len(t.history))
 		subscription.History, subscription.HistoryOffset, subscription.HistoryReset = out.Data, out.Next-uint64(len(out.Data)), out.Reset
+		subscription.HistoryState, subscription.HistoryAnswered, subscription.Repaint = out.State, out.Answered, out.Repaint
 	default:
-		subscription.History, subscription.HistoryOffset, subscription.HistoryReset = append([]byte(nil), t.history...), t.oldestLocked(), true
+		replay := t.replayFromOldestLocked(len(t.history))
+		subscription.History, subscription.HistoryOffset, subscription.HistoryReset = replay.data, replay.offset, true
+		subscription.HistoryState, subscription.HistoryAnswered, subscription.Repaint = replay.state, t.shown, replay.repaint()
 	}
+	// This viewer is shown everything so far.
+	t.shown = t.written
 	return subscription
 }
 
@@ -420,7 +436,7 @@ func (s *terminalSubscription) next(limit int) terminalBatch {
 		}
 		out := t.outputAfterLocked(viewer.offset, len(t.history))
 		viewer.lagged, viewer.pending, viewer.offset = false, nil, out.Next
-		return terminalBatch{Data: out.Data, Offset: out.Next - uint64(len(out.Data)), Resync: true, Reset: out.Reset}
+		return terminalBatch{Data: out.Data, Offset: out.Next - uint64(len(out.Data)), Resync: true, Reset: out.Reset, State: out.State}
 	}
 	if len(viewer.pending) > 0 {
 		n := min(len(viewer.pending), limit)
@@ -483,8 +499,13 @@ func (t *terminalSession) read() {
 			if t.kind != "claude-login" {
 				t.history = append(t.history, chunk...)
 				t.written += uint64(len(chunk))
-				if len(t.history) > terminalHistoryLimit {
-					t.history = t.history[len(t.history)-terminalHistoryLimit:]
+				if over := len(t.history) - terminalHistoryLimit; over > 0 {
+					// What leaves the history is read for the modes it set.
+					t.trimmed.feed(t.history[:over])
+					t.history = t.history[over:]
+				}
+				if len(t.clients) > 0 {
+					t.shown = t.written
 				}
 				t.notifyLocked()
 			}
@@ -508,10 +529,16 @@ func (t *terminalSession) notifyLocked() {
 }
 
 // terminalOutput is the scrollback after a byte offset of the whole output.
+// With Reset, State is what to set before Data (see terminalModes) and
+// Repaint asks the full-screen program for a whole screen. Output below
+// Answered had reached a viewer before this read.
 type terminalOutput struct {
 	Data     []byte
 	Next     uint64
 	Reset    bool
+	State    []byte
+	Repaint  bool
+	Answered uint64
 	Closed   bool
 	ExitCode *int
 	changed  <-chan struct{}
@@ -539,15 +566,18 @@ func (t *terminalSession) oldestLocked() uint64 {
 // Caller holds t.mu.
 func (t *terminalSession) outputAfterLocked(after uint64, limit int) terminalOutput {
 	oldest := t.oldestLocked()
-	out := terminalOutput{changed: t.changed}
+	out := terminalOutput{changed: t.changed, Answered: t.shown}
 	if after < oldest || after > t.written {
-		after, out.Reset = oldest, true
+		replay := t.replayFromOldestLocked(limit)
+		out.Data, out.Next, out.Reset = replay.data, replay.offset+uint64(len(replay.data)), true
+		out.State, out.Repaint = replay.state, replay.repaint()
+	} else {
+		start := int(after - oldest)
+		end := min(len(t.history), start+limit)
+		out.Data = make([]byte, end-start)
+		copy(out.Data, t.history[start:end])
+		out.Next = after + uint64(end-start)
 	}
-	start := int(after - oldest)
-	end := min(len(t.history), start+limit)
-	out.Data = make([]byte, end-start)
-	copy(out.Data, t.history[start:end])
-	out.Next = after + uint64(end-start)
 	if t.ended && out.Next == t.written {
 		out.Closed = true
 		if t.exitCode >= 0 {

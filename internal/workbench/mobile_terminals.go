@@ -142,8 +142,19 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 	for {
 		out := session.outputAfter(after, mobileTerminalChunk)
 		if len(out.Data) > 0 || out.Reset || out.Closed {
+			// Output below answered had reached a viewer before: its queries
+			// were answered then. state sets the modes a trimmed history was
+			// written in (terminalModes).
 			session.showQueries(peer, out.Data)
-			jsonReply(w, map[string]any{"data": out.Data, "next": out.Next, "reset": out.Reset, "closed": out.Closed, "exit_code": out.ExitCode})
+			session.markShown(out.Next)
+			reply := map[string]any{"data": out.Data, "next": out.Next, "reset": out.Reset, "closed": out.Closed, "exit_code": out.ExitCode, "answered": out.Answered}
+			if len(out.State) > 0 {
+				reply["state"] = string(out.State)
+			}
+			if out.Repaint {
+				go session.repaint()
+			}
+			jsonReply(w, reply)
 			return
 		}
 		select {

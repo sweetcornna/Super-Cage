@@ -178,6 +178,9 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 		hello = map[string]any{"type": "viewer", "protocol": terminalViewerProtocol}
 	}
 	subscription := session.subscribeFrom(after)
+	if subscription.Repaint {
+		go session.repaint()
+	}
 	pongs, stop, done := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
@@ -256,19 +259,28 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 		return true
 	}
 	// Replayed output must render without repeating clipboard side effects.
-	replay := func(data []byte, offset uint64, reset bool) bool {
+	// state sets the modes the replay was written in (terminalModes); the
+	// replay's queries below answered were answered when they were first
+	// shown, so a viewer that reads it answers only the rest.
+	replay := func(data []byte, offset uint64, reset bool, state []byte, answered uint64) bool {
+		// A viewer from before the answered offset answers every replayed
+		// query: the rules must still read those answers as answers.
 		shown(data)
 		if !resume {
-			if len(data) == 0 {
+			if len(data)+len(state) == 0 {
 				return true
 			}
 			if !writeJSON(map[string]string{"type": "history"}) {
 				return false
 			}
 			_ = ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
-			return ws.WriteMessage(websocket.BinaryMessage, data) == nil
+			return ws.WriteMessage(websocket.BinaryMessage, append(append([]byte(nil), state...), data...)) == nil
 		}
-		return writeJSON(map[string]any{"type": "history", "offset": offset, "reset": reset, "size": len(data)}) && writeBinary(data)
+		marker := map[string]any{"type": "history", "offset": offset, "reset": reset, "size": len(data), "answered": answered}
+		if len(state) > 0 {
+			marker["state"] = string(state)
+		}
+		return writeJSON(marker) && writeBinary(data)
 	}
 	if hello != nil && !writeJSON(hello) {
 		return
@@ -276,7 +288,7 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 	if subscription.CLIStartup != nil && !writeJSON(map[string]any{"type": "cli-startup", "pending": subscription.CLIStarting}) {
 		return
 	}
-	if !replay(subscription.History, subscription.HistoryOffset, subscription.HistoryReset) {
+	if !replay(subscription.History, subscription.HistoryOffset, subscription.HistoryReset, subscription.HistoryState, subscription.HistoryAnswered) {
 		return
 	}
 	subscription.History = nil
@@ -321,7 +333,8 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 			// it the kept history, as it did before resynchronisation.
 			return
 		case batch.Resync && resume:
-			if !replay(batch.Data, batch.Offset, batch.Reset) {
+			// This viewer never drew the bytes it missed: it answers them.
+			if !replay(batch.Data, batch.Offset, batch.Reset, batch.State, 0) {
 				return
 			}
 			continue
