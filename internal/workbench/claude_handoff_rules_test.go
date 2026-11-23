@@ -497,3 +497,36 @@ func TestClaudeSchedulingKeepsStandingAnswersAndPreferredAccount(t *testing.T) {
 		t.Fatalf("%+v", loaded.Scheduling)
 	}
 }
+
+func TestClaudeSessionRuleFollowsSchedulingUntilSet(t *testing.T) {
+	s, id, _, _ := claudeSwitchGuest(t, handoffGuest)
+	inspect := func(body string) (string, bool) {
+		t.Helper()
+		response := request(s, "POST", "/api/mobile/cli/sessions/"+id+"/account", s.origin, body, true)
+		var view struct {
+			Policy string `json:"switch_policy"`
+			Own    bool   `json:"switch_policy_own"`
+		}
+		if response.Code != 200 || json.Unmarshal(response.Body.Bytes(), &view) != nil {
+			t.Fatal(response.Code, response.Body.String())
+		}
+		return view.Policy, view.Own
+	}
+	if policy, own := inspect(`{"action":"inspect"}`); policy != "ask" || own {
+		t.Fatal("a new session follows 调度设置", policy, own)
+	}
+	if policy, own := inspect(`{"action":"policy","policy":"wait"}`); policy != "wait" || !own {
+		t.Fatal(policy, own)
+	}
+	list, _ := s.loadClaudeAccounts()
+	list.Scheduling.SwitchPolicy = "allow"
+	if err := s.saveClaudeAccounts(list); err != nil {
+		t.Fatal(err)
+	}
+	if policy, _ := inspect(`{"action":"inspect"}`); policy != "wait" {
+		t.Fatal("the session's own rule was overridden", policy)
+	}
+	if policy, own := inspect(`{"action":"policy","policy":"default"}`); policy != "allow" || own {
+		t.Fatal("back to 调度设置", policy, own)
+	}
+}

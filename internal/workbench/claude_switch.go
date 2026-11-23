@@ -73,10 +73,14 @@ func validSwitchPolicy(policy string) bool {
 // creation. A copied allow or wait was an explicit choice then and is kept; a
 // copied ask was the default and now follows 调度设置.
 func (r *mobileRecord) switchPolicy(list claudeAccountList) string {
-	if (r.SwitchPolicySet || r.SwitchPolicy == "allow" || r.SwitchPolicy == "wait") && validSwitchPolicy(r.SwitchPolicy) {
+	if r.ownSwitchPolicy() {
 		return r.SwitchPolicy
 	}
 	return list.Scheduling.defaults().SwitchPolicy
+}
+
+func (r *mobileRecord) ownSwitchPolicy() bool {
+	return (r.SwitchPolicySet || r.SwitchPolicy == "allow" || r.SwitchPolicy == "wait") && validSwitchPolicy(r.SwitchPolicy)
 }
 
 // claudeSwitchSource is the session's account while its identity is still
@@ -246,7 +250,8 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else if input.Action == "policy" {
-		if !validSwitchPolicy(input.Policy) {
+		// "default" returns the session to the rule in 调度设置.
+		if !validSwitchPolicy(input.Policy) && input.Policy != "default" {
 			http.Error(w, "切换授权无效", 400)
 			return
 		}
@@ -255,6 +260,9 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 				return errors.New("账号交接中，请等待完成后修改授权")
 			}
 			record.SwitchPolicy, record.SwitchPolicySet = input.Policy, true
+			if input.Policy == "default" {
+				record.SwitchPolicy, record.SwitchPolicySet = "", false
+			}
 			return nil
 		}); err != nil {
 			requestError(w, err)
@@ -290,6 +298,7 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	snapshot := record.snapshot()
 	policy := record.switchPolicy(list)
+	own := record.ownSwitchPolicy()
 	snapshot.SwitchPolicy = policy
 	sourceID := record.CLIID
 	targets := manualSwitchTargets(list, record, now)
@@ -307,7 +316,7 @@ func (s *Server) mobileSessionAccount(w http.ResponseWriter, r *http.Request) {
 	s.mobileCLI.mu.Unlock()
 	// handoff_api tells a client which fields and actions this server knows.
 	jsonReply(w, map[string]any{"session": snapshot, "source_id": sourceID, "switch_policy": policy, "candidates": options, "supported": supported,
-		"handoff_api": 2, "targets": targets, "source_busy": busy, "handoff": handoff, "undo": undo})
+		"handoff_api": 2, "targets": targets, "source_busy": busy, "handoff": handoff, "undo": undo, "switch_policy_own": own})
 }
 
 // changeClaudeSession applies change to a session record under the operation
