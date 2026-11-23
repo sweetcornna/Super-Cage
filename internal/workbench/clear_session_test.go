@@ -1,3 +1,5 @@
+//go:build !windows
+
 package workbench
 
 import (
@@ -220,6 +222,76 @@ func TestResumeOfAnEarlierPartInTheSameTerminalMakesItCurrent(t *testing.T) {
 	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, "", clearedTitle, false))
 	if list := f.list(t); len(list) != 1 || list[0].ID != f.id || f.record(t).CLIID != a {
 		t.Fatalf("after a restart: %+v", list)
+	}
+}
+
+// An entry inside an account handoff is never linked: the handoff decides its
+// id. A /clear on its terminal meanwhile makes no entry of its own, and is
+// linked once the handoff is settled (here: it failed and undid itself).
+func TestClearDuringAnAccountHandoffIsHeldBack(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	setSwitch := func(sw *claudeAccountSwitch) {
+		t.Helper()
+		f.s.mobileCLI.mu.Lock()
+		record, _ := f.s.mobileCLI.record(f.s.profile, f.id)
+		record.Switch = sw
+		err := writePrivate(mobileRecordPath(f.s.profile, f.id), record)
+		f.s.mobileCLI.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	for _, sw := range []claudeAccountSwitch{
+		{Phase: "preparing"}, {Phase: "prepared"}, {Phase: "prepared", Error: "目标账号身份无法确认，保留待恢复历史"}, {Phase: "starting"},
+	} {
+		sw.ID, sw.TargetID, sw.Connection, sw.Source = uuid.NewString(), uuid.NewString(), f.connection, claudeExecution{CLIID: a}
+		setSwitch(&sw)
+		list := f.list(t)
+		if record := f.record(t); len(list) != 1 || list[0].ID != f.id || record.CLIID != a || len(record.Cleared) != 0 {
+			t.Fatalf("%s %q: linked or split during the handoff: %+v %+v", sw.Phase, sw.Error, list, record)
+		}
+	}
+	// The preparation was refused and undid itself (claude_switch.go undo).
+	setSwitch(nil)
+	list := f.list(t)
+	if record := f.record(t); len(list) != 1 || record.CLIID != b || len(record.Cleared) != 1 || record.Cleared[0].CLIID != a {
+		t.Fatalf("not linked after the handoff undid itself: %+v %+v", list, record)
+	}
+}
+
+// An untitled id is held back only while it has no transcript: a conversation
+// the entry's terminal resumed whose transcript has no title still gets an
+// entry (review 0.1.17 finding 7: it was hidden forever).
+func TestUntitledConversationWithATranscriptGetsItsOwnEntry(t *testing.T) {
+	f := newClearFixture(t)
+	a, x := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	resumed := f.item(x, f.connection, untitledTitle, true)
+	resumed.HasHistory = true
+	f.observe(f.item(a, "", "整理发布流程", false), resumed)
+	list := f.list(t)
+	if record := f.record(t); len(list) != 2 || record.CLIID != a || len(record.Cleared) != 0 {
+		t.Fatalf("an untitled conversation with a transcript: %+v %+v", list, record)
+	}
+}
+
+// Between /clear and its first prompt the guest knows the new id from its
+// channel state, titled by the transcript's command row (the official CLI's
+// transcript has no folder yet): it is linked, never an entry of its own.
+func TestClearKnownFromTheChannelStateIsLinked(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.observe(f.item(b, f.connection, "<command-name>/clear</command-name>", true), f.item(a, "", "整理发布流程", false))
+	list := f.list(t)
+	if record := f.record(t); len(list) != 1 || list[0].Title != "整理发布流程" || record.CLIID != b || record.clearedPart(a) == nil {
+		t.Fatalf("a /clear known from the channel state: %+v %+v", list, record)
 	}
 }
 
@@ -697,6 +769,50 @@ func TestPhoneFollowsTheClearInTheCLIsOrder(t *testing.T) {
 	settle()
 	if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
 		t.Fatalf("lists: %+v", list)
+	}
+}
+
+// An entry opened again after its terminal closed: the first launch's closed
+// connection is left on the id it ran. After /clear the guest reports the old
+// id on that connection (not running), the new id on the open terminal's.
+// Views alone follow the /clear, and the old connection never resumes the part.
+func TestClearAfterReopeningFollowsPastTheFirstLaunch(t *testing.T) {
+	pace := conversationFollowPace
+	conversationFollowPace = 0
+	t.Cleanup(func() { conversationFollowPace = pace })
+	f := newClearFixture(t)
+	a, b, first := f.record(t).CLIID, uuid.NewString(), uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	stale := terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Connection: first, Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}}
+	f.view(t, a, stale)
+	// /clear: the new id is known only from the channel state; a list meanwhile
+	// takes the old id's leftover connection.
+	f.observe(f.item(a, first, "整理发布流程", false), f.item(b, f.connection, untitledTitle, true))
+	f.list(t)
+	if record := f.record(t); record.CLIID != a {
+		t.Fatalf("linked before the transcript: %+v", record)
+	}
+	// The guest lists the newest first.
+	f.observe(f.item(b, f.connection, clearedTitle, true), f.item(a, first, "整理发布流程", false))
+	deadline := time.Now().Add(10 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("views alone did not follow the /clear: %+v", f.record(t))
+		}
+		if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for range 3 {
+		if list := f.list(t); len(list) != 1 || list[0].ID != f.id {
+			t.Fatalf("lists: %+v", list)
+		}
+	}
+	if record := f.record(t); record.CLIID != b || len(record.Cleared) != 1 || record.Cleared[0].CLIID != a {
+		t.Fatalf("the old connection resumed the earlier part: %+v", record)
 	}
 }
 

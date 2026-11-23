@@ -19,6 +19,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import sys
 import threading
 import time
@@ -335,6 +336,18 @@ def read_activity(path):
     return activity, info.st_mtime
 
 
+def read_meta(path):
+    # A subagent's meta file, read only as a regular file: a symlink or a FIFO
+    # put in its place never redirects the read or blocks the helper.
+    if path.is_symlink():
+        raise OSError("symlink")
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("not a regular file")
+        return json.loads(stream.read(8 << 10))
+
+
 def read_children(tasks, folder, watch, activity=True):
     """Reads the files of running subagents, newest first and at most CHILD_LIMIT; returns their latest mtime."""
     agents = sorted((item for item in tasks.running() if item[1]["kind"] != "background_command"), key=lambda item: item[1].get("started_at") or 0, reverse=True)[:CHILD_LIMIT]
@@ -345,8 +358,7 @@ def read_children(tasks, folder, watch, activity=True):
         known = {}
         for meta in sorted(folder.glob("agent-*.meta.json"))[:256]:
             try:
-                with meta.open("rb") as stream:
-                    value = json.loads(stream.read(8 << 10))
+                value = read_meta(meta)
             except (OSError, ValueError):
                 continue
             if isinstance(value, dict) and isinstance(value.get("toolUseId"), str):
@@ -363,8 +375,7 @@ def read_children(tasks, folder, watch, activity=True):
         # Identities taken before the reads, so a write during them still wakes a held read.
         keys = [[str(item), file_key(item)] for item in (meta, history)]
         try:
-            with meta.open("rb") as stream:
-                value = json.loads(stream.read(8 << 10))
+            value = read_meta(meta)
             if isinstance(value, dict):
                 if "agent_type" not in entry and isinstance(value.get("agentType"), str) and value["agentType"].strip():
                     entry["agent_type"] = value["agentType"].strip()[:64]
@@ -611,6 +622,9 @@ def discover(request):
     finally:
         local.states = local.roots = None
     for item in sessions:
+        # Only a session known from its channel state alone says whether it
+        # has history; one found by its transcript in the project has.
+        item.setdefault("has_history", True)
         count = running_tasks(item) if item.get("running") else 0
         if count:
             item["running_tasks"] = count

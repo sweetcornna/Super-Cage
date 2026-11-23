@@ -302,7 +302,7 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		record.Workspace = workspace
 		record.Active = item.Active
 		record.RunningTasks = item.RunningTasks
-		title := item.Title
+		title := clearedConversationTitle(item.Title)
 		if title == clearedTitle && record.Title != "" {
 			// The guest titles a conversation by its first command until a
 			// name is set; after /clear the entry keeps its previous title.
@@ -339,6 +339,16 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 // the CLI starts the new transcript with that command's row.
 const clearedTitle = "/clear"
 
+// clearedConversationTitle reads the title the guest gives a conversation that
+// began with /clear: "/clear" from its transcript, or the command row itself
+// when it is known from its channel state (its transcript has no folder yet).
+func clearedConversationTitle(title string) string {
+	if strings.HasPrefix(title, "<command-name>"+clearedTitle+"<") {
+		return clearedTitle
+	}
+	return title
+}
+
 // untitledTitle is a conversation the guest knows only from its channel
 // state: the CLI has its id but has not written its transcript yet.
 const untitledTitle = "Claude Code"
@@ -357,8 +367,7 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 		byID[record.ID] = record
 	}
 	eligible := func(record *mobileRecord) bool {
-		// A record inside an account handoff changes its id by that handoff.
-		return record != nil && record.Terminal && !record.codex() && !record.Deleted && !record.Archived && (record.Switch == nil || record.Switch.Phase == "completed")
+		return record != nil && record.Terminal && !record.codex() && !record.Deleted && !record.Archived
 	}
 	// Owners are taken before discovery rewrites records: the old id's item no
 	// longer carries the connection, and an open terminal outlives it.
@@ -383,19 +392,39 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 		if item.Connection == "" || owner == nil || owner.CLIID == item.CLIID || !validCLIUUID(item.CLIID) {
 			continue
 		}
+		if sw := owner.Switch; sw != nil && sw.Phase != "completed" {
+			// An account handoff in progress decides this entry's id: a new id
+			// on its terminal meanwhile makes no entry and is linked, if it is
+			// a /clear, once the handoff is settled.
+			if known[item.CLIID] == nil {
+				deferred[item.CLIID] = owner
+			}
+			continue
+		}
 		if known[item.CLIID] != nil {
-			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil {
+			// Only a running CLI resumes: a reopened entry's first launch leaves
+			// its closed connection on the id it ran, which is now a part.
+			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil && item.Running {
 				s.resumeEarlierPart(m, owner, item.CLIID, present)
 			}
 			continue
 		}
-		switch item.Title {
+		switch clearedConversationTitle(item.Title) {
 		case untitledTitle:
-			deferred[item.CLIID] = owner
+			// Held back only while it has no history (the resident helper
+			// says so): an untitled conversation with some gets its own entry.
+			if !item.HasHistory {
+				deferred[item.CLIID] = owner
+			}
 		case clearedTitle:
 			executions, cleared, previous, resume := owner.Executions, owner.Cleared, owner.CLIID, owner.Resume
 			owner.Executions = append(slices.Clip(executions), claudeExecution{CLIID: previous, Account: owner.Account, Config: owner.GuestConfig})
 			owner.Cleared = append(slices.Clip(cleared), clearedPart{CLIID: previous, ClearedAt: time.Now().UTC(), Empty: !present[previous]})
+			if sw := owner.Switch; !present[previous] && sw != nil && sw.Phase == "completed" && sw.TargetID == previous && owner.clearedPart(sw.Source.CLIID) == nil {
+				// A handoff's target writes its copy of the history only with its
+				// first prompt: before that, the conversation is the source's.
+				owner.Cleared = append(owner.Cleared, clearedPart{CLIID: sw.Source.CLIID, ClearedAt: time.Now().UTC()})
+			}
 			owner.CLIID, owner.Resume = item.CLIID, true
 			owner.changed()
 			if err := writePrivate(mobileRecordPath(s.profile, owner.ID), owner); err != nil {
@@ -498,12 +527,20 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
-	if current.Connection == "" {
-		// The guest has no connection on this id while the entry's terminal
-		// still runs a conversation: its CLI moved to another id (/clear, or a
-		// /resume inside it). Checked on every view, as the new id's transcript
-		// appears only with the next prompt.
-		if terminal := s.boundTerminal(record); record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
+	terminal := s.boundTerminal(record)
+	bound := ""
+	if terminal != nil {
+		terminal.mu.Lock()
+		bound = terminal.connectionID
+		terminal.mu.Unlock()
+	}
+	// A reopened entry's first launch leaves its closed connection on this id.
+	if current.Connection == "" || !current.Running && bound != "" && bound != current.Connection {
+		// The guest has no live connection on this id while the entry's
+		// terminal still runs a conversation: its CLI moved to another id
+		// (/clear, or a /resume inside it). Checked on every view, as the new
+		// id's transcript appears only with the next prompt.
+		if record.Connection != "" && s.terminals.forConversation(record.Connection) != nil || terminal != nil && terminal.ownsConversation() {
 			s.followConversationID()
 		}
 	}

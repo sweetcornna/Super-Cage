@@ -51,6 +51,10 @@ export function waitingLine(view, timeZone) {
   if (handoff.waiting === "source") {
     return `${limitPhrase(source, handoff.window, handoff.resets_at, timeZone)}，正在等它恢复。也可以在账号菜单中直接换一个账号。`;
   }
+  if (handoff.waiting === "refused") {
+    const reason = String(handoff.refusal || "").replace(/[。.]?$/, "。");
+    return `${limitPhrase(source, handoff.window, handoff.resets_at, timeZone)}，自动接续没有完成：${reason}账号或会话有变化时会再试；也可以在账号菜单中直接选一个账号。`;
+  }
   const first = when ? `${handoff.wait_label} 将在 ${when} 最先恢复` : "要等账号恢复";
   return `可以接续的账号额度都已用完：${first}${handoff.automatic ? "，届时自动继续" : ""}。也可以在账号菜单中直接选一个账号。`;
 }
@@ -75,7 +79,11 @@ export const targetSelectable = (target) => target?.status === "ready";
 
 export const needsConfirm = (view) => handoffAPI(view) >= 2 && !!view.source_busy;
 
-export const confirmText = (label) => `会停止当前任务并切换到 ${label}，继续吗？`;
+// Background tasks (subagents, background commands) stop with the turn.
+export function confirmText(label, tasks = 0) {
+  const what = tasks > 0 ? `当前任务（包括 ${tasks} 个后台任务）` : "当前任务";
+  return `会停止${what}并切换到 ${label}，继续吗？`;
+}
 
 // A refusal that the one confirm answers, from a server that saw work the
 // client did not.

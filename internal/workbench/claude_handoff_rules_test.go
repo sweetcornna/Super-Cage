@@ -481,7 +481,8 @@ func TestClaudeSchedulingKeepsStandingAnswersAndPreferredAccount(t *testing.T) {
 		t.Fatal(response.Code, response.Body.String())
 	}
 	loaded, _ := s.loadClaudeAccounts()
-	if loaded.Scheduling.Preferred != b || !loaded.Accounts[1].Enabled || !loaded.Scheduling.UngroupedHandoff || !loaded.Scheduling.SwitchAnswered {
+	// 新会话使用此账号 leaves 参与分配 as it was.
+	if loaded.Scheduling.Preferred != b || loaded.Accounts[1].Enabled || !loaded.Scheduling.UngroupedHandoff || !loaded.Scheduling.SwitchAnswered {
 		t.Fatalf("scheduling lost fields: %+v", loaded.Scheduling)
 	}
 	if id := pickClaudeAccount(loaded, map[string]int{b: 5}, nil, "", "", time.Now()); id != b {
@@ -621,21 +622,22 @@ func TestClaudeManualSwitchAwayFromABrokenLogin(t *testing.T) {
 	}
 }
 
-// Choosing automatic continuation, in 调度设置 or in a session, is the yes
-// that lets ungrouped accounts continue one another.
+// Choosing automatic continuation in a session is that session's yes for
+// ungrouped accounts; in 调度设置 the rule alone is not that yes.
 func TestClaudeChoosingAutomaticIsTheYes(t *testing.T) {
 	s, id, _, _ := claudeSwitchGuest(t, handoffGuest)
 	if response := request(s, "POST", "/api/mobile/cli/sessions/"+id+"/account", s.origin, `{"action":"policy","policy":"allow"}`, true); response.Code != 200 {
 		t.Fatal(response.Code, response.Body.String())
 	}
-	if list, _ := s.loadClaudeAccounts(); !list.Scheduling.UngroupedHandoff || list.Scheduling.SwitchPolicy != "ask" {
-		t.Fatalf("session choice: %+v", list.Scheduling)
+	stored, _ := s.mobileCLI.record(s.profile, id)
+	if list, _ := s.loadClaudeAccounts(); list.Scheduling.UngroupedHandoff || list.Scheduling.SwitchPolicy != "ask" || !stored.UngroupedHandoff {
+		t.Fatalf("session choice: %+v, session %v", list.Scheduling, stored.UngroupedHandoff)
 	}
 	s2 := testServer(t)
 	if response := request(s2, "POST", "/api/claude-accounts", s2.origin, `{"action":"scheduling","scheduling":{"mode":"balanced","switch_policy":"allow"}}`, true); response.Code != 200 {
 		t.Fatal(response.Code, response.Body.String())
 	}
-	if list, _ := s2.loadClaudeAccounts(); !list.Scheduling.UngroupedHandoff || !list.Scheduling.answered() {
+	if list, _ := s2.loadClaudeAccounts(); list.Scheduling.UngroupedHandoff || !list.Scheduling.answered() {
 		t.Fatalf("调度设置 choice: %+v", list.Scheduling)
 	}
 }

@@ -4,7 +4,7 @@ import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import { EmptyState } from "./drawings";
 import crabIcon from "./claude-account-crab.svg";
-import { GROUP_SENTENCE, MANUAL_SENTENCE, OFFER_TEXT, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer } from "./claude-scheduling-state.mjs";
+import { GROUP_SENTENCE, MANUAL_SENTENCE, OFFER_TEXT, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer, UNGROUPED_LABEL, ungroupedChange } from "./claude-scheduling-state.mjs";
 import "./claude-accounts.css";
 
 // Ordinary reads never start an upstream usage query.
@@ -263,7 +263,7 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
           <input type="checkbox" aria-label="参与自动分配" checked={profile.enabled} disabled={busy}
             onChange={(e) => { const enabled = e.target.checked; perform(() => change({ action: "update", id: profile.id, enabled })); }} />
           <span className="claude-switch-track" aria-hidden="true" />
-          <span>{profile.enabled ? "参与分配" : "已暂停"}</span>
+          <span>{profile.enabled ? "参与分配" : preferred ? "仅新会话使用" : "已暂停"}</span>
         </label>
         {fromTerminal ? <span className="claude-profile-source">普通终端账号</span> : profile.status === "ready"
           ? <button className="quiet-button claude-icon-action" aria-label="重新登录" disabled={busy || !!environment || active > 0} onClick={() => perform(() => login(profile.id))}>
@@ -389,9 +389,14 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
         onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...store.scheduling,switch_policy})}))}>
         <option value="ask">每次询问</option><option value="allow">自动换账号继续</option><option value="wait">等原账号恢复</option>
       </InlineSelect></label>
+      {store.handoff_api >= 2 && store.scheduling.switch_policy === "allow" && <label className="check-line">
+        <input type="checkbox" checked={!!store.scheduling.ungrouped_handoff} disabled={busy}
+          onChange={event => perform(() => load({action:"scheduling",scheduling:ungroupedChange(store.scheduling,event.target.checked)}))} />
+        <span>{UNGROUPED_LABEL}</span>
+      </label>}
       <p className="field-help">{store.handoff_api >= 2 ? ruleSentence(store.scheduling) : "自动接续只在限额已确认且目标账号属于同一接续分组时进行。"} 跨账号可能重建缓存。{store.handoff_api >= 2 && " " + MANUAL_SENTENCE}</p>
       {store.handoff_api >= 2 && <p className="field-help">{GROUP_SENTENCE}</p>}
-      {preferredLabel(store) && <p className="field-help">新会话优先使用 {preferredLabel(store)}，它额度用完或未登录时按上面的分配方式选择。</p>}
+      {preferredLabel(store) && <p className="field-help">新会话优先使用 {preferredLabel(store)}，它额度用完或未登录时按上面的分配方式选择。它不因此参与自动分配或自动接续。</p>}
       {store.scheduling.mode === "sequential" && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
         {accounts.map((profile,index) => <div key={profile.id}><span>{index+1}. {profile.label || profile.email}</span>
           <button disabled={busy || index===0} aria-label={`提高 ${profile.label} 的优先级`} onClick={() => {

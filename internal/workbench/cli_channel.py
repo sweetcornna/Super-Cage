@@ -577,8 +577,12 @@ def prepare_account_switch(request):
     # Other live sessions of the same account are unrelated and never block;
     # the source's own children are found by ancestry and stopped with it.
     rows = active_sessions(sid, str(config))
+    force = request.get("force")
     for row in rows:
-        if not workspace_within(row.get("cwd", ""), root) or not request.get("force") and (row.get("status") != "idle" or row.get("kind") != "interactive"):
+        # A force cannot move a CLI that runs outside the project: name it.
+        if not workspace_within(row.get("cwd", ""), root):
+            raise ValueError("switch:outside:" + row.get("cwd", ""))
+        if not force and (row.get("status") != "idle" or row.get("kind") != "interactive"):
             raise ValueError("switch:running")
     pid = read_json(ROOT / connection / "state.json", {}).get("pid")
     fingerprint = process_fingerprint(pid)
@@ -592,7 +596,7 @@ def prepare_account_switch(request):
             raise ValueError("switch:changed")
         # A handoff the person confirmed, or one at a confirmed quota limit,
         # stops a working source: its turn ends and its approvals are dropped.
-        if not request.get("force") and (state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent")):
+        if not force and (state.get("busy") or state.get("approvals") or state.get("pending_send") or state.get("sent")):
             raise ValueError("switch:busy")
         # A fence whose preparation never froze a history is stale: replace it.
         existing = state.get("account_switch")
@@ -601,7 +605,8 @@ def prepare_account_switch(request):
         state["account_switch"] = switch_id
         save(ROOT / connection / "state.json", state)
     try:
-        children = descendants(pid)
+        # Its children are stopped only when the stop was confirmed or forced.
+        children = descendants(pid) if force else []
         for row in rows:
             terminate_cli(row["pid"])
         deadline = time.monotonic() + 5

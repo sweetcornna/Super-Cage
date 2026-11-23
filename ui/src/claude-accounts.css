@@ -95,6 +95,8 @@
   font-size: var(--fs-secondary);
   font-weight: 500;
 }
+/* The ungrouped yes: a checkbox line under the rule, not a stacked field. */
+.claude-scheduling > label.check-line { display: flex; align-items: center; gap: 8px; margin-top: -4px; }
 .claude-scheduling > .field-help { margin: 0; }
 .claude-account-order { max-height: 12rem; margin-top: 12px; overflow: auto; border-top: 1px solid var(--line); }
 .claude-account-order > div { display: flex; gap: 8px; align-items: center; min-height: var(--h-control); border-bottom: 1px solid var(--line); font-size: var(--fs-secondary); }

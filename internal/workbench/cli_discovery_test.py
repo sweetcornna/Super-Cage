@@ -89,10 +89,13 @@ class DiscoveryTests(unittest.TestCase):
         self.agents.write_text(json.dumps([{"pid": os.getpid(), "sessionId": sessions[1], "entrypoint": "claude-desktop"}]))
         self.register(os.getpid(), sessions[1], entrypoint="claude-desktop")
         expected = self.plain.discover(self.request)
+        for item in expected:
+            item.setdefault("has_history", True)  # a session found by its transcript has history
         for _ in range(2):
             found, hashed = self.discovery.discover(self.request)
             self.assertEqual(found, expected)
             self.assertEqual(hashed, self.discovery.digest(expected))
+        self.assertEqual({item["cli_id"]: item["has_history"] for item in found}, {sessions[0]: True, sessions[1]: True, sessions[3]: False})
         self.assertEqual({item["cli_id"]: item["connection"] for item in found if item["cli_id"] == sessions[0]}, {sessions[0]: connection})
         self.assertTrue(any(item["cli_id"] == sessions[1] and item["claude_desktop"] for item in found))
 
@@ -209,6 +212,35 @@ class DiscoveryTests(unittest.TestCase):
         key = view["watch_key"]
         append("{}\n")
         self.assertFalse(self.discovery.handle("view-wait", dict(request, key=key, timeout=0.3, cancelled=threading.Event()))["changed"])
+
+    def test_a_subagent_meta_file_that_is_no_regular_file_is_not_read(self):
+        # A FIFO in its place would block the helper; a symlink would read another file.
+        session, connection = str(uuid.uuid4()), str(uuid.uuid4())
+        path = self.history(session, self.project, "look around")
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".000Z"
+        with path.open("a") as stream:
+            stream.write(json.dumps({"cwd": self.project, "type": "assistant", "uuid": str(uuid.uuid4()), "timestamp": stamp, "message": {"content": [
+                {"type": "tool_use", "id": "toolu_child", "name": "Agent", "input": {"description": "梳理目录", "prompt": "p"}}]}}) + "\n")
+        folder = path.parent / session / "subagents"
+        folder.mkdir(parents=True)
+        (folder / "agent-a1b2c3.jsonl").write_text(json.dumps({"type": "assistant", "isSidechain": True, "message": {"content": [{"type": "tool_use", "id": "c1", "name": "Read", "input": {"file_path": "a.py"}}]}}) + "\n")
+        outside = self.home / "outside.json"
+        outside.write_text(json.dumps({"toolUseId": "toolu_child", "agentType": "Explore"}))
+        self.state(connection, cli_id=session, config=str(self.config), workspace=self.project, pid=os.getpid(), channel_pid=os.getpid(), updated_at=1)
+        request = {"cli_id": session, "config": str(self.config), "connection": connection, "account": "default"}
+        meta = folder / "agent-a1b2c3.meta.json"
+        for make in (os.mkfifo, lambda target: target.symlink_to(outside)):
+            if meta.is_symlink() or meta.exists():
+                meta.unlink()
+            make(meta)
+            result = {}
+            reader = threading.Thread(target=lambda: result.update(self.discovery.handle("view", dict(request, cancelled=threading.Event()))), daemon=True)
+            reader.start()
+            reader.join(5)
+            self.assertFalse(reader.is_alive(), "the view blocked on the meta file")
+            running = result["tasks"]["running"][0]
+            self.assertNotIn("now", running)
+            self.assertNotIn("agent_type", running)
 
     TASK_FIELDS = ("kind", "state", "agent_type", "started_at", "ended_at", "now", "calls", "calls_partial")
 
@@ -419,7 +451,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(reads, [], "a transcript without tasks reads nothing more")
         self.assertEqual(view, self.plain.view(self.config, self.session))
         found, _ = self.discovery.discover(self.request)
-        self.assertEqual(found, self.plain.discover(self.request))
+        self.assertEqual(found, [dict(item, has_history=item.get("has_history", True)) for item in self.plain.discover(self.request)])
 
     def test_discovery_counts_tasks_of_live_sessions_incrementally(self):
         path = self.task_history([

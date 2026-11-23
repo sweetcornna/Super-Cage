@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { answerBody, chipState, confirmText, handoffLine, handoffQuestion, limitPhrase, needsConfirm, refusalNeedsConfirm, resetLabel,
   sessionRule, switchBody, switchTargets, targetNote, targetSelectable, undoBody, waitingLine } from "./session-account-state.mjs";
-import { answered, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer } from "./claude-scheduling-state.mjs";
+import { answered, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer, ungroupedChange } from "./claude-scheduling-state.mjs";
 
 const reset = Date.UTC(2026, 10, 27, 18, 0) / 1000;
 const view = (fields = {}) => ({ handoff_api: 2, source_id: "source", supported: true, session: { account_label: "A" }, ...fields });
@@ -37,6 +37,10 @@ test("waiting says who resets first and whether it continues by itself", () => {
   assert.equal(waitingLine(view({ handoff: { waiting: "all", wait_until: reset, wait_label: "B", automatic: true } }), "UTC"),
     "可以接续的账号额度都已用完：B 将在 11/27 18:00 最先恢复，届时自动继续。也可以在账号菜单中直接选一个账号。");
   assert.doesNotMatch(waitingLine(view({ handoff: { waiting: "all", wait_until: reset, wait_label: "B" } }), "UTC"), /自动继续/);
+  // A refused automatic continuation says why and that it is tried again.
+  assert.equal(waitingLine(view({ handoff: { waiting: "refused", window: "seven_day", resets_at: reset, refusal: "找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。" } }), "UTC"),
+    "A 的额度已用完（周限额，11/27 18:00 重置），自动接续没有完成：找不到这段会话的历史文件，未切换：会话仍在原账号，可以继续使用。账号或会话有变化时会再试；也可以在账号菜单中直接选一个账号。");
+  assert.match(waitingLine(view({ handoff: { waiting: "refused", window: "five_hour", refusal: "B 尚未登录" } }), "UTC"), /自动接续没有完成：B 尚未登录。账号或会话/);
 });
 
 test("every logged-in account is a target, with what to expect", () => {
@@ -57,6 +61,8 @@ test("one confirm only while the source is really working", () => {
   assert.equal(needsConfirm(view({ source_busy: false })), false);
   assert.equal(needsConfirm({ source_busy: true }), false, "an older server has no force");
   assert.equal(confirmText("B"), "会停止当前任务并切换到 B，继续吗？");
+  assert.equal(confirmText("B", 2), "会停止当前任务（包括 2 个后台任务）并切换到 B，继续吗？");
+  assert.equal(refusalNeedsConfirm(view(), "还有 1 个后台任务在运行：确认“停止当前任务并切换到 B”（后台任务也会停止），或等它们结束。"), true);
   assert.equal(refusalNeedsConfirm(view(), "当前任务仍在运行：确认“停止当前任务并切换到 B”，或等本轮结束。"), true);
   assert.equal(refusalNeedsConfirm(view(), "B 尚未登录：在账号管理中点“检查状态”或重新登录后再切换。"), false);
   assert.deepEqual(switchBody(view(), "b", "r3", { force: true }), { action: "switch", target: "b", request_id: "r3", source_id: "source", confirm: true, continue: true, force: true });
@@ -73,7 +79,10 @@ test("调度设置 states the rule in plain words and offers the question once",
   assert.match(ruleSentence({ switch_policy: "ask" }), /第一次有账号额度用完时/);
   assert.match(ruleSentence({ switch_policy: "ask", switch_answered: true }), /问你是否换到另一个账号/);
   assert.match(ruleSentence({ switch_policy: "allow", ungrouped_handoff: true }), /没有设分组的账号之间也会互相接续/);
-  assert.match(ruleSentence({ switch_policy: "allow" }), /只在同一接续分组内接续/);
+  assert.match(ruleSentence({ switch_policy: "allow" }), /只在同一接续分组内接续，没有设分组的账号之间仍会先问你/);
+  // The yes for ungrouped accounts is its own control, never implied by the rule.
+  assert.deepEqual(ungroupedChange({ mode: "balanced", switch_policy: "allow" }, true), { mode: "balanced", switch_policy: "allow", ungrouped_handoff: true });
+  assert.deepEqual(ungroupedChange({ switch_policy: "allow", ungrouped_handoff: true }, false), { switch_policy: "allow", ungrouped_handoff: false });
   assert.equal(ruleSentence({ switch_policy: "wait" }), "额度用完时等原账号恢复，不换账号。");
   const accounts = [{ id: "a", status: "ready", enabled: true }, { id: "b", status: "ready", enabled: true }];
   assert.equal(showOffer({ handoff_api: 2, accounts, scheduling: { switch_policy: "ask" } }), true);
