@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -25,6 +27,17 @@ type clearFixture struct {
 	terminal   *terminalSession
 	requests   string
 	observe    func(...terminalConversation)
+	views      map[string]terminalConversation
+	viewsPath  string
+}
+
+// view sets what the guest answers to a view of that id.
+func (f *clearFixture) view(t *testing.T, cliID string, view terminalConversation) {
+	t.Helper()
+	f.views[cliID] = view
+	if err := writePrivate(f.viewsPath, f.views); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newClearFixture(t *testing.T) *clearFixture {
@@ -32,13 +45,17 @@ func newClearFixture(t *testing.T) *clearFixture {
 	s, id, project := metadataFixture(t)
 	home, _ := filepath.EvalSymlinks(t.TempDir())
 	mobileTestSSH(t, s, home, []string{"HOME=" + home, "PATH=/usr/bin:/bin:/usr/local/bin"})
-	f := &clearFixture{s: s, id: id, project: project, home: home, connection: uuid.NewString(), requests: filepath.Join(home, "requests.jsonl")}
+	f := &clearFixture{s: s, id: id, project: project, home: home, connection: uuid.NewString(), requests: filepath.Join(home, "requests.jsonl"),
+		views: map[string]terminalConversation{}, viewsPath: filepath.Join(home, "views.json")}
+	if err := writePrivate(f.viewsPath, f.views); err != nil {
+		t.Fatal(err)
+	}
 	observation := filepath.Join(home, "observation.json")
 	helper := filepath.Join(home, ".local/share/cage/cli-channel-code", fmt.Sprintf("%x.py", sha256.Sum256([]byte(cliChannelHelper+cliResumePrompt+claudeAccountResumePrompt))))
 	if err := os.MkdirAll(filepath.Dir(helper), 0700); err != nil {
 		t.Fatal(err)
 	}
-	code := fmt.Sprintf("import json,sys\nrequest=json.load(sys.stdin)\nopen(%q,'a').write(json.dumps([sys.argv[1],request])+'\\n')\nprint(open(%q).read() if sys.argv[1]=='discover' else json.dumps({'ok':True}))\n", f.requests, observation)
+	code := fmt.Sprintf("import json,sys\nrequest=json.load(sys.stdin)\nmode=sys.argv[1]\nopen(%q,'a').write(json.dumps([mode,request])+'\\n')\nif mode=='discover': print(open(%q).read())\nelif mode=='view': print(json.dumps(json.load(open(%q)).get(request.get('cli_id'),{})))\nelse: print(json.dumps({'ok':True}))\n", f.requests, observation, f.viewsPath)
 	if err := os.WriteFile(helper, []byte(code), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -309,5 +326,85 @@ func TestPurgeTakesTheClearedPartsWithTheEntry(t *testing.T) {
 	// After the purge the transcripts still listed by a slow guest stay hidden.
 	if list := f.list(t); len(list) != 0 {
 		t.Fatalf("purged parts came back: %+v", list)
+	}
+}
+
+func TestEarlierPartsAreListedReadAndSeparated(t *testing.T) {
+	f := newClearFixture(t)
+	a, b, c := f.record(t).CLIID, uuid.NewString(), uuid.NewString()
+	turn := func(prompt, text string) mobileTurn {
+		return mobileTurn{ID: uuid.NewString(), Prompt: prompt, Text: text, Status: "completed"}
+	}
+	clearRow := turn("<command-name>/clear</command-name>\n<command-message>clear</command-message>", "")
+	f.view(t, a, terminalConversation{CLIID: a, Workspace: guestPath(f.project), HasHistory: true, Turns: []mobileTurn{turn("整理发布流程", "好的"), turn("再检查一次", "检查完了")}})
+	f.view(t, b, terminalConversation{CLIID: b, Workspace: guestPath(f.project), HasHistory: true, Turns: []mobileTurn{clearRow}})
+	f.view(t, c, terminalConversation{CLIID: c, Workspace: guestPath(f.project), HasHistory: true, Turns: []mobileTurn{clearRow, turn("第二个问题", "回答")}})
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	f.list(t)
+	// /clear again at once: b holds only the /clear command.
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, "", clearedTitle, false), f.item(c, f.connection, clearedTitle, true))
+	f.list(t)
+	for _, route := range []string{"/api/mobile/cli/sessions/", "/api/cli/sessions/"} {
+		w := request(f.s, "GET", route+f.id+"/earlier", f.s.origin, "", true)
+		var answer struct {
+			Parts []earlierPart `json:"parts"`
+		}
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &answer) != nil || len(answer.Parts) != 1 || answer.Parts[0].CLIID != a || answer.Parts[0].Prompt != "整理发布流程" || answer.Parts[0].Turns != 2 {
+			t.Fatalf("%s earlier: %d %s", route, w.Code, w.Body.String())
+		}
+	}
+	w := request(f.s, "GET", "/api/mobile/cli/sessions/"+f.id+"/earlier/"+a, f.s.origin, "", true)
+	var part earlierView
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &part) != nil || !part.ReadOnly || len(part.Items) != 2 || part.Items[1].Text != "检查完了" {
+		t.Fatalf("part: %d %s", w.Code, w.Body.String())
+	}
+	if w := request(f.s, "GET", "/api/mobile/cli/sessions/"+f.id+"/earlier/"+uuid.NewString(), f.s.origin, "", true); w.Code != 404 {
+		t.Fatalf("an id that is not a part: %d", w.Code)
+	}
+	// 恢复为单独会话: an ordinary session again, the entry keeps the rest.
+	w = request(f.s, "POST", "/api/mobile/cli/sessions/"+f.id+"/earlier/"+a+"/separate", f.s.origin, "{}", true)
+	var separate mobileSummary
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &separate) != nil || separate.ID == f.id || separate.Title != "整理发布流程" {
+		t.Fatalf("separate: %d %s", w.Code, w.Body.String())
+	}
+	record := f.record(t)
+	if record.CLIID != c || len(record.Cleared) != 1 || record.Cleared[0].CLIID != b || slices.ContainsFunc(record.Executions, func(e claudeExecution) bool { return e.CLIID == a }) {
+		t.Fatalf("entry after separating: %+v", record)
+	}
+	list := f.list(t)
+	if len(list) != 2 {
+		t.Fatalf("lists after separating: %+v", list)
+	}
+	f.s.mobileCLI.mu.Lock()
+	separated, err := f.s.mobileCLI.record(f.s.profile, separate.ID)
+	f.s.mobileCLI.mu.Unlock()
+	if err != nil || separated.CLIID != a || !separated.Resume || !separated.Terminal || separated.Title != "整理发布流程" {
+		t.Fatalf("separated record: %+v %v", separated, err)
+	}
+}
+
+func TestPhoneInsideTheConversationFollowsTheClear(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	// The phone polls only the view: the old id no longer has the connection.
+	f.view(t, a, terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}})
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("the view did not follow the /clear: %+v", f.record(t))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if list, _ := f.s.mobileCLI.summaries(f.s.profile, map[string]bool{f.project: true}, false); len(list) != 1 {
+		t.Fatalf("lists: %+v", list)
 	}
 }

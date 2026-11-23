@@ -303,7 +303,7 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		record.Active = item.Active
 		record.RunningTasks = item.RunningTasks
 		title := item.Title
-		if title == clearedTitle && len(record.Cleared) > 0 && record.Title != "" {
+		if title == clearedTitle && record.Title != "" {
 			// The guest titles a conversation by its first command until a
 			// name is set; after /clear the entry keeps its previous title.
 			title = record.Title
@@ -496,7 +496,7 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	if record.Turns == nil {
 		record.Turns = []mobileTurn{}
 	}
-	if !s.cliDiscovery.discoveredTitle(id, record.Title) && !(len(record.Cleared) > 0 && strings.HasPrefix(current.Title, "<command-name>"+clearedTitle+"<")) {
+	if !s.cliDiscovery.discoveredTitle(id, record.Title) && !(record.Title != "" && strings.HasPrefix(current.Title, "<command-name>"+clearedTitle+"<")) {
 		record.Title = current.Title
 	}
 	record.ConnectionNotice = current.ConnectionNotice

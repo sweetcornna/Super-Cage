@@ -28,6 +28,9 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/cli/sessions/{id}/archive", s.mobileArchiveSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/restore", s.mobileRestoreSession)
 	mux.HandleFunc("POST /api/cli/sessions/{id}/purge", s.mobilePurgeSession)
+	mux.HandleFunc("GET /api/cli/sessions/{id}/earlier", s.mobileEarlierParts)
+	mux.HandleFunc("GET /api/cli/sessions/{id}/earlier/{cli}", s.mobileEarlierPart)
+	mux.HandleFunc("POST /api/cli/sessions/{id}/earlier/{cli}/separate", s.mobileSeparateEarlier)
 	// The desktop stops a Codex turn it can only watch (a phone turn) here.
 	mux.HandleFunc("POST /api/cli/sessions/{id}/stop", s.mobileStop)
 	mux.HandleFunc("GET /api/mobile/cli/projects", s.mobileProjects)
@@ -45,6 +48,9 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/archive", s.mobileArchiveSession)
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/restore", s.mobileRestoreSession)
 	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/purge", s.mobilePurgeSession)
+	mux.HandleFunc("GET /api/mobile/cli/sessions/{id}/earlier", s.mobileEarlierParts)
+	mux.HandleFunc("GET /api/mobile/cli/sessions/{id}/earlier/{cli}", s.mobileEarlierPart)
+	mux.HandleFunc("POST /api/mobile/cli/sessions/{id}/earlier/{cli}/separate", s.mobileSeparateEarlier)
 }
 
 func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
