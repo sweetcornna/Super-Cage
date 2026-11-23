@@ -61,25 +61,113 @@ func TestTerminalModesFinishCompletesCutSequence(t *testing.T) {
 	for _, tc := range []struct {
 		before, after string
 		skip          int
+		ok            bool
 		want          string
 	}{
-		{"\x1b[38;2;1", "2;3mX", 4, ""},
-		{"\x1b[?10", "49hX", 3, "\x1b[?1049h"},
-		{"\x1b", "[?2004hX", 7, "\x1b[?2004h"},
-		{"\xe4", "\xb8\xadX", 2, ""},
-		{"\x1b]0;long tit", "le\x07X", 3, ""},
-		{"\x1bP+q", "\x1b\\X", 2, ""},
-		{"X", "\x1b[1mY", 0, ""},
-		{"\x1b[38;2;1", "2;3", 3, ""}, // the history ends inside the sequence
+		{"\x1b[38;2;1", "2;3mX", 4, true, ""},
+		{"\x1b[?10", "49hX", 3, true, "\x1b[?1049h"},
+		{"\x1b", "[?2004hX", 7, true, "\x1b[?2004h"},
+		{"\xe4", "\xb8\xadX", 2, true, ""},
+		{"\x1b]0;long tit", "le\x07X", 3, true, ""},
+		{"\x1bP+q", "\x1b\\X", 2, true, ""},
+		{"X", "\x1b[1mY", 0, true, ""},
+		// The history ends inside the sequence: it is shown from its first
+		// byte, as before the tracker, and the modes are those before it.
+		{"\x1b[?10", "49", 0, false, ""},
+		{"\x1b]52;c;QUFB", "QUFB\r\nyyy\r\n", 0, false, ""},
 	} {
 		var m terminalModes
 		m.feed([]byte(tc.before))
-		if skip := m.finish([]byte(tc.after)); skip != tc.skip {
-			t.Errorf("%q|%q: skip %d, want %d", tc.before, tc.after, skip, tc.skip)
+		if skip, ok := m.finish([]byte(tc.after)); skip != tc.skip || ok != tc.ok {
+			t.Errorf("%q|%q: skip %d ok %v, want %d %v", tc.before, tc.after, skip, ok, tc.skip, tc.ok)
 		}
 		if got := string(m.preamble()); got != tc.want {
 			t.Errorf("%q|%q: preamble %q, want %q", tc.before, tc.after, got, tc.want)
 		}
+	}
+}
+
+// The tracker reads output as xterm.js's parser does (EscapeSequenceParser
+// and Params in @xterm/xterm 6): the viewer is told the modes its terminal
+// would be in, and a replay starts where xterm.js would be between
+// sequences.
+func TestTerminalModesParseAsXtermJS(t *testing.T) {
+	params := func(n int) string { return "\x1b[?" + strings.Repeat("0;", n) + "1049h" }
+	for _, tc := range []struct {
+		name, output, want string
+		ground             bool
+	}{
+		// xterm.js keeps 32 parameters and drops the digits of later ones;
+		// the sequence still acts on the 32 it kept.
+		{"1049 as parameter 21", params(20), "\x1b[?1049h", true},
+		{"1049 as parameter 32", params(31), "\x1b[?1049h", true},
+		{"1049 as parameter 33", params(32), "", true},
+		{"1049 as parameter 257", params(256), "", true},
+		{"modes kept past the limit", "\x1b[?1049;" + strings.Repeat("0;", 40) + "2004h", "\x1b[?1049h", true},
+		// A sub-parameter belongs to the parameter before it.
+		{"sub-parameter", "\x1b[?1049:1h", "\x1b[?1049h", true},
+		// A prefix counts only first; elsewhere the sequence is ignored.
+		{"prefix after a digit", "\x1b[1?1049h", "", true},
+		{"prefix after an intermediate", "\x1b[ ?1049h", "", true},
+		// C1 controls (U+0080..U+009F, sent as UTF-8) act as their ESC forms.
+		{"C1 CSI", "\xc2\x9b?1049h", "\x1b[?1049h", true},
+		{"C1 OSC", "\xc2\x9d0;title", "", false},
+		{"C1 ST ends an OSC", "\xc2\x9d0;title\xc2\x9c[?1h", "", true},
+		{"C1 ST ends a DCS", "\x1bP+q\xc2\x9c[?1h", "", true},
+		{"C1 DCS", "\xc2\x90+q", "", false},
+		{"C1 APC", "\xc2\x9fG", "", false},
+		{"other C1 controls end a sequence", "\x1b[?10\xc2\x8549h", "", true},
+		{"a raw C1 byte is no character", "\x9b?1049h", "", true},
+		// Only OSC ends at BEL.
+		{"BEL ends an OSC", "\x1b]0;title\x07[?1h", "", true},
+		{"BEL does not end a DCS", "\x1bP+q\x07[?1h", "", false},
+		{"BEL does not end an APC", "\x1b_Ga=q\x07[?1h", "", false},
+		{"BEL does not end a PM", "\x1b^note\x07", "", false},
+		// Outside OSC and DCS, a character past C1 ends the sequence.
+		{"a character ends an APC", "\x1b_G中[?1h", "", true},
+		{"a character ends a CSI", "\x1b[?10中49h", "", true},
+		{"a DCS keeps characters", "\x1bP+q中", "", false},
+		{"an OSC keeps characters", "\x1b]0;中", "", false},
+		{"ESC ends a DCS", "\x1bP+q\x07\x1b[?2004h", "\x1b[?2004h", true},
+		// Charsets xterm.js does not know leave the line-drawing set alone.
+		{"unknown charset", "\x1b(0\x1b(z", "\x1b(0", true},
+		{"default charset", "\x1b(0\x1b%G", "", true},
+	} {
+		var whole, split terminalModes
+		whole.feed([]byte(tc.output))
+		for i := range len(tc.output) {
+			split.feed([]byte{tc.output[i]})
+		}
+		if got := string(whole.preamble()); got != tc.want || whole.ground() != tc.ground {
+			t.Errorf("%s: preamble %q ground %v, want %q %v", tc.name, got, whole.ground(), tc.want, tc.ground)
+		}
+		if !bytes.Equal(split.preamble(), whole.preamble()) || split.ground() != whole.ground() {
+			t.Errorf("%s: byte by byte %q %v, at once %q %v", tc.name, split.preamble(), split.ground(), whole.preamble(), whole.ground())
+		}
+	}
+}
+
+// A string left open before the kept history (a clipboard write never ended,
+// then plain output for more than the history keeps) does not end within it:
+// the replay is the whole kept history from its oldest byte, as before the
+// modes were followed, never nothing.
+func TestTerminalReplayShowsTailOfStringNeverEnded(t *testing.T) {
+	f := newTerminalStreamFixture(t)
+	f.write([]byte("\x1b[?2004h\x1b]52;c;"+strings.Repeat("QUFB", 64)), 1<<10)
+	f.write(bytes.Repeat([]byte(strings.Repeat("y", 78)+"\r\n"), 2*terminalHistoryLimit/80), 16<<10)
+	f.write([]byte("flood-done\r\n"), 64)
+	f.session.mu.Lock()
+	oldest, history := f.session.oldestLocked(), append([]byte(nil), f.session.history...)
+	f.session.mu.Unlock()
+	if oldest == 0 {
+		t.Fatal("history was not trimmed")
+	}
+	out := f.session.outputAfter(0, 1<<20)
+	if start := out.Next - uint64(len(out.Data)); !out.Reset || start != oldest || !bytes.Equal(out.Data, history) {
+		t.Fatalf("replay [%d,+%d), want the kept history [%d,+%d)", start, len(out.Data), oldest, len(history))
+	}
+	if string(out.State) != "\x1b[?2004h" {
+		t.Fatalf("state %q", out.State)
 	}
 }
 
@@ -322,5 +410,79 @@ func TestTerminalRepaintsFullScreenProgramAfterTrimmedReplay(t *testing.T) {
 	f.session.mu.Unlock()
 	if owner != desktop.key {
 		t.Fatalf("repaint moved the owner to %q", owner)
+	}
+}
+
+// Output counts as answered only once it was written to a viewer whose
+// terminal answers it: not when a viewer is registered or the PTY is read,
+// not for an observer, not for a phone reply that may be lost.
+func TestTerminalAnsweredOnlyWhatReachedAViewer(t *testing.T) {
+	f := newTerminalStreamFixture(t)
+	query := []byte("query\x1b[c")
+	answered := func() uint64 {
+		t.Helper()
+		f.session.mu.Lock()
+		defer f.session.mu.Unlock()
+		return f.session.shown
+	}
+	waitAnswered := func(want uint64) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); answered() != want; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("answered %d, want %d", answered(), want)
+			}
+		}
+	}
+	// A viewer that never took the output: its socket dropped first.
+	idle := f.session.subscribeFrom(nil)
+	f.write(query, 64)
+	if got := f.session.outputAfter(0, 1<<20).Answered; got != 0 {
+		t.Fatalf("a query no viewer was written was answered up to %d", got)
+	}
+	idle.Close()
+	// An observer is written it, but its answers never reach the program.
+	watch := f.dial("?after=0&viewer=watch-tab-0001&observe=1")
+	view := &terminalView{}
+	view.read(t, watch, func() bool { return len(view.markers) == 1 && view.replay == 0 })
+	time.Sleep(50 * time.Millisecond)
+	if got := answered(); got != 0 {
+		t.Fatalf("an observer answered up to %d", got)
+	}
+	// A viewer that was written the replay, then live output, answered both.
+	ws := f.dial("?after=0")
+	view = &terminalView{}
+	view.read(t, ws, func() bool { return len(view.markers) == 1 && view.replay == 0 })
+	waitAnswered(uint64(len(query)))
+	f.write(query, 64)
+	view.read(t, ws, func() bool { return view.offset == uint64(2*len(query)) })
+	waitAnswered(uint64(2 * len(query)))
+	_ = ws.Close()
+	_ = watch.Close()
+
+	// The phone has drawn a reply when it asks for what follows it.
+	f.server.terminals.sessions = map[string]*terminalSession{"0123456789abcdef": f.session}
+	read := func(after uint64) (next, answered uint64) {
+		t.Helper()
+		w := request(f.server, "GET", "/api/mobile/terminals/0123456789abcdef/output?after="+strconv.FormatUint(after, 10), "", "", true)
+		var reply struct {
+			Next     uint64 `json:"next"`
+			Answered uint64 `json:"answered"`
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &reply) != nil {
+			t.Fatalf("phone read: %d %s", w.Code, w.Body.String())
+		}
+		return reply.Next, reply.Answered
+	}
+	before := answered()
+	f.write(query, 64)
+	next, _ := read(before)
+	// Its reply was lost: it reads from the same place again, and that
+	// output is not answered yet.
+	if _, got := read(before); got != before {
+		t.Fatalf("a phone reply that may be lost was answered: %d, want %d", got, before)
+	}
+	f.write(query, 64)
+	if _, got := read(next); got != next {
+		t.Fatalf("the phone's next read: answered %d, want %d", got, next)
 	}
 }

@@ -1385,7 +1385,11 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 				session.showQueries(peer, batch.Data)
 			}
 			out = entryFrame(output, out[:0], batch.Data, batch.Resync, batch.Resync && batch.Reset)
-			_, err = channel.Write(out)
+			if _, err = channel.Write(out); err == nil && !batch.Resync {
+				// Live output reaches the client's terminal, which answers it;
+				// history only draws.
+				session.markShown(batch.Offset + uint64(len(batch.Data)))
+			}
 			continue
 		}
 		if batch.Done {

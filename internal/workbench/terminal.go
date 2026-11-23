@@ -181,11 +181,17 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 	if subscription.Repaint {
 		go session.repaint()
 	}
+	// An observer's answers never reach the program: what it was written
+	// is not answered.
+	delivered := session.markShown
+	if observe {
+		delivered = func(uint64) {}
+	}
 	pongs, stop, done := make(chan struct{}, 1), make(chan struct{}), make(chan struct{})
 	go func() {
 		defer close(done)
 		defer ws.Close()
-		writeTerminalStream(ws, subscription, after != nil, hello, pongs, stop, func(data []byte) { session.showQueries(peer, data) })
+		writeTerminalStream(ws, subscription, after != nil, hello, pongs, stop, func(data []byte) { session.showQueries(peer, data) }, delivered)
 	}()
 	defer func() {
 		close(stop)
@@ -242,7 +248,9 @@ func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
 // overflows.
 // shown hears the history replayed to the viewer, which its terminal
 // answers queries in.
-func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, hello any, pongs, stop <-chan struct{}, shown func([]byte)) {
+// delivered is told the offset after each output write that succeeded: this
+// viewer's terminal draws it and answers its queries.
+func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription, resume bool, hello any, pongs, stop <-chan struct{}, shown func([]byte), delivered func(end uint64)) {
 	writeJSON := func(value any) bool {
 		_ = ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
 		return ws.WriteJSON(value) == nil
@@ -274,13 +282,21 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 				return false
 			}
 			_ = ws.SetWriteDeadline(time.Now().Add(terminalWriteTimeout))
-			return ws.WriteMessage(websocket.BinaryMessage, append(append([]byte(nil), state...), data...)) == nil
+			if ws.WriteMessage(websocket.BinaryMessage, append(append([]byte(nil), state...), data...)) != nil {
+				return false
+			}
+			delivered(offset + uint64(len(data)))
+			return true
 		}
 		marker := map[string]any{"type": "history", "offset": offset, "reset": reset, "size": len(data), "answered": answered}
 		if len(state) > 0 {
 			marker["state"] = string(state)
 		}
-		return writeJSON(marker) && writeBinary(data)
+		if !writeJSON(marker) || !writeBinary(data) {
+			return false
+		}
+		delivered(offset + uint64(len(data)))
+		return true
 	}
 	if hello != nil && !writeJSON(hello) {
 		return
@@ -342,6 +358,7 @@ func writeTerminalStream(ws *websocket.Conn, subscription *terminalSubscription,
 			if !writeBinary(batch.Data) {
 				return
 			}
+			delivered(batch.Offset + uint64(len(batch.Data)))
 			continue
 		case batch.Done:
 			if batch.Ended && writeJSON(map[string]string{"type": "exit"}) {

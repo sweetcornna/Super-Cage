@@ -134,6 +134,9 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 	if session == nil {
 		return
 	}
+	// A phone asks for what follows the output it drew: its terminal has
+	// answered the queries before after.
+	session.markShown(after)
 	// A phone reading the output shows the terminal: it stays a viewer for
 	// the size owner rules.
 	peer := session.phonePeer()
@@ -146,7 +149,6 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 			// were answered then. state sets the modes a trimmed history was
 			// written in (terminalModes).
 			session.showQueries(peer, out.Data)
-			session.markShown(out.Next)
 			reply := map[string]any{"data": out.Data, "next": out.Next, "reset": out.Reset, "closed": out.Closed, "exit_code": out.ExitCode, "answered": out.Answered}
 			if len(out.State) > 0 {
 				reply["state"] = string(out.State)
