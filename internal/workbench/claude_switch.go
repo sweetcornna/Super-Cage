@@ -703,10 +703,16 @@ func (s *Server) switchClaudeAccount(ctx context.Context, id string, input claud
 		}
 		if result.Error != "" {
 			// The guest refused before freezing the history. Lift its fence
-			// also when an older helper did not lift it itself.
+			// also when an older helper did not lift it itself. When the
+			// channel already moved to another conversation (switch:cancel),
+			// nothing of this switch is left in it: the session keeps none
+			// either, or every later choice would fail on it.
 			refusal := claudeSwitchRefusal(result.Error)
-			if s.dropClaudeSwitch(ctx, record) != nil {
-				return fail(refusal)
+			if err := s.dropClaudeSwitch(ctx, record); err != nil {
+				if err.Error() != claudeSwitchRefusals["switch:cancel"] {
+					return fail(refusal)
+				}
+				return undo(refusal)
 			}
 			return refusal
 		}

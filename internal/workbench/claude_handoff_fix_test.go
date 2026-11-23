@@ -466,4 +466,16 @@ func TestClaudeUndeliveredMessagesSurviveTheNextSwitch(t *testing.T) {
 	}
 }
 
+// A refusal after the channel moved to another conversation (a /clear or
+// /cd in the terminal) leaves no handoff behind, though the extra cancel is
+// refused: the next choice is not blocked by it.
+func TestClaudeRefusalAfterTheChannelMovedLeavesNoHandoff(t *testing.T) {
+	s, id, record, home := claudeSwitchGuest(t, "if mode=='account-switch':\n    print(json.dumps({'error':'switch:process'}))\nelif mode=='account-switch-cancel':\n    print(json.dumps({'error':'switch:cancel'}))\nelse:\n    print(json.dumps({'ok':True}))\n")
+	err := s.switchClaudeAccount(claudeSwitchContext(s), id, claudeSwitchInput{RequestID: uuid.NewString(), SourceID: record.CLIID, Target: strings.Repeat("b", 24), Confirm: true}, false)
+	stored, _ := s.mobileCLI.record(s.profile, id)
+	if err == nil || err.Error() != claudeSwitchRefusals["switch:process"] || stored.Switch != nil || len(guestCalls(t, home, "account-switch-cancel")) != 1 {
+		t.Fatalf("%v, switch %+v", err, stored.Switch)
+	}
+}
+
 var _ = context.Background
