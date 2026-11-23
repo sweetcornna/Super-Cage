@@ -1,0 +1,27 @@
+name: Full platform builds and tests
+# Run by hand (Actions, Run workflow) when a change touches an installer or a
+# native app. The pull request gate is ci.yml. These builds are slow (the
+# Windows one takes close to an hour) and none of them publishes anything.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: full-tests-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  macos:
+    uses: ./.github/workflows/macos-build.yml
+    with:
+      ref: ${{ github.sha }}
+      artifact_name: cage-macos-arm64-test
+  windows:
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      ref: ${{ github.sha }}
+      artifact_name: cage-windows-amd64-test
+  linux:
+    uses: ./.github/workflows/linux-build.yml
+    with:
+      ref: ${{ github.sha }}
+      artifact_name: cage-linux-amd64-test

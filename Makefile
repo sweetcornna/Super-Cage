@@ -5,6 +5,7 @@
 #                     to choose where; ~/.local/bin by default)
 #   make limactl      Lima's own limactl from third_party/, for debugging
 #   make test         the Go tests
+#   make test-fast    the Go tests the pull request gate runs (not internal/cage, internal/workbench)
 #   make check-windows      the Windows build and tests compile and vet, from any OS
 #   make test-third-party   the tests of the modules in third_party/, patched
 
@@ -48,7 +49,7 @@ CGO_ENABLED ?= 0
 endif
 GO_BUILD := CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -tags $(TAGS) -ldflags "$(LDFLAGS)"
 
-.PHONY: all agent-vm install limactl assets test test-go check-windows test-third-party fuzz clean
+.PHONY: all agent-vm install limactl assets test test-go test-fast check-windows test-third-party fuzz clean
 
 all: agent-vm
 
@@ -127,6 +128,14 @@ test: test-go
 test-go:
 	$(GO) test -tags $(TAGS) . ./cmd/... ./internal/...
 	cd tools/tailnet && GOFLAGS= $(GO) test ./...
+
+# The Go tests of the pull request gate: every package that passes on a hosted
+# Linux runner in a few minutes. internal/cage and internal/workbench stay out.
+# They start real guests and tunnel devices, run the "claude" CLI and take
+# 100-460 s; run them with make test-go on a machine that has all of that.
+# Needs the generated embeds first (make cage-ui assets tailnet-assets).
+test-fast:
+	$(GO) test -tags $(TAGS) $$($(GO) list -tags $(TAGS) ./cmd/... ./internal/... | grep -v -E '/internal/(cage|workbench)$$')
 
 # The Windows build and its tests compile and vet, from any OS. The Windows
 # paths' logic is tested everywhere (paths.Windows); the tests themselves
