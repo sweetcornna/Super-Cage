@@ -1,13 +1,15 @@
 import React, { useEffect, useRef, useState } from "react";
 import { InlineSelect } from "./inline-select";
+import { answerBody, chipState, confirmText, handoffLine, handoffQuestion, needsConfirm, refusalNeedsConfirm, SESSION_RULES, sessionRule,
+  switchBody, switchTargets, targetNote, targetSelectable, undoBody, waitingLine } from "./session-account-state.mjs";
 import "./session-account.css";
 
-const failures = {rate_limit:"请求受到限流，请核对额度后选择等待或接续",authentication_failed:"账号登录失效，请重新登录",account_on_hold:"账号受限，自动接续已停止",overloaded:"服务暂时过载，保留原账号",server_error:"服务暂时异常，保留原账号"};
+const failures = {rate_limit:"请求受到限流，尚未确认额度用完：可以等待，或在下方直接选择另一个账号。",authentication_failed:"账号登录失效：在账号管理中重新登录，或在下方选择另一个账号。",account_on_hold:"账号受限：在下方选择另一个账号继续。",overloaded:"服务暂时过载，保留原账号：稍后重试即可。",server_error:"服务暂时异常，保留原账号：稍后重试即可。"};
 
 // Desktop and mobile use the same session operation and durable request ID.
 export function SessionAccount({ id, request, onChanged, compact = false }) {
   const [open,setOpen]=useState(false), [view,setView]=useState(null), [busy,setBusy]=useState(false), [error,setError]=useState("");
-  const [target,setTarget]=useState(""), [confirmed,setConfirmed]=useState(false), [continueTask,setContinueTask]=useState(false);
+  const [confirming,setConfirming]=useState(null);
   const pending=useRef(null), current=useRef({request,onChanged}); current.current={request,onChanged};
   const terminalID=useRef(null);
   const path="/sessions/"+id+"/account";
@@ -17,8 +19,7 @@ export function SessionAccount({ id, request, onChanged, compact = false }) {
       try {
         const result=await current.current.request(path,{body:{action:"inspect"}});
         if(live) {
-          const candidates=result.candidates || [];
-          setView(result); setTarget(previous=>candidates.some(a=>a.id===previous)?previous:(candidates[0]?.id || ""));
+          setView(result);
           const next=result.session?.desktop_terminal_id;
           if(terminalID.current && next && next!==terminalID.current)current.current.onChanged?.(result.session);
           terminalID.current=next;
@@ -28,44 +29,78 @@ export function SessionAccount({ id, request, onChanged, compact = false }) {
     };
     void load(); return()=>{live=false;clearTimeout(timer);};
   },[id,path,open]);
-  const change=async(body)=>{
+  // One durable request per decision: a retry after a lost reply repeats it.
+  const send=async(key,make,after)=>{
     if(busy)return; setBusy(true);setError("");
+    if(pending.current?.key!==key)pending.current={key,body:make(crypto.randomUUID())};
+    const body=pending.current.body;
     try {
       const result=await current.current.request(path,{body}); setView(result);current.current.onChanged?.(result.session);
-      if(body.action==="switch") {pending.current=null;setConfirmed(false);}
-    } catch(e){setError(e.message);} finally{setBusy(false);}
+      pending.current=null; setConfirming(null); after?.();
+    } catch(e){
+      const fresh=await current.current.request(path,{body:{action:"inspect"}}).catch(()=>null);
+      if(fresh)setView(fresh);
+      // The server saw work this view did not: ask the one confirm instead.
+      if(body.action==="switch" && body.target && !body.force && refusalNeedsConfirm(view,e.message))setConfirming(body.target);
+      // Answered on the other device: the refreshed view already shows the outcome.
+      else if(!(body.action==="answer" && fresh && !handoffQuestion(fresh)))setError(e.message);
+    } finally{setBusy(false);}
   };
   if(!view?.supported)return null;
   const session=view.session, sw=session.account_switch;
   const switching=sw && sw.phase!=="completed";
+  const question=handoffQuestion(view), line=handoffLine(session), waiting=waitingLine(view);
+  const targets=switchTargets(view);
+  const label=(target)=>targets.find(t=>t.id===target)?.label || "目标账号";
+  const pick=(target)=>{
+    if(needsConfirm(view) && confirming!==target){setConfirming(target);return;}
+    const force=confirming===target;
+    void send(`switch:${target}:${force}`,requestID=>switchBody(view,target,requestID,{force}),()=>setOpen(false));
+  };
+  const answer=(choice)=>send("answer:"+choice,requestID=>answerBody(view,choice,requestID));
   return <section className={`session-account ${compact?"session-account--compact":""}`} aria-label="会话账号">
+    {question && <div className="session-account-card" role="group" aria-label="额度已用完">
+      <p>{question.text}</p>
+      <div className="session-account-choices">
+        <button type="button" className="session-account-primary" disabled={busy} onClick={()=>answer("once")}>切换并继续</button>
+        <button type="button" disabled={busy} onClick={()=>answer("always")}>以后额度用完都自动接续</button>
+        <button type="button" disabled={busy} onClick={()=>answer("wait_once")}>等 {question.source} 恢复</button>
+        <button type="button" className="text-button" disabled={busy} onClick={()=>answer("wait_always")}>以后都等待</button>
+      </div>
+      {error && <p role="alert">{error}</p>}
+    </div>}
+    {!question && (line || waiting) && <p className="session-account-line" role="status">
+      <span>{line || waiting}</span>
+      {line && view.undo && <button type="button" className="text-button" disabled={busy} onClick={()=>send("undo",requestID=>undoBody(view,requestID,view.source_busy))}>撤销 · 回到 {sw.source_label} 等待</button>}
+    </p>}
     <button type="button" className="quiet-button" aria-expanded={open} onClick={()=>setOpen(v=>!v)}>
-      {session.account_label || "Claude 账号"} · {session.account_failure?"需要处理":switching?"正在交接":"会话绑定"}
+      {session.account_label || "Claude 账号"} · {chipState(view)}
     </button>
     {open && <div className="session-account-options">
       <p>当前账号：{session.account_label || session.account_id}。会话重连会保持此账号。</p>
-      {session.account_failure && <p role="status">{failures[session.account_failure] || "本轮发生错误，原会话已保留"}</p>}
-      {sw && <p role="status">{sw.phase==="completed"?"已接续至":"接续目标："}{sw.target_label}{sw.error && ` · ${sw.error}`}</p>}
-      <label>此会话切换授权<InlineSelect aria-label="此会话切换授权" disabled={busy || switching} value={view.switch_policy} onValueChange={policy=>change({action:"policy",policy})}>
-        <option value="ask">每次询问</option><option value="allow">额度耗尽后自动接续</option><option value="wait">始终等待原账号</option>
+      {session.account_failure && !question && !waiting && <p role="status">{failures[session.account_failure] || "本轮发生错误，原会话已保留：可以重试，或选择另一个账号。"}</p>}
+      {switching && <p role="status">{sw.phase==="starting"?"正在等待 "+sw.target_label+" 连接。":"正在交接到 "+sw.target_label}{sw.error && ` · ${sw.error}`}</p>}
+      {!switching && <div className="session-account-targets" role="group" aria-label="切换到">
+        <span>切换到</span>
+        {targets.length===0 && <p>账号管理里还没有其他账号。</p>}
+        {targets.map(t=><button type="button" key={t.id} className="session-account-target" disabled={busy || !targetSelectable(t)}
+          aria-label={`切换到 ${t.label}`} onClick={()=>pick(t.id)}>
+          <strong>{t.label}</strong><small>{targetNote(t)}</small>
+        </button>)}
+      </div>}
+      {confirming && !switching && <div className="session-account-confirm" role="group" aria-label="确认切换">
+        <p>{confirmText(label(confirming))}</p>
+        <div className="session-account-choices">
+          <button type="button" className="session-account-primary" disabled={busy} onClick={()=>pick(confirming)}>停止并切换</button>
+          <button type="button" className="text-button" disabled={busy} onClick={()=>setConfirming(null)}>取消</button>
+        </div>
+      </div>}
+      <label>额度用完时<InlineSelect aria-label="此会话额度用完时" disabled={busy || switching} value={sessionRule(view)} onValueChange={policy=>send("policy:"+policy,()=>({action:"policy",policy}))}>
+        {SESSION_RULES.filter(([value])=>value!=="default" || view.handoff_api>=2).map(([value,text])=><option key={value} value={value}>{text}</option>)}
       </InlineSelect></label>
-      {!switching && <>
-        <label>接续账号<InlineSelect aria-label="接续账号" value={target} disabled={busy || !view.candidates.length} onValueChange={value=>{setTarget(value);setConfirmed(false);pending.current=null;}}>
-          {view.candidates.length?view.candidates.map(a=><option key={a.id} value={a.id}>{a.label}</option>):<option value="">无可用账号</option>}
-        </InlineSelect></label>
-        {!view.candidates.length && <p>在账号设置中，将允许共享会话历史的账号设为同一接续分组。</p>}
-        <p>历史将由目标账号继续处理，缓存可能重建。执行中的工具、后台任务和未确认结果会阻止切换。</p>
-        <label className="check-line"><input type="checkbox" checked={confirmed} onChange={e=>setConfirmed(e.target.checked)} />允许将此会话历史交给所选账号</label>
-        <label className="check-line"><input type="checkbox" checked={continueTask} onChange={e=>{setContinueTask(e.target.checked);pending.current=null;}} />恢复后继续未完成的任务</label>
-        <button type="button" disabled={busy || !target || !confirmed} onClick={()=>{
-          pending.current ||= {action:"switch",target,request_id:crypto.randomUUID(),source_id:view.source_id,confirm:true,continue:continueTask};
-          void change(pending.current);
-        }}>{busy?"正在交接…":"切换并恢复历史"}</button>
-      </>}
-      {switching && sw.phase!=="starting" && <button disabled={busy} onClick={()=>change({action:"switch",request_id:sw.id,source_id:view.source_id,target,confirm:true})}>重试账号交接</button>}
-      {switching && sw.phase==="preparing" && <button disabled={busy} onClick={()=>change({action:"cancel",request_id:sw.id})}>取消交接，保留原账号</button>}
-      {switching && sw.phase==="starting" && <p>正在等待目标账号连接。请保留当前页面，或从会话列表重新打开。</p>}
-      {error && <p role="alert">{error}</p>}
+      {switching && sw.phase!=="starting" && <button type="button" disabled={busy} onClick={()=>send("retry:"+sw.id,()=>({action:"switch",request_id:sw.id,source_id:view.source_id,confirm:true}))}>重试账号交接</button>}
+      {switching && sw.phase==="preparing" && <button type="button" disabled={busy} onClick={()=>send("cancel:"+sw.id,()=>({action:"cancel",request_id:sw.id}))}>取消交接，保留原账号</button>}
+      {error && !question && <p role="alert">{error}</p>}
     </div>}
   </section>;
 }

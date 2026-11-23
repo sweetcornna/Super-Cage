@@ -123,6 +123,15 @@ type mobileRecord struct {
 	Switch           *claudeAccountSwitch `json:"switch,omitempty"`
 	Executions       []claudeExecution    `json:"executions,omitempty"`
 	ResumeTranscript string               `json:"resume_transcript,omitempty"`
+	// SwitchPolicySet: the person chose this session's own rule; otherwise
+	// the session follows 调度设置.
+	SwitchPolicySet bool `json:"switch_policy_set,omitempty"`
+	// HandoffWait: the person chose to wait for this account's reset (unix
+	// seconds); until then the session neither asks nor moves.
+	HandoffWait int64 `json:"handoff_wait,omitempty"`
+	// WaitingReset: under automatic continuation every account that may take
+	// the session was used up; it continues at this first reset.
+	WaitingReset int64 `json:"waiting_reset,omitempty"`
 	// CodexAccount is the Codex account whose CODEX_HOME holds the thread;
 	// empty means the environment's own ~/.codex.
 	CodexAccount string `json:"codex_account,omitempty"`
@@ -149,6 +158,28 @@ type claudeAccountSwitch struct {
 	Connection  string          `json:"connection"`
 	Error       string          `json:"error,omitempty"`
 	Continue    bool            `json:"continue"`
+	// Force stops a working source: the person confirmed it, or the turn
+	// already ended on the account's limit.
+	Force       bool   `json:"force,omitempty"`
+	SourceLabel string `json:"source_label,omitempty"`
+	// Reason is the confirmed window (five_hour, seven_day) of a handoff at a
+	// quota limit, "reset" for continuing on the same account after its
+	// reset, empty for a manual switch.
+	Reason    string `json:"reason,omitempty"`
+	ResetsAt  int64  `json:"resets_at,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
+	At        int64  `json:"at,omitempty"`
+	// Note lists for the resume prompt what the handoff interrupted.
+	Note string `json:"note,omitempty"`
+	// Carry holds the messages the source never took, each delivered once to
+	// the target under its own request id.
+	Carry []claudeCarried `json:"carry,omitempty"`
+}
+
+type claudeCarried struct {
+	ID        string `json:"id"`
+	Text      string `json:"text"`
+	Delivered bool   `json:"delivered,omitempty"`
 }
 
 type claudeSwitchView struct {
@@ -156,6 +187,13 @@ type claudeSwitchView struct {
 	Phase       string `json:"phase"`
 	TargetLabel string `json:"target_label"`
 	Error       string `json:"error,omitempty"`
+	SourceLabel string `json:"source_label,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	ResetsAt    int64  `json:"resets_at,omitempty"`
+	Automatic   bool   `json:"automatic,omitempty"`
+	At          int64  `json:"at,omitempty"`
+	// carry: a message the source never took still waits for the target.
+	carry bool
 }
 type mobileRun struct {
 	record       *mobileRecord
@@ -259,7 +297,10 @@ func (record *mobileRecord) snapshot() mobileSession {
 		view.CodexAccountID = record.CodexAccount
 	}
 	if sw := record.Switch; sw != nil {
-		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error}
+		view.AccountSwitch = &claudeSwitchView{ID: sw.ID, Phase: sw.Phase, TargetLabel: sw.TargetLabel, Error: sw.Error, SourceLabel: sw.SourceLabel, Reason: sw.Reason, ResetsAt: sw.ResetsAt, Automatic: sw.Automatic, At: sw.At}
+		for _, message := range sw.Carry {
+			view.AccountSwitch.carry = view.AccountSwitch.carry || sw.Phase == "completed" && !message.Delivered
+		}
 	}
 	if !record.Terminal {
 		view.Active = record.turnActive()

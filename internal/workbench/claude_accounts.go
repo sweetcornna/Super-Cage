@@ -69,6 +69,14 @@ type claudeAccountList struct {
 type claudeScheduling struct {
 	Mode         string `json:"mode"`
 	SwitchPolicy string `json:"switch_policy"`
+	// SwitchAnswered: the person gave a standing answer to "what happens when
+	// an account's quota runs out", so the first-time question never returns.
+	SwitchAnswered bool `json:"switch_answered,omitempty"`
+	// UngroupedHandoff: accounts without a 接续分组 form one implicit group
+	// for automatic continuation. Set only by the person's yes to it.
+	UngroupedHandoff bool `json:"ungrouped_handoff,omitempty"`
+	// Preferred is the account new sessions use while it is available.
+	Preferred string `json:"preferred,omitempty"`
 }
 
 func (p claudeScheduling) defaults() claudeScheduling {
@@ -81,8 +89,14 @@ func (p claudeScheduling) defaults() claudeScheduling {
 	return p
 }
 
+// answered: the first-time question was answered for good. A stored allow
+// or wait was a choice (ask was the default) and counts.
+func (p claudeScheduling) answered() bool {
+	return p.SwitchAnswered || p.SwitchPolicy == "allow" || p.SwitchPolicy == "wait"
+}
+
 func (p claudeScheduling) valid() bool {
-	return (p.Mode == "balanced" || p.Mode == "sequential") && (p.SwitchPolicy == "ask" || p.SwitchPolicy == "allow" || p.SwitchPolicy == "wait")
+	return (p.Mode == "balanced" || p.Mode == "sequential") && validSwitchPolicy(p.SwitchPolicy) && (p.Preferred == "" || validClaudeID(p.Preferred))
 }
 
 type claudeAccountManager struct {
@@ -103,6 +117,8 @@ type claudeAccountManager struct {
 	recent         map[string]claudeProjectPick
 	refreshing     map[string]*claudeRefresh
 	attempted      map[string]time.Time
+	// now is the handoff clock; tests set it.
+	now func() time.Time
 }
 
 type claudeRefresh struct {
@@ -325,6 +341,22 @@ func (a claudeAccount) headroom(now time.Time) (float64, bool) {
 	return least, true
 }
 
+// exhaustedWindow names the window that a confirmed exhaustion comes from:
+// a window read at 100% whose reset is still ahead. When both are, the one
+// that resets last binds. A model-specific limit has no window here.
+func (a claudeAccount) exhaustedWindow(now time.Time) (string, int64) {
+	if _, available := a.headroom(now); available || a.Quota == nil {
+		return "", 0
+	}
+	window, reset := "", int64(0)
+	for name, w := range map[string]*claudeWindow{"five_hour": a.Quota.FiveHour, "seven_day": a.Quota.SevenDay} {
+		if validClaudeWindow(w) && w.UsedPercentage >= 100 && (w.ResetsAt == 0 || w.ResetsAt > now.Unix()) && (window == "" || w.ResetsAt > reset) {
+			window, reset = name, w.ResetsAt
+		}
+	}
+	return window, reset
+}
+
 // A selection carries the identity verified for this launch. The caller
 // must not replace Subject or GuestID by looking the record up again.
 type claudeSelection struct{ ID, GuestID, Subject string }
@@ -513,6 +545,12 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 // Start at the account following the last allocation. Among eligible accounts,
 // prefer fewer live sessions, then the largest known remaining minimum window.
 func pickClaudeAccount(list claudeAccountList, active map[string]int, logins map[string]bool, last, preferred string, now time.Time) string {
+	// The person's chosen account wins while it can take a session.
+	if a := list.find(list.Scheduling.Preferred); a != nil && a.Enabled && a.Status == "ready" && !logins[a.ID] {
+		if _, eligible := a.headroom(now); eligible {
+			return a.ID
+		}
+	}
 	if list.Scheduling.Mode == "sequential" {
 		for _, a := range list.Accounts {
 			if _, eligible := a.headroom(now); a.Enabled && a.Status == "ready" && !logins[a.ID] && eligible {

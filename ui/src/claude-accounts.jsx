@@ -4,6 +4,7 @@ import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import { EmptyState } from "./drawings";
 import crabIcon from "./claude-account-crab.svg";
+import { GROUP_SENTENCE, MANUAL_SENTENCE, OFFER_TEXT, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer } from "./claude-scheduling-state.mjs";
 import "./claude-accounts.css";
 
 // Ordinary reads never start an upstream usage query.
@@ -38,7 +39,7 @@ export function useClaudeAccounts() {
   return { accounts: registry?.accounts ?? null, detected: registry?.detected,
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
-    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, loginNotice: registry?.login_notice, error, load };
+    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, error, load };
 }
 
 const statusLabels = {
@@ -216,7 +217,7 @@ function DetectedProfile({ profile, usageEnvironment, busy, join, perform, chang
   </article>;
 }
 
-function ProfileCard({ profile, environment, usageEnvironment, busy, active, defaultActive, perform, change, login, cancelDraft }) {
+function ProfileCard({ profile, environment, usageEnvironment, busy, active, defaultActive, perform, change, login, cancelDraft, handoffApi, preferred }) {
   const [renaming, setRenaming] = useState(false);
   const [label, setLabel] = useState("");
   const [group, setGroup] = useState(profile.handoff_group || "");
@@ -250,6 +251,7 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
             {[profile.email !== displayName && profile.email, profile.organization].filter(Boolean).join(" · ")}
           </span>}
           {profile.handoff_group && <span className="claude-profile-group" title="接续分组">分组 {profile.handoff_group}</span>}
+          {preferred && <span className="claude-profile-group" title="新会话优先使用此账号">新会话优先</span>}
         </div>
       </div>
       <div className="claude-profile-usage">
@@ -271,13 +273,16 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
         <button className="quiet-button claude-icon-action" aria-label="检查状态" disabled={busy || !!usageEnvironment || usage.state === "checking"} onClick={usage.check}>
           <RefreshCw size={15} className={usage.state === "checking" ? "spin" : undefined} /></button>
         {draft && <button className="text-button" disabled={busy} onClick={() => perform(() => cancelDraft(profile))}>撤销添加</button>}
+        {handoffApi >= 2 && profile.status === "ready" && <button type="button" className="text-button claude-profile-prefer" disabled={busy}
+          onClick={() => perform(() => change({ action: "prefer", id: preferred ? "" : profile.id }))}>{preferred ? "恢复按规则分配" : "新会话使用此账号"}</button>}
         <button type="button" className="quiet-button claude-icon-action claude-profile-toggle" aria-expanded={open}
           aria-label={open ? "收起接续分组" : "设置接续分组"} onClick={() => setOpen((value) => !value)}><ChevronDown size={15} /></button>
       </div>
     </div>
     {open && <form className="claude-handoff-group" onSubmit={event => { event.preventDefault(); perform(() => change({action:"update",id:profile.id,handoff_group:group})); }}>
-      <label>接续分组<input aria-label={`${displayName} 的接续分组`} value={group} maxLength={32} placeholder="未分组，不跨账号接续" onChange={event => setGroup(event.target.value)} /></label>
+      <label>接续分组<input aria-label={`${displayName} 的接续分组`} value={group} maxLength={32} placeholder="未分组" onChange={event => setGroup(event.target.value)} /></label>
       <button disabled={busy || group === (profile.handoff_group || "")}>保存分组</button>
+      <p className="field-help">{GROUP_SENTENCE}</p>
     </form>}
     {active > 0 && <p className="claude-profile-note">{active} 个终端仍在运行{!fromTerminal && "，关闭后可重新登录"}</p>}
     {!fromTerminal && defaultActive > 0 && <p className="field-help">
@@ -367,21 +372,31 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
       </div>
     </div>
     <details className="claude-scheduling">
-      <summary>调度设置 · {store.scheduling.mode === "sequential" ? "顺序优先" : "均衡分配"}</summary>
+      <summary>调度设置 · {store.scheduling.mode === "sequential" ? "顺序优先" : "均衡分配"}{showOffer(store) && " · 额度用完时待设定"}</summary>
+      {showOffer(store) && <div className="claude-scheduling-offer" role="group" aria-label="额度用完时">
+        <p>{OFFER_TEXT}</p>
+        <div>
+          <button type="button" className="primary" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"always")}))}>以后额度用完都自动接续</button>
+          <button type="button" className="quiet-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"ask")}))}>每次询问</button>
+          <button type="button" className="text-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"wait")}))}>以后都等待</button>
+        </div>
+      </div>}
       <label>新会话分配<InlineSelect inline aria-label="新会话分配" value={store.scheduling.mode} disabled={busy}
-        onValueChange={mode => perform(() => load({action:"scheduling",scheduling:{...store.scheduling,mode}}))}>
+        onValueChange={mode => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...store.scheduling,mode})}))}>
         <option value="balanced">均衡分配</option><option value="sequential">按列表顺序优先</option>
       </InlineSelect></label>
-      <label>新会话切换授权<InlineSelect inline aria-label="新会话切换授权" value={store.scheduling.switch_policy} disabled={busy}
-        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:{...store.scheduling,switch_policy}}))}>
-        <option value="ask">每次询问</option><option value="allow">额度耗尽后自动接续</option><option value="wait">始终等待原账号</option>
+      <label>额度用完时<InlineSelect inline aria-label="额度用完时" value={store.scheduling.switch_policy} disabled={busy}
+        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...store.scheduling,switch_policy})}))}>
+        <option value="ask">每次询问</option><option value="allow">自动换账号继续</option><option value="wait">等原账号恢复</option>
       </InlineSelect></label>
-      <p className="field-help">已有会话保持原账号和授权。自动接续只在限额已确认、原任务可安全停止且目标账号属于同一接续分组时进行；跨账号可能重建缓存。</p>
+      <p className="field-help">{store.handoff_api >= 2 ? ruleSentence(store.scheduling) : "自动接续只在限额已确认且目标账号属于同一接续分组时进行。"} 跨账号可能重建缓存。{store.handoff_api >= 2 && " " + MANUAL_SENTENCE}</p>
+      {store.handoff_api >= 2 && <p className="field-help">{GROUP_SENTENCE}</p>}
+      {preferredLabel(store) && <p className="field-help">新会话优先使用 {preferredLabel(store)}，它额度用完或未登录时按上面的分配方式选择。</p>}
       {store.scheduling.mode === "sequential" && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
         {accounts.map((profile,index) => <div key={profile.id}><span>{index+1}. {profile.label || profile.email}</span>
           <button disabled={busy || index===0} aria-label={`提高 ${profile.label} 的优先级`} onClick={() => {
             const order=accounts.map(a=>a.id); [order[index-1],order[index]]=[order[index],order[index-1]];
-            perform(() => load({action:"scheduling",scheduling:store.scheduling,order}));
+            perform(() => load({action:"scheduling",scheduling:schedulingBody(store,store.scheduling),order}));
           }}>上移</button></div>)}
       </div>}
     </details>
@@ -408,7 +423,8 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
           join={() => perform(joinDetected)} />}
         {accounts?.map((profile) => <ProfileCard key={profile.id} profile={profile} environment={environment} usageEnvironment={usageEnvironment}
           busy={busy || environmentBusy} perform={perform} change={load} login={login} cancelDraft={cancelDraft}
-          active={activeCounts.get(profile.id)?.all || 0} defaultActive={activeCounts.get(profile.id)?.fromDefault || 0} />)}
+          active={activeCounts.get(profile.id)?.all || 0} defaultActive={activeCounts.get(profile.id)?.fromDefault || 0}
+          handoffApi={store.handoff_api} preferred={store.scheduling.preferred === profile.id} />)}
       </QuotaClock>
     </div>
   </section>;

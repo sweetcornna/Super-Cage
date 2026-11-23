@@ -30,6 +30,9 @@ type claudePanel struct {
 	DetectionStatus        string           `json:"detection_status"`
 	DetectionError         string           `json:"detection_error,omitempty"`
 	LoginNotice            string           `json:"login_notice,omitempty"`
+	// HandoffAPI tells a client which scheduling fields and actions (prefer,
+	// switch_answered, ungrouped_handoff) this server knows.
+	HandoffAPI int `json:"handoff_api"`
 }
 
 func (s *Server) probeClaude(ctx context.Context, guestID string) (claudeGuestSnapshot, error) {
@@ -222,7 +225,8 @@ func (s *Server) claudePanelView(ctx context.Context) (claudePanel, claudeAccoun
 		return view, list, err
 	}
 	view.Accounts, view.LoginNotice = list.Accounts, m.loginNotice
-	view.Scheduling = list.Scheduling
+	view.Scheduling, view.HandoffAPI = list.Scheduling, 2
+	view.Scheduling.SwitchAnswered = list.Scheduling.answered()
 	view.UsagePanelRunning = m.panelRunning
 	if subject := reading.subject(); view.DetectionStatus == "ready" && list.bySubject(subject) == nil {
 		view.Detected = &claudeDetected{Identity: subject, Email: reading.email(), Organization: strings.TrimSpace(reading.Organization), Plan: reading.Plan, Quota: reading.Quota, CheckedAt: checked.Unix()}

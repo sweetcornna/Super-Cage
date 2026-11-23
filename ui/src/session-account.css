@@ -79,3 +79,58 @@
   font-weight: 500;
 }
 .terminal-view .session-account-options > button:disabled { background: var(--soft); color: var(--faint); }
+
+/* A quota limit and a handoff: one quiet card or line in the session, never a
+   modal. The same rules serve the phone and the desktop terminal. */
+.session-account-card, .session-account-line {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 9px);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: var(--fs-secondary, .85rem);
+  line-height: 1.55;
+}
+.session-account-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 6px 10px; color: var(--muted); font-size: var(--fs-caption, .8rem); }
+.session-account-card p { margin: 0; overflow-wrap: anywhere; }
+.session-account-choices { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.session-account-choices > button, .session-account-line > button {
+  min-height: var(--h-compact, 30px);
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 7px);
+  background: var(--surface, var(--paper));
+  color: var(--ink);
+  font: inherit;
+  cursor: pointer;
+}
+.session-account-choices > .session-account-primary { border-color: transparent; background: var(--button, var(--ink)); color: var(--button-ink, var(--paper)); font-weight: 500; }
+.session-account-choices > .text-button, .session-account-line > .text-button { min-height: 0; padding: 0; border: 0; background: none; color: var(--muted); text-decoration: underline; text-underline-offset: 3px; }
+.session-account-choices > button:disabled, .session-account-line > button:disabled { opacity: .55; cursor: default; }
+.session-account-targets { display: grid; gap: 6px; }
+.session-account-targets > span { color: var(--ink); font-weight: 500; }
+.session-account-target {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: var(--h-control, 36px);
+  padding: 6px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 7px);
+  background: var(--surface, var(--paper));
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.session-account-target small { color: var(--muted); font-size: var(--fs-caption, .78rem); text-align: right; }
+.session-account-target:hover:not(:disabled) { background: var(--soft); }
+.session-account-target:disabled { color: var(--faint, var(--muted)); cursor: default; }
+.session-account-confirm { display: grid; gap: 8px; padding: 10px 12px; border-radius: var(--r-md, 7px); background: color-mix(in srgb, var(--amber) 10%, var(--surface, var(--paper))); }
+.session-account-confirm p { color: var(--ink) !important; }
+.terminal-view > .session-account > .session-account-card,
+.terminal-view > .session-account > .session-account-line { max-width: 44rem; }

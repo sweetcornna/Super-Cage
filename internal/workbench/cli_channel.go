@@ -343,13 +343,7 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		return mobileSession{}, err
 	}
 	s.cliDiscovery.noteView(id, input, current.WatchKey)
-	root := s.cliWorkspace(record.Workspace)
-	if legacy := s.macOSLegacyWorkspace(record); legacy != "" {
-		root = legacy
-	}
-	if s.windowsGuest != nil {
-		root = record.GuestWorkspace
-	}
+	root := s.cliConversationRoot(record)
 	if current.Workspace == "" && !current.HasHistory && record.TerminalID != "" {
 		if record.Switch != nil && record.Switch.Phase == "starting" && !current.Running {
 			if owner := s.terminals.get(record.TerminalID); owner == nil || !owner.ownsConversation() {
@@ -433,6 +427,18 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 		}
 	}
 	return record.snapshot(), nil
+}
+
+// cliConversationRoot is the guest folder of the project a terminal
+// conversation is bound to; its CLI may work in a folder below it.
+func (s *Server) cliConversationRoot(record *mobileRecord) string {
+	if s.windowsGuest != nil {
+		return record.GuestWorkspace
+	}
+	if legacy := s.macOSLegacyWorkspace(record); legacy != "" {
+		return legacy
+	}
+	return s.cliWorkspace(record.Workspace)
 }
 
 func (s *Server) terminalConversationAction(ctx context.Context, id string, input map[string]any) (mobileSession, error) {
@@ -566,8 +572,8 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return "", nil, err
 	}
 	record.Terminal, record.Account, record.Launcher = true, selection, launcher
+	// A new session follows the rule in 调度设置 until the person sets its own.
 	if record.SwitchPolicy == "" {
-		record.SwitchPolicy = list.Scheduling.SwitchPolicy
 		if a := list.find(selection.ID); a != nil {
 			record.AccountLabel = a.Label
 		}
@@ -589,6 +595,7 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		payload["resume"] = ""
 		payload["switch_id"] = record.Switch.ID
 		payload["continue_after_switch"] = record.Switch.Continue
+		payload["note"] = record.Switch.Note
 	}
 	if s.macosGuest != nil && record.GuestWorkspace != "" {
 		root := s.cliWorkspace(workspace)
