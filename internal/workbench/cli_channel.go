@@ -380,7 +380,13 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 	deferred := map[string]*mobileRecord{}
 	for _, item := range found {
 		owner := owners[item.Connection]
-		if item.Connection == "" || owner == nil || owner.CLIID == item.CLIID || known[item.CLIID] != nil || !validCLIUUID(item.CLIID) {
+		if item.Connection == "" || owner == nil || owner.CLIID == item.CLIID || !validCLIUUID(item.CLIID) {
+			continue
+		}
+		if known[item.CLIID] != nil {
+			if known[item.CLIID] == owner && owner.clearedPart(item.CLIID) != nil {
+				s.resumeEarlierPart(m, owner, item.CLIID, present)
+			}
 			continue
 		}
 		switch item.Title {
@@ -399,10 +405,36 @@ func (s *Server) followClearedConversations(m *mobileCLIStore, known map[string]
 				continue
 			}
 			known[item.CLIID] = owner
-			m.catalog[owner.ID] = owner.summary()
+			if m.catalog != nil {
+				m.catalog[owner.ID] = owner.summary()
+			}
 		}
 	}
 	return deferred
+}
+
+// resumeEarlierPart: /resume of an earlier part inside the entry's own
+// terminal makes it the entry's conversation again, and the conversation the
+// terminal left becomes an earlier part. Unsaved, it is retried by the next
+// discovery. Caller holds m.mu.
+func (s *Server) resumeEarlierPart(m *mobileCLIStore, owner *mobileRecord, id string, present map[string]bool) {
+	index := slices.IndexFunc(owner.Executions, func(e claudeExecution) bool { return e.CLIID == id })
+	if index < 0 {
+		return
+	}
+	executions, cleared, previous := owner.Executions, owner.Cleared, owner.CLIID
+	owner.Executions = append(slices.Delete(slices.Clone(executions), index, index+1), claudeExecution{CLIID: previous, Account: owner.Account, Config: owner.GuestConfig})
+	owner.Cleared = append(slices.DeleteFunc(slices.Clone(cleared), func(part clearedPart) bool { return part.CLIID == id }),
+		clearedPart{CLIID: previous, ClearedAt: time.Now().UTC(), Empty: !present[previous]})
+	owner.CLIID, owner.Resume = id, true
+	owner.changed()
+	if err := writePrivate(mobileRecordPath(s.profile, owner.ID), owner); err != nil {
+		owner.Executions, owner.Cleared, owner.CLIID = executions, cleared, previous
+		return
+	}
+	if m.catalog != nil {
+		m.catalog[owner.ID] = owner.summary()
+	}
 }
 
 // followConversationID looks at the guest's sessions once more when a view
@@ -417,6 +449,14 @@ func (s *Server) followConversationID() {
 		defer s.conversationFollow.Store(false)
 		paths, err := s.projectPaths()
 		if err != nil {
+			return
+		}
+		// As a list request does: discovery works on the loaded catalog.
+		granted := make(map[string]bool, len(paths))
+		for _, path := range paths {
+			granted[path] = true
+		}
+		if _, err := s.mobileCLI.summaries(s.profile, granted, false); err != nil {
 			return
 		}
 		_, _ = s.observeSessions(s.lifetimeContext(), paths, sessionListKinds{claude: true}, time.Now())

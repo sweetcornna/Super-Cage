@@ -194,16 +194,16 @@ func (s *Server) terminalAccountProblem(record *mobileRecord) string {
 	if label == "" {
 		label = "原账号"
 	}
+	// Only what the guest's account wrapper refuses at launch (claude-account.py
+	// "run": the profile's login must be the recorded subject). A paused or
+	// unlisted account whose profile still holds that login resumes as before.
 	var reason, fix string
 	switch {
-	case account == nil:
-		reason, fix = "已从 Super Cage 移除", "重新添加并登录这个账号"
-	case !account.Enabled:
-		reason, fix = "已停用", "启用这个账号"
+	case account == nil || account.guestID() != selection.GuestID:
+		return ""
 	case account.Status == "signed_out":
 		reason, fix = "已退出登录", "重新登录这个账号"
-	case account.Status == "changed" || account.Status == "duplicate" || account.guestID() != selection.GuestID ||
-		account.Email != "" && claudeIdentityHash(account.Email, account.Organization) != selection.Subject:
+	case account.Status == "changed" || account.Email != "" && claudeIdentityHash(account.Email, account.Organization) != selection.Subject:
 		reason, fix = "登录的身份已变化", "用原来的身份重新登录这个账号"
 	default:
 		return ""

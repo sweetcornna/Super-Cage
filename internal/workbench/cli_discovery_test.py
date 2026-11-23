@@ -453,12 +453,16 @@ class DiscoveryTests(unittest.TestCase):
         return path
 
     def test_a_session_whose_cwd_left_the_project_stays_in_it(self):
-        inside, outside, elsewhere = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
-        # Resumed from a subfolder, from a folder outside the project, and a
-        # session that was never the project's.
+        inside, outside, elsewhere, neighbour = (str(uuid.uuid4()) for _ in range(4))
+        # Resumed from a subfolder, from a folder outside the project, a
+        # session that was never the project's, and one from an ungranted
+        # folder whose name the CLI files under the same folder name.
         self.recorded(inside, [self.project, self.project + "/sub"])
         self.recorded(outside, [self.project, str(self.home / "other")])
         self.recorded(elsewhere, [str(self.home / "other")])
+        collider = str(Path(self.project).parent) + "-" + Path(self.project).name
+        self.assertEqual(re.sub(r"[^A-Za-z0-9]", "-", collider), re.sub(r"[^A-Za-z0-9]", "-", self.project))
+        self.recorded(neighbour, [collider, collider + "/x"])
         plain = {item["cli_id"]: item["workspace"] for item in self.plain.discover(self.request)}
         self.assertEqual(plain, {inside: self.project + "/sub"}, "the channel helper drops the session that left")
         found = {item["cli_id"]: item["workspace"] for item in self.discovery.discover(self.request)[0]}
@@ -468,6 +472,7 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(self.discovery.view(dict(request))["workspace"], str(self.home / "other"))
         self.assertEqual(self.discovery.view(dict(request, project=self.project))["workspace"], self.project)
         self.assertEqual(self.discovery.view({"cli_id": elsewhere, "config": str(self.config), "project": self.project})["workspace"], str(self.home / "other"))
+        self.assertEqual(self.discovery.view({"cli_id": neighbour, "config": str(self.config), "project": self.project})["workspace"], collider + "/x")
 
     def test_server_framing(self):
         code = self.home / ".local/share/cage/cli-channel-code"

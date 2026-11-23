@@ -165,11 +165,15 @@ func TestClearKeepsOneEntryThroughRestarts(t *testing.T) {
 	if record := f.record(t); record.CLIID != c || len(record.Cleared) != 2 || record.Cleared[1].CLIID != b || len(record.Executions) != 2 {
 		t.Fatalf("record after a second /clear: %+v", record)
 	}
-	// /compact keeps the id: nothing changes.
-	before := f.record(t).Revision
+	// /compact keeps the id: nothing changes. A repeat discovery asks the guest
+	// once and writes nothing.
+	before, asked := f.record(t).Revision, len(f.modes(t))
 	f.list(t)
 	if after := f.record(t); after.Revision != before || after.CLIID != c {
 		t.Fatalf("an unchanged guest rewrote the record: %d -> %d", before, after.Revision)
+	}
+	if modes := f.modes(t)[asked:]; !slices.Equal(modes, []string{"discover"}) {
+		t.Fatalf("a repeat discovery asked the guest %v", modes)
 	}
 	// After an app restart (no terminal, fresh store) and with the old
 	// transcripts still there, still one entry, on the latest id.
@@ -181,6 +185,41 @@ func TestClearKeepsOneEntryThroughRestarts(t *testing.T) {
 	}
 	if record := f.record(t); record.CLIID != c || record.Title != "整理发布流程" {
 		t.Fatalf("record after a restart: %+v", record)
+	}
+}
+
+func TestResumeOfAnEarlierPartInTheSameTerminalMakesItCurrent(t *testing.T) {
+	f := newClearFixture(t)
+	a, b := f.record(t).CLIID, uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true))
+	f.list(t)
+	if record := f.record(t); record.CLIID != b || len(record.Cleared) != 1 {
+		t.Fatalf("after /clear: %+v", record)
+	}
+	// "/resume a" in the same terminal: the CLI says the old conversation stays in /resume.
+	f.observe(f.item(a, f.connection, "整理发布流程", true), f.item(b, "", clearedTitle, false))
+	list := f.list(t)
+	if len(list) != 1 || list[0].ID != f.id || !list[0].Running || list[0].EarlierParts != 1 {
+		t.Fatalf("after /resume of the earlier part: %+v", list)
+	}
+	record := f.record(t)
+	if record.CLIID != a || record.Connection != f.connection || len(record.Cleared) != 1 || record.Cleared[0].CLIID != b ||
+		len(record.Executions) != 1 || record.Executions[0].CLIID != b || f.terminal.sharedID != f.id {
+		t.Fatalf("record after /resume of the earlier part: %+v", record)
+	}
+	// Unchanged afterwards, and after a restart still one entry on a.
+	revision := record.Revision
+	f.list(t)
+	if after := f.record(t); after.Revision != revision {
+		t.Fatalf("rewritten without a change: %d -> %d", revision, after.Revision)
+	}
+	f.s.terminals.sessions = map[string]*terminalSession{}
+	f.s.mobileCLI = mobileCLIStore{}
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, "", clearedTitle, false))
+	if list := f.list(t); len(list) != 1 || list[0].ID != f.id || f.record(t).CLIID != a {
+		t.Fatalf("after a restart: %+v", list)
 	}
 }
 
@@ -490,8 +529,6 @@ func TestReopenUnderAnUnusableAccountSaysWhichAndWhy(t *testing.T) {
 		accounts []claudeAccount
 		says     string
 	}{
-		{"removed", []claudeAccount{}, "已从 Super Cage 移除"},
-		{"disabled", []claudeAccount{func(a claudeAccount) claudeAccount { a.Enabled = false; return a }(ready)}, "已停用"},
 		{"signed out", []claudeAccount{func(a claudeAccount) claudeAccount { a.Status = "signed_out"; return a }(ready)}, "已退出登录"},
 		{"another login", []claudeAccount{func(a claudeAccount) claudeAccount { a.Email = "b@example.test"; return a }(ready)}, "登录的身份已变化"},
 	} {
@@ -509,11 +546,17 @@ func TestReopenUnderAnUnusableAccountSaysWhichAndWhy(t *testing.T) {
 			t.Fatalf("%s: the entry left the list: %+v", step.name, list)
 		}
 	}
-	if err := f.s.saveClaudeAccounts(claudeAccountList{Accounts: []claudeAccount{ready}}); err != nil {
-		t.Fatal(err)
-	}
-	if code, body, recovery, _ := f.open(t); recovery != "" || strings.Contains(body, "无法接续") {
-		t.Fatalf("a usable account was refused: %d %q", code, body)
+	// Ready, paused from scheduling, or missing from the list (its profile may
+	// still hold the login): the guest decides, as before.
+	paused := ready
+	paused.Enabled = false
+	for name, accounts := range map[string][]claudeAccount{"ready": {ready}, "paused": {paused}, "unlisted": {}} {
+		if err := f.s.saveClaudeAccounts(claudeAccountList{Accounts: accounts}); err != nil {
+			t.Fatal(err)
+		}
+		if code, body, recovery, _ := f.open(t); recovery != "" || strings.Contains(body, "无法接续") {
+			t.Fatalf("%s: refused: %d %q", name, code, body)
+		}
 	}
 }
 
@@ -592,6 +635,38 @@ func TestPhoneInsideTheConversationFollowsTheClear(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if list, _ := f.s.mobileCLI.summaries(f.s.profile, map[string]bool{f.project: true}, false); len(list) != 1 {
+		t.Fatalf("lists: %+v", list)
+	}
+}
+
+// After a restart nothing has loaded the catalog when the phone, already inside
+// the conversation, polls only its view: the follow-up look loads it itself
+// (a discovery on an unloaded catalog would panic on a new entry).
+func TestPhoneFollowUpAfterARestartLoadsTheCatalog(t *testing.T) {
+	f := newClearFixture(t)
+	a, b, other := f.record(t).CLIID, uuid.NewString(), uuid.NewString()
+	f.observe(f.item(a, f.connection, "整理发布流程", true))
+	f.list(t)
+	f.view(t, a, terminalConversation{CLIID: a, Config: filepath.Join(f.home, ".claude"), Workspace: guestPath(f.project), HasHistory: true, NativeHistory: true,
+		Turns: []mobileTurn{{ID: uuid.NewString(), Prompt: "整理发布流程", Status: "completed"}}})
+	// A conversation the host has never seen arrives with the same look.
+	f.observe(f.item(a, "", "整理发布流程", false), f.item(b, f.connection, clearedTitle, true), f.item(other, "", "另一段对话", false))
+	f.s.mobileCLI = mobileCLIStore{}
+	if _, err := f.s.terminalConversationView(context.Background(), f.id); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for f.record(t).CLIID != b {
+		if time.Now().After(deadline) {
+			t.Fatalf("the view did not follow the /clear: %+v", f.record(t))
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	for !f.s.conversationFollow.CompareAndSwap(false, true) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	f.s.conversationFollow.Store(false)
+	if list := f.list(t); len(list) != 2 {
 		t.Fatalf("lists: %+v", list)
 	}
 }
