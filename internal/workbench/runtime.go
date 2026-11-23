@@ -460,10 +460,17 @@ func (s *Server) runCage(args ...string) error {
 		if p := s.jobs.snapshot().SetupProgress; p != nil && p.Label != "" {
 			action = strings.TrimPrefix(p.Label, "正在")
 		}
+		// A start refused for memory says so in one sentence, before the
+		// generic QEMU reason below would show the kernel's words.
+		if reason := bootMemoryFailure(s.jobs.snapshot().Log); reason != "" {
+			return errors.New(reason)
+		}
 		// CLI failures can include the original QEMU stderr before a generic
 		// "Failed to start base VM" footer. Surface that reason in job.error.
+		// The start's own failure puts it on a line of its own, after
+		// "--- Lima's output ---", without the "Error: " prefix.
 		for _, line := range strings.Split(s.jobs.snapshot().Log, "\n") {
-			if _, reason, ok := strings.Cut(line, "Error: QEMU 启动失败："); ok {
+			if _, reason, ok := strings.Cut(line, "QEMU 启动失败："); ok {
 				return fmt.Errorf("%s失败：虚拟机未能启动。QEMU 启动失败：%s。请查看操作详情；仍无法启动时，在设置中导出诊断包。", action, reason)
 			}
 		}
@@ -474,6 +481,28 @@ func (s *Server) runCage(args ...string) error {
 		return executionFailure(action, errors.Join(ctx.Err(), err), s.jobs.snapshot().Log)
 	}
 	return nil
+}
+
+// qemuMemorySentence explains a QEMU start the kernel refused memory for.
+const qemuMemorySentence = cage.BootMemoryMarker + "：QEMU 没能为环境分到内存（cannot set up guest memory），这台机器现在的内存不够环境的内存上限；请稍后重试，或在设置中调低环境内存；在服务器上请管理员为这个工作区增加内存。"
+
+// bootMemoryFailure is the sentence for a start refused for memory, "" for
+// any other failure: the start's own (cage.PrepareBoot, which names the
+// sizes), or QEMU's when the kernel refused the guest's memory.
+func bootMemoryFailure(log string) string {
+	lines := strings.Split(log, "\n")
+	for _, line := range lines {
+		if i := strings.Index(line, cage.BootMemoryMarker+"："); i >= 0 {
+			return strings.TrimSpace(line[i:])
+		}
+	}
+	for _, line := range lines {
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, "cannot set up guest memory") || strings.Contains(lower, "no enough memory for the allocation") {
+			return qemuMemorySentence
+		}
+	}
+	return ""
 }
 
 // closeGuestSessions ends the long-lived connections to the guest, which a

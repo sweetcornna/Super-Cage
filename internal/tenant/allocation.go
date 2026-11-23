@@ -349,7 +349,10 @@ func allocateMemory(in allocationInput, held map[string]demandState) allocationR
 				continue
 			}
 			reason := "guest needs memory"
-			if entry.NestedShort > 0 {
+			switch {
+			case entry.NestedStart:
+				reason = "environment start needs memory"
+			case entry.NestedShort > 0:
 				reason = "nested guest needs memory"
 			}
 			if fair[id] < heldDemand[id] {

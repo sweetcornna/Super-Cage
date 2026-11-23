@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 	"runtime/debug"
@@ -86,6 +87,15 @@ func (m *jobManager) submit(operation sync.Locker, kind string, pauseVersion uin
 			}
 		}
 	}, func(line string) bool {
+		if message, ok := strings.CutPrefix(line, cage.JobMessagePrefix); ok {
+			// A child's step (cage.JobMessage) is the job's message, not log.
+			if m.state.ID == execution.id && m.state.Running {
+				if m.state.Message = strings.TrimSpace(message); m.state.SettingsSaved {
+					m.state.Message = "设置已保存，" + m.state.Message
+				}
+			}
+			return true
+		}
 		if m.state.ID == execution.id {
 			if m.state.SetupProgress != nil {
 				if p := parseSetupProgress(line); p != nil {
