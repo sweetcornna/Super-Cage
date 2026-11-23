@@ -412,3 +412,77 @@ func TestTerminalRepaintsFullScreenProgramAfterTrimmedReplay(t *testing.T) {
 		t.Fatalf("repaint moved the owner to %q", owner)
 	}
 }
+
+// Output counts as answered only once it was written to a viewer whose
+// terminal answers it: not when a viewer is registered or the PTY is read,
+// not for an observer, not for a phone reply that may be lost.
+func TestTerminalAnsweredOnlyWhatReachedAViewer(t *testing.T) {
+	f := newTerminalStreamFixture(t)
+	query := []byte("query\x1b[c")
+	answered := func() uint64 {
+		t.Helper()
+		f.session.mu.Lock()
+		defer f.session.mu.Unlock()
+		return f.session.shown
+	}
+	waitAnswered := func(want uint64) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); answered() != want; time.Sleep(time.Millisecond) {
+			if time.Now().After(deadline) {
+				t.Fatalf("answered %d, want %d", answered(), want)
+			}
+		}
+	}
+	// A viewer that never took the output: its socket dropped first.
+	idle := f.session.subscribeFrom(nil)
+	f.write(query, 64)
+	if got := f.session.outputAfter(0, 1<<20).Answered; got != 0 {
+		t.Fatalf("a query no viewer was written was answered up to %d", got)
+	}
+	idle.Close()
+	// An observer is written it, but its answers never reach the program.
+	watch := f.dial("?after=0&viewer=watch-tab-0001&observe=1")
+	view := &terminalView{}
+	view.read(t, watch, func() bool { return len(view.markers) == 1 && view.replay == 0 })
+	time.Sleep(50 * time.Millisecond)
+	if got := answered(); got != 0 {
+		t.Fatalf("an observer answered up to %d", got)
+	}
+	// A viewer that was written the replay, then live output, answered both.
+	ws := f.dial("?after=0")
+	view = &terminalView{}
+	view.read(t, ws, func() bool { return len(view.markers) == 1 && view.replay == 0 })
+	waitAnswered(uint64(len(query)))
+	f.write(query, 64)
+	view.read(t, ws, func() bool { return view.offset == uint64(2*len(query)) })
+	waitAnswered(uint64(2 * len(query)))
+	_ = ws.Close()
+	_ = watch.Close()
+
+	// The phone has drawn a reply when it asks for what follows it.
+	f.server.terminals.sessions = map[string]*terminalSession{"0123456789abcdef": f.session}
+	read := func(after uint64) (next, answered uint64) {
+		t.Helper()
+		w := request(f.server, "GET", "/api/mobile/terminals/0123456789abcdef/output?after="+strconv.FormatUint(after, 10), "", "", true)
+		var reply struct {
+			Next     uint64 `json:"next"`
+			Answered uint64 `json:"answered"`
+		}
+		if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &reply) != nil {
+			t.Fatalf("phone read: %d %s", w.Code, w.Body.String())
+		}
+		return reply.Next, reply.Answered
+	}
+	before := answered()
+	f.write(query, 64)
+	next, _ := read(before)
+	// Its reply was lost: it reads from the same place again, and that
+	// output is not answered yet.
+	if _, got := read(before); got != before {
+		t.Fatalf("a phone reply that may be lost was answered: %d, want %d", got, before)
+	}
+	f.write(query, 64)
+	if _, got := read(next); got != next {
+		t.Fatalf("the phone's next read: answered %d, want %d", got, next)
+	}
+}

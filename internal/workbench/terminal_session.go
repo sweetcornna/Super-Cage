@@ -417,8 +417,6 @@ func (t *terminalSession) subscribeFrom(after *uint64) *terminalSubscription {
 		subscription.History, subscription.HistoryOffset, subscription.HistoryReset = replay.data, replay.offset, true
 		subscription.HistoryState, subscription.HistoryAnswered, subscription.Repaint = replay.state, t.shown, replay.repaint()
 	}
-	// This viewer is shown everything so far.
-	t.shown = t.written
 	return subscription
 }
 
@@ -503,9 +501,6 @@ func (t *terminalSession) read() {
 					// What leaves the history is read for the modes it set.
 					t.trimmed.feed(t.history[:over])
 					t.history = t.history[over:]
-				}
-				if len(t.clients) > 0 {
-					t.shown = t.written
 				}
 				t.notifyLocked()
 			}
