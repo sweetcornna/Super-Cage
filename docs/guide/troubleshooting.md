@@ -39,8 +39,8 @@ keywords: 错误 失败 白屏 断网 137 OOM 代理 账号 配对 SSH 损坏 �
 安装和启动不要求启用主机 Git 裸仓库保护。已有 Git 设置不会随更新自动撤销；调整方法见[主机 Git 设置与裸仓库](https://github.com/Lee-xeo/Claude-Cage/blob/main/docs/troubleshooting.md#主机-git-设置与裸仓库)。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/proxy-diagnostics.jpg" target="_blank" rel="noopener" aria-label="查看原图：代理核心状态与独立端口诊断"><img src="../../www/public/docs/screenshots/proxy-diagnostics.jpg" alt="代理核心状态与独立端口诊断" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>代理核心状态与独立端口诊断。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/proxy-diagnostics.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/proxy-diagnostics.jpg" target="_blank" rel="noopener" aria-label="查看原图：代理核心状态与独立端口诊断"><img src="images/proxy-diagnostics.jpg" alt="代理核心状态与独立端口诊断" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>代理核心状态与独立端口诊断。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/proxy-diagnostics.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 节点已应用但无法联网
@@ -140,8 +140,8 @@ Windows 客机的官方 Desktop 在 Code 模式选择共享项目后提示“Cla
 不要通过删除容器、引擎 data-root 或账户修复部署。连接中断时先核对操作是否已完成，再重试有写入效果的动作。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/resources-diagnostics.jpg" target="_blank" rel="noopener" aria-label="查看原图：自动资源上限与导出诊断入口"><img src="../../www/public/docs/screenshots/resources-diagnostics.jpg" alt="自动资源上限与导出诊断入口" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>自动资源上限与导出诊断入口。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/resources-diagnostics.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/resources-diagnostics.jpg" target="_blank" rel="noopener" aria-label="查看原图：自动资源上限与导出诊断入口"><img src="images/resources-diagnostics.jpg" alt="自动资源上限与导出诊断入口" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>自动资源上限与导出诊断入口。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/resources-diagnostics.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 导出诊断与反馈

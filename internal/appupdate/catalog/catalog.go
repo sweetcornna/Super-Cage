@@ -19,7 +19,7 @@ const Repository = "sweetcornna/Super-Cage"
 const ReleasesURL = "https://api.github.com/repos/" + Repository + "/releases?per_page=100"
 
 // Releases must stay below the limit of every published App that still updates
-// in place; scripts/prepare-release-assets.mjs enforces that smaller limit.
+// in place.
 const MaxArchive = 2 << 30
 
 type Asset struct {

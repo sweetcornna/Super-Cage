@@ -58,11 +58,9 @@ __pycache__/
 /docs/agent-vm-upstream.md
 /docs/ci-cd.md
 /docs/public-releases.md
-/docs/releasing.md
 /promo/
 /ui/prototypes/
 /.oil-ui/
-/www/README.md
 /tools/tailnet/README.md
 /scripts/guest-os/macos-setup-view.md
 /internal/exitpolicy/data/README.md

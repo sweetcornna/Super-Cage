@@ -14,8 +14,8 @@ Super Cage 把终端、浏览器、编辑器和官方 Claude Desktop 放进同�
 配图来自实际应用与隔离验收环境，每张图下方标注版本、平台和日期，点击图片可查看原始分辨率。桌面主图使用 `0.1.6-alpha-preview` 开发构建；Windows 旧版与手机模拟器预览会单独注明。界面里的空账号、停止状态或示例对话保留原样，不代表已登录或真实模型请求成功。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/first-start.jpg" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/first-start.jpg" alt="Super Cage 工作台的首次使用引导" width="2560" height="1764" loading="lazy" decoding="async" /></a>
-  <figcaption>Super Cage 工作台的首次使用引导。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="../../www/public/docs/screenshots/first-start.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
+  <a href="images/first-start.jpg" target="_blank" rel="noopener"><img src="images/first-start.jpg" alt="Super Cage 工作台的首次使用引导" width="2560" height="1764" loading="lazy" decoding="async" /></a>
+  <figcaption>Super Cage 工作台的首次使用引导。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-07。<a href="images/first-start.jpg" target="_blank" rel="noopener">查看原图（2560 × 1764） ↗</a></figcaption>
 </figure>
 
 ## 第一次使用

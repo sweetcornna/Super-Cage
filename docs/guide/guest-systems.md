@@ -16,12 +16,11 @@ keywords: 客机 客户机 克隆 本机 系统选择 macOS Windows Debian Ubunt
 | 你的电脑 | 可选客机 | 适合的工作 |
 | --- | --- | --- |
 | Apple Silicon Mac，macOS 14+ | macOS、Debian 13 或 Ubuntu 22.04，均为 ARM64 | macOS 原生开发、Mac 版 Claude Desktop，或 Linux 工具与服务。macOS 客机版本需与硬件和主机兼容。 |
-| Intel Mac，macOS 14+，独立实验构建 | Debian 13、Ubuntu 22.04 或 macOS，均为 x86_64 | Linux 沿用现有工作台；macOS 客机要求主机与客机均为 15.4+，使用本机硬件虚拟化与加速图形。条件与验证范围见 [Intel 开发说明](../intel-macos-development.md)。 |
 | Windows 11 x64 专业版、企业版或教育版，具备完整 Hyper-V | Windows 11、Debian 13 或 Ubuntu 22.04，均为 x86_64 | PowerShell、Windows 原生编译与调试、Windows 版 Claude Desktop，或 Linux 开发。 |
 | 其他受支持的 Windows 10 22H2 / 11 x64 主机 | Debian 13 或 Ubuntu 22.04 x86_64 | 在独立 Linux 环境中使用 Claude Code、浏览器与开发工具。需要 Windows 虚拟机监控程序平台。 |
 | Debian 12/13、Ubuntu 22.04/24.04 x86_64 主机 | Debian 13、Ubuntu 22.04，或与本机同发行版的 Linux | Linux 开发与服务。需要 KVM 和当前用户的访问权限。 |
 
-选择与主机同类的系统，可以继续使用对应平台的应用、路径习惯和工具链。Debian 适合希望减少系统安装负担、主要使用命令行与 Linux 服务的用户；三个受支持的桌面平台都可以选择它。Intel Mac 的 macOS 路线目前仅在实验构建中提供；Windows ARM64 和 Linux ARM64 暂不支持。
+选择与主机同类的系统，可以继续使用对应平台的应用、路径习惯和工具链。Debian 适合希望减少系统安装负担、主要使用命令行与 Linux 服务的用户；三个受支持的桌面平台都可以选择它。Intel Mac、Windows ARM64 和 Linux ARM64 暂不支持。
 
 有一点需要注意，Windows 11 客机需要 Hyper-V 平台和管理工具，而 Windows 家庭版（大部分同学可能都是家庭版）并没有这个功能，此时你有两个选择：1、继续使用 Windows 家庭版（如果你平时的主要工作是 Python、Git、bash、Node）。在「启用或关闭 Windows 功能」中勾选「Windows 虚拟机监控程序平台」，按提示重启之后，回到 Super Cage 选择 Debian 13 或 Ubuntu 22.04 即可。注意，「虚拟机平台」和「适用于 Linux 的 Windows 子系统」是 WSL 2 使用的功能，Super Cage 不需要。2、升级到 Windows 专业版。如果你的工作的确需要 Windows 环境，你需要 Windows 客机，那么你可以原地升级到 Windows 专业版（这并不难，不知道怎么升级的，多上网搜搜），或在有相应许可时升级到教育版。升级后，在「启用或关闭 Windows 功能」中启用 Hyper-V 平台和管理工具，按提示重启后，回到 Super Cage 创建 Windows 11 客机即可。
 
@@ -69,8 +68,8 @@ keywords: 客机 客户机 克隆 本机 系统选择 macOS Windows Debian Ubunt
 选择后会显示目标系统、本机与客机构建号、预计系统下载量和可用空间要求。macOS 匹配相同版本和构建号。Windows 匹配发行版本、版本类型和语言，官方介质的补丁号可以与本机不同，两个构建号会同时显示。Windows 使用压缩系统文件，Linux 使用对应发行版的最小云镜像，虚拟磁盘按实际写入增长。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/host-system-clone.png" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/host-system-clone.png" alt="本机系统匹配的版本、已有材料与空间预览" width="1280" height="720" loading="lazy" decoding="async" /></a>
-  <figcaption>本机版本、安装材料与空间预览。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-09 · 独立首装验收；所示构建使用“克隆本机系统”名称，当前入口为“自动匹配本机系统版本”。<a href="../../www/public/docs/screenshots/host-system-clone.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
+  <a href="images/host-system-clone.png" target="_blank" rel="noopener"><img src="images/host-system-clone.png" alt="本机系统匹配的版本、已有材料与空间预览" width="1280" height="720" loading="lazy" decoding="async" /></a>
+  <figcaption>本机版本、安装材料与空间预览。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · 2026-11-09 · 独立首装验收；所示构建使用“克隆本机系统”名称，当前入口为“自动匹配本机系统版本”。<a href="images/host-system-clone.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
 </figure>
 
 在 macOS 上使用此选项需要 Apple Silicon 和 macOS 26.4 或更新版本，当前工作台的文件系统扩展依赖该版本提供的只读挂载能力。Windows 需要 Windows 11 x64 和完整 Hyper-V。Linux 支持 Debian 12/13、Ubuntu 22.04/24.04 x86_64。
@@ -108,8 +107,8 @@ macOS 27 客机的 macFUSE 组件需要你在客机中完成一次管理员授�
 以后启动自动登录；主动锁屏或注销时，从「登录客机账户」登录，必要时点击「查看客机密码」。FileVault 或其他系统设置阻止自动登录时，保留手动入口。账户、权限和文件随客机磁盘保留。客机系统自动登录使开机后账户直接可用，主机账户和 Super Cage 的解锁负责保护访问入口。
 
 <figure class="guide-shot">
-  <a href="../../www/public/docs/screenshots/macos-first-permissions.png" target="_blank" rel="noopener"><img src="../../www/public/docs/screenshots/macos-first-permissions.png" alt="Mac 客机首次权限引导与文件系统扩展设置，授权已通过" width="1280" height="720" loading="lazy" decoding="async" /></a>
-  <figcaption>Mac 客机首次权限引导与文件系统扩展设置，画面显示授权已通过。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · macOS 26.5 客机 · 2026-11-09 · 独立首装验收，未登录 Claude。<a href="../../www/public/docs/screenshots/macos-first-permissions.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
+  <a href="images/macos-first-permissions.png" target="_blank" rel="noopener"><img src="images/macos-first-permissions.png" alt="Mac 客机首次权限引导与文件系统扩展设置，授权已通过" width="1280" height="720" loading="lazy" decoding="async" /></a>
+  <figcaption>Mac 客机首次权限引导与文件系统扩展设置，画面显示授权已通过。截图版本：0.1.6-alpha-preview（开发构建） · macOS 原生应用 · macOS 26.5 客机 · 2026-11-09 · 独立首装验收，未登录 Claude。<a href="images/macos-first-permissions.png" target="_blank" rel="noopener">查看原图（1280 × 720） ↗</a></figcaption>
 </figure>
 
 ### Windows 的首次系统授权

@@ -269,7 +269,6 @@ export function buildIco(frames) {
 
 // ---------------------------------------------------------------- outputs
 export const PATHS = {
-  logo: "logo.png",
   macIconset: "packaging/macos/Cage.iconset",
   winIco: "packaging/windows/Cage.ico",
   linuxIcons: "packaging/linux/icons",
@@ -287,7 +286,6 @@ export const FAVICON_SIZES = [16, 32, 48];
 // Web icon sets: the PNG logo name, the SVG favicon, and further copies of the PNG logo.
 export const WEB_DIRS = [
   { dir: "ui/public", png: "cage.png", svg: "cage.svg", extra: ["ui/src/logo.png"] },
-  { dir: "www/public", png: "cage-icon.png", svg: "cage-icon.svg", extra: [] },
 ];
 // Add to Home Screen (web manifest) icons for the web apps that are installed from a phone: the workbench
 // (ui/public, its manifest.webmanifest) and the portal (PATHS.portalIcons). 192 px and the 512 px logo for
@@ -412,7 +410,6 @@ export async function rasterOutputs(masters, renderer) {
 
   // macOS iconset: 824/1024 tile, transparent margin.
   for (const [px, name] of MAC_SIZES) out.set(join(PATHS.macIconset, name + ".png"), (await png({ px, tile: "mac", alpha: true })).png);
-  out.set(PATHS.logo, (await png({ px: 1024, tile: "mac", alpha: true })).png);
 
   // Windows: full-bleed rounded square, PNG frames.
   out.set(PATHS.winIco, buildIco(await Promise.all(WIN_SIZES.map(async (size) => ({ size, png: (await png({ px: size, tile: "bleed", alpha: true })).png })))));

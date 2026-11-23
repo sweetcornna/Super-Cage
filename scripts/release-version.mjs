@@ -129,7 +129,7 @@ export function versionFiles(root, version) {
   const current = original.trim();
   parseVersion(current);
   const result = new Map([[versionPath, original.replace(current, version)]]);
-  for (const directory of ['ui', 'www']) {
+  for (const directory of ['ui']) {
     for (const filename of ['package.json', 'package-lock.json']) {
       const path = resolve(root, directory, filename);
       const text = readFileSync(path, 'utf8');

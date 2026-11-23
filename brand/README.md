@@ -44,7 +44,6 @@ the macOS tile (824 of 1024) and Android (72 of 108 dp) scale that same composit
 | Output | Notes |
 |---|---|
 | packaging/macos/Cage.iconset/*.png | 10 files, 824/1024 rounded tile with margin; small cut at 16 and 32 px. scripts/build-app.sh and build-client.sh run `iconutil` on it; no .icns is committed |
-| logo.png | 1024 px macOS-canvas icon (repo logo, nothing builds from it) |
 | packaging/windows/Cage.ico | PNG frames 16, 20, 24, 32, 40, 48 (small cut), 64, 128, 256; full-bleed rounded square |
 | packaging/linux/icons/hicolor/ | PNG 16, 22, 24, 32, 48, 64, 128, 256, 512 and scalable SVG, installed by scripts/package-linux.sh |
 | mobile/ios/.../AppIcon.appiconset/AppIcon.png | 1024 px opaque RGB square, no rounding |
@@ -52,6 +51,6 @@ the macOS tile (824 of 1024) and Android (72 of 108 dp) scale that same composit
 | mobile/android/res/drawable/cage_icon_foreground.xml, cage_icon_monochrome.xml | adaptive icon layers inside the 66 dp safe zone; background is `cage_icon_background` (ink) in values/themes.xml |
 | mobile/android/res/drawable/cage_logo.xml | in-app logo; ink and glow come from the theme (`?attr/cageInk`, `?attr/cageGlow`) |
 | mobile/assets/brand/logo.svg | copy of mark.svg |
-| ui/public and www/public | PNG logo (512, rounded), SVG favicon (small cut), favicon.ico (16/32/48), apple-touch-icon.png (180, opaque); ui/src/logo.png is the same 512 PNG |
+| ui/public | PNG logo (512, rounded), SVG favicon (small cut), favicon.ico (16/32/48), apple-touch-icon.png (180, opaque); ui/src/logo.png is the same 512 PNG |
 
 The doodles in mobile/assets/brand/doodles are not part of this generator; they keep using `node mobile/scripts/brand-assets.mjs`.

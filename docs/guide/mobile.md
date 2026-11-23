@@ -106,8 +106,8 @@ iOS 用户在自己的 Mac 上构建并为设备签名，步骤见下文。
 获授权项目中的既有 Claude Code 历史也会进入列表。打开后自动接续空闲会话；等待审批的任务会在手机重新请求批准。正在执行的任务保持运行，完成后自动连接。共享会话直接复用当前进程。账号失效、主机离线或组织策略禁止连接时，页面显示实际错误。续聊会检查账号与服务地址，身份变化时拒绝继续；无法核实身份的配置只支持首轮，可按提示新建会话。
 
 <figure class="guide-shot guide-shot-phone">
-  <a href="../../www/public/docs/screenshots/mobile-ios-preview.jpg" target="_blank" rel="noopener" aria-label="查看原图：手机原生客户端的会话界面预览"><img src="../../www/public/docs/screenshots/mobile-ios-preview.jpg" alt="手机原生客户端的会话界面预览" width="456" height="972" loading="lazy" decoding="async" /></a>
-  <figcaption>手机原生客户端的会话界面预览。截图版本：Super Cage iOS 0.1（build 1，开发版） · iPhone 17 Pro 模拟器 · iOS 26.5 · 2026-11-07 · 界面预览，示例对话，未连接主机。<a href="../../www/public/docs/screenshots/mobile-ios-preview.jpg" target="_blank" rel="noopener">查看原图（456 × 972） ↗</a></figcaption>
+  <a href="images/mobile-ios-preview.jpg" target="_blank" rel="noopener" aria-label="查看原图：手机原生客户端的会话界面预览"><img src="images/mobile-ios-preview.jpg" alt="手机原生客户端的会话界面预览" width="456" height="972" loading="lazy" decoding="async" /></a>
+  <figcaption>手机原生客户端的会话界面预览。截图版本：Super Cage iOS 0.1（build 1，开发版） · iPhone 17 Pro 模拟器 · iOS 26.5 · 2026-11-07 · 界面预览，示例对话，未连接主机。<a href="images/mobile-ios-preview.jpg" target="_blank" rel="noopener">查看原图（456 × 972） ↗</a></figcaption>
 </figure>
 
 ## 在手机打开远程浏览器

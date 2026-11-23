@@ -20,6 +20,12 @@ else
 fi
 mkdir -p _output
 output=$(mktemp -d "$repo_dir/_output/tenant-server.XXXXXX")
+# A tarball made on a Mac must not carry AppleDouble ._ files or extended
+# attributes: Linux sees them as stray files and tar warnings.
+tar_options=()
+if tar --version 2>/dev/null | grep -q bsdtar; then
+  tar_options=(--no-mac-metadata --no-xattrs)
+fi
 archives=()
 for arch in amd64 arm64; do
   name="Super-Cage-Server-$version-linux-$arch"
@@ -37,7 +43,7 @@ for arch in amd64 arm64; do
   cp docs/api-contract.md "$tree/docs/"
   cp ui/tenant/index.html ui/tenant/app.mjs ui/tenant/styles.css "$tree/ui/tenant/"
   archive="$name.tar.gz"
-  tar -czf "$output/$archive" -C "$output" "$name"
+  COPYFILE_DISABLE=1 tar ${tar_options[@]+"${tar_options[@]}"} -czf "$output/$archive" -C "$output" "$name"
   gzip -t "$output/$archive"
   archives+=("$archive")
 done

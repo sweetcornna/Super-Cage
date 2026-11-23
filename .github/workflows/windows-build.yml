@@ -7,7 +7,7 @@ on:
         required: true
         type: string
       release:
-        description: Require trusted signing and reviewed corresponding sources
+        description: Keep false. No release job remains here; true skips the development build and builds nothing
         type: boolean
         default: false
       artifact_name:
@@ -80,60 +80,3 @@ jobs:
           if-no-files-found: ignore
           overwrite: true
           retention-days: 14
-  release:
-    if: ${{ inputs.release }}
-    runs-on: windows-2025
-    environment: cage-release
-    timeout-minutes: 60
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-      - uses: ./.github/actions/windows-toolchain
-        with:
-          corresponding-sources: true
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-      - name: Build, sign, test and install the release candidate
-        env:
-          CAGE_BUILD_REF: ${{ inputs.ref }}
-          CAGE_WINDOWS_SIGNING_PROVIDER: ${{ vars.CAGE_WINDOWS_SIGNING_PROVIDER }}
-          CAGE_ESIGNER_USERNAME: ${{ secrets.CAGE_ESIGNER_USERNAME }}
-          CAGE_ESIGNER_PASSWORD: ${{ secrets.CAGE_ESIGNER_PASSWORD }}
-          CAGE_ESIGNER_CREDENTIAL_ID: ${{ secrets.CAGE_ESIGNER_CREDENTIAL_ID }}
-          CAGE_ESIGNER_CERTIFICATE_SERIAL: ${{ vars.CAGE_ESIGNER_CERTIFICATE_SERIAL }}
-          CAGE_ESIGNER_TOTP_SECRET: ${{ secrets.CAGE_ESIGNER_TOTP_SECRET }}
-          CAGE_WINDOWS_PFX_BASE64: ${{ secrets.CAGE_WINDOWS_PFX_BASE64 }}
-          CAGE_WINDOWS_PFX_PASSWORD: ${{ secrets.CAGE_WINDOWS_PFX_PASSWORD }}
-        run: ./scripts/ci-windows-build.ps1 -Release
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name }}
-          path: |
-            _output/releases/*/windows/Super-Cage-*-windows-amd64-setup.exe
-            _output/releases/*/windows/SHA256SUMS
-            _output/releases/*/windows/mihomo-*-source.tar.gz
-            _output/releases/*/windows/qemu-*-source.tar.gz
-            _output/releases/*/windows/qemu-*-windows-full-source.*
-            _output/releases/*/windows/build-metadata.json
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 14
-      - name: Preserve public release acceptance reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ inputs.artifact_name }}-reports
-          path: |
-            ${{ runner.temp }}/cage-smoke-*.json
-            ${{ runner.temp }}/cage-build-ui-*/smoke.json
-            ${{ runner.temp }}/cage-build-ui-*/*.png
-          if-no-files-found: ignore
-          retention-days: 14
-      # The caller owns publication. This workflow has no repository write access.
