@@ -29,6 +29,7 @@ func TestReplayStoppedEnvironmentStart(t *testing.T) {
 		return InstanceMemory{Status: "Running", Limit: limit, GuestTotal: int64(memTotal()), GuestAvailable: int64(memTotal() - own)}
 	}
 	var journal []string
+	starts := map[string]startSight{}
 	round := func() {
 		entry := stopped()
 		reading, err := parseGuestMemory(guestExec(entry, profile), world.now)
@@ -38,6 +39,8 @@ func TestReplayStoppedEnvironmentStart(t *testing.T) {
 		entry.NestedShort, entry.NestedPressure, entry.NestedStart = reading.NestedShort, reading.NestedPressure, reading.NestedStart
 		state := MemoryState{HostTotal: int64(world.host), HostAvailable: int64(world.host - world.hostOwn - min(uint64(limit), own+200*simMiB)), Ceiling: world.ceiling,
 			Instances: map[string]InstanceMemory{id: entry}}
+		// The gateway's balancer bounds a start's request before the rule.
+		starts, _ = boundStarts(world.now, state, starts, world.held)
 		result := allocateMemory(allocationInput{now: world.now, state: state, minimum: DefaultMemoryMin}, world.held)
 		world.held = result.held
 		for _, change := range result.changes {

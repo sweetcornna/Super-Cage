@@ -681,6 +681,11 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
   (MemoryState copies NestedShort, not NestedPressure), so on a real host a running nested guest under pressure has
   never been a shortage (7.13's rule exists only in the simulator). Passing it on for running guests changes
   allocation under host pressure for every running environment; left as is, a decision of its own.
+- A, bound (fix-start-bound, review item 12): a request with reason "start" counts as a start for startWindow =
+  150 s from the gateway's first sight of it (boundStarts in allocation.go, run by the balancer before the rule).
+  Past the window it is ignored altogether until it has been gone for startRearm = 5 min (memoryDemandHold); the
+  round it goes over, the VM's held demand is dropped, and the gateway logs "a start request still there 2m30s
+  after it was first seen is ignored until it has been gone for 5m0s" once. See 8.5.
 - Errors: vmStartError says "QEMU 启动失败：内存不足…" for QEMU's memory refusal; the workbench maps the start's own
   sentence, QEMU's refusal and the kernel's line to one memory sentence, and its QEMU match no longer needs "Error: ".
 
@@ -716,7 +721,32 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
 - Waiting in the workbench (owner of the job message): it would have to compute the boot maximum again
   (AutomaticLimits reads vmstat and every sysfs memory block) and two processes would own the decision.
 
-### 8.5 Editions and versions
+### 8.5 What bounds a workspace that keeps rewriting it
+machine-memory.json is written inside the workspace VM, so a workspace (or a compromised guest) can write anything
+into it. Before the bound the answer was "its ceiling and max-min fairness": a file rewritten with reason "start"
+every < 45 s stayed a shortage for ever, grew first while the host was in pressure, made idle and then in-use
+neighbours give back down to their fair shares for its growth, and its held demand kept the idle return from taking
+anything back. Now:
+- The host agent publishes one start request for at most its wait (bootWait, 75 s) and removes it when the wait
+  ends. startWindow = 150 s, two such waits: one start, an immediate retry after it failed, and gateway rounds
+  pushed back by slow guest reads; a real start never reaches it (TestNormalStartKeepsItsGrantWithTheBound: grant
+  at the first round, held for 5 min as before).
+- Past the window the request is not a start, whoever writes it: no shortage, no priority under host pressure, no
+  demand (not even as plain short_bytes, which would stay live demand up to the ceiling and keep the idle return
+  and the neighbours' fair shares at its mercy), and the demand it had raised is no longer held. The VM is back to
+  its own working set plus headroom: the idle return takes the grant back one step per round, and nothing more is
+  taken from others for it (TestStartRequestThatNeverEndsBecomesOrdinaryDemand: rewritten every 30 s for 10
+  minutes on a 16 GiB host, the VM is back at the guarantee and a neighbour that grows at five minutes gets its
+  whole demand; without the bound the neighbour stays 1.5 GiB short).
+- A request must have been gone for startRearm = 5 min before it is a start again. That is the held demand's hold:
+  a second start within it finds the first start's grant still held, so it needs no priority; after it, it is
+  honoured as a start again (TestStartRequestRearmsAfterItHasBeenGone).
+- What remains: a workspace that writes a request for less than 150 s, removes it for 5 minutes and starts over is
+  treated each time like a real start (a person starting the environment every 7.5 minutes): at most 150 s of
+  priority per 7.5 minutes, its ceiling and max-min fairness. A running guest's own report (no reason) is not
+  affected by the bound; it is bounded, as before, by the ceiling, max-min fairness and the 5-minute hold.
+
+### 8.6 Editions and versions
 | | today (0.1.16) | with this change |
 |---|---|---|
 | server, Incus VM + balloon, gateway 0.1.16 | QEMU refused, "退出码 1" | grows at once while the host is not in pressure; in pressure the flag is dropped, so the start waits 75 s and falls back or refuses with the memory sentence |

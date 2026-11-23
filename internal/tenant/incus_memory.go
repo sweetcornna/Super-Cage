@@ -118,7 +118,9 @@ const guestMemoryScript = "head -c 16384 /proc/meminfo; echo '#cage-psi'; head -
 
 // machineMemoryFile is the file a host agent writes next to its profile's
 // control.json for the gateway: what its guest wants and the machine cannot
-// back now. The guest writes it, so it can at most claim its own ceiling.
+// back now. The guest writes it, so it can at most claim its own ceiling, and
+// a start's request (reason "start") counts as one only for startWindow from
+// its first sight (boundStarts).
 const machineMemoryFile = "machine-memory.json"
 
 // nestedFresh is how old a nested demand may be, either way, before it is
