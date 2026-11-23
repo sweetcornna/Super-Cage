@@ -15,6 +15,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="许可：MIT" /></a>
   <a href="https://github.com/sweetcornna/Super-Cage/releases/latest"><img src="https://img.shields.io/github/v/release/sweetcornna/Super-Cage?label=release" alt="最新版本" /></a>
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux%20%7C%20iOS%20%7C%20Android-lightgrey" alt="支持平台" />
+  <a href="#交流群"><img src="https://img.shields.io/badge/QQ%E7%BE%A4-1135173451-12B7F5?logo=tencentqq&logoColor=white" alt="QQ 交流群：1135173451" /></a>
 </p>
 
 <p>
@@ -23,6 +24,7 @@
   <a href="#快速开始">快速开始</a> ·
   <a href="#文档导航">文档</a> ·
   <a href="#从源码构建">源码构建</a> ·
+  <a href="#交流群">交流群</a> ·
   <a href="#许可与致谢">许可与致谢</a>
 </p>
 
@@ -281,6 +283,18 @@ npm ci --prefix ui && bash mobile/build.sh ios   # 移动端构建（ios 或 and
 
 > - Windows 版需在 Windows x64 上通过 PowerShell 7 运行 `make cage-windows` 与 `make package-windows`，另需 `.NET SDK`、MSYS2 与 NSIS，详见 [Windows 源码构建](docs/windows.md#windows-源码构建)。
 > - 打包脚本要求干净的 Git 工作区；iOS 与 Android 签名安装流程见 [手机端说明](mobile/README.md)。
+
+---
+
+## 交流群
+
+使用问题、功能建议和部署经验，欢迎到 QQ 交流群讨论。
+
+<p align="center">
+  <a href="https://qm.qq.com/q/qUf3uBmJji"><img src="docs/images/readme/qq-group.jpg" alt="Super Cage 交流群的 QQ 二维码，群号 1135173451" width="280" /></a>
+</p>
+
+<p align="center">QQ 群号 <strong>1135173451</strong> · 手机 QQ 扫码，或<a href="https://qm.qq.com/q/qUf3uBmJji">点此加入</a></p>
 
 ---
 
