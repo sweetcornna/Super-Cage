@@ -78,11 +78,14 @@ func openController(profile string) (*controllerClient, error) {
 // controller from the release before the identity proof (a control.json
 // without auth): connectController and openController accept its record and
 // talk to it over 127.0.0.1, unproven, so the window can save and stop its
-// environment and complete an update. The proof ships in 0.1.16; from
-// 0.1.17 every caller below uses connectProvenController and openController
-// refuses a record without auth. TestOlderControllerGraceCallers fails once
-// the version reaches it.
-const olderControllerGraceEndsIn = "0.1.17"
+// environment and complete an update. The proof ships in 0.1.16. The grace
+// was to end in 0.1.17, which follows 0.1.16 by two days: it stays for that
+// release, so that an install over 0.1.15 (which has no in-app update and
+// may skip 0.1.16) can still save and stop its environment. From 0.1.18
+// every caller below uses connectProvenController and openController refuses
+// a record without auth. TestOlderControllerGraceCallers fails once the
+// version reaches it.
+const olderControllerGraceEndsIn = "0.1.18"
 
 // olderControllerGraceEntries are the functions that give the grace.
 var olderControllerGraceEntries = []string{"connectController", "openController"}
