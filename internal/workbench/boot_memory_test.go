@@ -1,13 +1,16 @@
 package workbench
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/cage"
+	"github.com/sylvinus/agent-vm/internal/host"
 )
 
 // startFailureOutput is what cage up prints when Lima.Start fails: cli
@@ -81,4 +84,43 @@ func TestJobMessageLineSetsTheMessage(t *testing.T) {
 		t.Fatalf("job %+v", job)
 	}
 	awaitJobIdle(t, &s.jobs)
+}
+
+func TestResourceStatusSaysTheStartFellBack(t *testing.T) {
+	oldMem := host.MemGiB
+	t.Cleanup(func() { host.MemGiB = oldMem })
+	host.MemGiB = func() int { return 9 }
+	t.Setenv("CAGE_MACHINE_ROLE", "dedicated")
+	s := testServer(t)
+	if err := writePrivate(filepath.Join(s.instanceDir(), "cage-running.json"), map[string]int{"pid": os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	if !s.vmRunning() {
+		t.Fatal("the running-environment fixture is not seen")
+	}
+	if err := os.WriteFile(filepath.Join(s.instanceDir(), "lima.yaml"), []byte("memory: 4GiB\ncpus: 8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	notice := "服务器暂时分不出更多内存，环境按 4 GB 内存上限启动（设置为 7 GB），之后重启环境即可恢复。"
+	read := func() (status struct {
+		Memory  int    `json:"memory_gib"`
+		Restart bool   `json:"restart_required"`
+		Notice  string `json:"notice"`
+	}) {
+		t.Helper()
+		w := request(s, "GET", "/api/environment/resources", "", "", true)
+		if err := json.Unmarshal(w.Body.Bytes(), &status); err != nil {
+			t.Fatal(w.Body.String(), err)
+		}
+		return status
+	}
+	if got := read(); got.Memory != 7 || !got.Restart || got.Notice != "" {
+		t.Fatalf("without a fallback %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(s.instanceDir(), cage.BootNoticeFile), []byte(notice), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(); got.Notice != notice || !got.Restart {
+		t.Fatalf("after a fallback %+v", got)
+	}
 }

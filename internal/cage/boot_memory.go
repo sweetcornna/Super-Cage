@@ -52,6 +52,9 @@ const (
 	BootRequestReason = "start"
 	// BootMemoryMarker begins every sentence of a start refused for memory.
 	BootMemoryMarker = "内存不足以启动环境"
+	// BootNoticeFile, in the instance directory, holds the notice of a start
+	// that fell back to a smaller boot maximum, until the next start.
+	BootNoticeFile = "boot-memory-notice.txt"
 )
 
 // BootMachine is the machine as the kernel's overcommit check sees it.
@@ -107,6 +110,18 @@ func parseBootMeminfo(path string) (BootMachine, bool) {
 		seen++
 	}
 	return m, seen == 5 && m.Total > 0 && m.Available <= m.Total
+}
+
+// bootGrowable reports an outer balloon holding memory of this machine: its
+// counters in /proc/vmstat, or, on kernels without them, memory blocks
+// online beyond MemTotal by more than the kernel's own reservations. Read only
+// on the slow path.
+func bootGrowable() bool {
+	if balloonBytes() > 0 {
+		return true
+	}
+	m, ok := readBootMachine()
+	return ok && onlineMemory() > m.Total+gib
 }
 
 // readOvercommit is vm.overcommit_memory, 0 (the default) when unreadable.
@@ -233,7 +248,7 @@ func (r *BootRequest) defaults() {
 		r.Overcommit = readOvercommit
 	}
 	if r.Growable == nil {
-		r.Growable = func() bool { return balloonBytes() > 0 }
+		r.Growable = bootGrowable
 	}
 	if r.Now == nil {
 		r.Now = time.Now
@@ -324,6 +339,7 @@ func PrepareBoot(ctx context.Context, req BootRequest) (BootDecision, error) {
 		}
 		decision.Waited = req.Now().Sub(started)
 		if fits() {
+			req.Progress("已获得所需内存，继续启动环境…")
 			return decision, nil
 		}
 	}

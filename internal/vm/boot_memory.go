@@ -24,10 +24,16 @@ var (
 // with a sentence about memory. Every QEMU start of a Cage environment comes
 // through here: cage up, the base build of cage setup, and the restart after
 // a share change.
-func bootMemory(ctx context.Context, configPath string, memoryGiB int) (int, error) {
+//
+// A smaller maximum is the guest's ceiling until the next start: its notice
+// stays in instanceDir (cage.BootNoticeFile) for the resources status until
+// then.
+func bootMemory(ctx context.Context, configPath, instanceDir string, memoryGiB int) (int, error) {
 	if memoryGiB <= 0 {
 		return memoryGiB, nil
 	}
+	notice := filepath.Join(instanceDir, cage.BootNoticeFile)
+	_ = os.Remove(notice)
 	progress := func(message string) { cage.JobMessage(bootOutput, message) }
 	decision, err := bootPrepare(ctx, cage.BootRequest{Profile: filepath.Dir(configPath), Maximum: uint64(memoryGiB) << 30, Progress: progress})
 	if decision.Asked {
@@ -39,6 +45,7 @@ func bootMemory(ctx context.Context, configPath string, memoryGiB int) (int, err
 	if decision.Notice != "" {
 		progress(decision.Notice)
 		diagnostics.Log("warn", "vm/start", decision.Notice)
+		_ = os.WriteFile(notice, []byte(decision.Notice), 0o600)
 	}
 	return int(min(decision.Maximum, uint64(memoryGiB)<<30) >> 30), nil
 }

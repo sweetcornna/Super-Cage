@@ -96,7 +96,13 @@ func (r *IncusRuntime) MemoryState(ctx context.Context) (MemoryState, error) {
 		reading := guests[index]
 		entry.GuestTotal, entry.GuestAvailable, entry.GuestSilent = reading.GuestTotal, reading.GuestAvailable, reading.GuestSilent
 		entry.GuestStall, entry.GuestSwapIns, entry.GuestSwapKnown = reading.GuestStall, reading.GuestSwapIns, reading.GuestSwapKnown
-		entry.NestedShort, entry.NestedPressure, entry.NestedStart = reading.NestedShort, reading.NestedPressure, reading.NestedStart
+		// The pressure flag reaches the rule only for a start's request: for
+		// a running guest the reading has always dropped it, and passing it
+		// on (as resource-allocation.md 7.13 intends) changes allocation
+		// under host pressure for every running environment; that is a
+		// decision of its own.
+		entry.NestedShort, entry.NestedStart = reading.NestedShort, reading.NestedStart
+		entry.NestedPressure = reading.NestedStart && reading.NestedPressure
 		state.Instances[id] = entry
 	}
 	return state, nil

@@ -80,7 +80,7 @@ func TestReplayStoppedEnvironmentStart(t *testing.T) {
 			return nil
 		}})
 	launched := world.second
-	if err != nil || decision.Maximum != 7<<30 || !decision.Asked || len(progress) != 1 {
+	if err != nil || decision.Maximum != 7<<30 || !decision.Asked || len(progress) != 2 {
 		t.Fatalf("start: %+v %v %q", decision, err, progress)
 	}
 	if _, err := os.Stat(filepath.Join(profile, "machine-memory.json")); !os.IsNotExist(err) {

@@ -117,7 +117,7 @@ func TestBootAsksTheOuterLevelWaitsAndStarts(t *testing.T) {
 	if err != nil || decision.Maximum != 7*gib || !decision.Asked || decision.Waited != 17*time.Second || decision.Notice != "" {
 		t.Fatalf("decision %+v %v", decision, err)
 	}
-	if len(progress) != 1 || progress[0] != "正在向服务器申请内存…" {
+	if len(progress) != 2 || progress[0] != "正在向服务器申请内存…" || progress[1] != "已获得所需内存，继续启动环境…" {
 		t.Fatalf("progress %q", progress)
 	}
 	// Published at once and rewritten every 10 s, each fresh for the gateway:

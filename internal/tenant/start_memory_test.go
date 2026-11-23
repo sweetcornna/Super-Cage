@@ -239,23 +239,31 @@ func TestIncusMemoryStatePassesTheNestedRequest(t *testing.T) {
 	// The reading's nested fields reach the allocation, the pressure flag
 	// included.
 	dir := t.TempDir()
-	running := strings.Repeat("1", 32)
+	running, other := strings.Repeat("1", 32), strings.Repeat("2", 32)
 	oldMeminfo, oldPressure := hostMeminfo, hostMemoryPressure
 	t.Cleanup(func() { hostMeminfo, hostMemoryPressure = oldMeminfo, oldPressure })
 	hostMeminfo = writeTestFile(t, filepath.Join(dir, "meminfo"), "MemTotal: 33554432 kB\nMemAvailable: 25165824 kB\n", 0600)
 	hostMemoryPressure = filepath.Join(dir, "none")
 	nested := `{"version":1,"updated_at":"` + time.Now().UTC().Format(time.RFC3339) + `","short_bytes":7247757312,"wanted_bytes":7516192768,"target_bytes":0,"pressure":true,"reason":"start"}`
 	writeTestFile(t, filepath.Join(dir, "guest"), "MemTotal: 1779712 kB\nMemAvailable: 1228800 kB\n#cage-psi\n#cage-vmstat\n#cage-nested\n"+nested+"\n", 0600)
-	writeTestFile(t, filepath.Join(dir, "inventory"), `[{"name":"cage-`+running+`","type":"virtual-machine","status":"Running","config":{"user.cage-tenant.id":"`+running+`"},"expanded_config":{"limits.memory":"2048MiB"}}]`, 0600)
+	// A running guest's own report: its pressure flag stays out of the rule.
+	writeTestFile(t, filepath.Join(dir, "nested"), "MemTotal: 8000000 kB\nMemAvailable: 1000000 kB\n#cage-psi\n#cage-vmstat\n#cage-nested\n"+
+		`{"version":1,"updated_at":"`+time.Now().UTC().Format(time.RFC3339)+`","short_bytes":1073741824,"pressure":true}`+"\n", 0600)
+	writeTestFile(t, filepath.Join(dir, "inventory"), `[{"name":"cage-`+running+`","type":"virtual-machine","status":"Running","config":{"user.cage-tenant.id":"`+running+`"},"expanded_config":{"limits.memory":"2048MiB"}},
+ {"name":"cage-`+other+`","type":"virtual-machine","status":"Running","config":{"user.cage-tenant.id":"`+other+`"},"expanded_config":{"limits.memory":"8GiB"}}]`, 0600)
 	runtime, _ := fakeIncus(t, `"--force-local query local:/1.0/projects/cage-tenant") echo '{"name":"cage-tenant","config":{"features.profiles":"true"}}' ;;
 "--force-local query local:/1.0/profiles/default?project=cage-tenant") echo '{"name":"default","config":{"limits.cpu":"4","limits.memory":"9728MiB"},"devices":{"root":{"type":"disk","path":"/","pool":"tenant-pool","size":"10GiB"}}}' ;;
 "--force-local query local:/1.0/instances?recursion=1&project=cage-tenant") cat '`+filepath.Join(dir, "inventory")+`' ;;
-"--force-local --project cage-tenant exec local:cage-`+running+` --mode=non-interactive -- /bin/sh -c "*" sh /home/cage/.claude-cage/machine-memory.json") cat '`+filepath.Join(dir, "guest")+`' ;;`)
+"--force-local --project cage-tenant exec local:cage-`+running+` --mode=non-interactive -- /bin/sh -c "*" sh /home/cage/.claude-cage/machine-memory.json") cat '`+filepath.Join(dir, "guest")+`' ;;
+"--force-local --project cage-tenant exec local:cage-`+other+` --mode=non-interactive -- /bin/sh -c "*" sh /home/cage/.claude-cage/machine-memory.json") cat '`+filepath.Join(dir, "nested")+`' ;;`)
 	state, err := runtime.MemoryState(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if entry := state.Instances[running]; entry.NestedShort != 7247757312 || !entry.NestedPressure || !entry.NestedStart {
 		t.Fatalf("nested request lost: %+v", entry)
+	}
+	if entry := state.Instances[other]; entry.NestedShort != 1<<30 || entry.NestedPressure || entry.NestedStart {
+		t.Fatalf("running guest's report: %+v", entry)
 	}
 }

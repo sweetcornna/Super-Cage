@@ -626,7 +626,7 @@ func (l *Lima) Start(ctx context.Context, name string, log io.Writer) error {
 			return err
 		}
 		if *inst.Config.OS == limatype.LINUX {
-			if settings.MemoryGiB, err = bootMemory(ctx, configPath, settings.MemoryGiB); err != nil {
+			if settings.MemoryGiB, err = bootMemory(ctx, configPath, inst.Dir, settings.MemoryGiB); err != nil {
 				return err
 			}
 		}
