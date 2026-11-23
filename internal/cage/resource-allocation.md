@@ -660,20 +660,27 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
     the kernel maps the maximum (mode 0: M + 256 MiB <= MemTotal + swap; 2: Committed_AS + M + 256 MiB <=
     CommitLimit; 1: always) and the guest's floor fits (available >= min(2 GiB, M) + clamp(MemTotal/64, 256, 512 MiB)).
     Nothing is written or waited for.
-  - otherwise, when an outer balloon holds memory (/proc/vmstat), it writes machine-memory.json
+  - otherwise, when an outer balloon holds memory (/proc/vmstat balloon counters; without them, memory blocks online
+    more than 1 GiB beyond MemTotal), it writes machine-memory.json
     {version 1, short_bytes S, wanted_bytes M, pressure true, reason "start"}, rewrites it every 10 s, reads
     /proc/meminfo every second for up to 75 s, and removes the file (only if its reason is still "start") when the
     wait ends, before QEMU starts. S = what the start needs beyond the machine's working set: A adds it to W +
     headroom, so one grant takes MemTotal past the need (2048 -> 8960 MiB for the incident).
   - then: the maximum if the kernel maps it; else the largest whole GiB it maps, if >= 2 GiB, with a notice
-    (the boot maximum is the balloon's ceiling until the next environment restart; the resources API already reports
-    restart_required); else a BootMemoryError ("内存不足以启动环境：…" with sizes and what to do).
-  - the wait and the notice reach the start job's message through a line "CAGE_JOB_MESSAGE <text>" on stderr
-    (printed only under a workbench job, CLAUDE_CAGE_JOB_ID set; the workbench hides it from the log).
-- A: no new rule. The reason "start" logs the growth as "environment start needs memory"; a start counts as short
-  (it also grows while the host is in pressure) without the shortage step on top (its need is exact). MemoryState now
-  passes NestedPressure (and NestedStart) from the reading to the rule: 0.1.16 read the pressure flag and dropped it,
-  so a nested guest under pressure was never a shortage there.
+    (the boot maximum is the balloon's ceiling until the next environment restart, so the notice stays in
+    <instance>/boot-memory-notice.txt until the next start and GET /api/environment/resources shows it as its notice
+    while the environment runs below its configured memory, with restart_required); else a BootMemoryError
+    ("内存不足以启动环境：…" with sizes and what to do).
+  - the wait ("正在向服务器申请内存…", then "已获得所需内存，继续启动环境…") and the notice reach the start job's message
+    through a line "CAGE_JOB_MESSAGE <text>" on stderr (printed only under a workbench job, CLAUDE_CAGE_JOB_ID set;
+    the workbench hides it from the log).
+- A: no new allocation rule; three small changes. The reason "start" (NestedStart) logs the growth as "environment
+  start needs memory"; a start counts as short, so it also grows while the host is in pressure, without the shortage
+  step on top (its need is exact). MemoryState passes the pressure flag to the rule for a start's request only.
+  Finding: 0.1.16 reads machine-memory.json's pressure flag and drops it between the reading and the rule
+  (MemoryState copies NestedShort, not NestedPressure), so on a real host a running nested guest under pressure has
+  never been a shortage (7.13's rule exists only in the simulator). Passing it on for running guests changes
+  allocation under host pressure for every running environment; left as is, a decision of its own.
 - Errors: vmStartError says "QEMU 启动失败：内存不足…" for QEMU's memory refusal; the workbench maps the start's own
   sentence, QEMU's refusal and the kernel's line to one memory sentence, and its QEMU match no longer needs "Error: ".
 
@@ -681,7 +688,8 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
 - Fast path: +23 us per start (BenchmarkBootFastPath, macOS APFS file reads of a 56-line meminfo; /proc on Linux not
   measured here). Nothing runs while the environment is stopped and nobody starts it; A's round is still one exec.
 - Start at the guarantee (replay): request 1 s after a gateway round -> grant at the next round -> QEMU 15 s after the
-  request; at most one round (15 s) plus Incus's balloon time plus 1 s of polling.
+  request; at most one round (15 s) plus Incus's balloon time (not modelled: the replay applies a grant at once) plus
+  1 s of polling.
 - Memory a stopped workspace holds: the guarantee, as before. After an abandoned start: the grant (8960 MiB) for
   memoryDemandHold (5 min), back to within one step of the guarantee after 8 min (TestAllocationStartRequestExpires).
 - Short host (16 GiB, 1.5 GiB free, an idle 10 GiB neighbour): first round +768 MiB, the full grant after 7 rounds
@@ -696,10 +704,13 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
   chunk; it would hold ~7 GiB per opened workspace (N opened-but-stopped workspaces: N x 7 GiB) to save at most one
   15 s round of a start that takes 35 s or more.
 - memory-backend-ram,reserve=off (MAP_NORESERVE) for the guest's memory: possible in third_party/lima qemu.go
-  (`-object memory-backend-ram,id=..,size=..,reserve=off -numa node,memdev=..`, QEMU >= 6.1, Linux hosts, not with
-  virtiofs, which already uses a shared file backend), not hashed into the guest revision; but it changes the QEMU
-  command line of every Linux-hosted edition, cannot be run here, and alone moves the failure to a run-time OOM kill
-  of QEMU. Follow-up for the partial-grant case, where it would let the full maximum start on a machine that backs
+  (next to `-m`: `-object memory-backend-ram,id=..,size=..,reserve=off -numa node,memdev=..`; not with virtiofs,
+  which already uses a shared file backend), not hashed into the guest revision. reserve= exists from QEMU 6.1 and
+  only on Linux hosts; the vendored Lima accepts Linux hosts from QEMU 4.0.0 (minimumQemuVersion: hard 4.0.0, soft
+  6.2.0 = Ubuntu 22.04; Debian 12 ships 7.2, Ubuntu 24.04 8.2), so it needs a version gate (getQemuVersion is already
+  read there). macOS (VZ, or QEMU >= 8.2.1 on arm64) and Windows (QEMU >= 11.0.0, WHPX) do not need it: their
+  allocation is not refused this way. It changes the QEMU command line of every Linux-hosted edition, cannot be run
+  here, and alone moves the failure to a run-time OOM kill of QEMU. Follow-up for the partial-grant case, where it would let the full maximum start on a machine that backs
   only part of it. virtio-mem (growing the guest instead of a large boot maximum) is the longer-term option.
 - A new field A sums with short_bytes, or a separate file: 0.1.16 would not read it; one carrier.
 - Waiting in the workbench (owner of the job message): it would have to compute the boot maximum again
@@ -711,6 +722,7 @@ workbench matched (pinned by TestRunCageExplainsAStartRefusedForMemory against t
 | server, Incus VM + balloon, gateway 0.1.16 | QEMU refused, "退出码 1" | grows at once while the host is not in pressure; in pressure the flag is dropped, so the start waits 75 s and falls back or refuses with the memory sentence |
 | server, new gateway + new workspace | - | grows at once, also in host pressure; partial grant -> fallback >= 2 GiB or the sentence |
 | server, gateway 0.1.15 (no machine-memory.json, legacy policy) | same failure | no growth; 75 s wait, then fallback or the sentence |
+| server, new gateway with CAGE_TENANT_MEMORY_POLICY=legacy | same failure | planMemory ignores nested demand: as 0.1.15 |
 | new gateway + old workspace binary | same failure | same failure (nothing publishes while stopped); the workspace binary carries the fix |
 | server without virtualisation (containers) | not affected | not affected (no QEMU, no elastic memory) |
 | desktop macOS / Windows | not affected (machine not measured) | unchanged, no reading beyond the fast path's GOOS check |
