@@ -36,7 +36,7 @@ func TestReplayStoppedEnvironmentStart(t *testing.T) {
 			t.Fatal(err)
 		}
 		entry.NestedShort, entry.NestedPressure, entry.NestedStart = reading.NestedShort, reading.NestedPressure, reading.NestedStart
-		state := MemoryState{HostTotal: int64(world.host), HostAvailable: int64(world.host - world.hostOwn - min(uint64(limit), own+200*simMib())), Ceiling: world.ceiling,
+		state := MemoryState{HostTotal: int64(world.host), HostAvailable: int64(world.host - world.hostOwn - min(uint64(limit), own+200*simMiB)), Ceiling: world.ceiling,
 			Instances: map[string]InstanceMemory{id: entry}}
 		result := allocateMemory(allocationInput{now: world.now, state: state, minimum: DefaultMemoryMin}, world.held)
 		world.held = result.held
@@ -122,5 +122,3 @@ func TestReplayStoppedEnvironmentStart(t *testing.T) {
 		t.Fatalf("after the start: VM %d MiB, uses %d MiB, start grant %d MiB", m.limit>>20, m.used()>>20, grown>>20)
 	}
 }
-
-func simMib() uint64 { return simMiB }

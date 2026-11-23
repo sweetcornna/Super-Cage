@@ -37,12 +37,17 @@ func TestBootMemoryAppliesTheDecision(t *testing.T) {
 		t.Fatalf("progress %q", got)
 	}
 	refusal := &cage.BootMemoryError{Need: 2304 << 20, Have: 1738 << 20, Growable: true}
-	bootPrepare = func(context.Context, cage.BootRequest) (cage.BootDecision, error) { return cage.BootDecision{Asked: true}, refusal }
+	bootPrepare = func(context.Context, cage.BootRequest) (cage.BootDecision, error) {
+		return cage.BootDecision{Asked: true}, refusal
+	}
 	if _, err := bootMemory(context.Background(), config, 7); !errors.Is(err, refusal) {
 		t.Fatal(err)
 	}
 	// Nothing configured, nothing asked.
-	bootPrepare = func(context.Context, cage.BootRequest) (cage.BootDecision, error) { t.Fatal("asked"); return cage.BootDecision{}, nil }
+	bootPrepare = func(context.Context, cage.BootRequest) (cage.BootDecision, error) {
+		t.Fatal("asked")
+		return cage.BootDecision{}, nil
+	}
 	if memory, err := bootMemory(context.Background(), config, 0); memory != 0 || err != nil {
 		t.Fatal(memory, err)
 	}

@@ -14,8 +14,8 @@ import (
 // bootPrepare is cage.PrepareBoot and bootOutput where its progress goes;
 // tests replace them.
 var (
-	bootPrepare            = cage.PrepareBoot
-	bootOutput   io.Writer = os.Stderr
+	bootPrepare           = cage.PrepareBoot
+	bootOutput  io.Writer = os.Stderr
 )
 
 // bootMemory makes sure the machine can back a Linux guest's boot maximum of

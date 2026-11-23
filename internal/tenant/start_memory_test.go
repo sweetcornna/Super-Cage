@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,24 +28,11 @@ func bootMachineOf(entry InstanceMemory) cage.BootMachine {
 // guestExec is what the gateway's one exec returns for a VM whose profile is
 // dir: its meminfo and machine-memory.json as the start wrote it.
 func guestExec(entry InstanceMemory, dir string) []byte {
-	body := "MemTotal: " + itoa(entry.GuestTotal>>10) + " kB\nMemAvailable: " + itoa(entry.GuestAvailable>>10) + " kB\n#cage-psi\n#cage-vmstat\n#cage-nested\n"
+	body := "MemTotal: " + strconv.FormatInt(entry.GuestTotal>>10, 10) + " kB\nMemAvailable: " + strconv.FormatInt(entry.GuestAvailable>>10, 10) + " kB\n#cage-psi\n#cage-vmstat\n#cage-nested\n"
 	if data, err := os.ReadFile(filepath.Join(dir, "machine-memory.json")); err == nil {
 		body += string(data)
 	}
 	return []byte(body)
-}
-
-func itoa(n int64) string { return strings.TrimSpace(strings.Repeat(" ", 0) + formatInt(n)) }
-
-func formatInt(n int64) string {
-	if n == 0 {
-		return "0"
-	}
-	var digits []byte
-	for ; n > 0; n /= 10 {
-		digits = append([]byte{byte('0' + n%10)}, digits...)
-	}
-	return string(digits)
 }
 
 // readThrough feeds the bytes the start wrote through the gateway's parser.
