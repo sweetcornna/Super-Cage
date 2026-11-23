@@ -54,6 +54,7 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Cage contributors"
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "${APP_DIR}/LICENSE.txt"
 !define MUI_DIRECTORYPAGE_TEXT_TOP "$(CageDirectoryHelp)"
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE DirectoryPageLeave
 !insertmacro MUI_PAGE_DIRECTORY
 Page custom ShortcutOptionsPage ShortcutOptionsLeave
 !insertmacro MUI_PAGE_INSTFILES
@@ -73,6 +74,12 @@ LangString CageDesktopShortcut ${LANG_ENGLISH} "Add a desktop shortcut"
 LangString CageDesktopShortcut ${LANG_SIMPCHINESE} "添加桌面快捷方式"
 LangString CageStartMenuShortcuts ${LANG_ENGLISH} "Add to the Start menu"
 LangString CageStartMenuShortcuts ${LANG_SIMPCHINESE} "添加到开始菜单"
+LangString CageRootDestination ${LANG_ENGLISH} "Choose a dedicated application folder."
+LangString CageRootDestination ${LANG_SIMPCHINESE} "请为 Super Cage 选择单独的文件夹，不要直接装到磁盘根目录。"
+LangString CageForeignDestination ${LANG_ENGLISH} "The destination contains files that do not belong to Super Cage. Choose an empty folder or the folder of an earlier Super Cage installation."
+LangString CageUnwritableDestination ${LANG_ENGLISH} "Could not write to the destination folder. Check its permissions and retry."
+LangString CageUnwritableDestination ${LANG_SIMPCHINESE} "无法写入所选文件夹，请检查文件夹权限后重试。"
+LangString CageForeignDestination ${LANG_SIMPCHINESE} "所选文件夹里有不属于 Super Cage 的文件。请选择空文件夹，或原来的 Super Cage 安装目录。"
 
 !include "CageInstallerOptions.nsh"
 Var StageDir
@@ -263,7 +270,13 @@ Function SetDefaultInstallDirectory
   ${EndIf}
   System::Call 'kernel32::GetDriveTypeW(w "D:\") i .r0'
   ${If} $0 == 3
+    StrCpy $1 $INSTDIR
     StrCpy $INSTDIR "D:\Cage"
+    ; Another program's D:\Cage keeps the per-user default.
+    Call ClassifyDestination
+    ${If} $0 == "foreign"
+      StrCpy $INSTDIR $1
+    ${EndIf}
   ${EndIf}
 FunctionEnd
 
@@ -337,26 +350,88 @@ Function .onInit
   Call SetDefaultInstallDirectory
 FunctionEnd
 
-Function CheckDestination
+; Sets $0 to root, fresh, existing or foreign for $INSTDIR.
+Function ClassifyDestination
+  Push $1
+  Push $2
   ${GetRoot} "$INSTDIR" $0
   ${If} $0 == ""
   ${OrIf} $INSTDIR == $0
   ${OrIf} $INSTDIR == "$0\"
-    SetErrorLevel 2
-    Abort "Choose a dedicated application folder."
+    StrCpy $0 "root"
+    Goto classified
   ${EndIf}
-  StrCpy $ExistingInstall "0"
-  IfFileExists "$INSTDIR\Cage.install-id" existing
+  ${If} ${FileExists} "$INSTDIR\Cage.install-id"
+    StrCpy $2 ""
+    ClearErrors
+    FileOpen $1 "$INSTDIR\Cage.install-id" r
+    ${IfNot} ${Errors}
+      FileRead $1 $2
+      FileClose $1
+    ${EndIf}
+    StrCpy $0 "foreign"
+    ${If} $2 == "${APP_ID}"
+      StrCpy $0 "existing"
+    ${EndIf}
+    Goto classified
+  ${EndIf}
   ; IfFileExists with a wildcard also matches an empty directory.
   ${DirState} "$INSTDIR" $0
-  StrCmp $0 1 foreign done
-  existing:
-    FileOpen $0 "$INSTDIR\Cage.install-id" r
-    FileRead $0 $1
-    FileClose $0
-    ${If} $1 != "${APP_ID}"
-      Goto foreign
+  ${If} $0 != 1
+    StrCpy $0 "fresh"
+    Goto classified
+  ${EndIf}
+  ; A Super Cage folder loses its identity file when it is cleaned by hand,
+  ; for example after deleting a VM, while CageData or other entries stay.
+  ; It takes the update path: CageData stays in place and every file the
+  ; manifest does not prove to be an old program file moves into the new
+  ; installation instead of being deleted.
+  StrCpy $0 "existing"
+  ReadRegStr $1 HKCU "${UNINSTALL_KEY}" "InstallLocation"
+  ${If} $1 != ""
+    ${If} $1 == $INSTDIR
+    ${OrIf} $1 == "$INSTDIR\"
+      Goto classified
     ${EndIf}
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\CageData\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\Cage-preserved-files\*.*"
+  ${OrIf} ${FileExists} "$INSTDIR\Cage.install-files.json"
+    Goto classified
+  ${EndIf}
+  ${If} ${FileExists} "$INSTDIR\Cage.exe"
+  ${AndIf} ${FileExists} "$INSTDIR\resources\cage.exe"
+    Goto classified
+  ${EndIf}
+  StrCpy $0 "foreign"
+  classified:
+  Pop $2
+  Pop $1
+FunctionEnd
+
+; Interactive installs reject an unusable folder while it can still be changed.
+Function DirectoryPageLeave
+  Call ClassifyDestination
+  ${If} $0 == "root"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "$(CageRootDestination)"
+    Abort
+  ${ElseIf} $0 == "foreign"
+    MessageBox MB_ICONEXCLAMATION|MB_OK "$(CageForeignDestination)"
+    Abort
+  ${EndIf}
+FunctionEnd
+
+Function CheckDestination
+  Call ClassifyDestination
+  ${If} $0 == "root"
+    SetErrorLevel 2
+    Abort "$(CageRootDestination)"
+  ${ElseIf} $0 == "foreign"
+    SetErrorLevel 2
+    Abort "$(CageForeignDestination)"
+  ${EndIf}
+  StrCpy $ExistingInstall "0"
+  ${If} $0 == "existing"
     StrCpy $ExistingInstall "1"
     ; Never stop processes by their name or force-close user workloads.
     !insertmacro CheckStopped "Cage.exe"
@@ -364,12 +439,20 @@ Function CheckDestination
     !insertmacro CheckStopped "resources\cage-attach.exe"
     !insertmacro CheckStopped "resources\mihomo.exe"
     !insertmacro CheckStopped "resources\runtime\qemu\qemu-system-x86_64.exe"
-    Goto done
-  foreign:
-    SetErrorLevel 2
-    Abort "The destination contains files from another installation. Choose an empty folder."
-  done:
-    ClearErrors
+    ; A reused folder gets its identity back before the transaction, so a
+    ; rollback restores an ordinary installation and finishes its receipt.
+    ${IfNot} ${FileExists} "$INSTDIR\Cage.install-id"
+      ClearErrors
+      FileOpen $1 "$INSTDIR\Cage.install-id" w
+      ${If} ${Errors}
+        SetErrorLevel 2
+        Abort "$(CageUnwritableDestination)"
+      ${EndIf}
+      FileWrite $1 "${APP_ID}"
+      FileClose $1
+    ${EndIf}
+  ${EndIf}
+  ClearErrors
 FunctionEnd
 
 Function RestorePreservedFiles

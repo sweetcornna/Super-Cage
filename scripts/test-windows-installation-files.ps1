@@ -98,11 +98,11 @@ function Test-InstallerTransaction {
     $version = (Get-Content (Join-Path $PSScriptRoot '../VERSION') -Raw).Trim()
     & (Get-Command makensis.exe -ErrorAction Stop).Source /V2 /INPUTCHARSET UTF8 "/DAPP_DIR=$app" "/DVERSION=$version" "/DVERSION_NUMERIC=$(($version -split '-')[0]).0" "/DFILE_MANIFEST=$app\Cage.install-files.json" "/DOUTPUT_FILE=$setup" (Join-Path $PSScriptRoot '../packaging/windows/Cage.nsi')
     if ($LASTEXITCODE -ne 0) { throw 'The production NSIS fixture did not compile.' }
-    function Run-Fixture([string]$Executable, [string[]]$Arguments) {
+    function Run-Fixture([string]$Executable, [string[]]$Arguments, [int]$Expected = 0) {
         $process = Start-Process -FilePath $Executable -ArgumentList $Arguments -PassThru
         try {
             if (!$process.WaitForExit(30000)) { $process.Kill($true); $process.WaitForExit(); throw 'The owned NSIS fixture exceeded 30 seconds.' }
-            if ($process.ExitCode -ne 0) {
+            if ($process.ExitCode -ne $Expected) {
                 foreach ($path in @($report, "$report.helper.json", "$report.uninstall.json", "$report.uninstall.json.helper.json")) {
                     if ((Test-Path -LiteralPath $path) -and (Get-Item -LiteralPath $path).Length -le 8192) { Write-Output ('Quick NSIS diagnostic: ' + (Get-Content -LiteralPath $path -Raw)) }
                 }
@@ -134,6 +134,41 @@ function Test-InstallerTransaction {
         }
     }
     Check (!($remaining.Values -contains $true)) ('NSIS fixture did not finish uninstalling owned artifacts: ' + ($remaining | ConvertTo-Json -Compress))
+    # A Super Cage folder cleaned by hand keeps CageData but has lost its
+    # identity file. The installer reuses it and keeps every remaining file.
+    $leftover = Join-Path $scenario 'leftover target'
+    Write-File (Join-Path $leftover 'CageData/vm/disk.vhdx') 'persistent disk'
+    Write-File (Join-Path $leftover 'notes.txt') 'personal notes'
+    # A failed reuse rolls back and finishes its receipt, so a rerun can start.
+    $held = [IO.File]::Open((Join-Path $leftover 'notes.txt'), 'Open', 'Read', 'Read')
+    try { Run-Fixture $setup @('/S','/DESKTOPSHORTCUT=0','/STARTMENUSHORTCUT=0',"/DIAGNOSTICS=`"$report`"","/D=$leftover") 2 } finally { $held.Dispose() }
+    Check (!(Test-Path -LiteralPath ($leftover + '.cage-installation.json'))) 'A failed reuse left its receipt and blocks the next installation.'
+    Check ((Get-Content (Join-Path $leftover 'notes.txt') -Raw) -eq 'personal notes') 'A failed reuse moved or lost a personal file.'
+    Check ((Get-Content (Join-Path $leftover 'CageData/vm/disk.vhdx') -Raw) -eq 'persistent disk') 'A failed reuse changed CageData.'
+    Check (!(Test-Path $key) -and !(Test-Path -LiteralPath (Join-Path $leftover 'program.txt'))) 'A failed reuse published or registered the program.'
+    try {
+        Run-Fixture $setup @('/S','/DESKTOPSHORTCUT=0','/STARTMENUSHORTCUT=0',"/DIAGNOSTICS=`"$report`"","/D=$leftover")
+        Check ((Get-Content (Join-Path $leftover 'program.txt') -Raw) -eq 'fixture') 'NSIS refused a Super Cage folder without its identity file.'
+        Check ((Get-Content (Join-Path $leftover 'CageData/vm/disk.vhdx') -Raw) -eq 'persistent disk') 'Reusing a Super Cage folder changed CageData.'
+        Check ((Get-Content (Join-Path $leftover 'notes.txt') -Raw) -eq 'personal notes') 'Reusing a Super Cage folder moved or lost a personal file.'
+        Check ((Get-Content (Join-Path $leftover 'Cage.install-id') -Raw) -eq 'io.github.lee-xeo.claude-cage') 'The reused folder has no identity file.'
+        Check (!(Test-Path -LiteralPath ($leftover + '.cage-installation.json'))) 'NSIS left the reuse receipt unfinished.'
+        Check ((Get-ItemProperty $key).InstallLocation -eq $leftover) 'NSIS registered a different reused target.'
+    } finally {
+        if ((Test-Path $key) -and (Get-ItemProperty $key).InstallLocation -eq $leftover) {
+            Run-Fixture (Join-Path $leftover 'Uninstall.exe') @('/S',('/DIAGNOSTICS="' + $report + '.uninstall.json"'))
+            $deadline = [DateTime]::UtcNow.AddSeconds(120)
+            while (((Test-Path -LiteralPath (Join-Path $leftover 'Uninstall.exe')) -or (Test-Path $key)) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 100 }
+        }
+    }
+    Check (!(Test-Path $key) -and !(Test-Path -LiteralPath (Join-Path $leftover 'program.txt'))) 'Uninstalling the reused folder left the program or its registration.'
+    Check ((Get-Content (Join-Path $leftover 'CageData/vm/disk.vhdx') -Raw) -eq 'persistent disk') 'Uninstalling the reused folder changed CageData.'
+    # Another program's files still stop the installation before any change.
+    $foreign = Join-Path $scenario 'foreign target'
+    Write-File (Join-Path $foreign 'notes.txt') 'another program'
+    Run-Fixture $setup @('/S','/DESKTOPSHORTCUT=0','/STARTMENUSHORTCUT=0',"/DIAGNOSTICS=`"$report`"","/D=$foreign") 2
+    Check ((@(Get-ChildItem -LiteralPath $foreign -Force).Name -join ',') -eq 'notes.txt') 'NSIS changed a folder of another program.'
+    Check (!(Test-Path $key)) 'NSIS registered a folder of another program.'
     Write-Output 'PASS: production NSIS silently installed/uninstalled its text-only fixture through PowerShell 5.1 transactions; no application or VM was started.'
 }
 try {
