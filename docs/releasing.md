@@ -1,6 +1,6 @@
 # 发布 Super Cage
 
-一次发布：版本号 PR → 合并 → 一条命令构建并汇总全部安装包 → 草稿 Release（逐个核对摘要）→ 明确地发布。发布路径里不跑完整测试套件：测试由 PR 上的 CI 负责；这里只做每项一分钟以内的快速检查。
+一次发布：版本号 PR → 合并 → 一条命令构建并汇总全部安装包 → 草稿 Release（逐个核对摘要）→ 明确地发布。发布路径里不跑测试套件，只做每项一分钟以内的快速检查。PR 上的 CI（`ci.yml`，约 6 分钟）跑的是快速子集，见文末。
 
 入口是 `scripts/release/release.sh`，在 Apple Silicon Mac 上运行。
 
@@ -13,7 +13,7 @@
 ## 步骤
 
 1. **版本号**：`scripts/release/release.sh prepare 0.1.18`
-   基于 `origin/main`，在 `.claude/worktrees/release-0.1.18-prepare` 新建分支 `release-0.1.18`。修改 `scripts/release-version.mjs` 列出的版本文件，以及 README 和 docs 里的下载链接和安装包名。然后运行 `scripts/check-version.mjs` 并提交。输出里的 `check` 行是链接以外提到旧版本的地方，需要人工判断。之后按提示推送、开 PR，再用 `gh pr merge --merge --match-head-commit` 合并。
+   基于 `origin/main`，在 `.claude/worktrees/release-0.1.18-prepare` 新建分支 `release-0.1.18`。版本 PR 的 CI 会跑版本绊线（`make test-version-tripwires`）：某个兼容路径约定在这一版移除时，测试会故意失败，要在同一个 PR 里移除它，或明确把期限推后一版（例如 `internal/workbench/desktop.go` 的 `olderControllerGraceEndsIn`）。修改 `scripts/release-version.mjs` 列出的版本文件，以及 README 和 docs 里的下载链接和安装包名。然后运行 `scripts/check-version.mjs` 并提交。输出里的 `check` 行是链接以外提到旧版本的地方，需要人工判断。之后按提示推送、开 PR，再用 `gh pr merge --merge --match-head-commit` 合并。
 2. **构建**：`scripts/release/release.sh build 0.1.18`
    默认取 `origin/main` 的提交，可用 `--sha` 指定，该提交的 `VERSION` 必须等于版本号。以下几路并行：
    - GitHub：`gh workflow run release-build.yml -f sha=<提交>`，等它结束后下载 `release-windows`、`release-linux`、`release-server` 三个 artifact。
@@ -79,7 +79,8 @@
 
 ## 不检查什么
 
-- 不跑 Go、UI、浏览器的测试套件，也不做安装测试（.deb 安装、Windows 安装、手机模拟器）。这些由 PR 上的 CI 和手动触发的完整测试工作流负责。
+- 不跑 Go、UI、浏览器的测试套件，也不做安装测试（.deb 安装、Windows 安装、手机模拟器）。
+- PR 上的 CI 只跑快速子集：脚本和仓库检查、界面与门户单元测试、Linux/Windows 的 Go 编译与 vet、除 `internal/workbench` 和 `internal/cage` 以外的 Go 测试、版本绊线。`internal/workbench`、`internal/cage` 和浏览器冒烟测试不会自动运行：改动涉及它们时，在本机跑 `make test-go` 或对应的冒烟脚本。手动的 `full-tests.yml`（三平台完整构建和测试）目前本身不是全绿，只适合对比失败项。
 - 不验证已发布版本能否通过应用内更新拿到新版，也不把服务器包的文件列表与上一版对比。需要时手动做。
 - Windows 安装器未签名（文件名带 `-unsigned`），只检查名称和大小。
 - iOS 和 TestFlight 不在这个流程里。

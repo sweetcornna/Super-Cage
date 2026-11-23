@@ -49,7 +49,7 @@ CGO_ENABLED ?= 0
 endif
 GO_BUILD := CGO_ENABLED=$(CGO_ENABLED) $(GO) build -trimpath -tags $(TAGS) -ldflags "$(LDFLAGS)"
 
-.PHONY: all agent-vm install limactl assets test test-go test-fast check-windows test-third-party fuzz clean
+.PHONY: all agent-vm install limactl assets test test-go test-fast test-version-tripwires check-windows test-third-party fuzz clean
 
 all: agent-vm
 
@@ -136,6 +136,13 @@ test-go:
 # Needs the generated embeds first (make cage-ui assets tailnet-assets).
 test-fast:
 	pkgs=$$($(GO) list -tags $(TAGS) ./cmd/... ./internal/... | grep -v -E '/internal/(cage|workbench)$$') && test -n "$$pkgs" && $(GO) test -tags $(TAGS) $$pkgs
+	$(MAKE) test-version-tripwires
+
+# Tests that fail on purpose once VERSION reaches the release that has to drop
+# a compatibility path, so the version bump's pull request does it. They read
+# source and VERSION only, so they run here although their package stays out.
+test-version-tripwires:
+	$(GO) test -tags $(TAGS) -count=1 -run '^TestOlderControllerGraceCallers$$' ./internal/workbench
 
 # The Windows build and its tests compile and vet, from any OS. The Windows
 # paths' logic is tested everywhere (paths.Windows); the tests themselves
