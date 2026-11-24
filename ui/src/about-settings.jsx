@@ -92,7 +92,9 @@ function AppUpdateSettings() {
 }
 
 export function AboutSettings() {
-  const workspaceOnly = getClientContext().tenant_workspace === true;
+  const clientContext = getClientContext();
+  const workspaceOnly = clientContext.tenant_workspace === true;
+  const canUpdateFromPortal = workspaceOnly && clientContext.can_update === true && Boolean(clientContext.portal_origin);
   const [build, setBuild] = useState(null);
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -137,7 +139,22 @@ export function AboutSettings() {
     </dl>
     {build?.modified && <p className="footnote">此构建包含未提交的修改，提交核对仅反映已记录的提交。</p>}
     {!workspaceOnly && nativeAvailable() && <AppUpdateSettings />}
-    {workspaceOnly ? <p className="footnote">工作台版本由服务器管理员维护。</p> : <>
+    {workspaceOnly ? (canUpdateFromPortal ? <section className="about-updates" aria-label="服务器在线更新">
+      <h4>服务器在线更新</h4>
+      <p className="footnote">你可以直接从前端检查新版本，并一键更新服务器上的 Super Cage 网关、门户界面和工作区组件。</p>
+      <div className="about-check-actions">
+        <button className="secondary-button" type="button" onClick={() => {
+          try {
+            window.parent.postMessage({ type: "cage:open-server-update" }, clientContext.portal_origin);
+          } catch {
+            setError("无法通知门户打开更新面板，请点击门户顶部栏的“更新”按钮。");
+          }
+        }}>
+          <RefreshCw size={15} />
+          检查并更新 Super Cage
+        </button>
+      </div>
+    </section> : <p className="footnote">工作台版本由服务器管理员维护。</p>) : <>
       <div className="about-check-actions">
         <button className="secondary-button" onClick={check} disabled={busy || coolingDown}>
           {busy ? <LoaderCircle size={15} className="spin" /> : <RefreshCw size={15} />}

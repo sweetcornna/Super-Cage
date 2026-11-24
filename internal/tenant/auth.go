@@ -274,7 +274,11 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request, register b
 	token := secret(32)
 	s.sessions[token] = &loginSession{user: record.user, expires: expires, ctx: ctx, cancel: cancel, grants: make(map[string]string)}
 	s.setCookie(w, s.site.loginCookie, token, expires)
-	jsonReply(w, status, map[string]user{"user": record.user})
+	reply := map[string]any{"user": record.user}
+	if s.canSelfUpdate(record.user.Username) {
+		reply["self_update"] = true
+	}
+	jsonReply(w, status, reply)
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request) {
@@ -285,7 +289,11 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 		unauthenticated(w)
 		return
 	}
-	jsonReply(w, http.StatusOK, map[string]user{"user": session.user})
+	reply := map[string]any{"user": session.user}
+	if s.canSelfUpdate(session.user.Username) {
+		reply["self_update"] = true
+	}
+	jsonReply(w, http.StatusOK, reply)
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {

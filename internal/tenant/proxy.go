@@ -201,10 +201,14 @@ func (s *Server) workbench(w http.ResponseWriter, r *http.Request, id string) {
 	// The browser uses the VM's own workbench assets, but this is still a
 	// remote workbench, not a desktop entry point on the server.
 	if r.Method == http.MethodGet && r.URL.Path == "/api/client/context" && !upgrade {
-		jsonReply(w, http.StatusOK, map[string]any{
+		ctxBody := map[string]any{
 			"mode": "local", "connection_id": "local", "server_platform": "linux", "tenant_workspace": true,
 			"virtual_machines": true, "portal_origin": s.site.origin, "name": vmName,
-		})
+		}
+		if s.canSelfUpdate(grant.login.user.Username) {
+			ctxBody["can_update"] = true
+		}
+		jsonReply(w, http.StatusOK, ctxBody)
 		return
 	}
 	proxy := workspace.proxy(origin, func() { s.invalidateWorkspace(id, workspace) }, func() {

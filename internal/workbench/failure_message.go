@@ -20,6 +20,12 @@ func executionFailure(action string, err error, output string) error {
 		patterns     []string
 		reason, next string
 	}{
+		{[]string{"built without lima's guest agent", "does not include the lima guest agent"}, "当前 Super Cage 构建缺少匹配此架构的 Lima 客机组件，无法启动虚拟机", "请通过正式发行包或门户更新重新安装对应架构的完整 Super Cage 构建，不要使用未打包客机组件的开发编译产物。"},
+		{[]string{"requires kvm", "/dev/kvm", "kvm is not available", "virtualization is not available", "could not access kvm kernel module"}, "当前机器未启用 KVM 硬件虚拟化，或运行账户没有访问 /dev/kvm 的权限", "请确认宿主机已开启硬件虚拟化并授予运行账户访问 /dev/kvm 的权限后重试。"},
+		{[]string{"adds to every vm's config"}, "检测到不受支持的 Lima 全局覆盖配置（default.yaml 或 override.yaml）", "请移走提示中列出的配置文件后再试。"},
+		{[]string{"lima cannot read the config"}, "虚拟机配置文件损坏或无法读取", "请打开“操作详情”核对错误；需要恢复时可在设置中导出诊断包并检查环境状态。"},
+		{[]string{"could not lock vm"}, "虚拟机正在执行另一项操作，未能取得启动锁", "请等待当前操作完成后重试；若确认没有其他进程在运行，重启服务后再试。"},
+		{[]string{"could not stop vm"}, "异常残留的虚拟机未能自动清理停止", "请稍后重试启动或重启工作区服务；仍失败时导出诊断包。"},
 		{[]string{"base vm not found"}, "基础模板缺失，无法创建或重置环境", "请先完成环境安装；已有环境的磁盘应保留，不要删除或重置个人数据。"},
 		{[]string{"base vm setup did not complete"}, "基础模板尚未安装完成", "请继续环境安装后重试；已有环境的磁盘应保留，不要删除或重置个人数据。"},
 		{[]string{"cage_windows_maintenance_authorization_canceled"}, "已取消 Windows 管理员授权", "请重新发起原操作，并在 Windows 系统授权窗口中确认。"},
@@ -41,6 +47,7 @@ func executionFailure(action string, err error, output string) error {
 		{[]string{"407 proxy authentication", "proxy authentication required"}, "代理服务器拒绝了当前登录凭据", "请在网络与代理设置中更新代理账号或订阅，再应用节点。"},
 		{[]string{"permission denied", "access is denied"}, "系统拒绝访问安装所需的文件或程序", "请检查应用及环境目录的权限；若安全软件拦截了 Super Cage，请先核实其拦截记录。"},
 		{[]string{"tried to start delayed item"}, "环境的软件包下载程序反复重试，未能完成安装", "请使用包含 APT 修复的 Super Cage 构建后继续安装；仍失败时导出诊断包。"},
+		{[]string{"host agent process has exited", "failed to start vm"}, "虚拟机启动进程提前退出，未完成启动", "请打开“操作详情”查看虚拟机日志；若刚更新完程序，请确认安装包与当前架构匹配，仍失败时导出诊断包。"},
 	} {
 		for _, pattern := range rule.patterns {
 			if strings.Contains(lower, pattern) {

@@ -41,6 +41,10 @@ for arch in amd64 arm64; do
   CGO_ENABLED=0 GOOS=linux GOARCH="$arch" go build -trimpath -buildvcs=true -o "$tree/cage-tenant" ./cmd/cage-tenant
   make cage GOOS=linux GOARCH="$arch" CGO_ENABLED=0 > "$output/make-$arch.log" 2>&1
   cp _output/bin/cage "$tree/cage"
+  if [[ "$(uname -s)" == Linux ]] && [[ ("$arch" == amd64 && "$(uname -m)" == x86_64) || ("$arch" == arm64 && "$(uname -m)" == aarch64) ]]; then
+    "$tree/cage" verify-vm-assets
+    "$tree/cage" verify-web-assets
+  fi
   for binary in "$tree/cage-tenant" "$tree/cage"; do
     stamped "$binary" || {
       printf '%s build metadata does not match clean revision %s\n' "$binary" "$revision" >&2

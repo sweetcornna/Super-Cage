@@ -12,12 +12,16 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/tenant"
+	"github.com/sylvinus/agent-vm/internal/version"
 )
 
 func main() {
@@ -31,7 +35,10 @@ func run() error {
 	var config tenant.Config
 	var incus tenant.IncusConfig
 	var listen, uiDir, image, systemsFile, guestAccountFile, instanceType, memoryReserve, memoryMin string
+	var selfUpdateAdmins, selfUpdateGuestCage, selfUpdateGuestService string
+	var showVersion bool
 	var busyPercent float64
+	flag.BoolVar(&showVersion, "version", false, "print cage-tenant version and exit")
 	flag.StringVar(&listen, "listen", "127.0.0.1:8080", "loopback HTTP listen address")
 	flag.StringVar(&config.Origin, "origin", "", "public portal origin, without a trailing slash")
 	flag.BoolVar(&config.Development, "dev", false, "enable HTTP development on cage.localhost")
@@ -59,7 +66,15 @@ func run() error {
 	flag.DurationVar(&config.MemoryInterval, "memory-interval", 15*time.Second, "resize running VMs to this host's memory this often; the profile limits.memory is each VM's ceiling (0 disables elastic memory; VM mode only)")
 	flag.StringVar(&memoryReserve, "memory-reserve", "", "host memory kept for the host itself, such as 4GiB (default: the larger of 2GiB and 15% of host memory); below twice this much available, VMs give back their caches")
 	flag.StringVar(&memoryMin, "memory-min", "2GiB", "smallest memory size elastic memory gives a running VM (at least 1GiB)")
+	flag.BoolVar(&config.SelfUpdate.Enabled, "enable-self-update", false, "allow configured admin accounts to check and install official Super Cage releases from the portal UI")
+	flag.StringVar(&selfUpdateAdmins, "self-update-admin", "", "comma-separated portal usernames authorized to trigger Super Cage self-updates")
+	flag.StringVar(&selfUpdateGuestCage, "self-update-guest-cage-path", "/usr/lib/claude-cage/cage", "absolute path to the cage binary inside each managed workspace")
+	flag.StringVar(&selfUpdateGuestService, "self-update-guest-service", "cage-serve.service", "systemd unit restarted inside each managed workspace after updating cage")
 	flag.Parse()
+	if showVersion {
+		fmt.Println(version.Version)
+		return nil
+	}
 	if flag.NArg() != 0 {
 		return errors.New("unexpected positional arguments")
 	}
@@ -144,6 +159,27 @@ func run() error {
 			return fmt.Errorf("portal UI asset unavailable: %s", name)
 		}
 	}
+	restartCh := make(chan string, 1)
+	if config.SelfUpdate.Enabled {
+		absUI, err := filepath.Abs(uiDir)
+		if err != nil {
+			return fmt.Errorf("resolve portal UI directory: %w", err)
+		}
+		config.SelfUpdate.UIDir = absUI
+		config.SelfUpdate.GuestCagePath = selfUpdateGuestCage
+		config.SelfUpdate.GuestServiceName = selfUpdateGuestService
+		for _, part := range strings.Split(selfUpdateAdmins, ",") {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				config.SelfUpdate.Admins = append(config.SelfUpdate.Admins, trimmed)
+			}
+		}
+		config.SelfUpdate.OnRestart = func(gatewayPath string) {
+			select {
+			case restartCh <- gatewayPath:
+			default:
+			}
+		}
+	}
 	gateway, err := tenant.NewServer(config)
 	if err != nil {
 		return err
@@ -159,14 +195,29 @@ func run() error {
 	}
 	signals, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var restartTarget atomic.Pointer[string]
 	go func() {
-		<-signals.Done()
-		gateway.Close()
-		_ = server.Close()
+		select {
+		case <-signals.Done():
+			gateway.Close()
+			_ = server.Close()
+		case target := <-restartCh:
+			restartTarget.Store(&target)
+			_ = server.Close()
+		}
 	}()
 	log.Printf("cage-tenant listening on %s for %s", listen, config.Origin)
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
+	}
+	if target := restartTarget.Load(); target != nil && *target != "" {
+		// Release the state directory lock and UI root before exec'ing the updated binary.
+		gateway.Close()
+		_ = root.Close()
+		log.Printf("cage-tenant re-executing updated binary %s", *target)
+		if err := reexecSelf(*target, os.Args, os.Environ()); err != nil {
+			return fmt.Errorf("re-exec updated binary: %w", err)
+		}
 	}
 	return nil
 }

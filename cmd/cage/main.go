@@ -157,6 +157,9 @@ func run() int {
 		if len(args) != 1 {
 			return 2
 		}
+		if err := limaembed.VerifyEmbedded(); err != nil {
+			return fail(err)
+		}
 		dir, err := os.MkdirTemp("", "cage-vm-assets-")
 		if err != nil {
 			return fail(err)

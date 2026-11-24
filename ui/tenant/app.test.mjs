@@ -1352,3 +1352,93 @@ describe("手机上的工作台：门户自己判断", () => {
     assert.match(handler, /type === "cage:phone-ui"\) return true/);
   });
 });
+
+describe("服务器在线更新（仅管理员可见）", () => {
+  test("管理员会话加载更新状态、检查更新、应用更新并在重启恢复后触发刷新", async () => {
+    let reloaded = "";
+    const f = fakeFetch();
+    const clock = fakeClock();
+    const portal = app.createPortal({
+      api: app.createApi({ fetch: f.fetch }),
+      selection: app.createSelectionStore({ local: memoryStorage(), session: memoryStorage() }),
+      timers: clock.timers,
+      now: clock.now,
+      location: PORTAL,
+      isHidden: () => false,
+      onReload: (ver) => { reloaded = ver || "reloaded"; },
+    });
+    const booting = portal.boot();
+    f.next("GET", "/api/tenant/session").respond(200, { user: USER, self_update: true });
+    await flush();
+    f.next("GET", "/api/tenant/vms").respond(200, { vms: [vm(ID_A, "ready")], limit: 5 });
+    f.next("GET", "/api/tenant/update").respond(200, {
+      enabled: true,
+      current_version: "0.1.19",
+      arch: "amd64",
+      latest_version: "0.1.20",
+      update_available: true,
+      job: { running: false, phase: "idle", progress: 0 },
+    });
+    await booting;
+    await flush();
+    assert.equal(portal.getState().canUpdate, true);
+    assert.equal(portal.getState().update.data.update_available, true);
+
+    portal.openUpdate();
+    assert.equal(portal.getState().update.open, true);
+    f.next("GET", "/api/tenant/update").respond(200, {
+      enabled: true,
+      current_version: "0.1.19",
+      arch: "amd64",
+      latest_version: "0.1.20",
+      update_available: true,
+      job: { running: false, phase: "idle", progress: 0 },
+    });
+    await flush();
+
+    const applying = portal.applyUpdate();
+    const applyCall = f.next("POST", "/api/tenant/update/apply");
+    assert.equal(applyCall.init.headers[HEADER], USER.id);
+    assert.deepEqual(applyCall.body, { version: "0.1.20" });
+    applyCall.respond(202, {
+      enabled: true,
+      current_version: "0.1.19",
+      arch: "amd64",
+      latest_version: "0.1.20",
+      update_available: true,
+      job: { running: true, phase: "downloading", target_version: "0.1.20", progress: 20, logs: ["12:00:00 下载中"] },
+    });
+    await applying;
+    await flush();
+    assert.equal(portal.getState().update.data.job.phase, "downloading");
+
+    await clock.advance(app.UPDATE_POLL_MS);
+    f.next("GET", "/api/tenant/update").respond(200, {
+      enabled: true,
+      current_version: "0.1.19",
+      arch: "amd64",
+      job: { running: true, phase: "restarting", target_version: "0.1.20", progress: 100 },
+    });
+    await flush();
+    assert.equal(portal.getState().update.reconnecting, true);
+
+    // 网关重启期间的瞬时断连继续轮询，重启完成后自动刷新页面。
+    await clock.advance(app.UPDATE_POLL_MS);
+    f.next("GET", "/api/tenant/update").fail();
+    await flush();
+    assert.equal(portal.getState().update.reconnecting, true);
+
+    await clock.advance(app.UPDATE_POLL_MS);
+    f.next("GET", "/api/tenant/update").respond(200, {
+      enabled: true,
+      current_version: "0.1.20",
+      arch: "amd64",
+      latest_version: "0.1.20",
+      update_available: false,
+      job: { running: false, phase: "idle", progress: 0 },
+    });
+    await flush();
+    assert.equal(reloaded, "0.1.20");
+    assert.equal(portal.getState().update.reloading, true);
+  });
+});

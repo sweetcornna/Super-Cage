@@ -16,6 +16,7 @@ else
   [[ -x _output/bin/cage && -x _output/bin/cage-attach ]] || { echo 'Missing prebuilt Linux backend.' >&2; exit 1; }
   _output/bin/cage help >/dev/null
 fi
+_output/bin/cage verify-vm-assets
 _output/bin/cage verify-web-assets
 mkdir -p _output/linux-amd64
 stage=$(mktemp -d "$PWD/_output/linux-amd64/build.XXXXXX")

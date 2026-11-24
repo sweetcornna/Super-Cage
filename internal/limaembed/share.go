@@ -1,10 +1,14 @@
 package limaembed
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/sha256"
 	_ "embed"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -118,4 +122,83 @@ func guestArch() string {
 	default:
 		return runtime.GOARCH
 	}
+}
+
+// VerifyEmbedded checks that this binary embeds a valid gzipped Linux guest
+// agent matching runtime.GOARCH (and on macOS, the Darwin guest agent too).
+// Build scripts and the self-updater run this via `cage verify-vm-assets` so a
+// mismatched cross-compilation can never reach production.
+func VerifyEmbedded() error {
+	return verifyEmbedded(assets, runtime.GOOS, runtime.GOARCH)
+}
+
+func verifyEmbedded(files fs.FS, goos, goarch string) error {
+	arch := goarch
+	switch goarch {
+	case "amd64":
+		arch = "x86_64"
+	case "arm64":
+		arch = "aarch64"
+	}
+	name := "assets/lima-guestagent.Linux-" + arch + ".gz"
+	data, err := fs.ReadFile(files, name)
+	if err != nil {
+		return fmt.Errorf("%w (missing %s for %s/%s)", ErrNoAssets, name, goos, goarch)
+	}
+	if err := VerifyLinuxGuestAgentArchive(data, goarch); err != nil {
+		return fmt.Errorf("%w (%s: %v)", ErrNoAssets, name, err)
+	}
+	if goos == "darwin" {
+		darwinName := "assets/Darwin/lima-guestagent.Darwin-" + arch + ".gz"
+		darwinData, err := fs.ReadFile(files, darwinName)
+		if err != nil {
+			return fmt.Errorf("missing embedded Darwin guest agent %s: %w", darwinName, err)
+		}
+		zr, err := gzip.NewReader(bytes.NewReader(darwinData))
+		if err != nil {
+			return fmt.Errorf("corrupt %s: %w", darwinName, err)
+		}
+		header := make([]byte, 4)
+		_, readErr := io.ReadFull(zr, header)
+		_ = zr.Close()
+		if readErr != nil {
+			return fmt.Errorf("truncated %s: %w", darwinName, readErr)
+		}
+	}
+	return nil
+}
+
+// VerifyLinuxGuestAgentArchive checks that data is a valid gzip-compressed
+// Linux ELF binary whose e_machine matches targetGOARCH.
+func VerifyLinuxGuestAgentArchive(data []byte, targetGOARCH string) error {
+	zr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("invalid gzip archive: %w", err)
+	}
+	defer zr.Close()
+	var hdr [20]byte
+	if _, err := io.ReadFull(zr, hdr[:]); err != nil {
+		return fmt.Errorf("truncated ELF header: %w", err)
+	}
+	if !bytes.Equal(hdr[:4], []byte{0x7f, 'E', 'L', 'F'}) {
+		return errors.New("guest agent is not an ELF executable")
+	}
+	// ELF class 2 = 64-bit, data 1 = little-endian; e_machine is uint16 at offset 18.
+	if hdr[4] != 2 || hdr[5] != 1 {
+		return fmt.Errorf("unexpected ELF class/endianness (%d/%d)", hdr[4], hdr[5])
+	}
+	machine := binary.LittleEndian.Uint16(hdr[18:20])
+	var want uint16
+	switch targetGOARCH {
+	case "amd64":
+		want = 62 // EM_X86_64
+	case "arm64":
+		want = 183 // EM_AARCH64
+	default:
+		return nil
+	}
+	if machine != want {
+		return fmt.Errorf("ELF architecture mismatch: got e_machine=%d, want %d for %s", machine, want, targetGOARCH)
+	}
+	return nil
 }
