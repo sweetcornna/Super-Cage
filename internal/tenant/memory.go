@@ -108,6 +108,10 @@ type memoryBalancing struct {
 	runtime MemoryBalancer // nil when elastic memory is off
 	// changes holds the workspaces being resized. Guarded by the server lock.
 	changes map[string]bool
+	// shrinkHold and shrinkHoldAll pause shrinking (while still allowing growth)
+	// during and immediately after a self-update. Guarded by the server lock.
+	shrinkHold    map[string]time.Time
+	shrinkHoldAll time.Time
 	// The rest belongs to the balancer goroutine.
 	pause    map[string]time.Time
 	failures map[string]string
@@ -138,8 +142,13 @@ func (s *Server) startMemoryBalancer() {
 	if s.cfg.MemoryInterval == 0 || !ok || !runtime.ElasticMemory() {
 		return
 	}
-	s.memory = memoryBalancing{runtime: runtime, changes: make(map[string]bool), pause: make(map[string]time.Time), failures: make(map[string]string), silent: make(map[string]int),
+	s.memory = memoryBalancing{runtime: runtime, changes: make(map[string]bool), shrinkHold: make(map[string]time.Time),
+		shrinkHoldAll: readPostUpdateGrace(s.cfg.StateDir, s.now()),
+		pause: make(map[string]time.Time), failures: make(map[string]string), silent: make(map[string]int),
 		held: make(map[string]demandState), swapIns: make(map[string]uint64), starts: make(map[string]startSight), legacy: os.Getenv("CAGE_TENANT_MEMORY_POLICY") == "legacy"}
+	if !s.memory.shrinkHoldAll.IsZero() {
+		log.Printf("cage-tenant: holding elastic VM memory shrink until %s after update", s.memory.shrinkHoldAll.UTC().Format(time.RFC3339))
+	}
 	reserve := "the larger of 2 GiB and 15% of host memory"
 	if s.cfg.MemoryReserve > 0 {
 		reserve = mib(s.cfg.MemoryReserve)
@@ -189,10 +198,26 @@ func (s *Server) balanceOnce() {
 	s.memory.failure = ""
 	now := s.now()
 	fixed := make(map[string]bool)
+	holdShrink := make(map[string]bool)
 	s.mu.Lock()
+	holdAll := !s.memory.shrinkHoldAll.IsZero() && now.Before(s.memory.shrinkHoldAll)
+	if !holdAll && !s.memory.shrinkHoldAll.IsZero() {
+		s.memory.shrinkHoldAll = time.Time{}
+		clearPostUpdateGrace(s.cfg.StateDir)
+	}
+	for id, until := range s.memory.shrinkHold {
+		if now.Before(until) {
+			holdShrink[id] = true
+		} else {
+			delete(s.memory.shrinkHold, id)
+		}
+	}
 	for id := range state.Instances {
 		if _, owned := s.store.VMs[id]; !owned || s.starting[id] || s.cooling.changes[id] != nil {
 			fixed[id] = true
+		}
+		if holdAll {
+			holdShrink[id] = true
 		}
 		if s.activeLocked(id, now) {
 			entry := state.Instances[id]
@@ -201,7 +226,6 @@ func (s *Server) balanceOnce() {
 		}
 	}
 	s.mu.Unlock()
-	holdShrink := make(map[string]bool)
 	for id, until := range s.memory.pause {
 		if now.Before(until) {
 			holdShrink[id] = true
@@ -294,6 +318,30 @@ func (s *Server) activeLocked(id string, now time.Time) bool {
 		}
 	}
 	return !last.IsZero() && now.Sub(last) < memoryActiveWindow
+}
+
+// holdMemoryShrink pauses elastic shrinking of id (or every owned VM when id is
+// empty) until now + d while still allowing growth. Safe to call when elastic
+// memory is disabled.
+func (s *Server) holdMemoryShrink(id string, d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	until := s.now().Add(d)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id == "" {
+		if until.After(s.memory.shrinkHoldAll) {
+			s.memory.shrinkHoldAll = until
+		}
+		return
+	}
+	if s.memory.shrinkHold == nil {
+		s.memory.shrinkHold = make(map[string]time.Time)
+	}
+	if until.After(s.memory.shrinkHold[id]) {
+		s.memory.shrinkHold[id] = until
+	}
 }
 
 // memoryReserve is the host memory kept for the host itself.

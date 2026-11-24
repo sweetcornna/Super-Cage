@@ -55,9 +55,14 @@ all: agent-vm
 
 # Claude Cage ships a separate entry point with a mandatory proxy profile.
 cage: cage-ui assets tailnet-assets
+	@test -f "$(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH).gz" || { echo "ERROR: missing $(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH).gz for GOARCH=$(GOARCH)" >&2; exit 1; }
 	$(GO_BUILD) -o _output/bin/cage$(EXE) ./cmd/cage
 ifeq ($(GOOS),darwin)
 	codesign -f --entitlements third_party/lima/vz.entitlements -s - _output/bin/cage
+endif
+ifeq ($(GOOS)/$(GOARCH),$(shell $(GO) env GOHOSTOS)/$(shell $(GO) env GOHOSTARCH))
+	./_output/bin/cage$(EXE) verify-vm-assets
+	./_output/bin/cage$(EXE) verify-web-assets
 endif
 	$(MAKE) cage-attach STAMP=$(STAMP)
 
@@ -108,14 +113,23 @@ ifeq ($(GOOS),darwin)
 	codesign -f -v --entitlements third_party/lima/vz.entitlements -s - _output/bin/limactl
 endif
 
-# Build each guest helper for the OS in which it will run.
+# Build each guest helper for the OS in which it will run. Remove stale Linux
+# guest-agent archives from other architectures first so cross-builds never
+# embed or mistake the host architecture's helper for the target's.
 assets:
+	rm -f $(ASSETS)/lima-guestagent.Linux-*.gz $(ASSETS)/lima-guestagent.Linux-*
 	CGO_ENABLED=0 GOOS=linux GOARCH=$(GOARCH) $(GO) build -trimpath \
 		-ldflags "-s -w -X github.com/lima-vm/lima/v2/pkg/version.Version=$(LIMA_VERSION)" \
 		-o $(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH) github.com/lima-vm/lima/v2/cmd/lima-guestagent
 	gzip -9 -n -f $(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH)
+	@want=""; case "$(GOARCH)" in amd64) want="3e 00" ;; arm64) want="b7 00" ;; esac; \
+	if [ -n "$$want" ]; then \
+		got=$$(gzip -dc "$(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH).gz" | dd bs=1 skip=18 count=2 2>/dev/null | od -An -tx1 | tr -s ' ' | sed 's/^ //; s/ $$//'); \
+		test "$$got" = "$$want" || { echo "ERROR: $(ASSETS)/lima-guestagent.Linux-$(GUEST_ARCH).gz ELF e_machine=$$got, want $$want for GOARCH=$(GOARCH)" >&2; exit 1; }; \
+	fi
 ifeq ($(GOOS),darwin)
 	mkdir -p $(ASSETS)/Darwin
+	rm -f $(ASSETS)/Darwin/lima-guestagent.Darwin-*.gz $(ASSETS)/Darwin/lima-guestagent.Darwin-*
 	CGO_ENABLED=0 GOOS=darwin GOARCH=$(GOARCH) $(GO) build -trimpath -tags $(TAGS) \
 		-ldflags "-s -w -X github.com/lima-vm/lima/v2/pkg/version.Version=$(LIMA_VERSION)" \
 		-o $(ASSETS)/Darwin/lima-guestagent.Darwin-$(GUEST_ARCH) github.com/lima-vm/lima/v2/cmd/lima-guestagent

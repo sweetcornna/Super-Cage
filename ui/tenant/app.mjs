@@ -272,6 +272,7 @@ const FALLBACK_MESSAGES = Object.freeze({
   bad_response: "门户服务返回了无法识别的响应。",
   server_error: "门户服务暂时出错，请稍后重试。",
   aborted: "请求已取消。",
+  update_in_progress: "已有更新任务正在执行，请等待完成。",
 });
 
 function codeForStatus(status) {
@@ -406,6 +407,9 @@ export function createApi({ fetch: fetchImpl = globalThis.fetch?.bind(globalThis
       isValidVmId(id)
         ? call("POST", `/api/tenant/vms/${id}/open`, { ...options, body: {} })
         : Promise.reject(new ApiError({ status: 404, code: "vm_not_found" })),
+    updateStatus: (options) => call("GET", "/api/tenant/update", options),
+    checkUpdate: (options) => call("POST", "/api/tenant/update/check", { ...options, body: {} }),
+    applyUpdate: (body = {}, options = {}) => call("POST", "/api/tenant/update/apply", { ...options, body }),
   };
 }
 
@@ -483,6 +487,20 @@ export function createSelectionStore({
 
 const DEFAULT_AUTH = Object.freeze({ mode: "login", busy: false, error: null, notice: null });
 const CLOSED_CREATE = Object.freeze({ open: false, seq: 0, busy: false, error: null });
+const INITIAL_UPDATE = Object.freeze({
+  open: false,
+  seq: 0,
+  loading: false,
+  checking: false,
+  applying: false,
+  reconnecting: false,
+  reloading: false,
+  targetVersion: "",
+  data: null,
+  error: null,
+});
+export const UPDATE_POLL_MS = 1500;
+const UPDATE_RECONNECT_MAX_FAILURES = 60;
 
 function errorView(error) {
   return {
@@ -497,6 +515,7 @@ function signedOutState(auth = DEFAULT_AUTH) {
     phase: "signed-out",
     bootError: null,
     user: null,
+    canUpdate: false,
     auth: { ...DEFAULT_AUTH, ...auth },
     vms: [],
     limit: null,
@@ -505,6 +524,7 @@ function signedOutState(auth = DEFAULT_AUTH) {
     selectedId: null,
     target: null,
     create: CLOSED_CREATE,
+    update: INITIAL_UPDATE,
     logout: { busy: false },
     banner: null,
   };
@@ -541,6 +561,8 @@ export function createPortal({
   warmPollMs = WARM_POLL_MS,
   frameSlowMs = FRAME_SLOW_MS,
   checkGapMs = SESSION_CHECK_GAP_MS,
+  updatePollMs = UPDATE_POLL_MS,
+  onReload = null,
 } = {}) {
   if (!api) throw new Error("createPortal 需要 api");
   let registrationClosed = false;
@@ -560,9 +582,13 @@ export function createPortal({
   let listAbort = null;
   let authAbort = null;
   let checkAbort = null;
+  let updateAbort = null;
   let createSeq = 0;
+  let updateSeq = 0;
   let pollTimer = null;
   let frameTimer = null;
+  let updateTimer = null;
+  let updateReconnectFailures = 0;
   let pollDeferred = false;
   let openInFlight = false;
   let pendingRestore = false;
@@ -600,6 +626,11 @@ export function createPortal({
     frameTimer = null;
   }
 
+  function clearUpdateTimer() {
+    if (updateTimer !== null) timers.clearTimeout(updateTimer);
+    updateTimer = null;
+  }
+
   function cancelTarget() {
     targetGen += 1;
     targetAbort?.abort();
@@ -612,6 +643,10 @@ export function createPortal({
   function cancelSession() {
     sessionGen += 1;
     cancelTarget();
+    clearUpdateTimer();
+    updateAbort?.abort();
+    updateAbort = null;
+    updateReconnectFailures = 0;
     listAbort?.abort();
     listAbort = null;
     authAbort?.abort();
@@ -650,7 +685,7 @@ export function createPortal({
       if (gen !== sessionGen) return;
       const user = normalizeUser(data?.user);
       if (!user) throw new ApiError({ status: 200, code: "bad_response" });
-      signedIn(user, { banner: announce ? switchedBanner(previous, user) : null });
+      signedIn(user, { banner: announce ? switchedBanner(previous, user) : null, canUpdate: data?.self_update === true });
     } catch (error) {
       if (gen !== sessionGen || error?.aborted) return;
       if (error?.code === "unauthenticated") {
@@ -699,7 +734,7 @@ export function createPortal({
       if (gen !== sessionGen || seq !== checkSeq) return;
       const user = normalizeUser(data?.user);
       if (!user || (shown && user.id === shown.id)) return;
-      signedIn(user, { banner: switchedBanner(shown, user) });
+      signedIn(user, { banner: switchedBanner(shown, user), canUpdate: data?.self_update === true });
     } catch (error) {
       if (checkAbort === controller) checkAbort = null;
       if (gen !== sessionGen || seq !== checkSeq || error?.aborted) return;
@@ -709,12 +744,13 @@ export function createPortal({
     }
   }
 
-  function signedIn(user, { banner = null } = {}) {
+  function signedIn(user, { banner = null, canUpdate = false } = {}) {
     cancelSession();
     localAdds.clear();
-    set({ ...signedOut(), phase: "signed-in", user, listStatus: "loading", banner });
+    set({ ...signedOut(), phase: "signed-in", user, canUpdate: Boolean(canUpdate), listStatus: "loading", banner });
     pendingRestore = true;
     void refreshList();
+    if (canUpdate) void loadUpdateStatus({ silent: true });
   }
 
   function setAuth(patch) {
@@ -758,7 +794,7 @@ export function createPortal({
       if (gen !== sessionGen) return;
       const user = normalizeUser(data?.user);
       if (!user) throw new ApiError({ status: 200, code: "bad_response" });
-      signedIn(user);
+      signedIn(user, { canUpdate: data?.self_update === true });
       notifyOtherTabs();
     } catch (error) {
       if (gen !== sessionGen || error?.aborted) return;
@@ -1127,6 +1163,170 @@ export function createPortal({
     }
   }
 
+  /* ---- 服务器自更新（仅管理员可用） ---- */
+
+  function setUpdate(patch) {
+    set({ update: { ...state.update, ...patch } });
+  }
+
+  function scheduleUpdatePoll(gen) {
+    clearUpdateTimer();
+    updateTimer = timers.setTimeout(() => {
+      updateTimer = null;
+      if (gen !== sessionGen || !state.canUpdate) return;
+      void pollUpdate(gen);
+    }, updatePollMs);
+  }
+
+  function applyUpdatePayload(gen, data) {
+    if (!data || typeof data !== "object") return;
+    const job = data.job && typeof data.job === "object" ? data.job : null;
+    const target = state.update.targetVersion || job?.target_version || "";
+    const restarting = job?.phase === "restarting";
+    const wasReconnecting = state.update.reconnecting;
+    const cameBackUpdated =
+      wasReconnecting &&
+      !job?.running &&
+      (!target || data.current_version === target || job?.phase === "idle" || job?.phase === "done");
+    if (cameBackUpdated) {
+      clearUpdateTimer();
+      updateReconnectFailures = 0;
+      setUpdate({
+        loading: false,
+        checking: false,
+        applying: false,
+        reconnecting: false,
+        reloading: true,
+        data,
+        error: null,
+      });
+      if (typeof onReload === "function") onReload(data.current_version);
+      return;
+    }
+    updateReconnectFailures = 0;
+    const reconnecting = wasReconnecting || restarting;
+    setUpdate({
+      loading: false,
+      checking: false,
+      applying: false,
+      reconnecting,
+      targetVersion: target || state.update.targetVersion,
+      data,
+      error: null,
+    });
+    if (job?.running || reconnecting) scheduleUpdatePoll(gen);
+    else clearUpdateTimer();
+  }
+
+  async function loadUpdateStatus({ silent = false } = {}) {
+    if (state.phase !== "signed-in" || !state.canUpdate || state.logout.busy) return;
+    const gen = sessionGen;
+    updateAbort?.abort();
+    const controller = new AbortController();
+    updateAbort = controller;
+    if (!silent) setUpdate({ loading: true, error: null });
+    try {
+      const { data } = await api.updateStatus(expected({ signal: controller.signal }));
+      if (gen !== sessionGen) return;
+      if (updateAbort === controller) updateAbort = null;
+      applyUpdatePayload(gen, data);
+    } catch (error) {
+      if (gen !== sessionGen || error?.aborted) return;
+      if (updateAbort === controller) updateAbort = null;
+      if (handleSessionError(error)) return;
+      if (!silent) setUpdate({ loading: false, error: errorView(error) });
+    }
+  }
+
+  async function pollUpdate(gen) {
+    if (gen !== sessionGen || state.phase !== "signed-in" || !state.canUpdate) return;
+    const controller = new AbortController();
+    updateAbort = controller;
+    try {
+      const { data } = await api.updateStatus(expected({ signal: controller.signal }));
+      if (gen !== sessionGen) return;
+      if (updateAbort === controller) updateAbort = null;
+      applyUpdatePayload(gen, data);
+    } catch (error) {
+      if (gen !== sessionGen || error?.aborted) return;
+      if (updateAbort === controller) updateAbort = null;
+      // 重启后网关会话保存在内存中，新进程启动时可能返回 401：此时直接刷新门户页进入新版本。
+      if (state.update.reconnecting && error?.code === "unauthenticated") {
+        clearUpdateTimer();
+        setUpdate({ reconnecting: false, reloading: true, error: null });
+        if (typeof onReload === "function") onReload(state.update.targetVersion);
+        return;
+      }
+      const transient = error?.code === "network_error" || error?.code === "server_error" || error?.code === "runtime_unavailable" || error?.status === 502 || error?.status === 503;
+      if ((state.update.reconnecting || state.update.data?.job?.running) && transient) {
+        updateReconnectFailures += 1;
+        if (updateReconnectFailures <= UPDATE_RECONNECT_MAX_FAILURES) {
+          setUpdate({ reconnecting: true, error: null });
+          scheduleUpdatePoll(gen);
+          return;
+        }
+      }
+      if (handleSessionError(error)) return;
+      clearUpdateTimer();
+      setUpdate({ reconnecting: false, error: errorView(error) });
+    }
+  }
+
+  function openUpdate() {
+    if (state.phase !== "signed-in" || !state.canUpdate || state.logout.busy) return;
+    const seq = state.update.open ? state.update.seq : ++updateSeq;
+    setUpdate({ open: true, seq, error: null });
+    void loadUpdateStatus();
+  }
+
+  function closeUpdate() {
+    if (!state.update.open) return;
+    if (state.update.applying || state.update.reconnecting || state.update.reloading) return;
+    setUpdate({ open: false });
+  }
+
+  async function checkUpdate() {
+    if (state.phase !== "signed-in" || !state.canUpdate || state.update.checking || state.update.applying || state.update.data?.job?.running) return;
+    const gen = sessionGen;
+    updateAbort?.abort();
+    const controller = new AbortController();
+    updateAbort = controller;
+    setUpdate({ checking: true, error: null });
+    try {
+      const { data } = await api.checkUpdate(expected({ signal: controller.signal }));
+      if (gen !== sessionGen) return;
+      if (updateAbort === controller) updateAbort = null;
+      applyUpdatePayload(gen, data);
+    } catch (error) {
+      if (gen !== sessionGen || error?.aborted) return;
+      if (updateAbort === controller) updateAbort = null;
+      if (handleSessionError(error)) return;
+      setUpdate({ checking: false, error: errorView(error) });
+    }
+  }
+
+  async function applyUpdate(version = "") {
+    if (state.phase !== "signed-in" || !state.canUpdate || state.update.applying || state.update.reconnecting || state.update.data?.job?.running) return;
+    const gen = sessionGen;
+    const target = String(version || state.update.data?.latest_version || "").trim();
+    updateAbort?.abort();
+    const controller = new AbortController();
+    updateAbort = controller;
+    setUpdate({ applying: true, reconnecting: false, reloading: false, targetVersion: target, error: null });
+    try {
+      const body = target ? { version: target } : {};
+      const { data } = await api.applyUpdate(body, expected({ signal: controller.signal }));
+      if (gen !== sessionGen) return;
+      if (updateAbort === controller) updateAbort = null;
+      applyUpdatePayload(gen, data);
+    } catch (error) {
+      if (gen !== sessionGen || error?.aborted) return;
+      if (updateAbort === controller) updateAbort = null;
+      if (handleSessionError(error)) return;
+      setUpdate({ applying: false, error: errorView(error) });
+    }
+  }
+
   function dismissBanner() {
     if (state.banner) set({ banner: null });
   }
@@ -1155,6 +1355,10 @@ export function createPortal({
     openCreate,
     closeCreate,
     createVm,
+    openUpdate,
+    closeUpdate,
+    checkUpdate,
+    applyUpdate,
     dismissBanner,
   };
 }
@@ -1262,6 +1466,7 @@ const ICONS = {
   check: [{ c: [12, 12, 10] }, "m9 12 2 2 4-4"],
   close: ["M18 6 6 18", "m6 6 12 12"],
   chevron: ["m9 18 6-6-6-6"],
+  download: ["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4", "m7 10 5 5 5-5", "M12 15V3"],
 };
 
 // Hand-drawn art in the brush hand of the Super Cage mark: filled outlines with thick-thin strokes, ink in
@@ -1689,6 +1894,12 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     const avatar = h("span", { class: "avatar", "aria-hidden": "true" });
     const userLabel = h("span", { class: "user-label" });
     const userChip = h("span", { class: "user-chip", title: "当前门户账户" }, [avatar, userLabel]);
+    const updateDot = h("span", { class: "update-dot", "aria-hidden": "true", hidden: true });
+    const updateButton = h("button", { type: "button", class: "icon-btn update-btn", "aria-label": "Super Cage 更新", title: "Super Cage 更新", hidden: true, onclick: () => portal.openUpdate() }, [
+      icon("download"),
+      h("span", { class: "btn-text", text: "更新" }),
+      updateDot,
+    ]);
     const logoutButton = h("button", { type: "button", class: "icon-btn logout-btn", onclick: () => portal.logout() }, [
       icon("logout"),
       h("span", { class: "btn-text", text: "退出" }),
@@ -1721,6 +1932,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     const live = h("p", { class: "sr-only", "aria-live": "polite" });
 
     const dialog = buildCreateDialog();
+    const updateDialog = buildUpdateDialog();
     const barRule = h("span", { class: "bar-rule", "aria-hidden": "true" });
     const switcher = h("nav", { class: "switcher", "aria-label": "虚拟机切换" }, [tablist, addButton]);
 
@@ -1743,13 +1955,14 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         barRule,
         switcher,
         contextBar,
-        h("div", { class: "account" }, [themeButton(), userChip, logoutButton]),
+        h("div", { class: "account" }, [updateButton, themeButton(), userChip, logoutButton]),
       ]),
       scrim,
       banner,
       stage,
       live,
       dialog.el,
+      updateDialog.el,
     ]);
 
     let mountedFrame = null;
@@ -1775,6 +1988,13 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       const { type, vm_id: id } = event.data || {};
       if (type === "cage:virtual-machines-changed") {
         void portal.refreshList();
+        return;
+      }
+      if (type === "cage:open-server-update") {
+        if (current.canUpdate) {
+          setPortalBar(false);
+          portal.openUpdate();
+        }
         return;
       }
       if (phoneMessage(frame, event.data || {})) return;
@@ -2329,6 +2549,20 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       logoutButton.setAttribute("title", logoutLabel);
       const full = state.limit !== null && state.vms.length >= state.limit;
       addButton.setAttribute("title", full ? `已达到 ${state.limit} 台上限` : "新建虚拟机");
+      updateButton.hidden = !state.canUpdate;
+      const updateData = state.update?.data;
+      const hasNew = Boolean(updateData?.update_available);
+      const runningUpdate = Boolean(updateData?.job?.running || state.update?.reconnecting);
+      updateDot.hidden = !(hasNew || runningUpdate);
+      updateButton.dataset.available = String(hasNew);
+      updateButton.dataset.running = String(runningUpdate);
+      const updateTitle = runningUpdate
+        ? "Super Cage 正在更新…"
+        : hasNew && updateData?.latest_version
+          ? `发现新版本 v${updateData.latest_version}（点击更新）`
+          : "检查并更新 Super Cage";
+      updateButton.setAttribute("title", updateTitle);
+      updateButton.setAttribute("aria-label", updateTitle);
       // With no VMs yet the empty overview carries the create action; a lone "+" in the bar would only repeat it.
       switcher.hidden = !state.vms.length;
       barRule.hidden = !state.vms.length;
@@ -2342,6 +2576,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
       updateOverlay(state);
       updateTicker(state);
       dialog.update(state);
+      updateDialog.update(state);
       announce(state);
       settleParkedFocus(state);
     }
@@ -2379,6 +2614,7 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
         if (ticker !== null) win.clearInterval(ticker);
         ticker = null;
         dialog.destroy();
+        updateDialog.destroy();
       },
     };
   }
@@ -2483,6 +2719,150 @@ export function mountPortal(root, portal, { doc = root.ownerDocument, win = doc.
     };
   }
 
+  function buildUpdateDialog() {
+    const ids = { title: uid("update-title"), lead: uid("update-lead") };
+    const heading = h("h2", { id: ids.title, class: "dialog-title", text: "Super Cage 服务器更新" });
+    const lead = setProse(h("p", { id: ids.lead, class: "dialog-lead" }), "直接从门户检查官方发行版，校验后一键更新网关、门户界面和运行中的工作区组件。");
+    const currentValue = h("strong", { class: "mono" });
+    const latestValue = h("strong", { class: "mono" });
+    const checkedMeta = h("p", { class: "update-meta" });
+    const summary = h("dl", { class: "update-summary" }, [
+      h("div", {}, [h("dt", { text: "当前版本" }), h("dd", {}, currentValue)]),
+      h("div", {}, [h("dt", { text: "最新发行版" }), h("dd", {}, latestValue)]),
+    ]);
+    const notesText = h("pre", { class: "update-notes" });
+    const releaseAnchor = h("a", { class: "update-link", target: "_blank", rel: "noopener noreferrer", text: "查看 GitHub 发行说明" });
+    const notesBox = h("div", { class: "update-notes-box", hidden: true }, [notesText, releaseAnchor]);
+    const caution = note("update-caution", "info", "note");
+    caution.set("更新时会自动备份并校验 SHA-256，安全停止运行中的嵌套环境后重启工作区与门户服务；项目文件与账号数据会完整保留。");
+    const progressEl = h("progress", { class: "update-progress", max: "100", value: "0" });
+    const phaseText = h("p", { class: "update-phase", role: "status" });
+    const wsList = h("ul", { class: "update-ws-list", hidden: true });
+    const logPre = h("pre", { class: "update-log", hidden: true });
+    const progressBox = h("div", { class: "update-progress-box", hidden: true }, [progressEl, phaseText, wsList, logPre]);
+    const errNote = note("form-error", "alert", "alert");
+    const closeBtn = h("button", { type: "button", class: "btn", onclick: () => portal.closeUpdate() }, "关闭");
+    const checkBtn = h("button", { type: "button", class: "btn", onclick: () => portal.checkUpdate() }, "检查更新");
+    const applyBtn = h("button", { type: "button", class: "btn btn-clay", onclick: () => portal.applyUpdate() }, "立即更新");
+    const content = h("div", { class: "dialog-form update-form" }, [
+      h("div", { class: "dialog-head" }, [heading, lead]),
+      summary,
+      checkedMeta,
+      notesBox,
+      caution.el,
+      progressBox,
+      errNote.el,
+      h("div", { class: "dialog-actions" }, [h("div", { class: "actions" }, [closeBtn, checkBtn, applyBtn])]),
+    ]);
+    const el = h("dialog", { class: "dialog update-dialog", "aria-labelledby": ids.title, "aria-describedby": ids.lead }, [content]);
+    el.addEventListener("cancel", (event) => {
+      event.preventDefault();
+      portal.closeUpdate();
+    });
+    el.addEventListener("close", () => {
+      if (el.open) return;
+      const update = portal.getState().update;
+      if (update.open && update.seq === shownSeq) portal.closeUpdate();
+    });
+
+    let shownSeq = 0;
+
+    function show(seq) {
+      if (shownSeq !== seq) shownSeq = seq;
+      if (!el.open) {
+        if (typeof el.showModal === "function") el.showModal();
+        else el.setAttribute("open", "");
+      }
+    }
+
+    function hide() {
+      if (!el.open) return;
+      if (typeof el.close === "function") el.close();
+      else el.removeAttribute("open");
+    }
+
+    return {
+      el,
+      update(state) {
+        const u = state.update;
+        if (!u?.open || !state.canUpdate) {
+          hide();
+          return;
+        }
+        show(u.seq);
+        const data = u.data;
+        const job = data?.job;
+        const busy = Boolean(u.applying || u.reconnecting || u.reloading || job?.running);
+        const cur = data?.current_version ? `v${data.current_version}` : u.loading ? "读取中…" : "未知";
+        const arch = data?.arch ? ` · linux/${data.arch}` : "";
+        const commit = data?.current_commit ? ` (${data.current_commit.slice(0, 7)})` : "";
+        currentValue.textContent = `${cur}${arch}${commit}`;
+        if (u.checking) {
+          latestValue.textContent = "正在检查…";
+        } else if (data?.latest_version) {
+          latestValue.textContent = data.update_available ? `v${data.latest_version}（可更新）` : `v${data.latest_version}（已是最新）`;
+        } else if (data?.check_error) {
+          latestValue.textContent = "检查失败";
+        } else {
+          latestValue.textContent = "尚未检查";
+        }
+        const checkedAt = data?.checked_at ? formatCreated(data.checked_at) : "";
+        checkedMeta.textContent = checkedAt ? `上次检查：${checkedAt}` : "点击“检查更新”核对最新官方发行版。";
+        const safeLink = externalLink(data?.release_url);
+        const notes = cleanText(data?.release_notes || "", 2000);
+        notesBox.hidden = !(notes || safeLink);
+        notesText.textContent = notes;
+        notesText.hidden = !notes;
+        releaseAnchor.hidden = !safeLink;
+        if (safeLink) releaseAnchor.setAttribute("href", safeLink.href);
+
+        const showProgress = Boolean(u.applying || u.reconnecting || u.reloading || (job && job.phase && job.phase !== "idle"));
+        progressBox.hidden = !showProgress;
+        if (showProgress) {
+          const pct = u.reloading || u.reconnecting ? 100 : Math.max(0, Math.min(100, Number(job?.progress || 0)));
+          progressEl.setAttribute("value", String(pct));
+          if (u.reloading) {
+            phaseText.textContent = `已更新至 v${data?.current_version || u.targetVersion}，正在刷新门户…`;
+          } else if (u.reconnecting) {
+            phaseText.textContent = "网关服务正在平滑重启，等待自动重连…";
+          } else {
+            phaseText.textContent = job?.message || "正在执行更新…";
+          }
+          const workspaces = Array.isArray(job?.workspaces) ? job.workspaces : [];
+          wsList.hidden = workspaces.length === 0;
+          wsList.replaceChildren(...workspaces.map((ws) => {
+            const label = { updated: "已更新", skipped: "已跳过", failed: "失败" }[ws.status] || ws.status;
+            return h("li", { "data-status": ws.status }, [
+              h("strong", { text: cleanText(ws.name, 64) || ws.id }),
+              h("span", { text: ` · ${label}${ws.detail ? `（${cleanText(ws.detail, 200)}）` : ""}` }),
+            ]);
+          }));
+          const logs = Array.isArray(job?.logs) ? job.logs : [];
+          logPre.hidden = logs.length === 0;
+          logPre.textContent = logs.join("\n");
+          logPre.scrollTop = logPre.scrollHeight;
+        }
+
+        const errText = u.error?.message || data?.check_error || (job?.phase === "error" ? job.error : "") || "";
+        errNote.set(errText, u.error?.detail || "");
+
+        setBusy(closeBtn, busy);
+        setBusy(checkBtn, busy || u.checking);
+        checkBtn.textContent = u.checking ? "检查中…" : "检查更新";
+        const canApply = Boolean(data?.update_available && data?.latest_version && !busy && !u.checking);
+        setBusy(applyBtn, !canApply);
+        applyBtn.textContent = busy
+          ? u.reconnecting
+            ? "等待重启…"
+            : "更新中…"
+          : data?.update_available && data?.latest_version
+            ? `立即更新至 v${data.latest_version}`
+            : "已是最新版本";
+      },
+      destroy: hide,
+    };
+  }
+
   const SCREENS = {
     booting: buildBooting,
     "session-error": buildSessionError,
@@ -2571,6 +2951,7 @@ export function start(doc = globalThis.document, win = globalThis) {
     location: win.location,
     isHidden: () => doc.visibilityState === "hidden",
     broadcast,
+    onReload: () => win.location.reload(),
   });
   trackViewport(doc, win);
   mountPortal(root, portal, { doc, win, theme });

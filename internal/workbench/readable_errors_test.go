@@ -78,3 +78,42 @@ func TestFileServiceRetainsKnownRejectionAndHidesUnknownBody(t *testing.T) {
 		t.Fatalf("unsafe unknown response: %v", unknown)
 	}
 }
+
+func TestStartupExecutionFailuresExplainKnownVMCauses(t *testing.T) {
+	cause := errors.New("exit status 1")
+	cases := []struct {
+		name, output, want string
+	}{
+		{
+			name:   "missing lima guest agent",
+			output: "Error: Failed to start VM 'cage'.\n--- Lima's output ---\nthis agent-vm was built without Lima's guest agent: build it with make token=secret-value\nFull log: /home/cage/.claude-cage/state/lima/cage/ha.stderr.log\n",
+			want:   "缺少匹配此架构的 Lima 客机组件",
+		},
+		{
+			name:   "unbundled arch guest agent",
+			output: "Error: Failed to start VM 'cage'.\n--- Lima's output ---\nthis build does not include the Lima guest agent for Linux/x86_64\n",
+			want:   "缺少匹配此架构的 Lima 客机组件",
+		},
+		{
+			name:   "kvm unavailable",
+			output: "Error: /dev/kvm is not accessible; Super Cage requires KVM\n",
+			want:   "KVM 硬件虚拟化",
+		},
+		{
+			name:   "hostagent exited",
+			output: "Error: Failed to start VM 'cage'.\n--- Lima's output ---\nhost agent process has exited\n",
+			want:   "虚拟机启动进程提前退出",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := executionFailure("启动环境", cause, tc.output)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("got %v, want substring %q", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "secret-value") || strings.Contains(err.Error(), "未返回可识别的原因") {
+				t.Fatalf("unexpected error formatting: %v", err)
+			}
+		})
+	}
+}

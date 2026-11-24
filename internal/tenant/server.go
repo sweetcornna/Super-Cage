@@ -56,6 +56,9 @@ type Config struct {
 	MemoryInterval time.Duration
 	MemoryReserve  int64
 	MemoryMin      int64
+	// SelfUpdate configures optional admin-gated one-click updates from the
+	// web portal. Disabled unless Explicitly enabled with admin usernames.
+	SelfUpdate SelfUpdateConfig
 }
 
 type Server struct {
@@ -82,6 +85,7 @@ type Server struct {
 	sessionTTL    time.Duration
 	cooling       cooling
 	memory        memoryBalancing
+	selfUpdate    *selfUpdater
 }
 
 func NewServer(cfg Config) (*Server, error) {
@@ -100,6 +104,10 @@ func NewServer(cfg Config) (*Server, error) {
 	}
 	if (cfg.MemoryInterval != 0 && (cfg.MemoryInterval < 5*time.Second || cfg.MemoryInterval > 10*time.Minute)) || cfg.MemoryReserve < 0 || (cfg.MemoryMin != 0 && cfg.MemoryMin < MinimumMemory) {
 		return nil, errors.New("memory-interval must be 0 or between 5s and 10m, memory-reserve must not be negative, and memory-min must be at least 1GiB")
+	}
+	updater, err := newSelfUpdater(cfg.SelfUpdate, cfg.Runtime)
+	if err != nil {
+		return nil, err
 	}
 	systems, err := systemIndex(cfg.Systems)
 	if err != nil {
@@ -131,6 +139,7 @@ func NewServer(cfg Config) (*Server, error) {
 		startFailed: make(map[string]bool),
 		startSlots:  make(chan struct{}, cfg.ParallelStarts), hashSlots: make(chan struct{}, 4),
 		now: time.Now, sessionTTL: 24 * time.Hour,
+		selfUpdate: updater,
 	}
 	if len(cfg.Systems) != 0 {
 		server.defaultSystem = cfg.Systems[0]
@@ -339,6 +348,12 @@ func (s *Server) portal(w http.ResponseWriter, r *http.Request) {
 		s.listVMs(w, r)
 	case "POST /api/tenant/vms":
 		s.createVM(w, r)
+	case "GET /api/tenant/update":
+		s.handleGetSelfUpdate(w, r)
+	case "POST /api/tenant/update/check":
+		s.handleCheckSelfUpdate(w, r)
+	case "POST /api/tenant/update/apply":
+		s.handleApplySelfUpdate(w, r)
 	default:
 		const prefix = "/api/tenant/vms/"
 		if id, ok := strings.CutPrefix(r.URL.Path, prefix); ok && r.Method == http.MethodPost && strings.HasSuffix(id, "/open") {

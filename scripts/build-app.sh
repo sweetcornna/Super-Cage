@@ -50,6 +50,7 @@ if [[ "$(uname -m)" == arm64 ]]; then
 else
   make cage VERSION="$version"
 fi
+_output/bin/cage verify-vm-assets
 _output/bin/cage verify-web-assets
 build_stage="$(mktemp -d "$PWD/_output/app-build.XXXXXX")"
 install_stage=''

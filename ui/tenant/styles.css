@@ -1844,6 +1844,159 @@ html:has(.shell[data-phone-ui="true"]) body {
   min-height: 44px;
 }
 
+/* ---- Server self-update (admin only) ---- */
+
+.update-btn {
+  position: relative;
+}
+
+.update-btn[data-available="true"],
+.update-btn[data-running="true"] {
+  color: var(--clay-ink);
+}
+
+.update-dot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--clay);
+  box-shadow: 0 0 0 2px var(--chrome);
+}
+
+.update-btn[data-running="true"] .update-dot {
+  animation: breathe 1.6s ease-in-out infinite;
+}
+
+.update-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+
+.update-form {
+  gap: 14px;
+}
+
+.update-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--soft);
+}
+
+.update-summary > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.update-summary dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.update-summary dd {
+  margin: 0;
+  font-size: 13.5px;
+  overflow-wrap: anywhere;
+}
+
+.update-meta {
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+.update-notes-box {
+  display: grid;
+  gap: 6px;
+}
+
+.update-notes {
+  margin: 0;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: 12.5px/1.55 var(--sans);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.update-link {
+  justify-self: start;
+  color: var(--clay-ink);
+  font-size: 12.5px;
+  font-weight: 500;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.update-caution .icon {
+  color: var(--clay-ink);
+}
+
+.update-progress-box {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+}
+
+.update-progress {
+  width: 100%;
+  height: 8px;
+  border: 0;
+  border-radius: 999px;
+  overflow: hidden;
+  accent-color: var(--clay);
+}
+
+.update-phase {
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.update-ws-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+.update-ws-list li[data-status="updated"] {
+  color: var(--green);
+}
+
+.update-ws-list li[data-status="failed"] {
+  color: var(--error);
+}
+
+.update-log {
+  margin: 0;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--soft);
+  color: var(--muted);
+  font: 11.5px/1.5 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Dialogs rise from the bottom edge on phones and stay above the keyboard. */
 @media (max-width: 640px) {
   .dialog {
