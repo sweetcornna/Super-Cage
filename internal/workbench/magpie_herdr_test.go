@@ -501,7 +501,7 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 	s := testServer(t)
 	s.ready = true
 
-	// Default status: disabled, takeover_terminals=true, theme="default".
+	// Default status: disabled, takeover_terminals=true, no theme (the TUI's).
 	w := request(s, "GET", "/api/herdr", "", "", true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("GET /api/herdr: %d %s", w.Code, w.Body.String())
@@ -510,16 +510,16 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil {
 		t.Fatal(err)
 	}
-	if st["enabled"] != false || st["takeover_terminals"] != true || st["theme"] != "default" {
+	if _, theme := st["theme"]; st["enabled"] != false || st["takeover_terminals"] != true || theme {
 		t.Fatalf("unexpected default herdr status: %+v", st)
 	}
 	if st["installed"] != false || st["server_running"] != false || st["supports_managed"] != true {
 		t.Fatalf("unexpected default herdr runtime fields: %+v", st)
 	}
 
-	// Reject invalid theme name.
-	if w = request(s, "POST", "/api/herdr/config", s.origin, `{"theme":"unknown-theme"}`, true); w.Code != http.StatusBadRequest {
-		t.Fatalf("invalid herdr theme accepted: %d %s", w.Code, w.Body.String())
+	// A theme from an older client is accepted and ignored.
+	if w = request(s, "POST", "/api/herdr/config", s.origin, `{"theme":"tokyo-night"}`, true); w.Code != http.StatusOK || strings.Contains(w.Body.String(), "theme") {
+		t.Fatalf("old client's herdr theme: %d %s", w.Code, w.Body.String())
 	}
 
 	// Disabled start must fail with 409 Conflict; unknown action must 404.
@@ -530,12 +530,12 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 		t.Fatalf("unknown herdr action status = %d, want 404", w.Code)
 	}
 
-	// Valid config updates (enable, theme, takeover_terminals toggle).
-	w = request(s, "POST", "/api/herdr/config", s.origin, `{"enabled":true,"takeover_terminals":false,"theme":"tokyo-night"}`, true)
+	// Valid config updates (enable, takeover_terminals toggle).
+	w = request(s, "POST", "/api/herdr/config", s.origin, `{"enabled":true,"takeover_terminals":false}`, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("valid herdr config rejected: %d %s", w.Code, w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), `"enabled":true`) || !strings.Contains(w.Body.String(), `"takeover_terminals":false`) || !strings.Contains(w.Body.String(), `"theme":"tokyo-night"`) {
+	if !strings.Contains(w.Body.String(), `"enabled":true`) || !strings.Contains(w.Body.String(), `"takeover_terminals":false`) {
 		t.Fatalf("unexpected saved herdr config response: %s", w.Body.String())
 	}
 
@@ -614,9 +614,12 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 	hostileProject := `proj'$(touch /tmp/pwn)`
 	hostileTab := `Claude #1; echo pwn`
 	hostileInner := `cd '/proj' && eval "echo 'hi'" ; $(false)`
-	linuxAttach := s.herdrAttachScript(hostileWorkspace, hostileProject, hostileTab, "claude", hostileInner)
+	linuxAttach := s.herdrAttachScript(herdrAttach{Mode: "create", Name: "cage-0123456789abcdef", Workspace: hostileWorkspace,
+		Project: hostileProject, Title: hostileTab, Kind: "claude", Inner: hostileInner})
 	for _, want := range []string{
 		"exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 ",
+		"CAGE_HERDR_MODE=create ",
+		"CAGE_HERDR_NAME=cage-0123456789abcdef ",
 		"CAGE_HERDR_WORKSPACE=" + shellescape.Quote(hostileWorkspace),
 		"CAGE_HERDR_PROJECT_LABEL=" + shellescape.Quote(hostileProject),
 		"CAGE_HERDR_TAB_LABEL=" + shellescape.Quote(hostileTab),
@@ -635,7 +638,7 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 	}
 
 	s.macosGuest = &guestos.MacOSProfile{User: "cage"}
-	macAttach := s.herdrAttachScript("/Users/cage/proj", "proj", "Shell 1", "shell", "exec /bin/zsh -l")
+	macAttach := s.herdrAttachScript(herdrAttach{Mode: "create", Name: "cage-0123456789abcdef", Workspace: "/Users/cage/proj", Project: "proj", Title: "Shell 1", Kind: "shell", Inner: "exec /bin/zsh -l"})
 	s.macosGuest = nil
 	if !strings.Contains(macAttach, "CAGE_HERDR_SHELL="+shellescape.Quote("/bin/zsh")) ||
 		!strings.Contains(macAttach, "/usr/local/libexec/cage-cli/bin/python3") {

@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Check,
   Download,
@@ -6,30 +6,14 @@ import {
   Play,
   RefreshCw,
   RotateCw,
-  SlidersHorizontal,
   Square,
   TerminalSquare,
   Trash2,
 } from "lucide-react";
 import { AgentIcon } from "./agent-icon";
-import { InlineSelect } from "./inline-select";
+import { api } from "./api";
 import "./t3code.css";
 import "./magpie-herdr.css";
-
-const HERDR_THEME_OPTIONS = [
-  { value: "default", label: "保持 Herdr 原生配置" },
-  { value: "terminal", label: "跟随 Super Cage 终端主题" },
-  { value: "catppuccin", label: "Catppuccin" },
-  { value: "tokyo-night", label: "Tokyo Night" },
-  { value: "dracula", label: "Dracula" },
-  { value: "nord", label: "Nord" },
-  { value: "gruvbox", label: "Gruvbox" },
-  { value: "one-dark", label: "One Dark" },
-  { value: "solarized", label: "Solarized" },
-  { value: "kanagawa", label: "Kanagawa" },
-  { value: "rose-pine", label: "Rose Pine" },
-  { value: "vesper", label: "Vesper" },
-];
 
 export function isHerdrManagedSupported(herdr, status = null) {
   if (herdr?.supports_managed === false || herdr?.data?.supports_managed === false) {
@@ -45,12 +29,66 @@ export function isHerdrManagedSupported(herdr, status = null) {
   return true;
 }
 
+// The Herdr TUI that Super Cage 0.1.21-0.1.23 installed: one quiet line while
+// it is still there, and its removal once it holds no terminals.
+function HerdrLegacyLine({ busy, onConfirm }) {
+  const [legacy, setLegacy] = useState(null);
+  const [error, setError] = useState("");
+  const [removing, setRemoving] = useState(false);
+  useEffect(() => {
+    let live = true;
+    api("/herdr/legacy").then((result) => { if (live) setLegacy(result); }).catch(() => {});
+    return () => { live = false; };
+  }, []);
+  if (!legacy?.installed) return null;
+  const panes = Number(legacy.panes) || 0;
+  const holding = Boolean(legacy.busy);
+  const remove = async () => {
+    const confirmed = onConfirm
+      ? await onConfirm({
+          title: "卸载旧版 Herdr？",
+          body: "将停止旧版 Herdr 服务并删除它的程序，~/.config/herdr 里的数据会保留。",
+          confirm: "卸载旧版",
+        })
+      : true;
+    if (!confirmed) return;
+    setRemoving(true);
+    setError("");
+    try {
+      setLegacy(await api("/herdr/legacy/uninstall", {}));
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setRemoving(false);
+    }
+  };
+  return (
+    <div className="herdr-legacy-line" role="status">
+      <span>
+        {legacy.server_running && panes > 0
+          ? `旧版 Herdr 仍在运行，里面有 ${panes} 个终端`
+          : legacy.server_running ? "旧版 Herdr 仍在运行" : "旧版 Herdr 还留在环境里"}
+      </span>
+      <button
+        type="button"
+        disabled={busy || removing || holding}
+        title={holding ? "旧版里还有终端在运行，卸载会结束它们。请先在旧版 Herdr 里关掉这些终端。" : undefined}
+        onClick={() => void remove()}
+      >
+        {removing ? <LoaderCircle size={13} className="spin" /> : <Trash2 size={13} />}
+        卸载旧版
+      </button>
+      {holding && <small>先在旧版里关掉这些终端，才能卸载。</small>}
+      {error && <small className="herdr-legacy-error">{error}</small>}
+    </div>
+  );
+}
+
 export function HerdrSettingsCard({
   store,
   status,
   onConfirm,
   onOpenHerdr,
-  onOpenHerdrSettings,
 }) {
   const supportsManaged = isHerdrManagedSupported(store, status);
   const [submitting, setSubmitting] = useState("");
@@ -65,6 +103,8 @@ export function HerdrSettingsCard({
   const busy = jobRunning || Boolean(submitting);
 
   if (!store) return null;
+
+  const terminals = Number(store.terminals_count) || 0;
 
   const runAction = async (tag, fn, notice = "") => {
     setActionError("");
@@ -82,6 +122,17 @@ export function HerdrSettingsCard({
     }
   };
 
+  // Stopping the core (and uninstalling, which stops it) ends every program
+  // in it, Super Cage's or another Herdr client's: say so first.
+  const confirmEnding = async (title, confirm) => {
+    if (!terminals || !onConfirm) return true;
+    return await onConfirm({
+      title,
+      body: `Herdr 里还有 ${terminals} 个终端在运行（包括其他 Herdr 客户端打开的），继续会结束它们。`,
+      confirm,
+    });
+  };
+
   const toggleEnabled = (checked) => {
     if (!supportsManaged && checked) return;
     void runAction("toggle", () => store.saveConfig({ enabled: checked }));
@@ -91,36 +142,39 @@ export function HerdrSettingsCard({
     void runAction(
       "takeover",
       () => store.saveConfig({ takeover_terminals }),
-      takeover_terminals ? "已开启终端自动接管" : "已恢复默认终端启动方式",
+      takeover_terminals ? "新终端会放进 Herdr" : "新终端恢复直连",
     );
   };
 
-  const saveTheme = (theme) => {
-    void runAction("theme", () => store.saveConfig({ theme }), "Herdr 界面配色已保存");
+  const handleStop = async () => {
+    if (!(await confirmEnding("停止 Herdr 服务？", "停止服务"))) return;
+    void runAction("stop", () => store.stop(terminals > 0), "Herdr 服务已停止");
   };
 
   const handleUninstall = async () => {
-    const confirmed = onConfirm
-      ? await onConfirm({
-          title: "卸载 Herdr？",
-          body: "将停止 Herdr 守护服务并卸载客机中的 Herdr 程序；您的 ~/.config/herdr 配置目录会被安全保留，工作台终端将自动恢复为默认方式。",
-          confirm: "确认卸载",
-        })
-      : true;
+    const confirmed = terminals
+      ? await confirmEnding("卸载 Herdr？", "确认卸载")
+      : onConfirm
+        ? await onConfirm({
+            title: "卸载 Herdr？",
+            body: "将删除环境里的 herdr-core；终端记录和设置会保留，新终端恢复直连。",
+            confirm: "确认卸载",
+          })
+        : true;
     if (!confirmed) return;
-    void runAction("uninstall", () => store.uninstall());
+    void runAction("uninstall", () => store.uninstall(terminals > 0));
   };
 
   const expanded = Boolean(store.enabled && supportsManaged);
   const canOpen = Boolean(store.enabled && supportsManaged && store.installed && vmRunning);
 
   return (
-    <section className="t3code-card herdr-card" aria-label="Herdr 多 Agent 持久终端工作区">
+    <section className="t3code-card herdr-card" aria-label="Herdr 持久终端">
       <div className="t3code-card-top">
         <AgentIcon agentId="herdr" size={36} />
         <div className="t3code-card-info">
           <div className="t3code-card-title">
-            <strong>Herdr 多 Agent 持久终端工作区</strong>
+            <strong>Herdr 持久终端</strong>
             <span className="agent-pill">可选增强</span>
             {!supportsManaged ? (
               <span className="agent-pill">当前客机暂不支持</span>
@@ -139,29 +193,18 @@ export function HerdrSettingsCard({
               <span className="agent-pill">v{store.version.replace(/^v/i, "")}</span>
             )}
             {supportsManaged && store.server_running && (
-              <>
-                <span className="agent-pill">{store.workspaces_count} 工作区</span>
-                <span className="agent-pill">{store.agents_count} Agent</span>
-                {store.blocked_agents_count > 0 && (
-                  <span
-                    className="agent-pill herdr-pill--blocked"
-                    title="有 Agent 正在等待审批或用户输入"
-                  >
-                    {store.blocked_agents_count} 待处理
-                  </span>
-                )}
-              </>
+              <span className="agent-pill">{terminals} 个终端</span>
             )}
           </div>
           <p className="agent-card-desc">
-            可选安装 Herdr 多 Agent 持久终端工作区（基于 Ghostty-VT）：安装启用后，工作台所有普通终端与 Agent CLI 终端均可自动在 Herdr 中运行，实时追踪 Working / Blocked / Done 状态，支持键盘前缀（Ctrl+B）与鼠标分屏，关闭标签后后台任务持续保活。
+            终端运行在环境里的 Herdr（herdr-core）中：关掉页面或断线后程序继续运行，再打开就接上。环境里其他 Herdr 客户端开的终端也会出现在终端列表里。
           </p>
         </div>
         <label className="t3code-optin-switch">
           <input
             type="checkbox"
             role="switch"
-            aria-label="启用 Herdr 工作区"
+            aria-label="启用 Herdr"
             checked={Boolean(store.enabled)}
             disabled={busy || !supportsManaged}
             onChange={(e) => toggleEnabled(e.target.checked)}
@@ -171,7 +214,7 @@ export function HerdrSettingsCard({
 
       {!supportsManaged && (
         <div className="inline-info t3code-info-banner" role="status">
-          <span>当前客机环境暂不支持托管 Herdr 持久终端工作区（需 Linux / macOS 客机环境）。</span>
+          <span>当前客机暂不支持 Herdr（需要 Linux 或 macOS 客机）。</span>
         </div>
       )}
 
@@ -179,8 +222,7 @@ export function HerdrSettingsCard({
         <div className="agent-job-banner" role="status">
           <LoaderCircle size={16} className="spin" />
           <span>
-            {status.job.message ||
-              (isUninstallJob ? "正在卸载 Herdr 并恢复默认终端方式…" : "正在客机环境中安装 Herdr…")}
+            {status.job.message || (isUninstallJob ? "正在卸载 Herdr…" : "正在安装 Herdr…")}
           </span>
         </div>
       )}
@@ -198,62 +240,47 @@ export function HerdrSettingsCard({
               <button
                 type="button"
                 className="primary"
+                title="打开 Herdr 的终端选择器"
                 disabled={!canOpen || busy}
                 onClick={() => void runAction("open", () => onOpenHerdr?.())}
               >
                 {submitting === "open" ? <LoaderCircle size={14} className="spin" /> : <TerminalSquare size={14} />}
-                立即打开 Herdr 工作区
-              </button>
-            )}
-            {store.installed && onOpenHerdrSettings && (
-              <button
-                type="button"
-                title={`打开 Herdr 工作区并进入它自己的设置（${store.data?.settings_keys?.shortcut || "ctrl+b s"}）`}
-                disabled={!canOpen || busy}
-                onClick={() => void runAction("open-settings", () => onOpenHerdrSettings?.())}
-              >
-                {submitting === "open-settings" ? <LoaderCircle size={14} className="spin" /> : <SlidersHorizontal size={14} />}
-                Herdr 官方设置
+                打开 Herdr
               </button>
             )}
             {store.installed && (
-              <>
-                {store.server_running ? (
-                  <>
-                    <button
-                      type="button"
-                      disabled={!vmRunning || busy}
-                      onClick={() => void runAction("restart", () => store.restart(), "Herdr 守护服务已重启")}
-                    >
-                      {submitting === "restart" ? <LoaderCircle size={14} className="spin" /> : <RotateCw size={14} />}
-                      重启守护服务
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!vmRunning || busy}
-                      onClick={() => void runAction("stop", () => store.stop(), "Herdr 守护服务已停止")}
-                    >
-                      <Square size={13} />
-                      停止守护服务
-                    </button>
-                  </>
-                ) : (
+              store.server_running ? (
+                <>
                   <button
                     type="button"
+                    title="重启服务，终端里的程序继续运行"
                     disabled={!vmRunning || busy}
-                    onClick={() => void runAction("start", () => store.start(), "Herdr 守护服务已启动")}
+                    onClick={() => void runAction("restart", () => store.restart(), "Herdr 服务已重启")}
                   >
-                    {submitting === "start" ? <LoaderCircle size={14} className="spin" /> : <Play size={13} />}
-                    启动守护服务
+                    {submitting === "restart" ? <LoaderCircle size={14} className="spin" /> : <RotateCw size={14} />}
+                    重启服务
                   </button>
-                )}
-              </>
+                  <button type="button" disabled={!vmRunning || busy} onClick={() => void handleStop()}>
+                    <Square size={13} />
+                    停止服务
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={!vmRunning || busy}
+                  onClick={() => void runAction("start", () => store.start(), "Herdr 服务已启动")}
+                >
+                  {submitting === "start" ? <LoaderCircle size={14} className="spin" /> : <Play size={13} />}
+                  启动服务
+                </button>
+              )
             )}
             <button
               type="button"
               disabled={store.loading || busy}
               onClick={() => void store.refresh(true)}
-              title="重新检测 Herdr 安装与守护服务状态"
+              title="重新检测 Herdr 的安装与运行状态"
             >
               <RefreshCw size={14} className={store.loading ? "spin" : undefined} />
               刷新状态
@@ -272,17 +299,17 @@ export function HerdrSettingsCard({
                 type="button"
                 className={store.installed ? "" : "primary"}
                 disabled={!envReady || busy}
-                onClick={() => void runAction("install", () => store.install())}
+                onClick={() => void runAction("install", () => store.install(store.installed))}
               >
                 {submitting === "install" ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
-                {store.installed ? "更新 / 重装 Herdr" : "一键安装 Herdr"}
+                {store.installed ? "检查更新" : "一键安装 Herdr"}
               </button>
               {store.installed && (
                 <button
                   type="button"
                   className="herdr-uninstall-btn"
                   disabled={!envReady || busy}
-                  onClick={handleUninstall}
+                  onClick={() => void handleUninstall()}
                 >
                   {submitting === "uninstall" ? <LoaderCircle size={14} className="spin" /> : <Trash2 size={14} />}
                   卸载 Herdr
@@ -290,13 +317,14 @@ export function HerdrSettingsCard({
               )}
             </div>
             <p className="herdr-install-note">
-              通过官方 <code>herdr.dev/install.sh</code> 安装并进行 SHA-256 完整性校验。
+              从 <code>releases.herdr.dev</code> 官方发布渠道安装 herdr-core，并核对 SHA-256；环境里已有可用的 herdr-core 时直接沿用。
               {store.binary_path && (
                 <>
                   {" "}当前路径：<code>{store.binary_path}</code>
                 </>
               )}
             </p>
+            {store.data?.legacy_installed && <HerdrLegacyLine busy={busy} onConfirm={onConfirm} />}
           </div>
 
           <label
@@ -304,9 +332,9 @@ export function HerdrSettingsCard({
             data-active={store.takeover_terminals !== false ? "true" : undefined}
           >
             <span>
-              <strong>用 Herdr 自动接管所有工作台终端</strong>
+              <strong>新建终端都放进 Herdr</strong>
               <small>
-                开启后，新建普通终端、Claude、Codex 及所有 Agent CLI 终端均自动在 Herdr 工作区中启动并持续保活；账号 OAuth 登录终端仍保持独立直连。
+                普通终端、Claude、Codex 和各 Agent CLI 终端都在 Herdr 里运行，关掉标签才会结束；账号登录终端仍然直连。
               </small>
             </span>
             <input
@@ -317,24 +345,6 @@ export function HerdrSettingsCard({
               onChange={(e) => saveTakeover(e.target.checked)}
             />
           </label>
-
-          <div className="herdr-theme-row">
-            <label>
-              Herdr 界面配色
-              <InlineSelect
-                aria-label="Herdr 界面配色"
-                value={store.theme || "default"}
-                disabled={busy}
-                onValueChange={saveTheme}
-              >
-                {HERDR_THEME_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </InlineSelect>
-            </label>
-          </div>
         </div>
       )}
     </section>

@@ -54,6 +54,10 @@ type terminalManager struct {
 	// kept are the ssh terminals kept past their connection (entryKeep),
 	// which have their own cap instead of the shared limit.
 	kept map[string]bool
+	// imported are the viewers of hc terminals another Herdr client started
+	// (herdr_terminals.go): their own cap too, so terminals the user opens
+	// from another client never block new Cage terminals.
+	imported map[string]bool
 }
 
 func (m *terminalManager) startSession(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func()) (*terminalSession, error) {
@@ -84,9 +88,26 @@ func (m *terminalManager) startCodexSessionWithSetup(cmd *exec.Cmd, workspace, k
 // Account bindings are published together with the session, so a concurrent
 // allocation always counts a terminal that is already running.
 func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, codex codexSelection, finished func(*terminalSession), start func() (terminalPTY, error), setup func(*terminalSession, int)) (*terminalSession, error) {
+	return m.startSessionAdmitted(false, cmd, workspace, kind, selection, codex, finished, start, setup)
+}
+
+// herdrViewerPTY starts a Herdr viewer's PTY; tests replace it.
+var herdrViewerPTY = startTerminal
+
+// startHerdrViewer starts a viewer of an hc terminal (herdr_terminals.go).
+// One another client started (imported) counts against its own cap.
+func (m *terminalManager) startHerdrViewer(cmd *exec.Cmd, workspace, kind string, imported bool, setup func(*terminalSession, int)) (*terminalSession, error) {
+	return m.startSessionAdmitted(imported, cmd, workspace, kind, claudeSelection{}, codexSelection{}, nil, func() (terminalPTY, error) { return herdrViewerPTY(cmd, 100, 30) }, setup)
+}
+
+func (m *terminalManager) startSessionAdmitted(imported bool, cmd *exec.Cmd, workspace, kind string, selection claudeSelection, codex codexSelection, finished func(*terminalSession), start func() (terminalPTY, error), setup func(*terminalSession, int)) (*terminalSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if err := m.admissionErrorLocked(); err != nil {
+	admission := m.admissionErrorLocked
+	if imported {
+		admission = m.importedAdmissionLocked
+	}
+	if err := admission(); err != nil {
 		return nil, err
 	}
 	file, err := start()
@@ -130,6 +151,12 @@ func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string
 		m.sessions = make(map[string]*terminalSession)
 	}
 	m.sessions[session.id] = session
+	if imported {
+		if m.imported == nil {
+			m.imported = make(map[string]bool)
+		}
+		m.imported[session.id] = true
+	}
 	m.workers.Add(1)
 	go func() {
 		defer m.workers.Done()
@@ -145,8 +172,18 @@ func (m *terminalManager) admissionErrorLocked() error {
 	if m.closed {
 		return errTerminalsClosed
 	}
-	if len(m.sessions)-len(m.kept) >= 12 {
+	if len(m.sessions)-len(m.kept)-len(m.imported) >= 12 {
 		return errTerminalLimit
+	}
+	return nil
+}
+
+func (m *terminalManager) importedAdmissionLocked() error {
+	if m.closed {
+		return errTerminalsClosed
+	}
+	if len(m.imported) >= herdrImportedLimit {
+		return errHerdrTerminalLimit
 	}
 	return nil
 }
@@ -404,6 +441,7 @@ func (m *terminalManager) remove(id string) {
 		m.mu.Lock()
 		delete(m.sessions, id)
 		delete(m.kept, id)
+		delete(m.imported, id)
 		m.mu.Unlock()
 	}
 }
@@ -684,37 +722,42 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if s.macosGuest != nil && input.Kind != "claude-login" && input.Kind != "agent-login" {
 		guestWorkspace = macOSProjectPath(s.macosGuest.User, workspace)
 	}
+	// With Herdr the terminal is an hc terminal named cage-<its id>, which
+	// it views; the "herdr" kind opens hc's own picker.
 	herdrBacked := false
+	herdrID, herdrKind, herdrTitle := "", "", ""
 	projectLabel := herdrProjectLabel(workspace)
 	switch input.Kind {
 	case "herdr":
-		script = s.herdrAttachScript(guestWorkspace, projectLabel, "Herdr", "herdr", "")
+		script = s.herdrAttachScript(herdrAttach{Mode: "picker", Workspace: guestWorkspace, Project: projectLabel, Title: "Herdr", Kind: "herdr"})
 		herdrBacked = true
 	case "magpie-tui":
 		script = s.magpieTUIScript(guestWorkspace)
 		if herdrTakeover {
-			script = s.herdrAttachScript(guestWorkspace, projectLabel, "Magpie TUI", "magpie-tui", script)
-			herdrBacked = true
+			herdrKind, herdrTitle = "magpie-tui", "Magpie TUI"
 		}
 	case "", "shell", "claude", "agent":
 		if herdrTakeover && conversation == nil {
-			herdrKind := input.Kind
-			tabLabel := "Shell"
+			herdrKind, herdrTitle = input.Kind, "Shell"
 			if herdrKind == "" {
 				herdrKind = "shell"
 			}
 			switch herdrKind {
 			case "claude":
-				tabLabel = "Claude"
+				herdrTitle = "Claude"
 			case "agent":
-				tabLabel = agentSpecName
-				if tabLabel == "" {
-					tabLabel = input.AgentID
+				herdrTitle = agentSpecName
+				if herdrTitle == "" {
+					herdrTitle = input.AgentID
 				}
 			}
-			script = s.herdrAttachScript(guestWorkspace, projectLabel, tabLabel, herdrKind, script)
-			herdrBacked = true
 		}
+	}
+	if herdrKind != "" {
+		herdrID = randomToken()[:16]
+		script = s.herdrAttachScript(herdrAttach{Mode: "create", Name: herdrTerminalName(herdrID), Workspace: guestWorkspace,
+			Project: projectLabel, Title: herdrTitle, Kind: herdrKind, Inner: script})
+		herdrBacked = true
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {
@@ -728,6 +771,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if isAgentKind || herdrBacked {
 		setup = func(session *terminalSession, seq int) {
 			session.herdrBacked = herdrBacked
+			if herdrID != "" {
+				session.id, session.herdrName = herdrID, herdrTerminalName(herdrID)
+			}
 			if isAgentKind {
 				session.agentID = agentSel.AgentID
 				session.agentName = agentSpecName
@@ -757,6 +803,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	}
 	if err == nil && isAgentKind && input.Kind == "agent" && agentSel.ID != "" {
 		s.noteAgentSelection(agentSel.AgentID, agentSel.ID, workspace)
+	}
+	if err == nil && herdrID != "" {
+		s.rememberHerdrSession(session, herdrKind)
 	}
 	if err == nil && conversation != nil {
 		session.mu.Lock()

@@ -1,15 +1,16 @@
-// The three tools' own settings pages, opened from Super Cage's settings:
-// T3 Code and Magpie ask the server for their settings page (page:
-// "settings"); Herdr opens its tab and gets the key its config binds to
-// settings (here ctrl+b then s), typed once its full-screen client draws.
+// The tools' own settings pages, opened from Super Cage's settings: T3 Code
+// and Magpie ask the server for their settings page (page: "settings").
+// Herdr (herdr-core) has no settings page of its own any more: its card
+// shows its version, state and terminals, no theme or 官方设置, and the old
+// Herdr TUI's line, whose 卸载旧版 waits until the TUI holds no terminals.
 import assert from "node:assert/strict";
 import { createWorkbench } from "./workbench-fixture.mjs";
 
 const screenshot = process.env.SCREENSHOT || "";
 const herdrState = {
-  enabled: true, installed: true, supports_managed: true, server_running: true, version: "0.9.5",
-  takeover_terminals: false, theme: "default", workspaces_count: 1, agents_count: 0, blocked_agents_count: 0,
-  settings_keys: { onboarding: false, chunks: ["\u0002", "s"], shortcut: "ctrl+b s" },
+  enabled: true, installed: true, supports_managed: true, server_running: true, version: "0.1.22",
+  binary_path: "/home/cage/.local/bin/herdr-core", takeover_terminals: true, terminals_count: 3,
+  keeps_running_after_logout: true, legacy_installed: true,
 };
 const tool = (name) => ({
   enabled: true, mode: "external", external_url: "https://" + name + ".example.test", open_mode: "workbench",
@@ -18,10 +19,19 @@ const tool = (name) => ({
 const { browser, page, errors } = await createWorkbench({ mockWebSockets: false });
 try {
   const opens = [];
-  const inputs = [];
-  let herdrTerminal = null;
-  let drawn = false;
-  await page.route("**/api/herdr**", (route) => route.fulfill({ json: herdrState }));
+  const legacyRemovals = [];
+  let legacy = { installed: true, server_running: true, panes: 2, busy: true };
+  await page.route("**/api/herdr**", (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/herdr/legacy") return route.fulfill({ json: legacy });
+    if (path === "/api/herdr/legacy/uninstall") {
+      legacyRemovals.push(route.request().postDataJSON());
+      legacy = { installed: false, server_running: false, panes: 0, busy: false };
+      herdrState.legacy_installed = false;
+      return route.fulfill({ json: legacy });
+    }
+    return route.fulfill({ json: herdrState });
+  });
   for (const name of ["t3code", "magpie"]) {
     await page.route("**/api/" + name, (route) => route.fulfill({ json: tool(name) }));
     await page.route("**/api/" + name + "?*", (route) => route.fulfill({ json: tool(name) }));
@@ -30,27 +40,6 @@ try {
       return route.fulfill({ json: { mode: "workbench", tab_id: name + "-tab", url: "https://" + name + ".example.test/", title: name, settings_opened: true } });
     });
   }
-  await page.route("**/api/terminals", (route) => {
-    if (route.request().method() === "GET") return route.fulfill({ json: herdrTerminal ? [herdrTerminal] : [] });
-    const body = route.request().postDataJSON();
-    assert.equal(body.kind, "herdr");
-    herdrTerminal = { id: "herdr-1", kind: "herdr", workspace: body.workspace, title: "Herdr", closed: false };
-    return route.fulfill({ json: herdrTerminal });
-  });
-  await page.routeWebSocket("**/api/**", (socket) => {
-    if (!socket.url().includes("/terminals/")) return socket.close();
-    socket.onMessage((message) => {
-      try {
-        const parsed = JSON.parse(String(message));
-        if (parsed.type === "input") inputs.push({ data: parsed.data, drawn });
-      } catch { /* not JSON: resize or binary */ }
-    });
-    // Herdr takes a moment before it switches to its full screen.
-    setTimeout(() => {
-      drawn = true;
-      socket.send(Buffer.from("\u001b[?1049h\u001b[H\u001b[2JHerdr · workspace design-lab"));
-    }, 700);
-  });
   await page.reload();
   await page.getByRole("button", { name: "启动 Super Cage 环境", exact: true }).click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
@@ -64,21 +53,30 @@ try {
   await page.getByRole("button", { name: "Magpie 官方设置", exact: true }).click();
   await expectOpen("magpie");
 
-  // Herdr: its tab opens and gets ctrl+b, then s, after it has drawn.
+  // Herdr: no settings page of its own, no theme; its version, state and
+  // terminals; the old TUI's line.
   await page.getByRole("button", { name: "设置", exact: true }).click();
   await page.getByRole("button", { name: "Agent CLI", exact: true }).click();
-  const herdrSettings = page.getByRole("button", { name: "Herdr 官方设置", exact: true });
-  if (screenshot) {
-    await herdrSettings.scrollIntoViewIfNeeded();
-    await page.screenshot({ path: screenshot + "-card.png" });
-  }
-  await herdrSettings.click();
-  await page.locator(".xterm-rows > div").filter({ hasText: "Herdr · workspace" }).first().waitFor();
-  await waitFor(() => inputs.length >= 2, "Herdr never got its settings key");
-  await page.waitForTimeout(400);
-  assert.deepEqual(inputs.map((input) => input.data), ["\u0002", "s"]);
-  assert.ok(inputs.every((input) => input.drawn), "keys were typed before Herdr drew its screen");
-  if (screenshot) await page.screenshot({ path: screenshot + "-herdr.png" });
+  const card = page.getByRole("region", { name: "Herdr 持久终端", exact: true });
+  await card.scrollIntoViewIfNeeded();
+  assert.equal(await page.getByRole("button", { name: "Herdr 官方设置", exact: true }).count(), 0);
+  assert.equal(await card.getByRole("combobox").count(), 0, "the Herdr card still offers a theme");
+  await card.getByText("v0.1.22", { exact: true }).waitFor();
+  await card.getByText("3 个终端", { exact: true }).waitFor();
+  await card.getByText("旧版 Herdr 仍在运行，里面有 2 个终端", { exact: true }).waitFor();
+  const removeLegacy = card.getByRole("button", { name: "卸载旧版", exact: true });
+  assert.equal(await removeLegacy.isDisabled(), true, "the old TUI could be removed with terminals in it");
+  if (screenshot) await page.screenshot({ path: screenshot + "-card.png" });
+  // Once the old TUI holds nothing it goes, after a confirmation.
+  legacy = { installed: true, server_running: false, panes: 0, busy: false };
+  const nav = page.getByRole("navigation", { name: "设置分组" });
+  await nav.getByRole("button", { name: "通用", exact: true }).click();
+  await nav.getByRole("button", { name: "Agent CLI", exact: true }).click();
+  await card.getByText("旧版 Herdr 还留在环境里", { exact: true }).waitFor();
+  await removeLegacy.click();
+  await page.getByRole("dialog").getByRole("button", { name: "卸载旧版", exact: true }).click();
+  await card.getByText(/旧版 Herdr/).waitFor({ state: "detached" });
+  assert.deepEqual(legacyRemovals, [{}]);
   assert.deepEqual(errors, []);
 
   async function expectOpen(name) {
@@ -94,4 +92,4 @@ try {
     }
   }
 } finally { await browser.close(); }
-console.log("T3 Code, Magpie and Herdr each open on their own settings page.");
+console.log("T3 Code and Magpie open on their own settings page; Herdr shows its state and the old TUI's line, with no settings page or theme.");

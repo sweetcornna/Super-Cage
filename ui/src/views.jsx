@@ -766,22 +766,6 @@ export function TerminalView({
     };
     host.addEventListener("copy", onCopy, true);
     onControls?.({
-      // Herdr's own settings (official_settings.go): its configured key,
-      // one press per chunk, once the full-screen client is drawing.
-      async sendKeys(chunks, timeout = 15000) {
-        const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const started = Date.now();
-        while (!disposed && terminal.buffer.active.type !== "alternate") {
-          if (Date.now() - started > timeout) throw new Error("Herdr 还没有准备好");
-          await pause(100);
-        }
-        if (disposed) throw new Error("终端已关闭");
-        await pause(300);
-        for (const [index, chunk] of chunks.entries()) {
-          if (index) await pause(150);
-          await enqueue(() => send(chunk));
-        }
-      },
       edit(action) {
         if (!box.current?.contains(document.activeElement)) return false;
         if (action === "copy") {
@@ -958,14 +942,14 @@ export function TerminalView({
           {ended
             ? codexLaunchRefused(session)
               ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示")
-              : (session.terminalKind === "herdr" || session.herdr_backed) && onReattachHerdr
-                ? "已从 Herdr 分离（后台终端与 Agent 仍在运行）。"
+              : session.herdr_live && onReattachHerdr
+                ? "已和 Herdr 断开，终端里的程序仍在运行。"
                 : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
             : link === "stalled" ? "终端连接已断开。" : link === "connecting" ? "正在连接终端…" : "正在重新连接…"}
-          {ended && (session.terminalKind === "herdr" || session.herdr_backed) && onReattachHerdr && (
+          {ended && session.herdr_live && onReattachHerdr && (
             <button className="primary" onClick={() => onReattachHerdr(session)}>
               <RefreshCw size={13} />
-              重新连接 Herdr
+              重新连接
             </button>
           )}
           {!ended && link === "stalled" && (

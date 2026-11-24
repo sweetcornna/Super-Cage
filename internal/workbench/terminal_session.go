@@ -46,6 +46,8 @@ type terminalSession struct {
 	codexAccountID        string
 	codexAccountSource    string
 	herdrBacked           bool
+	herdrName             string // the hc terminal it views: cage-<id>, or another client's address (herdrImported); "" for none or hc's picker
+	herdrImported         bool
 	cmd                   *exec.Cmd
 	file                  terminalPTY
 	exitCode              int
@@ -89,6 +91,21 @@ func (t *terminalSession) ownsConversation() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return !t.closed && !t.conversationEnded
+}
+
+// finished reports whether the session's process has ended.
+func (t *terminalSession) finished() bool {
+	if t.done == nil {
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		return t.closed
+	}
+	select {
+	case <-t.done:
+		return true
+	default:
+		return false
+	}
 }
 
 func newTerminalSession(file terminalPTY) *terminalSession {
@@ -158,6 +175,9 @@ func (t *terminalSession) summary() map[string]any {
 	}
 	if t.herdrBacked {
 		summary["herdr_backed"] = true
+	}
+	if t.herdrImported {
+		summary["herdr_imported"] = true
 	}
 	// How it ended, once it has: a Codex launch the guest refused ends with 75
 	// and must not look like an ordinary close. Absent while it runs and when

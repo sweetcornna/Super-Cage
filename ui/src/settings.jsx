@@ -83,7 +83,6 @@ export function SettingsPanel({
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
-  onOpenHerdrSettings,
   initialSection = "keyboard",
 }) {
   const [localKeyboard, setLocalKeyboard] = useState(() => clientKeyboard(current.keyboard));
@@ -328,10 +327,6 @@ export function SettingsPanel({
               onOpenHerdr={async () => {
                 onClose();
                 return await onOpenHerdr?.();
-              }}
-              onOpenHerdrSettings={async () => {
-                onClose();
-                return await onOpenHerdrSettings?.();
               }}
               onSavedClaudeCommand={onSaved}
             />

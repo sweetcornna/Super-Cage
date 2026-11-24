@@ -92,13 +92,6 @@
   border-top: 0 !important;
 }
 
-/* Herdr live blocked-agent attention pill (amber in light & dark themes). */
-.herdr-pill--blocked {
-  background: color-mix(in srgb, var(--warning, var(--amber, #9a6700)) 15%, var(--paper));
-  color: var(--warning, var(--amber, #9a6700));
-  border: 1px solid color-mix(in srgb, var(--warning, var(--amber, #9a6700)) 30%, transparent);
-}
-
 /* Prominent Herdr terminal-takeover switch container. */
 .herdr-takeover-row {
   margin: 0 !important;
@@ -115,15 +108,39 @@
   background: color-mix(in srgb, var(--accent) 7%, var(--paper));
 }
 
-.herdr-theme-row {
-  display: grid;
-  grid-template-columns: minmax(0, 320px);
-  gap: 8px;
+/* The Herdr TUI from Super Cage 0.1.21-0.1.23, while it is still installed. */
+.herdr-legacy-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+  color: var(--muted);
+  font-size: var(--s-xs, 0.82rem);
+  line-height: 1.5;
+}
+
+.herdr-legacy-line > span {
+  color: var(--ink);
+}
+
+.herdr-legacy-line > button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: var(--s-xs, 0.82rem);
+}
+
+.herdr-legacy-line > small {
+  flex-basis: 100%;
+}
+
+.herdr-legacy-error {
+  color: var(--danger, var(--error));
 }
 
 @media (max-width: 720px) {
-  .magpie-port-gateway-grid,
-  .herdr-theme-row {
+  .magpie-port-gateway-grid {
     grid-template-columns: 1fr;
   }
   .magpie-gateway-chip {

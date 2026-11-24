@@ -3,6 +3,8 @@
 import base64
 import json
 import os
+import shlex
+import shutil
 from pathlib import Path
 import socket
 import stat
@@ -993,383 +995,406 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertFalse(st_uninst["installed"])
         self.assertFalse(st_uninst["running"])
 
-    def test_herdr_lifecycle_theme_and_interactive_attach(self):
+    def _hc_stub(self):
+        """A herdr-core stand-in: a core that is a unix socket listener,
+        terminals in a JSON file, every call logged."""
         bin_dir = self.home / ".local/bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
-        proj_dir = self.home / "my-project"
-        proj_dir.mkdir(parents=True, exist_ok=True)
-        mock_state_file = self.home / "herdr-mock-state.json"
-        mock_calls_file = self.home / "herdr-mock-calls.jsonl"
-        mock_state_file.write_text(json.dumps({
-            "running": False,
-            "server_pid": 0,
-            "workspaces": [],
-            "agents": [],
-            "next_id": 1,
-        }))
-
-        mock_herdr = bin_dir / "herdr"
-        mock_herdr.write_text(
+        short = Path(tempfile.mkdtemp(prefix="hc"))
+        self.addCleanup(shutil.rmtree, short, True)
+        state = self.home / "hc-state.json"
+        calls = self.home / "hc-calls.jsonl"
+        stub = bin_dir / "herdr-core"
+        stub.write_text(
             f"#!{sys.executable}\n"
-            "import json, os, pathlib, shlex, signal, stat, subprocess, sys, time\n"
-            f"STATE = pathlib.Path({str(mock_state_file)!r})\n"
-            f"CALLS = pathlib.Path({str(mock_calls_file)!r})\n"
-            "def load_state():\n"
-            "    return json.loads(STATE.read_text())\n"
-            "def save_state(st):\n"
+            "import json, os, pathlib, signal, socket, subprocess, sys, time\n"
+            "STATE = pathlib.Path(os.environ['HC_STUB_STATE'])\n"
+            "CALLS = pathlib.Path(os.environ['HC_STUB_CALLS'])\n"
+            "SOCK = os.environ['HC_SOCKET']\n"
+            "def load():\n"
+            "    return json.loads(STATE.read_text()) if STATE.exists() else {'terminals': [], 'next': 1, 'pid': 0, 'attaches': 0}\n"
+            "def save(st):\n"
             "    STATE.write_text(json.dumps(st))\n"
-            "def log_call(entry):\n"
+            "def log(**entry):\n"
             "    with CALLS.open('a') as f:\n"
             "        f.write(json.dumps(entry) + '\\n')\n"
+            "def out(obj):\n"
+            "    print(json.dumps(obj, separators=(',', ':')))\n"
+            "def running():\n"
+            "    s = socket.socket(socket.AF_UNIX)\n"
+            "    try:\n"
+            "        s.connect(SOCK)\n"
+            "        return True\n"
+            "    except OSError:\n"
+            "        return False\n"
+            "    finally:\n"
+            "        s.close()\n"
+            "def start():\n"
+            "    if running():\n"
+            "        return\n"
+            "    code = 'import os,socket,sys\\ns=socket.socket(socket.AF_UNIX)\\ntry: os.unlink(sys.argv[1])\\nexcept OSError: pass\\ns.bind(sys.argv[1]); s.listen(16)\\nwhile True:\\n  c,_=s.accept(); c.close()'\n"
+            "    p = subprocess.Popen([sys.executable, '-c', code, SOCK], start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+            "    st = load(); st['pid'] = p.pid; save(st)\n"
+            "    for _ in range(200):\n"
+            "        if running():\n"
+            "            break\n"
+            "        time.sleep(0.01)\n"
+            "    log(cmd='core-start')\n"
+            "def find(st, t):\n"
+            "    for term in st['terminals']:\n"
+            "        if t in (term['address'], term.get('name')):\n"
+            "            return term\n"
+            "    return None\n"
             "args = sys.argv[1:]\n"
+            "log(cmd=' '.join(args[:2]) if args else 'picker', argv=args, nested=os.environ.get('HC_TERMINAL_ID', ''))\n"
             "if args == ['--version']:\n"
-            "    print('herdr 0.4.2')\n"
-            "    sys.exit(0)\n"
-            "if args == ['status', 'server', '--json']:\n"
-            "    st = load_state()\n"
-            "    running = bool(st.get('running'))\n"
-            "    print(json.dumps({'running': running, 'status': 'running' if running else 'stopped'}))\n"
-            "    sys.exit(0)\n"
-            "if args == ['server']:\n"
-            "    st = load_state()\n"
-            "    st['running'] = True\n"
-            "    st['server_pid'] = os.getpid()\n"
-            "    save_state(st)\n"
-            "    log_call({'cmd': 'server'})\n"
-            "    def stop_sig(*_a):\n"
-            "        s = load_state()\n"
-            "        s['running'] = False\n"
-            "        s['server_pid'] = 0\n"
-            "        save_state(s)\n"
-            "        sys.exit(0)\n"
-            "    signal.signal(signal.SIGTERM, stop_sig)\n"
-            "    while True:\n"
-            "        time.sleep(0.2)\n"
-            "if args == ['server', 'stop']:\n"
-            "    st = load_state()\n"
-            "    pid = st.get('server_pid') or 0\n"
-            "    st['running'] = False\n"
-            "    st['server_pid'] = 0\n"
-            "    save_state(st)\n"
-            "    log_call({'cmd': 'server-stop'})\n"
-            "    if pid > 0:\n"
-            "        try:\n"
-            "            os.kill(pid, signal.SIGTERM)\n"
-            "        except OSError:\n"
-            "            pass\n"
-            "    sys.exit(0)\n"
-            "if args == ['server', 'reload-config']:\n"
-            "    log_call({'cmd': 'reload-config'})\n"
-            "    sys.exit(0)\n"
-            "if args == ['workspace', 'list']:\n"
-            "    st = load_state()\n"
-            "    print(json.dumps({'result': {'workspaces': st.get('workspaces', [])}}))\n"
-            "    sys.exit(0)\n"
-            "if args == ['agent', 'list']:\n"
-            "    st = load_state()\n"
-            "    print(json.dumps({'result': {'agents': st.get('agents', [])}}))\n"
-            "    sys.exit(0)\n"
-            "if args[:2] == ['workspace', 'create']:\n"
-            "    st = load_state()\n"
-            "    nid = st.get('next_id', 1)\n"
-            "    st['next_id'] = nid + 1\n"
-            "    def opt(flag):\n"
-            "        for i, a in enumerate(args):\n"
-            "            if a == flag and i + 1 < len(args):\n"
-            "                return args[i + 1]\n"
-            "            if a.startswith(flag + '='):\n"
-            "                return a.split('=', 1)[1]\n"
-            "        return ''\n"
-            "    label = opt('--label')\n"
-            "    cwd = opt('--cwd')\n"
-            "    ws = {'workspace_id': f'ws-{nid}', 'label': label, 'cwd': cwd}\n"
-            "    st['workspaces'].append(ws)\n"
-            "    save_state(st)\n"
-            "    log_call({'cmd': 'workspace-create', 'args': args})\n"
-            "    print(json.dumps({'result': {'workspace': ws, 'tab': {'tab_id': f'tab-{nid}'}, 'root_pane': {'pane_id': f'pane-{nid}'}}}))\n"
-            "    sys.exit(0)\n"
-            "if args[:2] == ['tab', 'rename']:\n"
-            "    log_call({'cmd': 'tab-rename', 'args': args})\n"
-            "    sys.exit(0)\n"
-            "if args[:2] == ['tab', 'create']:\n"
-            "    st = load_state()\n"
-            "    nid = st.get('next_id', 1)\n"
-            "    st['next_id'] = nid + 1\n"
-            "    save_state(st)\n"
-            "    log_call({'cmd': 'tab-create', 'args': args})\n"
-            "    print(json.dumps({'result': {'tab': {'tab_id': f'tab-{nid}'}, 'root_pane': {'pane_id': f'pane-{nid}'}}}))\n"
-            "    sys.exit(0)\n"
-            "if args[:2] == ['pane', 'run']:\n"
-            "    pane_id = args[2]\n"
-            "    shell_cmd = args[3]\n"
-            "    parts = shlex.split(shell_cmd)\n"
-            "    script_path = pathlib.Path(parts[-1])\n"
-            "    mode = stat.S_IMODE(script_path.stat().st_mode)\n"
-            "    body = script_path.read_text()\n"
-            "    res = subprocess.run(['/bin/sh', '-c', shell_cmd], check=False)\n"
-            "    log_call({\n"
-            "        'cmd': 'pane-run',\n"
-            "        'pane_id': pane_id,\n"
-            "        'shell_cmd': shell_cmd,\n"
-            "        'mode': mode,\n"
-            "        'body': body,\n"
-            "        'rc': res.returncode,\n"
-            "        'deleted_after': not script_path.exists(),\n"
-            "    })\n"
-            "    sys.exit(0)\n"
+            "    print('hc 0.1.22'); sys.exit(0)\n"
             "if not args:\n"
-            "    leaked = [k for k in os.environ if k.startswith('CAGE_HERDR_')]\n"
-            "    log_call({'cmd': 'attach', 'cwd': os.getcwd(), 'leaked': leaked})\n"
-            "    print(f'HERDR_ATTACHED:{os.getcwd()}')\n"
+            "    print('PICKER:' + os.getcwd()); sys.exit(0)\n"
+            "if args[:2] == ['server', 'stop']:\n"
+            "    st = load()\n"
+            "    if st.get('pid'):\n"
+            "        try: os.kill(st['pid'], signal.SIGTERM)\n"
+            "        except OSError: pass\n"
+            "    try: os.unlink(SOCK)\n"
+            "    except OSError: pass\n"
+            "    for term in st['terminals']:\n"
+            "        term['state'] = 'finished'\n"
+            "    st['pid'] = 0; save(st); out({'stopped': True}); sys.exit(0)\n"
+            "start()\n"
+            "st = load()\n"
+            "live = [t for t in st['terminals'] if t['state'] == 'live']\n"
+            "if args[:2] == ['server', 'status']:\n"
+            "    out({'version': '0.1.22', 'live': len(live), 'keeps_running_after_logout': True}); sys.exit(0)\n"
+            "if args[:2] in (['server', 'start'], ['server', 'restart']):\n"
+            "    out({'started': True}); sys.exit(0)\n"
+            "if args == ['connect']:\n"
+            "    for line in sys.stdin:\n"
+            "        req = json.loads(line)\n"
+            "        terms = live + [{'address': 'box/t9', 'name': 'remote', 'state': 'live'}]\n"
+            "        out({'jsonrpc': '2.0', 'id': req['id'], 'result': {'terminals': terms, 'machines': [], 'hidden_finished': 0}})\n"
             "    sys.exit(0)\n"
-            "sys.exit(1)\n"
+            "target = args[-1]\n"
+            "if args[0] == 'get':\n"
+            "    term = find(st, target)\n"
+            "    if not term:\n"
+            "        out({'error': {'kind': 'not_found', 'message': 'no terminal'}}); sys.exit(3)\n"
+            "    out(term); sys.exit(0)\n"
+            "if args[0] == 'run':\n"
+            "    if os.environ.get('HC_STUB_RUN_FAIL') == '1':\n"
+            "        st['terminals'].append({'address': 't99', 'name': args[args.index('--name') + 1], 'state': 'live', 'labels': {}})\n"
+            "        save(st); out({'error': {'kind': 'internal', 'message': 'registry save failed'}}); sys.exit(1)\n"
+            "    sep = args.index('--')\n"
+            "    opts, argv = args[:sep], args[sep + 1:]\n"
+            "    labels = dict(opts[i + 1].split('=', 1) for i, a in enumerate(opts) if a == '--label')\n"
+            "    name = opts[opts.index('--name') + 1]\n"
+            "    cwd = opts[opts.index('--cwd') + 1]\n"
+            "    address = 't' + str(st['next']); st['next'] += 1\n"
+            "    term = {'address': address, 'name': name, 'state': 'live', 'labels': labels, 'cwd': cwd, 'argv': argv, 'title': ''}\n"
+            "    st['terminals'].append(term); save(st)\n"
+            "    # hc runs programs in the core's environment, not the caller's.\n"
+            "    core_env = {'PATH': '/usr/bin:/bin', 'HOME': os.environ['HOME'], 'CORE_ONLY': '1', 'LANG': 'C',\n"
+            "                'HC_TERMINAL_ID': address, 'HC_SESSION': 'stub-core'}\n"
+            "    subprocess.run(argv, cwd=cwd, env=core_env, stdin=subprocess.DEVNULL, check=False)\n"
+            "    out(term); sys.exit(0)\n"
+            "if args[0] == 'attach':\n"
+            "    st['attaches'] += 1\n"
+            "    term = find(st, target)\n"
+            "    print('ATTACHED:' + target + ':' + os.getcwd())\n"
+            "    if term and not (os.environ.get('HC_STUB_DETACH_FIRST') == '1' and st['attaches'] == 1):\n"
+            "        term['state'] = 'finished'\n"
+            "    save(st); sys.exit(0)\n"
+            "if args[0] == 'kill':\n"
+            "    term = find(st, target)\n"
+            "    if term: term['state'] = 'finished'\n"
+            "    save(st); out(term or {}); sys.exit(0 if term else 3)\n"
+            "if args[0] == 'rm':\n"
+            "    term = find(st, target)\n"
+            "    st['terminals'] = [t for t in st['terminals'] if t is not term]\n"
+            "    save(st); out({'removed': term['address']} if term else {}); sys.exit(0 if term else 3)\n"
+            "sys.exit(2)\n"
         )
-        mock_herdr.chmod(0o755)
+        stub.chmod(0o755)
+        env = {**self.env, "HC_SOCKET": str(short / "hc.sock"), "HC_STUB_STATE": str(state), "HC_STUB_CALLS": str(calls)}
+        env.pop("HC_SESSION", None)
+        env.pop("HC_TERMINAL_ID", None)
 
-        # 1. Status while stopped.
-        st0 = json.loads(self.run_rt("herdr-status", {}).stdout)
+        def read_calls():
+            if not calls.exists():
+                return []
+            return [json.loads(line) for line in calls.read_text().splitlines()]
+
+        def stop_core():
+            if stub.exists():
+                subprocess.run([str(stub), "server", "stop"], env=env, capture_output=True)
+        self.addCleanup(stop_core)
+        return stub, env, read_calls, state
+
+    def _attach(self, env, **extra):
+        return subprocess.run(
+            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
+            env={**env, **extra}, text=True, capture_output=True, timeout=30,
+        )
+
+    def test_herdr_core_lifecycle_attach_and_close(self):
+        stub, env, read_calls, state = self._hc_stub()
+        proj = self.home / "proj"
+        proj.mkdir()
+
+        # Looking never starts the core: status, list, close, attach-mode.
+        st0 = json.loads(self.run_rt("herdr-status", {}, env=env).stdout)
         self.assertTrue(st0["installed"])
-        self.assertEqual(st0["binary_path"], str(mock_herdr))
-        self.assertEqual(st0["version"], "0.4.2")
+        self.assertEqual(st0["version"], "0.1.22")
         self.assertFalse(st0["server_running"])
-        self.assertEqual(st0["workspaces_count"], 0)
-        self.assertEqual(st0["agents_count"], 0)
-        self.assertEqual(st0["blocked_agents_count"], 0)
+        self.assertEqual(json.loads(self.run_rt("herdr-list", {}, env=env).stdout), {"running": False, "terminals": []})
+        self.assertEqual(json.loads(self.run_rt("herdr-close", {"terminal": "cage-0123456789abcdef"}, env=env).stdout)["running"], False)
+        down = self._attach(env, CAGE_HERDR_MODE="attach", CAGE_HERDR_TARGET="t1", CAGE_HERDR_WORKSPACE=str(proj))
+        self.assertIn("已经结束", down.stdout)
+        self.assertEqual([c for c in read_calls() if c["cmd"] != "--version"], [])
+        bad = self.run_rt("herdr-close", {"terminal": "--help"}, env=env, check=False)
+        self.assertNotEqual(bad.returncode, 0)
+        self.assertIn("名称无效", bad.stderr)
 
-        # 2. Start server and verify workspace/agent/blocked counts.
-        started = json.loads(self.run_rt("herdr-start", {"workspace": str(proj_dir)}).stdout)
-        self.assertTrue(started["server_running"])
-        st_data = json.loads(mock_state_file.read_text())
-        st_data["workspaces"] = [{"workspace_id": "ws-init", "label": "init"}]
-        st_data["agents"] = [
-            {"id": "a1", "status": "running"},
-            {"id": "a2", "status": "blocked"},
-            {"id": "a3", "agent_status": "BLOCKED"},
-        ]
-        mock_state_file.write_text(json.dumps(st_data))
-        st1 = json.loads(self.run_rt("herdr-status", {}).stdout)
-        self.assertTrue(st1["server_running"])
-        self.assertEqual(st1["workspaces_count"], 1)
-        self.assertEqual(st1["agents_count"], 3)
-        self.assertEqual(st1["blocked_agents_count"], 2)
+        # Create: one core start, a named, labelled terminal with no parent
+        # and no notes, the inner command in a self-deleting script, then the
+        # viewer loop (hc attach) until the terminal finishes.
+        marker = self.home / "inner-ran"
+        name = "cage-0123456789abcdef"
+        res = self._attach(env, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME=name, CAGE_HERDR_WORKSPACE=str(proj),
+                           CAGE_HERDR_PROJECT_LABEL="proj", CAGE_HERDR_TAB_LABEL="Shell\x1b[31m 1", CAGE_HERDR_KIND="shell",
+                           CAGE_HERDR_INNER_CMD=f"printf ok > '{marker}'; [ -z \"$CAGE_HERDR_INNER_CMD\" ] && printf clean >> '{marker}'",
+                           CAGE_HERDR_SHELL="/bin/sh")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertIn(f"ATTACHED:{name}:{proj.resolve()}", res.stdout)
+        self.assertEqual(marker.read_text(), "okclean")
+        calls = read_calls()
+        self.assertEqual(sum(1 for c in calls if c["cmd"] == "core-start"), 1)
+        run = next(c for c in calls if c["cmd"].startswith("run"))
+        argv = run["argv"]
+        for flag in ("--bg", "--json", "--no-parent", "--no-notify"):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index("--name") + 1], name)
+        self.assertEqual(argv[argv.index("--cwd") + 1], str(proj))
+        labels = [argv[i + 1] for i, a in enumerate(argv) if a == "--label"]
+        self.assertEqual(labels, ["cage=1", "cage.project=proj", "cage.kind=shell", "cage.title=Shell[31m 1"])
+        runner = argv[argv.index("--") + 1:]
+        self.assertEqual(runner[1:4], ["-I", "-S", "-c"])
+        self.assertFalse(Path(runner[-1]).exists(), "the launch file must delete itself")
+        self.assertNotIn("printf", " ".join(argv), "the command stays out of argv")
+        attach = next(c for c in calls if c["cmd"].startswith("attach"))
+        self.assertEqual(attach["argv"], ["attach", "--history", "1000", "--", name])
+        self.assertFalse(any(c["cmd"].startswith("machine") for c in calls))
 
-        # 3. Apply theme: preserves existing TOML sections/comments and triggers server reload-config.
-        cfg_file = self.home / ".config/herdr/config.toml"
-        cfg_file.parent.mkdir(parents=True, exist_ok=True)
-        cfg_file.write_text(
-            "# Top-level user comment\n"
-            "[server]\n"
-            "port = 9999\n"
-            "\n"
-            "[other]\n"
-            'name = "keep-this-name"\n'
-        )
-        th1 = json.loads(self.run_rt("herdr-apply-theme", {"theme": "tokyo-night"}).stdout)
-        self.assertEqual(th1, {"ok": True, "theme": "tokyo-night"})
-        self.assertEqual(stat.S_IMODE(cfg_file.stat().st_mode), 0o600)
-        cfg1 = cfg_file.read_text()
-        self.assertIn("# Top-level user comment", cfg1)
-        self.assertIn("port = 9999", cfg1)
-        self.assertIn('[other]\nname = "keep-this-name"', cfg1)
-        self.assertIn('[theme]\nname = "tokyo-night"', cfg1)
+        # ctrl+\ (hc attach detaches): the loop attaches again while it lives.
+        st = json.loads(state.read_text())
+        st["attaches"] = 0
+        st["terminals"][0]["state"] = "live"
+        state.write_text(json.dumps(st))
+        again = self._attach({**env, "HC_STUB_DETACH_FIRST": "1"}, CAGE_HERDR_MODE="attach", CAGE_HERDR_TARGET=name,
+                             CAGE_HERDR_WORKSPACE=str(proj))
+        self.assertEqual(again.stdout.count(f"ATTACHED:{name}"), 2, again.stdout)
 
-        # Updating existing [theme] replaces name in-place without touching [other] or duplicating [theme].
-        th2 = json.loads(self.run_rt("herdr-apply-theme", {"theme": "catppuccin"}).stdout)
-        self.assertEqual(th2, {"ok": True, "theme": "catppuccin"})
-        cfg2 = cfg_file.read_text()
-        self.assertEqual(cfg2.count("[theme]"), 1)
-        self.assertIn('name = "catppuccin"', cfg2)
-        self.assertNotIn('name = "tokyo-night"', cfg2)
-        self.assertIn('[other]\nname = "keep-this-name"', cfg2)
+        # Re-open with the same name while it lives: no second program.
+        st = json.loads(state.read_text())
+        st["terminals"][0]["state"] = "live"
+        state.write_text(json.dumps(st))
+        before = sum(1 for c in read_calls() if c["cmd"].startswith("run"))
+        self._attach(env, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME=name, CAGE_HERDR_WORKSPACE=str(proj),
+                     CAGE_HERDR_INNER_CMD=f"printf twice >> '{marker}'", CAGE_HERDR_SHELL="/bin/sh")
+        self.assertEqual(sum(1 for c in read_calls() if c["cmd"].startswith("run")), before)
+        self.assertEqual(marker.read_text(), "okclean")
 
-        # Default theme removes the managed [theme] override while keeping other sections; unknown theme is rejected.
-        th_def = json.loads(self.run_rt("herdr-apply-theme", {"theme": "default"}).stdout)
-        self.assertEqual(th_def, {"ok": True, "theme": "default"})
-        cfg_def = cfg_file.read_text()
-        self.assertNotIn('name = "catppuccin"', cfg_def)
-        self.assertIn("# Top-level user comment", cfg_def)
-        self.assertIn("port = 9999", cfg_def)
-        self.assertIn('[other]\nname = "keep-this-name"', cfg_def)
-        bad_theme = self.run_rt("herdr-apply-theme", {"theme": "nonexistent-theme"}, check=False)
-        self.assertNotEqual(bad_theme.returncode, 0)
+        # List: live local terminals with their cage.* labels, never another machine's.
+        st = json.loads(state.read_text())
+        st["terminals"][0]["state"] = "live"
+        state.write_text(json.dumps(st))
+        listed = json.loads(self.run_rt("herdr-list", {}, env=env).stdout)
+        self.assertTrue(listed["running"])
+        self.assertEqual([t["address"] for t in listed["terminals"]], ["t1"])
+        self.assertEqual(listed["terminals"][0]["name"], name)
+        self.assertEqual(listed["terminals"][0]["labels"]["cage.kind"], "shell")
+        status = json.loads(self.run_rt("herdr-status", {}, env=env).stdout)
+        self.assertTrue(status["server_running"])
+        self.assertEqual(status["terminals_count"], 1)
 
-        calls = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
-        self.assertTrue(any(c.get("cmd") == "reload-config" for c in calls))
+        # Stop refuses while terminals run, unless forced.
+        refused = self.run_rt("herdr-stop", {}, env=env, check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("1 个终端在运行", refused.stderr)
 
-        # 4. Stop server cleanly.
-        stopped = json.loads(self.run_rt("herdr-stop", {}).stdout)
+        # Close: kill, then rm.
+        closed = json.loads(self.run_rt("herdr-close", {"terminal": name}, env=env).stdout)
+        self.assertTrue(closed["closed"])
+        self.assertEqual([c["cmd"] for c in read_calls()][-2:], ["kill --json", "rm --json"])
+        self.assertEqual(json.loads(state.read_text())["terminals"], [])
+
+        stopped = json.loads(self.run_rt("herdr-stop", {"force": True}, env=env).stdout)
         self.assertFalse(stopped["server_running"])
 
-        # Reset mock workspaces and call log before testing herdr-attach takeover flow.
-        st_data = json.loads(mock_state_file.read_text())
-        st_data["workspaces"] = []
-        mock_state_file.write_text(json.dumps(st_data))
-        mock_calls_file.write_text("")
+        # A run that fails ends what it may have started, then falls back.
+        res = self._attach({**env, "HC_STUB_RUN_FAIL": "1"}, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME="cage-1111111111111111",
+                           CAGE_HERDR_WORKSPACE=str(proj), CAGE_HERDR_INNER_CMD="printf FALLBACK_RAN", CAGE_HERDR_SHELL="/bin/sh")
+        self.assertIn("FALLBACK_RAN", res.stdout)
+        self.assertEqual([c["cmd"] for c in read_calls()][-2:], ["kill --json", "rm --json"])
 
-        # Seed a stale run-*.sh older than 5 minutes to verify pruning.
-        herdr_root = self.home / ".local/share/cage/herdr"
-        herdr_root.mkdir(parents=True, exist_ok=True)
-        stale_script = herdr_root / "run-stale-old.sh"
-        stale_script.write_text("#!/bin/sh\n")
-        old_ts = time.time() - 600
-        os.utime(stale_script, (old_ts, old_ts))
+        # Nested in an hc terminal, a bad name, or no herdr-core: the plain shell.
+        nested = self._attach({**env, "HC_TERMINAL_ID": "t3"}, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME="cage-2222222222222222",
+                              CAGE_HERDR_WORKSPACE=str(proj), CAGE_HERDR_INNER_CMD="printf NESTED_PLAIN", CAGE_HERDR_SHELL="/bin/sh")
+        self.assertIn("NESTED_PLAIN", nested.stdout)
+        bad_name = self._attach(env, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME="--help", CAGE_HERDR_WORKSPACE=str(proj),
+                                CAGE_HERDR_INNER_CMD="printf BAD_NAME_PLAIN", CAGE_HERDR_SHELL="/bin/sh")
+        self.assertIn("BAD_NAME_PLAIN", bad_name.stdout)
+        picker = self._attach(env, CAGE_HERDR_KIND="herdr", CAGE_HERDR_WORKSPACE=str(proj))
+        self.assertIn(f"PICKER:{proj.resolve()}", picker.stdout)
+        stub.unlink()
+        missing = self._attach(env, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME="cage-3333333333333333",
+                               CAGE_HERDR_WORKSPACE=str(proj), CAGE_HERDR_INNER_CMD="printf MISSING_PLAIN", CAGE_HERDR_SHELL="/bin/sh")
+        self.assertIn("MISSING_PLAIN", missing.stdout)
 
-        # 5a. herdr-attach autostarts server, creates workspace, renames tab, runs self-deleting 0700 script.
-        marker1 = self.home / "claude-ran.txt"
-        attach_env1 = {
-            **self.env,
-            "CAGE_HERDR_WORKSPACE": str(proj_dir),
-            "CAGE_HERDR_PROJECT_LABEL": "my-project",
-            "CAGE_HERDR_TAB_LABEL": "Claude",
-            "CAGE_HERDR_KIND": "claude",
-            "CAGE_HERDR_INNER_CMD": f"printf 'CLAUDE_OK' > '{marker1}'",
-            "CAGE_HERDR_SHELL": "/bin/sh",
-        }
-        res_a1 = subprocess.run(
-            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
-            env=attach_env1,
-            text=True,
-            capture_output=True,
-            timeout=15,
+    def test_herdr_program_gets_cages_environment_not_the_cores(self):
+        stub, env, read_calls, state = self._hc_stub()
+        proj = self.home / "proj"
+        proj.mkdir()
+        dump = self.home / "program-env.json"
+        cage_env = {**env, "LANG": "zh_CN.UTF-8", "TZ": "Asia/Shanghai", "BROWSER": "/opt/cage/browser",
+                    "CLAUDE_CONFIG_DIR": str(self.home / "claude-account-2"), "CAGE_TEST_SECRET": "s3cr3t-value",
+                    "PATH": f"{self.home}/cage-bin:{env['PATH']}", "HC_SESSION": "from-the-caller"}
+        program = f"import json, os; open({str(dump)!r}, 'w').write(json.dumps(dict(os.environ)))"
+        res = self._attach(cage_env, CAGE_HERDR_MODE="create", CAGE_HERDR_NAME="cage-4444444444444444",
+                           CAGE_HERDR_WORKSPACE=str(proj), CAGE_HERDR_SHELL="/bin/sh",
+                           CAGE_HERDR_INNER_CMD=f"exec {shlex.quote(sys.executable)} -I -c {shlex.quote(program)}")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        seen = json.loads(dump.read_text())
+        for key in ("LANG", "TZ", "BROWSER", "CLAUDE_CONFIG_DIR", "CAGE_TEST_SECRET", "PATH", "HOME"):
+            self.assertEqual(seen.get(key), cage_env[key], key)
+        self.assertNotIn("CORE_ONLY", seen, "the core's environment leaked into the program")
+        self.assertFalse(any(k.startswith("CAGE_HERDR_") for k in seen), "Cage's launch variables leaked")
+        # hc's own variables for this terminal stay hc's.
+        self.assertEqual(seen.get("HC_TERMINAL_ID"), "t1")
+        self.assertEqual(seen.get("HC_SESSION"), "stub-core")
+        # Nothing secret in what hc keeps: argv, labels, names.
+        self.assertNotIn("s3cr3t-value", state.read_text())
+        self.assertNotIn("s3cr3t-value", json.dumps(read_calls()))
+        self.assertEqual(list((self.home / ".local/share/cage/herdr").glob("run-*")), [], "the launch file was left behind")
+
+    def test_herdr_legacy_tui_status_and_uninstall(self):
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        panes = self.home / "legacy-panes.json"
+        panes.write_text(json.dumps({"result": {"panes": [{"pane_id": "w1:p1"}, {"pane_id": "w1:p2"}]}}))
+        legacy = bin_dir / "herdr"
+        legacy.write_text(
+            f"#!{sys.executable}\n"
+            "import json, pathlib, sys\n"
+            f"PANES = pathlib.Path({str(panes)!r})\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['--version']:\n"
+            "    print('herdr 0.9.5'); sys.exit(0)\n"
+            "if args == ['status', 'server', '--json']:\n"
+            "    print(json.dumps({'running': PANES.exists()})); sys.exit(0)\n"
+            "if args == ['pane', 'list']:\n"
+            "    print(PANES.read_text()); sys.exit(0)\n"
+            "if args == ['server', 'stop']:\n"
+            "    PANES.unlink(missing_ok=True); sys.exit(0)\n"
+            "sys.exit(1)\n"
         )
-        self.assertEqual(res_a1.returncode, 0, res_a1.stderr)
-        self.assertIn("HERDR_ATTACHED:", res_a1.stdout)
-        attached_cwd = res_a1.stdout.strip().split("HERDR_ATTACHED:", 1)[1]
-        self.assertEqual(Path(attached_cwd).resolve(), proj_dir.resolve())
-        self.assertFalse(stale_script.exists(), "stale run-*.sh should be pruned")
-        self.assertEqual(marker1.read_text(), "CLAUDE_OK")
+        legacy.chmod(0o755)
+        config = self.home / ".config/herdr/session.json"
+        config.parent.mkdir(parents=True)
+        config.write_text("{}")
+        st = json.loads(self.run_rt("herdr-legacy-status", {}).stdout)
+        self.assertEqual((st["installed"], st["server_running"], st["panes"], st["busy"]), (True, True, 2, True))
+        self.assertTrue(json.loads(self.run_rt("herdr-status", {}).stdout)["legacy_installed"])
+        refused = self.run_rt("herdr-legacy-uninstall", {}, check=False)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("2 个终端", refused.stderr)
+        self.assertTrue(legacy.exists())
+        done = json.loads(self.run_rt("herdr-legacy-uninstall", {"force": True}).stdout)
+        self.assertFalse(done["installed"])
+        self.assertFalse(legacy.exists())
+        self.assertTrue(config.exists(), "~/.config/herdr stays")
+        self.assertFalse(json.loads(self.run_rt("herdr-status", {}).stdout)["legacy_installed"])
 
-        calls1 = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
-        cmds1 = [c["cmd"] for c in calls1]
-        self.assertIn("server", cmds1)
-        self.assertIn("workspace-create", cmds1)
-        self.assertIn("tab-rename", cmds1)
-        pane_runs = [c for c in calls1 if c["cmd"] == "pane-run"]
-        self.assertEqual(len(pane_runs), 1)
-        self.assertEqual(pane_runs[0]["mode"], 0o700)
-        self.assertTrue(pane_runs[0]["deleted_after"])
-        self.assertIn('rm -f -- "$0"', pane_runs[0]["body"])
-        attach_calls = [c for c in calls1 if c["cmd"] == "attach"]
-        self.assertEqual(attach_calls[-1]["leaked"], [])
-
-        # 5b. Second attach for same project reuses workspace via `tab create` instead of creating a new workspace.
-        mock_calls_file.write_text("")
-        marker2 = self.home / "codex-ran.txt"
-        attach_env2 = {
-            **self.env,
-            "CAGE_HERDR_WORKSPACE": str(proj_dir),
-            "CAGE_HERDR_PROJECT_LABEL": "my-project",
-            "CAGE_HERDR_TAB_LABEL": "Codex",
-            "CAGE_HERDR_KIND": "codex",
-            "CAGE_HERDR_INNER_CMD": f"printf 'CODEX_OK' > '{marker2}'",
-            "CAGE_HERDR_SHELL": "/bin/sh",
-        }
-        res_a2 = subprocess.run(
-            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
-            env=attach_env2,
-            text=True,
-            capture_output=True,
-            timeout=15,
-        )
-        self.assertEqual(res_a2.returncode, 0, res_a2.stderr)
-        self.assertEqual(marker2.read_text(), "CODEX_OK")
-        calls2 = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
-        cmds2 = [c["cmd"] for c in calls2]
-        self.assertNotIn("workspace-create", cmds2)
-        self.assertIn("tab-create", cmds2)
-        self.assertIn("pane-run", cmds2)
-
-        # 5c. Fallback when HERDR_ENV=1 runs inner command directly via shell without invoking herdr.
-        mock_calls_file.write_text("")
-        attach_env3 = {
-            **self.env,
-            "HERDR_ENV": "1",
-            "CAGE_HERDR_WORKSPACE": str(proj_dir),
-            "CAGE_HERDR_KIND": "claude",
-            "CAGE_HERDR_INNER_CMD": "printf 'FALLBACK_NESTED'",
-            "CAGE_HERDR_SHELL": "/bin/sh",
-        }
-        res_a3 = subprocess.run(
-            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
-            env=attach_env3,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        self.assertEqual(res_a3.returncode, 0, res_a3.stderr)
-        self.assertEqual(res_a3.stdout, "FALLBACK_NESTED")
-        self.assertEqual(mock_calls_file.read_text().strip(), "")
-
-        # 5d. Uninstall stops server, removes ~/.local/bin/herdr, preserves ~/.config/herdr/config.toml.
-        uninst = json.loads(self.run_rt("herdr-uninstall", {}).stdout)
-        self.assertEqual(uninst, {"installed": False, "server_running": False})
-        self.assertFalse(mock_herdr.exists())
-        self.assertTrue(cfg_file.is_file())
-        self.assertIn('name = "keep-this-name"', cfg_file.read_text())
-
-        # 5e. Fallback when herdr binary is missing executes inner command cleanly.
-        attach_env4 = {
-            **self.env,
-            "CAGE_HERDR_WORKSPACE": str(proj_dir),
-            "CAGE_HERDR_KIND": "codex",
-            "CAGE_HERDR_INNER_CMD": "printf 'FALLBACK_MISSING'",
-            "CAGE_HERDR_SHELL": "/bin/sh",
-        }
-        res_a4 = subprocess.run(
-            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
-            env=attach_env4,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        self.assertEqual(res_a4.returncode, 0, res_a4.stderr)
-        self.assertEqual(res_a4.stdout, "FALLBACK_MISSING")
-
-    def test_herdr_settings_keys_follow_config(self):
+    def test_herdr_core_install_reuse_and_release_checksum(self):
+        import hashlib
         import importlib.util
-        spec = importlib.util.spec_from_file_location("agent_runtime_settings_keys", RUNTIME)
-        rt = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(rt)
-        config = self.home / "herdr-config.toml"
-        saved = os.environ.get("HERDR_CONFIG_PATH")
-        os.environ["HERDR_CONFIG_PATH"] = str(config)
-        self.addCleanup(lambda: os.environ.pop("HERDR_CONFIG_PATH", None) if saved is None else os.environ.__setitem__("HERDR_CONFIG_PATH", saved))
-        cases = [
-            # No config: first-run setup shows first, and ends in Settings.
-            (None, {"onboarding": True, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
-            ("onboarding = false\n", {"onboarding": False, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
-            ('onboarding = false\n[keys]\nprefix = ["ctrl+space", "ctrl+s"]\nsettings = "prefix+comma"\n',
-             {"onboarding": False, "chunks": ["\x00", ","], "shortcut": "ctrl+space comma"}),
-            ('onboarding = false\n[keys]\nsettings = ["cmd+comma", "alt+s"]\n',
-             {"onboarding": False, "chunks": ["\x1bs"], "shortcut": "alt+s"}),
-            # A key no terminal can type: only its label, for the user to press.
-            ('onboarding = false\n[keys]\nsettings = "cmd+comma"\n',
-             {"onboarding": False, "chunks": None, "shortcut": "cmd+comma"}),
-            # Herdr reads an invalid config as its defaults.
-            ("onboarding = = nope\n", {"onboarding": False, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
-        ]
-        for text, want in cases:
-            if text is None:
-                config.unlink(missing_ok=True)
-            else:
-                config.write_text(text)
-            self.assertEqual(rt._herdr_settings_keys(), want, text)
-        # Without tomllib (a macOS guest's Python 3.9) the same simple lines read the same.
-        saved_module = sys.modules.get("tomllib")
-        sys.modules["tomllib"] = None
+        import io
+        import tarfile
+        saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
         try:
-            for text, want in cases[1:5]:
-                config.write_text(text)
-                self.assertEqual(rt._herdr_settings_keys(), want, text)
+            spec = importlib.util.spec_from_file_location("agent_runtime_hc_install", RUNTIME)
+            rt = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(rt)
         finally:
-            if saved_module is None:
-                sys.modules.pop("tomllib", None)
-            else:
-                sys.modules["tomllib"] = saved_module
-        self.assertIsNone(rt._herdr_key_bytes("super+s"))
-        self.assertIsNone(rt._herdr_key_bytes("ctrl+shift+s"))
-        self.assertEqual(rt._herdr_key_bytes("shift+n"), "N")
-        self.assertEqual(rt._herdr_key_bytes("ctrl+["), "\x1b")
+            os.environ["HOME"] = saved_home
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        served = self.home / "served"
+        served.mkdir()
+        curl_log = self.home / "curl.log"
+        # curl stand-in: serves files by the URL's last path segment.
+        fake_curl = bin_dir / "curl"
+        fake_curl.write_text(
+            "#!/bin/sh\n"
+            "echo \"$@\" >> '" + str(curl_log) + "'\n"
+            "out=''; url=''\n"
+            "while [ $# -gt 0 ]; do case $1 in -o) out=$2; shift 2;; https://*) url=$1; shift;; *) shift;; esac; done\n"
+            "cp '" + str(served) + "'/\"$(basename \"$url\")\" \"$out\"\n"
+        )
+        fake_curl.chmod(0o755)
+
+        def build(version):
+            body = ("#!/bin/sh\n[ \"$1\" = --version ] && echo 'hc " + version + "' && exit 0\n"
+                    "[ \"$1\" = update ] && echo \"$@\" >> '" + str(self.home) + "/update.log' && exit 0\nexit 1\n").encode()
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                info = tarfile.TarInfo("herdr-core")
+                info.size, info.mode = len(body), 0o755
+                tar.addfile(info, io.BytesIO(body))
+            return buf.getvalue()
+
+        machine = os.uname().machine.lower()
+        target = "linux-" + {"x86_64": "x86_64", "amd64": "x86_64"}.get(machine, "aarch64")
+
+        def publish(version, archive, sha=None, url=None):
+            (served / "herdr-core.tar.gz").write_bytes(archive)
+            (served / "latest.json").write_text(json.dumps({"version": version, "targets": {target: {
+                "url": url or f"https://releases.herdr.dev/core/{version}/herdr-core.tar.gz",
+                "sha256": sha or hashlib.sha256(archive).hexdigest()}}}))
+
+        path_str = f"{bin_dir}:/usr/bin:/bin"
+        env = {**os.environ, "HOME": str(self.home), "PATH": path_str}
+
+        # A damaged download is refused and nothing is installed.
+        publish("0.1.22", build("0.1.22"), sha="0" * 64)
+        with self.assertRaisesRegex(ValueError, "SHA-256"):
+            rt._herdr_install_linux("", "", path_str, env)
+        self.assertFalse((bin_dir / "herdr-core").exists())
+        # A manifest pointing anywhere but the release host is refused.
+        publish("0.1.22", build("0.1.22"), url="https://evil.example/herdr-core.tar.gz")
+        with self.assertRaisesRegex(ValueError, "格式"):
+            rt._herdr_install_linux("", "", path_str, env)
+        # The checked release installs, with hc beside it.
+        publish("0.1.22", build("0.1.22"))
+        rt._herdr_install_linux("", "", path_str, env)
+        self.assertEqual(rt._hc_version(str(bin_dir / "herdr-core")), "0.1.22")
+        rt._hc_link_hc(path_str)
+        self.assertEqual(os.readlink(bin_dir / "hc"), "herdr-core")
+        self.assertIn("--proto =https", curl_log.read_text())
+        # A working herdr-core is kept: no download at all.
+        curl_log.unlink()
+        res = json.loads(self.run_rt("herdr-install", {}).stdout.strip().splitlines()[-1])
+        self.assertTrue(res["reused"])
+        self.assertFalse(curl_log.exists())
+        # update with a newer release swaps it the planned way (update --from).
+        publish("0.1.23", build("0.1.23"))
+        rt._herdr_install_linux(str(bin_dir / "herdr-core"), "0.1.22", path_str, env)
+        self.assertIn("update --from", (self.home / "update.log").read_text())
+        # update with nothing newer downloads only the manifest.
+        curl_log.unlink()
+        rt._herdr_install_linux(str(bin_dir / "herdr-core"), "0.1.23", path_str, env)
+        self.assertEqual(len(curl_log.read_text().splitlines()), 1)
 
 
 if __name__ == "__main__":

@@ -55,8 +55,11 @@ func terminalResumeOffset(r *http.Request) (*uint64, bool) {
 	return &offset, true
 }
 
+// listTerminals also lists the live hc terminals without a running session
+// when Herdr is on (herdr_terminals.go). terminalsRevision, which every
+// status poll reads, never asks the guest: those show up on the next list.
 func (s *Server) listTerminals(w http.ResponseWriter, r *http.Request) {
-	jsonReply(w, s.terminalSummaries())
+	jsonReply(w, s.withHerdrTerminals(r.Context(), s.terminalSummaries()))
 }
 
 // terminalsRevision changes whenever the list from listTerminals would, so a
@@ -121,9 +124,11 @@ func (s *Server) closeTerminal(w http.ResponseWriter, r *http.Request) {
 }
 
 // A terminal sharing a Claude Code session is archived with its session;
-// any other terminal ends and is removed.
+// any other terminal ends and is removed. A Herdr terminal ends in hc too
+// (kill, then rm): closing is the user's word, a dropped viewer is not.
 func (s *Server) closeTerminalID(id string) error {
-	if terminal := s.terminals.get(id); terminal != nil {
+	terminal := s.terminals.get(id)
+	if terminal != nil {
 		summary := terminal.summary()
 		if shared, _ := summary["cli_session_id"].(string); shared != "" {
 			// A bound Codex terminal ends with its Codex; closing what is left
@@ -137,6 +142,9 @@ func (s *Server) closeTerminalID(id string) error {
 	}
 	s.terminals.remove(id)
 	s.entryUnkept()
+	if terminal == nil || terminal.herdrBacked {
+		s.endHerdrTerminal(id, terminal)
+	}
 	return nil
 }
 
@@ -146,7 +154,13 @@ func (s *Server) closeTerminalID(id string) error {
 // follow, their size and whether the viewer must clear its screen first, so
 // the viewer can resume after a reconnect from the last byte it received.
 func (s *Server) terminalStream(w http.ResponseWriter, r *http.Request) {
-	session := s.terminals.get(r.PathValue("id"))
+	// A Herdr terminal without a running session opens here: its stream
+	// starts a viewer of the hc terminal under the same id.
+	session, err := s.openHerdrViewer(r.Context(), r.PathValue("id"))
+	if err != nil {
+		terminalFailure(w, err)
+		return
+	}
 	if session == nil {
 		http.NotFound(w, r)
 		return
