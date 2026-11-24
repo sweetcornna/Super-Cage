@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCw,
   Settings,
+  SlidersHorizontal,
   Square,
   TerminalSquare,
   Trash2,
@@ -108,6 +109,7 @@ export function MagpieHeader({
   onOpenTUI,
   onRestart,
   onToggleBrowserBar,
+  onOfficialSettings,
   onSettings,
   onClose,
   menu,
@@ -223,11 +225,23 @@ export function MagpieHeader({
             <PanelTop size={13} aria-hidden="true" />
             <span>显示浏览器栏</span>
           </button>
+          {onOfficialSettings && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Magpie 官方设置"
+              title="打开 Magpie 自己的设置页"
+              disabled={!ready || busy}
+              onClick={onOfficialSettings}
+            >
+              <SlidersHorizontal size={14} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             className="icon-button"
-            aria-label="Magpie 设置"
-            title="配置 Magpie 模型路由与网关"
+            aria-label="Magpie 接入设置"
+            title="在 Super Cage 中配置 Magpie 接入、模型路由与网关"
             onClick={onSettings}
           >
             <Settings size={14} aria-hidden="true" />
@@ -546,6 +560,17 @@ export function MagpieSettingsCard({
               >
                 {submitting === "open-direct" ? <LoaderCircle size={14} className="spin" /> : <Zap size={14} />}
                 原生极速窗口
+              </button>
+            )}
+            {canLaunch && (
+              <button
+                type="button"
+                title="打开 Magpie 自己的设置页"
+                disabled={busy || (effectiveOpenMode === "workbench" && !envReady)}
+                onClick={() => void runAction("open-settings", () => onOpenMagpie?.("", "settings"))}
+              >
+                {submitting === "open-settings" ? <LoaderCircle size={14} className="spin" /> : <SlidersHorizontal size={14} />}
+                Magpie 官方设置
               </button>
             )}
             {supportsManaged && store.enabled && store.mode === "managed" && store.installed && onOpenMagpieTUI && (

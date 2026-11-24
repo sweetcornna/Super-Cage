@@ -9,6 +9,7 @@ import {
   RefreshCw,
   RotateCw,
   Settings,
+  SlidersHorizontal,
   Square,
   X,
   Zap,
@@ -95,6 +96,7 @@ export function T3CodeHeader({
   onOpenDirect,
   onRestart,
   onToggleBrowserBar,
+  onOfficialSettings,
   onSettings,
   onClose,
   menu,
@@ -185,11 +187,23 @@ export function T3CodeHeader({
             <PanelTop size={13} aria-hidden="true" />
             <span>显示浏览器栏</span>
           </button>
+          {onOfficialSettings && (
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="T3 Code 官方设置"
+              title="打开 T3 Code 自己的设置页"
+              disabled={!ready || busy}
+              onClick={onOfficialSettings}
+            >
+              <SlidersHorizontal size={14} aria-hidden="true" />
+            </button>
+          )}
           <button
             type="button"
             className="icon-button"
-            aria-label="T3 Code 设置"
-            title="配置 T3 Code 与账号绑定"
+            aria-label="T3 Code 接入设置"
+            title="在 Super Cage 中配置 T3 Code 接入与账号绑定"
             onClick={onSettings}
           >
             <Settings size={14} aria-hidden="true" />
@@ -517,6 +531,17 @@ export function T3CodeSettingsCard({
               >
                 {submitting === "open-direct" ? <LoaderCircle size={14} className="spin" /> : <Zap size={14} />}
                 原生极速直连窗口
+              </button>
+            )}
+            {canLaunch && (
+              <button
+                type="button"
+                title="在工作台中打开 T3 Code 自己的设置页"
+                disabled={busy || !envReady}
+                onClick={() => void runAction("open-settings", () => onOpenT3Code?.("", "settings"))}
+              >
+                {submitting === "open-settings" ? <LoaderCircle size={14} className="spin" /> : <SlidersHorizontal size={14} />}
+                T3 Code 官方设置
               </button>
             )}
             {supportsManaged && store.enabled && store.mode === "managed" && store.installed && (

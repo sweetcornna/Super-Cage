@@ -3226,6 +3226,116 @@ def _herdr_extract_tab_id(resp):
     return ""
 
 
+# Herdr's own settings open with a key in its client: keys.settings, by
+# default "prefix+s" with keys.prefix "ctrl+b" (upstream src/config/model.rs).
+# Super Cage types that key into the Herdr tab it opens, so it reports the
+# bytes a legacy terminal sends for it, or none when the key cannot be typed.
+HERDR_DEFAULT_PREFIX = "ctrl+b"
+HERDR_DEFAULT_SETTINGS_KEY = "prefix+s"
+_HERDR_NAMED_KEYS = {
+    "space": " ", "enter": "\r", "tab": "\t", "esc": "\x1b", "escape": "\x1b",
+    "minus": "-", "plus": "+", "comma": ",", "period": ".", "slash": "/",
+    "backslash": "\\", "semicolon": ";", "quote": "'", "backtick": "`", "equal": "=",
+}
+
+
+def _herdr_key_bytes(key):
+    parts = str(key or "").strip().lower().split("+")
+    if not parts or any(not part for part in parts):
+        return None
+    *mods, base = parts
+    if base in _HERDR_NAMED_KEYS:
+        ch = _HERDR_NAMED_KEYS[base]
+    elif len(base) == 1 and 0x21 <= ord(base) <= 0x7E:
+        ch = base
+    else:
+        return None
+    mods = set(mods)
+    if len(mods) != len(parts) - 1 or not mods <= {"ctrl", "alt", "shift"}:
+        return None
+    if "shift" in mods:
+        if "ctrl" in mods or not ("a" <= ch <= "z"):
+            return None
+        ch = ch.upper()
+    if "ctrl" in mods:
+        if ch == " ":
+            ch = "\x00"
+        elif "a" <= ch <= "z" or ch in "[\\]^_":
+            ch = chr(ord(ch.upper()) & 0x1F)
+        else:
+            return None
+    return "\x1b" + ch if "alt" in mods else ch
+
+
+def _herdr_bindings(value, default):
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return [default]
+    found = [item.strip() for item in value if isinstance(item, str) and item.strip()]
+    return found or [default]
+
+
+def _herdr_read_config(text):
+    """The parts of config.toml this needs: top-level onboarding and [keys]."""
+    try:
+        import tomllib
+    except ImportError:
+        tomllib = None
+    if tomllib is not None:
+        try:
+            return tomllib.loads(text)
+        except (tomllib.TOMLDecodeError, ValueError):
+            return None
+    # Python before 3.11 (a macOS guest): the few simple lines read here.
+    config, section = {}, ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            section = line.strip("[] ")
+            continue
+        match = re.match(r"(onboarding|prefix|settings)\s*=\s*(.+)$", line)
+        if not match:
+            continue
+        name, value = match.groups()
+        if (section, name) == ("", "onboarding"):
+            config["onboarding"] = not value.startswith("false")
+        elif section == "keys" and name in ("prefix", "settings"):
+            strings = [a or b for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', value)]
+            config.setdefault("keys", {})[name] = strings
+    return config
+
+
+def _herdr_settings_keys():
+    path = Path(os.environ.get("HERDR_CONFIG_PATH") or HERDR_CONFIG_FILE)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        text = ""
+    except (OSError, UnicodeError):
+        text = None
+    config = _herdr_read_config(text) if text is not None else None
+    if config is None:
+        # Herdr falls back to its defaults for a config it cannot read.
+        config = {"onboarding": False}
+    onboarding = config.get("onboarding", True) is not False
+    keys = config.get("keys") if isinstance(config.get("keys"), dict) else {}
+    prefix = _herdr_bindings(keys.get("prefix"), HERDR_DEFAULT_PREFIX)[0]
+    bindings = _herdr_bindings(keys.get("settings"), HERDR_DEFAULT_SETTINGS_KEY)
+    for binding in bindings:
+        if binding.lower().startswith("prefix+"):
+            rest = binding[len("prefix+"):]
+            chunks = [_herdr_key_bytes(prefix), _herdr_key_bytes(rest)]
+            label = f"{prefix} {rest}"
+        else:
+            chunks, label = [_herdr_key_bytes(binding)], binding
+        if all(chunks):
+            return {"onboarding": onboarding, "chunks": chunks, "shortcut": label}
+    first = bindings[0]
+    label = f"{prefix} {first[len('prefix+'):]}" if first.lower().startswith("prefix+") else first
+    return {"onboarding": onboarding, "chunks": None, "shortcut": label}
+
+
 def herdr_status(payload=None):
     path_str = enriched_path()
     binary = shutil.which("herdr", path=path_str) or ""
@@ -3257,6 +3367,7 @@ def herdr_status(payload=None):
         "workspaces_count": workspaces_count,
         "agents_count": agents_count,
         "blocked_agents_count": blocked_agents_count,
+        "settings_keys": _herdr_settings_keys(),
     }
 
 

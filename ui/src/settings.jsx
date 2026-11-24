@@ -83,6 +83,7 @@ export function SettingsPanel({
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
+  onOpenHerdrSettings,
   initialSection = "keyboard",
 }) {
   const [localKeyboard, setLocalKeyboard] = useState(() => clientKeyboard(current.keyboard));
@@ -310,13 +311,13 @@ export function SettingsPanel({
                 onClose();
                 onLaunchAgent?.(id);
               }}
-              onOpenT3Code={async (forceMode) => {
-                const opened = await onOpenT3Code?.(forceMode);
+              onOpenT3Code={async (forceMode, page) => {
+                const opened = await onOpenT3Code?.(forceMode, page);
                 if (opened?.mode === "workbench") onClose();
                 return opened;
               }}
-              onOpenMagpie={async (forceMode) => {
-                const opened = await onOpenMagpie?.(forceMode);
+              onOpenMagpie={async (forceMode, page) => {
+                const opened = await onOpenMagpie?.(forceMode, page);
                 if (opened?.mode === "workbench") onClose();
                 return opened;
               }}
@@ -327,6 +328,10 @@ export function SettingsPanel({
               onOpenHerdr={async () => {
                 onClose();
                 return await onOpenHerdr?.();
+              }}
+              onOpenHerdrSettings={async () => {
+                onClose();
+                return await onOpenHerdrSettings?.();
               }}
               onSavedClaudeCommand={onSaved}
             />
