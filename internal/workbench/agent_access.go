@@ -195,6 +195,8 @@ var agentRoutes = []string{
 	"POST /api/agent-clis/install", "POST /api/agent-clis/uninstall", "POST /api/agent-clis/config", "POST /api/agent-clis/custom",
 	"DELETE /api/agent-clis/custom/{id}", "POST /api/agent-clis/{id}/accounts",
 	"POST /api/t3code/config", "POST /api/t3code/install", "POST /api/t3code/open", "POST /api/t3code/{action}",
+	"POST /api/magpie/config", "POST /api/magpie/install", "POST /api/magpie/uninstall", "POST /api/magpie/open", "POST /api/magpie/{action}",
+	"POST /api/herdr/config", "POST /api/herdr/install", "POST /api/herdr/uninstall", "POST /api/herdr/{action}",
 	"POST /api/proxy/{action}", "POST /api/proxy/delay", "POST /api/safety/check", "POST /api/safety/close", "POST /api/tailscale/{action}",
 	"DELETE /api/mobile-pair", "DELETE /api/devices/invite", "DELETE /api/devices/{id}",
 	"POST /api/mobile/browser/open", "POST /api/mobile/browser/favorites", "POST /api/mobile/browser/{id}/action", "POST /api/mobile/browser/{id}/close",

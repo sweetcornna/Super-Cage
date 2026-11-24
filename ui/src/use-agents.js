@@ -229,3 +229,243 @@ export function useT3Code({ vmRunning = false, ready = false, job = null } = {})
     open,
   };
 }
+
+// Manages the optional Magpie model router & local gateway integration without idle polling.
+export function useMagpie({ vmRunning = false, ready = false, job = null } = {}) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  const lastJobId = useRef("");
+
+  const applyPayload = useCallback((result) => {
+    if (result && typeof result === "object") {
+      setData(result);
+      setError("");
+    }
+    return result;
+  }, []);
+
+  const refresh = useCallback(async (force = false) => {
+    const request = ++generation.current;
+    setLoading(true);
+    try {
+      const result = await api(force ? "/magpie?force=1" : "/magpie");
+      if (generation.current === request) {
+        setData(result);
+        setError("");
+      }
+      return result;
+    } catch (e) {
+      if (generation.current === request) setError(e.message);
+      return null;
+    } finally {
+      if (generation.current === request) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh(false);
+    return () => { generation.current++; };
+  }, [refresh, vmRunning, ready]);
+
+  useEffect(() => {
+    if (!job || job.running || !job.id) return;
+    if (lastJobId.current === job.id) return;
+    if (
+      job.kind === "magpie-install" ||
+      job.kind === "magpie-uninstall" ||
+      job.kind === "environment-tools" ||
+      job.kind === "start" ||
+      job.kind === "stop"
+    ) {
+      lastJobId.current = job.id;
+      void refresh(true);
+    }
+  }, [job, refresh]);
+
+  const saveConfig = useCallback(async (patch) => {
+    const result = await api("/magpie/config", patch);
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const install = useCallback(async () => {
+    return await api("/magpie/install", {});
+  }, []);
+
+  const uninstall = useCallback(async () => {
+    return await api("/magpie/uninstall", {});
+  }, []);
+
+  const start = useCallback(async () => {
+    const result = await api("/magpie/start", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const stop = useCallback(async () => {
+    const result = await api("/magpie/stop", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const restart = useCallback(async () => {
+    const result = await api("/magpie/restart", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const open = useCallback(async (options = {}) => {
+    const result = await api("/magpie/open", options);
+    if (result && typeof result === "object") {
+      setData((prev) => (prev ? {
+        ...prev,
+        running: prev.mode === "managed" ? true : prev.running,
+        gateway_running: typeof result.gateway_running === "boolean"
+          ? result.gateway_running
+          : prev.gateway_running,
+        url: result.url || prev.url,
+        gateway_url: result.gateway_url || prev.gateway_url,
+        error: "",
+      } : prev));
+      setError("");
+    }
+    return result;
+  }, []);
+
+  return {
+    data,
+    enabled: Boolean(data?.enabled),
+    mode: data?.mode || "managed",
+    external_url: data?.external_url || "",
+    port: data?.port || 0,
+    gateway_port: data?.gateway_port || 3425,
+    gateway_url: data?.gateway_url || "",
+    gateway_running: Boolean(data?.gateway_running),
+    gateway_only: Boolean(data?.gateway_only),
+    open_mode: data?.open_mode || "workbench",
+    focus_chrome: data?.focus_chrome !== false,
+    installed: Boolean(data?.installed),
+    version: data?.version || "",
+    running: Boolean(data?.running),
+    url: data?.url || "",
+    supports_managed: data?.supports_managed,
+    direct_available: data?.direct_available,
+    serverError: data?.error || "",
+    loading,
+    error,
+    refresh,
+    saveConfig,
+    install,
+    uninstall,
+    start,
+    stop,
+    restart,
+    open,
+  };
+}
+
+// Manages the optional Herdr persistent multi-agent terminal workspace integration without idle polling.
+export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  const lastJobId = useRef("");
+
+  const applyPayload = useCallback((result) => {
+    if (result && typeof result === "object") {
+      setData(result);
+      setError("");
+    }
+    return result;
+  }, []);
+
+  const refresh = useCallback(async (force = false) => {
+    const request = ++generation.current;
+    setLoading(true);
+    try {
+      const result = await api(force ? "/herdr?force=1" : "/herdr");
+      if (generation.current === request) {
+        setData(result);
+        setError("");
+      }
+      return result;
+    } catch (e) {
+      if (generation.current === request) setError(e.message);
+      return null;
+    } finally {
+      if (generation.current === request) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh(false);
+    return () => { generation.current++; };
+  }, [refresh, vmRunning, ready]);
+
+  useEffect(() => {
+    if (!job || job.running || !job.id) return;
+    if (lastJobId.current === job.id) return;
+    if (
+      job.kind === "herdr-install" ||
+      job.kind === "herdr-uninstall" ||
+      job.kind === "environment-tools" ||
+      job.kind === "start" ||
+      job.kind === "stop"
+    ) {
+      lastJobId.current = job.id;
+      void refresh(true);
+    }
+  }, [job, refresh]);
+
+  const saveConfig = useCallback(async (patch) => {
+    const result = await api("/herdr/config", patch);
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const install = useCallback(async () => {
+    return await api("/herdr/install", {});
+  }, []);
+
+  const uninstall = useCallback(async () => {
+    return await api("/herdr/uninstall", {});
+  }, []);
+
+  const start = useCallback(async () => {
+    const result = await api("/herdr/start", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const stop = useCallback(async () => {
+    const result = await api("/herdr/stop", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const restart = useCallback(async () => {
+    const result = await api("/herdr/restart", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  return {
+    data,
+    enabled: Boolean(data?.enabled),
+    takeover_terminals: data?.takeover_terminals !== false,
+    theme: data?.theme || "default",
+    installed: Boolean(data?.installed),
+    version: data?.version || "",
+    binary_path: data?.binary_path || "",
+    server_running: Boolean(data?.server_running),
+    workspaces_count: Number(data?.workspaces_count) || 0,
+    agents_count: Number(data?.agents_count) || 0,
+    blocked_agents_count: Number(data?.blocked_agents_count) || 0,
+    supports_managed: data?.supports_managed,
+    serverError: data?.error || "",
+    loading,
+    error,
+    refresh,
+    saveConfig,
+    install,
+    uninstall,
+    start,
+    stop,
+    restart,
+  };
+}

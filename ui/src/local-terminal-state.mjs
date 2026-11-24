@@ -1,14 +1,15 @@
 // Pure state of the "本机终端" feature on this computer: the line that says
 // which application opens, the two switches, the menu item "在本机终端中打开"
 // and the request that opens a terminal there. There is no application to
-// choose: Ghostty opens it when it is installed, the system Terminal
-// otherwise (internal/localterm). No DOM and no fetch, so node --test covers it.
+// choose: Herdr opens it when it is installed, else Ghostty, else the system
+// Terminal (internal/localterm). No DOM and no fetch, so node --test covers it.
 
 export const MENU_LABEL = "在本机终端中打开";
 export const MENU_SHORTCUT = "⌘⇧O";
 export const MENU_ICON = "square-arrow-out-up-right";
 export const SETTINGS_PATH = "/client/local-terminal";
 export const APP_PATH = "/client/local-terminal/app";
+export const INSTALL_HERDR_PATH = "/client/local-terminal/install-herdr";
 export const OPEN_PATH = "/client/local-terminal/open";
 
 export const DEFAULT_SETTINGS = Object.freeze({ image_upload: true, clipboard_write: true });
@@ -45,9 +46,10 @@ export function settingsChanged(saved, draft) {
 // app is what GET /client/local-terminal/app found ({id, name}), or null.
 export function openerLine(app, supported = true) {
   if (!supported) return "这台电脑的系统暂不支持在本机终端中打开，终端会在 Super Cage 的标签页中打开";
-  if (!app) return "这台电脑上找不到 Ghostty 或系统终端，暂时不能在本机终端中打开";
-  if (app.id === "ghostty") return "用 Ghostty 打开";
-  return "用系统终端打开；安装 Ghostty 后自动改用 Ghostty";
+  if (!app) return "这台电脑上找不到 Herdr、Ghostty 或系统终端，暂时不能在本机终端中打开";
+  if (app.id === "herdr") return "用 Herdr 打开（已自动替代 Ghostty 接管本机终端）";
+  if (app.id === "ghostty") return "用 Ghostty 打开；安装 Herdr 后自动改用 Herdr";
+  return "用系统终端打开；安装 Herdr 或 Ghostty 后自动切换";
 }
 
 const terminalID = /^[0-9a-f]{16}$/;

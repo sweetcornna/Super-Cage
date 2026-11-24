@@ -33,8 +33,9 @@ import { useClaudeAccounts } from "./claude-accounts";
 import { useCodexAccounts } from "./codex-accounts";
 import { codexSurfaces, codexTerminalDetail, codexTerminalLabel } from "./codex-accounts-state.mjs";
 import { AccountsHub } from "./accounts-hub";
-import { useAgents, useT3Code } from "./use-agents";
+import { useAgents, useHerdr, useMagpie, useT3Code } from "./use-agents";
 import { T3CodeHeader, isT3CodeDirectAvailable, isT3CodeTab } from "./t3code-panel";
+import { MagpieHeader, isMagpieDirectAvailable, isMagpieTab } from "./magpie-panel";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
 import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
@@ -232,10 +233,17 @@ function App() {
       : "claude";
   const agentCatalog = useAgents({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const t3code = useT3Code({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const magpie = useMagpie({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const herdr = useHerdr({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const [t3codeShowBrowserBar, setT3codeShowBrowserBar] = useState(false);
+  const [magpieShowBrowserBar, setMagpieShowBrowserBar] = useState(false);
   const browserHeaderRefs = useRef(new Map());
   const t3codeFocusFrame = useRef(0);
-  useEffect(() => () => cancelAnimationFrame(t3codeFocusFrame.current), []);
+  const magpieFocusFrame = useRef(0);
+  useEffect(() => () => {
+    cancelAnimationFrame(t3codeFocusFrame.current);
+    cancelAnimationFrame(magpieFocusFrame.current);
+  }, []);
   const toggleT3CodeBrowserBar = (tabId, showBrowserBar) => {
     setT3codeShowBrowserBar(showBrowserBar);
     cancelAnimationFrame(t3codeFocusFrame.current);
@@ -251,6 +259,25 @@ function App() {
            container.querySelector(".address-bar input") ||
            container.querySelector("button:not(:disabled)"))
         : (container.querySelector('[data-t3code-chrome-toggle="true"]') ||
+           container.querySelector("button:not(:disabled)"));
+      target?.focus();
+    });
+  };
+  const toggleMagpieBrowserBar = (tabId, showBrowserBar) => {
+    setMagpieShowBrowserBar(showBrowserBar);
+    cancelAnimationFrame(magpieFocusFrame.current);
+    magpieFocusFrame.current = requestAnimationFrame(() => {
+      const container =
+        browserHeaderRefs.current.get(tabId) ||
+        [...document.querySelectorAll("[data-browser-tab]")].find(
+          (node) => node.dataset.browserTab === tabId,
+        );
+      if (!container) return;
+      const target = showBrowserBar
+        ? (container.querySelector(".browser-more-trigger") ||
+           container.querySelector(".address-bar input") ||
+           container.querySelector("button:not(:disabled)"))
+        : (container.querySelector('[data-magpie-chrome-toggle="true"]') ||
            container.querySelector("button:not(:disabled)"));
       target?.focus();
     });
@@ -780,6 +807,121 @@ function App() {
       notify(error.message);
     }
   };
+  const openMagpie = async (forceMode = "") => {
+    const directAvailable = isMagpieDirectAvailable(magpie);
+    const effectiveForceMode = !directAvailable ? "workbench" : forceMode;
+    const wantDirect = (effectiveForceMode || magpie.open_mode) === "direct" && directAvailable;
+    let popup = null;
+    if (wantDirect) {
+      popup = window.open("about:blank", "_blank");
+      if (popup) {
+        try {
+          popup.opener = null;
+        } catch {
+          // Ignore if opener cannot be cleared in this environment.
+        }
+      }
+    }
+    const closeReservedPopup = () => {
+      if (popup && !popup.closed) {
+        try {
+          popup.close();
+        } catch {
+          // Ignore if popup could not be closed.
+        }
+      }
+      popup = null;
+    };
+    try {
+      const result = await magpie.open({
+        workspace: contentWorkspace || workspace,
+        ...(effectiveForceMode ? { force_mode: effectiveForceMode } : {}),
+      });
+      if (result?.mode === "direct" && result.direct_url) {
+        if (popup && !popup.closed) {
+          popup.location.replace(result.direct_url);
+          popup.focus();
+          notify("已在新窗口极速直连打开 Magpie");
+          return result;
+        }
+        const opened = window.open(result.direct_url, "_blank", "noopener");
+        if (opened) {
+          notify("已在新窗口极速直连打开 Magpie");
+          return result;
+        }
+        const fallback = await magpie.open({
+          workspace: contentWorkspace || workspace,
+          force_mode: "workbench",
+        });
+        if (!fallback?.tab_id) {
+          throw new Error("新窗口弹窗被拦截，且未能在工作台标签中打开 Magpie，请允许弹窗或重试");
+        }
+        showBrowserResult({
+          id: fallback.tab_id,
+          kind: "magpie",
+          url: fallback.url,
+          title: fallback.title || "Magpie",
+        });
+        notify("当前窗口拦截了新窗口弹窗，已自动在工作台标签中打开 Magpie");
+        return fallback;
+      }
+      closeReservedPopup();
+      if (result?.tab_id) {
+        showBrowserResult({
+          id: result.tab_id,
+          kind: "magpie",
+          url: result.url,
+          title: result.title || "Magpie",
+        });
+      }
+      return result;
+    } catch (error) {
+      closeReservedPopup();
+      notify(error.message);
+      throw error;
+    }
+  };
+  const restartMagpie = async (tab) => {
+    try {
+      await magpie.restart();
+      notify("Magpie 服务已重启");
+      if (tab?.id && status?.ready) {
+        await action("/browser/reload", { id: tab.id });
+      }
+    } catch (error) {
+      notify(error.message);
+    }
+  };
+  const openMagpieTUI = async (targetWorkspace = "") => {
+    const ws = targetWorkspace || contentWorkspace || workspace;
+    if (!ws && system !== "windows-remote") {
+      setProjectDialog({});
+      return null;
+    }
+    return await createTerminal(ws, "magpie-tui");
+  };
+  const openHerdr = async (targetWorkspace = "") => {
+    const ws = targetWorkspace || contentWorkspace || workspace;
+    const existing = tabs.find(
+      (t) =>
+        t.kind === "terminal" &&
+        t.terminalKind === "herdr" &&
+        !t.closed &&
+        !t.pending &&
+        (!targetWorkspace || t.workspace === ws),
+    );
+    if (existing) {
+      await select(existing.id);
+      return existing;
+    }
+    if (!ws && system !== "windows-remote") {
+      setProjectDialog({});
+      return null;
+    }
+    const created = await createTerminal(ws, "herdr");
+    void herdr.refresh(false);
+    return created;
+  };
   const showTerminal = (result, placeholder) => {
     const tab = {
       ...result, id: "terminal:" + result.id, sessionId: result.id,
@@ -886,6 +1028,8 @@ function App() {
   const terminalMenuAt = (location) => terminalChoice?.anchor?.dataset.terminalLocation === location && (
     <TerminalMenu choice={terminalChoice} busy={busy} codex={codexUI.menu} codexLabel={codexMenuLabel(sessionCapabilities)}
       agents={agentCatalog.agents}
+      herdr={herdr}
+      magpie={magpie}
       local={localTerminalItem(location)}
       onClose={() => setTerminalChoice(null)}
       onInstallMore={() => openSettings("agents")}
@@ -1623,9 +1767,10 @@ function App() {
   const displayTabs = orderedTabs(tabs, metadata).map((tab) => {
     const agentSpec = tab.agent_id ? agentCatalog.byId.get(tab.agent_id)?.spec : null;
     const isT3 = tab.kind !== "terminal" && isT3CodeTab(tab, t3code);
+    const isMP = tab.kind !== "terminal" && !isT3 && isMagpieTab(tab, magpie);
     const hasClaudeMeta = Boolean(tab.claude_account_id || tab.terminalKind === "claude-login");
     const codexLabel = !hasClaudeMeta ? codexTerminalLabel(tab, codexProfiles.accounts) : "";
-    if (!hasClaudeMeta && !codexLabel && !agentSpec && !isT3) return tab;
+    if (!hasClaudeMeta && !codexLabel && !agentSpec && !isT3 && !isMP) return tab;
     return {
       ...tab,
       ...(hasClaudeMeta ? {
@@ -1639,9 +1784,12 @@ function App() {
         agentAccentColor: agentSpec.accent_color,
       } : {}),
       ...(isT3 ? { isT3Code: true } : {}),
+      ...(isMP ? { isMagpie: true } : {}),
     };
   });
   const activeIsT3Code = Boolean(!desktopOpen && !showHome && !managementPage && current && isT3CodeTab(current, t3code));
+  const activeIsMagpie = Boolean(!desktopOpen && !showHome && !managementPage && current && !activeIsT3Code && isMagpieTab(current, magpie));
+  const activeIsHerdr = Boolean(!desktopOpen && !showHome && !managementPage && current?.kind === "terminal" && current.terminalKind === "herdr");
   const browserTabs = displayTabs.filter((tab) => tab.kind !== "terminal");
   const switchTabs =
     terminal && !showHome
@@ -1746,6 +1894,8 @@ function App() {
     const detail = tab?.terminalKind === "claude-login" ? `登录 · ${account || "新账号"}`
       : tab?.terminalKind === "agent-login" ? `${tab.agent_name || tab.agent_id} · 登录`
       : tab?.terminalKind === "agent" ? `${tab.agent_name || tab.agent_id}${tab.account_label ? ` · ${tab.account_label}` : ""}`
+      : tab?.terminalKind === "herdr" ? "Herdr 持久工作区"
+      : tab?.terminalKind === "magpie-tui" ? "Magpie TUI"
       : account ? `Claude · ${account}${tab.claude_account_source === "default" ? "（启动时账号）" : ""}` : codexTerminalDetail(tab, codexProfiles.accounts);
     const detailHint = isAgentTab && tab?.schedule_reason
       ? `${detail}（${tab.schedule_reason}）`
@@ -1777,6 +1927,7 @@ function App() {
     item.id === tab.id || (tab.id === leftId && item.id !== rightId));
   const browserHeader = tab => {
     const isT3 = isT3CodeTab(tab, t3code);
+    const isMP = !isT3 && isMagpieTab(tab, magpie);
     if (isT3 && t3code.focus_chrome !== false && !t3codeShowBrowserBar) {
       return <T3CodeHeader
         tab={tab}
@@ -1795,9 +1946,29 @@ function App() {
         menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
       />;
     }
+    if (isMP && magpie.focus_chrome !== false && !magpieShowBrowserBar) {
+      return <MagpieHeader
+        tab={tab}
+        magpie={magpie}
+        ready={status.ready}
+        busy={busy}
+        compact={split}
+        sidebarButton={sidebarButton(paneSide(tab.id))}
+        exitButton={expandButton(tab)}
+        onReload={() => action("/browser/reload", { id: tab.id })}
+        onOpenDirect={() => { void openMagpie("direct").catch(() => {}); }}
+        onOpenTUI={() => { void openMagpieTUI().catch((e) => notify(e.message)); }}
+        onRestart={() => restartMagpie(tab)}
+        onToggleBrowserBar={() => toggleMagpieBrowserBar(tab.id, true)}
+        onSettings={() => openSettings("agents")}
+        onClose={() => closeTab(tab)}
+        menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
+      />;
+    }
     return <BrowserHeader vault={passwordVault} onManageVault={() => openSettings("vault")} tab={tab} tabs={paneTabs(tab)} metadata={metadata}
       agentsById={agentCatalog.byId}
       onFocusT3CodeChrome={isT3 ? () => toggleT3CodeBrowserBar(tab.id, false) : undefined}
+      onFocusMagpieChrome={isMP ? () => toggleMagpieBrowserBar(tab.id, false) : undefined}
       vertical={browserTabLayout === "vertical"}
       ready={status.ready} busy={busy} focused={active === tab.id} compact={split} splitDrag={splitDrag}
       sidebarButton={sidebarButton(paneSide(tab.id))} exitButton={expandButton(tab)}
@@ -1936,6 +2107,12 @@ function App() {
             t3code={t3code}
             t3codeActive={activeIsT3Code}
             onOpenT3Code={(forceMode) => { void openT3Code(forceMode).catch(() => {}); }}
+            magpie={magpie}
+            magpieActive={activeIsMagpie}
+            onOpenMagpie={(forceMode) => { void openMagpie(forceMode).catch(() => {}); }}
+            herdr={herdr}
+            herdrActive={activeIsHerdr}
+            onOpenHerdr={() => { void openHerdr().catch((e) => notify(e.message)); }}
             onInstallAgents={() => openSettings("agents")}
             tailscaleOpen={managementPage === "tailscale"}
             updateAction={<AppUpdateButton updates={appUpdates} />}
@@ -2117,7 +2294,8 @@ function App() {
                 )}
                 {!macGuest && !desktopOpen && !showHome && webPanes.length > 0 && (() => {
                   const t3FocusSingle = webPanes.length === 1 && isT3CodeTab(webPanes[0], t3code) && t3code.focus_chrome !== false && !t3codeShowBrowserBar;
-                  const showVerticalRail = browserTabLayout === "vertical" && !t3FocusSingle;
+                  const magpieFocusSingle = webPanes.length === 1 && !isT3CodeTab(webPanes[0], t3code) && isMagpieTab(webPanes[0], magpie) && magpie.focus_chrome !== false && !magpieShowBrowserBar;
+                  const showVerticalRail = browserTabLayout === "vertical" && !t3FocusSingle && !magpieFocusSingle;
                   return (
                   <section className={`pane-lane browser-lane ${showVerticalRail ? "vertical-browser" : ""} ${dualBrowser ? "" : "split-" + paneSide(webPanes[0].id)}`}>
                     {showVerticalRail && <BrowserTabRail tabs={browserTabs} metadata={metadata}
@@ -2195,6 +2373,15 @@ function App() {
                         agentOAuthDomains={allAgentOAuthDomains}
                         onLaunchAgent={(id, accountId, ws) => launchAgentTerminal(id, accountId, ws || tab.workspace).catch((e) => notify(e.message))}
                         onOpenAgentAccounts={openAgentAccounts}
+                        onReattachHerdr={(sess) => {
+                          if (sess?.id) {
+                            api("/terminals/" + sess.id, undefined, "DELETE").catch(() => {});
+                            setTabs((list) => list.filter((item) => item.sessionId !== sess.id));
+                          }
+                          void createTerminal(sess.workspace || workspace, "herdr")
+                            .then(() => { void herdr.refresh(false); })
+                            .catch((e) => notify(e.message));
+                        }}
                         onOutput={isCodexTab(tab) && tab.cli_session_id ? () => codexOutputArrived(tab.id) : undefined}
                         onLoginTab={({ id }) => showBrowserResult({ id, kind: "web", login: true, incognito: true, title: "账号授权" })}
                         onControls={(control) =>
@@ -2357,6 +2544,8 @@ function App() {
           status={status}
           agents={agentCatalog}
           t3code={t3code}
+          magpie={magpie}
+          herdr={herdr}
           initialSection={settingsSection}
           onClose={() => setSettingsOpen(false)}
           onSaved={refreshSettings}
@@ -2364,6 +2553,9 @@ function App() {
           onOpenAgentAccounts={openAgentAccounts}
           onLaunchAgent={(id) => launchAgentTerminal(id).catch((e) => notify(e.message))}
           onOpenT3Code={openT3Code}
+          onOpenMagpie={openMagpie}
+          onOpenMagpieTUI={() => openMagpieTUI().catch((e) => notify(e.message))}
+          onOpenHerdr={() => openHerdr().catch((e) => notify(e.message))}
         />
       )}
       </Suspense>

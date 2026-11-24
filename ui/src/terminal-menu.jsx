@@ -7,7 +7,7 @@ import { AgentIcon } from "./agent-icon";
 // "Codex 终端" (a plain Codex terminal) otherwise (codexMenuLabel).
 // local, when given, is "在本机终端中打开" ({label, enabled, reason,
 // onSelect}): the desktop app only. Its reason, when disabled, is its tooltip.
-export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", local = null, agents = [], onClose, onSelect, onInstallMore }) {
+export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 终端", local = null, agents = [], herdr = null, magpie = null, onClose, onSelect, onInstallMore }) {
   const menu = useRef(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -93,6 +93,21 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
           )}
         </button>
       ))}
+      {herdr?.enabled && herdr?.installed && (
+        <button role="menuitem" disabled={busy} onClick={() => onSelect("herdr")}>
+          <AgentIcon agentId="herdr" size={17} />
+          <span className="terminal-menu-label">Herdr 工作区</span>
+          {herdr.takeover_terminals && (
+            <small className="terminal-menu-badge" aria-hidden="true">接管</small>
+          )}
+        </button>
+      )}
+      {magpie?.enabled && magpie?.installed && (
+        <button role="menuitem" disabled={busy} onClick={() => onSelect("magpie-tui")}>
+          <AgentIcon agentId="magpie" size={17} />
+          <span className="terminal-menu-label">Magpie TUI</span>
+        </button>
+      )}
       {local && <button role="menuitem" className="local-terminal-item" disabled={busy || !local.enabled} title={local.reason || undefined} onClick={local.onSelect}>
         <ExternalLink size={16} />{local.label}
       </button>}

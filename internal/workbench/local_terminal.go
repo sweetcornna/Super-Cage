@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -25,13 +26,14 @@ import (
 // The "本机终端" client routes belong to the desktop on the owner's computer:
 // two switches, kept in the desktop's local client configuration, and opening
 // a Cage terminal in the owner's terminal application. There is nothing to
-// choose: Ghostty opens it when it is installed, the system Terminal
-// otherwise. They never reach an environment or the portal.
+// choose: Herdr opens it when it is installed, else Ghostty, else the system
+// Terminal. They never reach an environment or the portal.
 //
-//	GET  /api/client/local-terminal        this computer's settings
-//	PUT  /api/client/local-terminal        save them
-//	GET  /api/client/local-terminal/app    the application that opens, detected now
-//	POST /api/client/local-terminal/open   open a terminal, project or session
+//	GET  /api/client/local-terminal               this computer's settings
+//	PUT  /api/client/local-terminal               save them
+//	GET  /api/client/local-terminal/app           the application that opens, detected now
+//	POST /api/client/local-terminal/install-herdr install Herdr desktop app on this computer
+//	POST /api/client/local-terminal/open          open a terminal, project or session
 
 // localTerminalRunner runs launch steps; tests replace it so that nothing
 // is ever launched.
@@ -40,6 +42,57 @@ var localTerminalRunner localterm.Runner = localterm.ExecRunner{}
 // localTerminalDetect finds the installed applications; tests replace it.
 var localTerminalDetect = localterm.Detect
 
+// localTerminalInstallHerdr installs Herdr desktop app on this computer; tests
+// replace it so that nothing is downloaded or executed.
+var localTerminalInstallHerdr = installHerdrDesktop
+
+func installHerdrEnv(environ []string) []string {
+	kept := localterm.LaunchEnvironment(environ)
+	for _, entry := range environ {
+		name, _, ok := strings.Cut(entry, "=")
+		if !ok {
+			continue
+		}
+		switch strings.ToUpper(name) {
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+			kept = append(kept, entry)
+		}
+	}
+	return kept
+}
+
+func installHerdrDesktop(ctx context.Context) error {
+	if runtime.GOOS != "darwin" {
+		return errors.New("当前系统暂不支持安装 Herdr 桌面端")
+	}
+	tmp, err := os.CreateTemp("", "super-cage-herdr-install-*.sh")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	_ = tmp.Chmod(0o600)
+	_ = tmp.Close()
+	defer os.Remove(tmpPath)
+
+	const script = `set -eu
+curl --proto =https --proto-redir =https --tlsv1.2 --connect-timeout 20 --max-time 240 -fsSL https://releases.herdr.dev/app/install.sh -o "$1"
+sh "$1"`
+	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script, "super-cage-herdr-install", tmpPath)
+	cmd.Env = installHerdrEnv(os.Environ())
+	configureLocalTermProcGroup(cmd)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+		for i := len(lines) - 1; i >= 0; i-- {
+			if line := strings.TrimSpace(lines[i]); line != "" {
+				return errors.New(line)
+			}
+		}
+		return err
+	}
+	return nil
+}
+
 // localTerminalOpenEvery and localTerminalOpenPerMinute bound the launches
 // of one desktop: each can open a window or raise macOS's Automation prompt.
 var localTerminalOpenEvery, localTerminalOpenPerMinute = time.Second, 10
@@ -47,9 +100,10 @@ var localTerminalOpenEvery, localTerminalOpenPerMinute = time.Second, 10
 // localTerminalGate is the desktop's state for opening windows: one at a
 // time, and the recent launches the bounds count.
 type localTerminalGate struct {
-	opening atomic.Bool
-	mu      sync.Mutex
-	opens   []time.Time
+	opening         atomic.Bool
+	installingHerdr atomic.Bool
+	mu              sync.Mutex
+	opens           []time.Time
 }
 
 // allow records a launch, or refuses one past the bounds. Every launch
@@ -159,11 +213,46 @@ func (s *Server) localTerminalRequest(w http.ResponseWriter, r *http.Request, pa
 			app = found.App
 		}
 		jsonReply(w, map[string]any{"app": app})
+	case path == "local-terminal/install-herdr" && r.Method == http.MethodPost:
+		s.installLocalTerminalHerdr(w, r)
 	case path == "local-terminal/open" && r.Method == http.MethodPost:
 		s.openLocalTerminal(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) installLocalTerminalHerdr(w http.ResponseWriter, r *http.Request) {
+	if len(localterm.Apps()) == 0 {
+		http.Error(w, "当前系统暂不支持安装 Herdr 桌面端", http.StatusConflict)
+		return
+	}
+	if current := s.remote.context(); current.Mode != "none" && current.ConnectionID != "" {
+		switch unlocked, err := s.localTerminalUnlocked(r.Context(), current.ConnectionID); {
+		case err != nil:
+			http.Error(w, localTerminalUnanswered, http.StatusConflict)
+			return
+		case !unlocked:
+			http.Error(w, localTerminalLocked, http.StatusLocked)
+			return
+		}
+	}
+	if !s.localTerminal.installingHerdr.CompareAndSwap(false, true) {
+		http.Error(w, "正在安装 Herdr，请稍候完成后再试", http.StatusConflict)
+		return
+	}
+	defer s.localTerminal.installingHerdr.Store(false)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+	if err := localTerminalInstallHerdr(ctx); err != nil {
+		http.Error(w, "安装 Herdr 失败："+err.Error(), http.StatusBadGateway)
+		return
+	}
+	var app any
+	if found, ok := localterm.Pick(localTerminalDetect()); ok {
+		app = found.App
+	}
+	jsonReply(w, map[string]any{"app": app, "installed": true})
 }
 
 // localTerminalOpen is what to open: one existing terminal, a new terminal
@@ -241,7 +330,7 @@ func (s *Server) openLocalTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	found, ok := localterm.Pick(localTerminalDetect())
 	if !ok {
-		http.Error(w, "这台电脑上找不到 Ghostty 或系统终端", http.StatusConflict)
+		http.Error(w, "这台电脑上找不到 Herdr、Ghostty 或系统终端", http.StatusConflict)
 		return
 	}
 	args, err := localTerminalArgs(s.localTerminalConfig(), connection, input)

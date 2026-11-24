@@ -4,7 +4,7 @@
 // main.jsx owns the tab list and calls these.
 
 const pendingPrefix = "terminal:pending-";
-const pendingTitles = { claude: "Claude", codex: "Codex" };
+const pendingTitles = { claude: "Claude", codex: "Codex", herdr: "Herdr", "magpie-tui": "Magpie TUI" };
 let sequence = 0;
 
 export const isPendingTerminal = (id) => typeof id === "string" && id.startsWith(pendingPrefix);

@@ -46,11 +46,15 @@ func (refusedLaunches) Run(context.Context, localterm.Step) error {
 	return errors.New("this test did not set a runner")
 }
 
-// noApplications finds nothing, as a Mac with neither Ghostty nor Terminal.
+// noApplications finds nothing, as a Mac with none of Herdr, Ghostty or Terminal.
 func noApplications() []localterm.Installed { return nil }
 
+func refusedHerdrInstall(context.Context) error {
+	return errors.New("this test did not set a Herdr installer")
+}
+
 func init() {
-	localTerminalRunner, localTerminalDetect = refusedLaunches{}, noApplications
+	localTerminalRunner, localTerminalDetect, localTerminalInstallHerdr = refusedLaunches{}, noApplications, refusedHerdrInstall
 }
 
 // installedAt is the application of the table with this id, as if installed
@@ -162,13 +166,16 @@ func TestLocalTerminalIgnoresAnEarlierAppChoice(t *testing.T) {
 }
 
 // The application that opens is asked for apart from the settings, and is
-// Ghostty when it is installed, else the system Terminal, else none.
+// Herdr when it is installed, else Ghostty, else the system Terminal, else none.
 func TestLocalTerminalAppRoute(t *testing.T) {
 	desktop, _, _ := desktopBeforeWorkload(t)
 	for _, row := range []struct {
 		installed []string
 		want      string
 	}{
+		{[]string{"terminal", "ghostty", "herdr"}, "{\"app\":{\"id\":\"herdr\",\"name\":\"Herdr\",\"automation\":false}}"},
+		{[]string{"ghostty", "herdr"}, "{\"app\":{\"id\":\"herdr\",\"name\":\"Herdr\",\"automation\":false}}"},
+		{[]string{"herdr"}, "{\"app\":{\"id\":\"herdr\",\"name\":\"Herdr\",\"automation\":false}}"},
 		{[]string{"terminal", "ghostty"}, "{\"app\":{\"id\":\"ghostty\",\"name\":\"Ghostty\",\"automation\":true}}"},
 		{[]string{"ghostty"}, "{\"app\":{\"id\":\"ghostty\",\"name\":\"Ghostty\",\"automation\":true}}"},
 		{[]string{"terminal"}, "{\"app\":{\"id\":\"terminal\",\"name\":\"系统终端\",\"automation\":false}}"},
@@ -205,8 +212,8 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	generation := desktop.remote.desktop.generation
 	session := startChild(t, workload, "report")
 	open := "{\"terminal_id\":\"" + session.id + "\"}"
-	// Neither Ghostty nor the system Terminal is here: nothing opens.
-	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 409 || !strings.Contains(w.Body.String(), "找不到 Ghostty 或系统终端") {
+	// None of Herdr, Ghostty or the system Terminal is here: nothing opens.
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 409 || !strings.Contains(w.Body.String(), "找不到 Herdr、Ghostty 或系统终端") {
 		t.Fatal(w.Code, w.Body.String())
 	}
 	useLocalTerminal(t, launches, "terminal")
@@ -294,10 +301,11 @@ func TestLocalTerminalOpensAWorkingAttach(t *testing.T) {
 	}
 }
 
-// With Ghostty installed it opens the window, after macOS's Automation
-// question; with Ghostty gone, the very same request opens the system
-// Terminal. Nothing is stored in between: there is no choice to keep.
-func TestLocalTerminalOpensInGhosttyElseTerminal(t *testing.T) {
+// With Herdr installed it opens the window with no Automation prompt, replacing
+// Ghostty; without Herdr, Ghostty opens the window after macOS's Automation
+// question; with both gone, the very same request opens the system Terminal.
+// Nothing is stored in between: there is no choice to keep.
+func TestLocalTerminalOpensInHerdrElseGhosttyElseTerminal(t *testing.T) {
 	every := localTerminalOpenEvery
 	localTerminalOpenEvery = 0
 	t.Cleanup(func() { localTerminalOpenEvery = every })
@@ -305,12 +313,23 @@ func TestLocalTerminalOpensInGhosttyElseTerminal(t *testing.T) {
 	generation := desktop.remote.desktop.generation
 	open := "{\"terminal_id\":\"" + startChild(t, workload, "report").id + "\"}"
 	launches := &recordingLaunches{}
+	useLocalTerminal(t, launches, "terminal", "ghostty", "herdr")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"Herdr\"}" {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	step := launches.steps[0]
+	if len(step) != 2 || step[0] != "/bin/sh" || !strings.HasSuffix(step[1], "-herdr.sh") || launches.prompts[0] {
+		t.Fatal(step, launches.prompts)
+	}
+	if argv := scriptCommand(t, step); argv[1] != "attach" {
+		t.Fatal(argv)
+	}
 	useLocalTerminal(t, launches, "terminal", "ghostty")
 	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"Ghostty\"}" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	step := launches.steps[0]
-	if len(step) != 3 || step[0] != "/usr/bin/osascript" || !strings.Contains(step[2], "tell application id \"com.mitchellh.ghostty\"") || !launches.prompts[0] {
+	step = launches.steps[1]
+	if len(step) != 3 || step[0] != "/usr/bin/osascript" || !strings.Contains(step[2], "tell application id \"com.mitchellh.ghostty\"") || !launches.prompts[1] {
 		t.Fatal(step, launches.prompts)
 	}
 	if argv := scriptCommand(t, step); argv[1] != "attach" {
@@ -320,11 +339,15 @@ func TestLocalTerminalOpensInGhosttyElseTerminal(t *testing.T) {
 	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != 200 || strings.TrimSpace(w.Body.String()) != "{\"app\":\"系统终端\"}" {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if step := launches.steps[1]; step[0] != "/usr/bin/open" || launches.prompts[1] {
+	if step := launches.steps[2]; step[0] != "/usr/bin/open" || launches.prompts[2] {
 		t.Fatal(step, launches.prompts)
 	}
-	// A failing Ghostty is reported as it is, with its name: nothing falls
-	// back to another application behind the owner's back.
+	// A failing Herdr or Ghostty is reported as it is, with its name: nothing
+	// falls back to another application behind the owner's back.
+	useLocalTerminal(t, &recordingLaunches{fail: true}, "terminal", "ghostty", "herdr")
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "无法在 Herdr 中打开：refused") {
+		t.Fatal(w.Code, w.Body.String())
+	}
 	useLocalTerminal(t, &recordingLaunches{fail: true}, "terminal", "ghostty")
 	if w := clientCall(desktop, "POST", "/api/client/local-terminal/open", open, generation); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "无法在 Ghostty 中打开：refused") {
 		t.Fatal(w.Code, w.Body.String())
@@ -332,14 +355,25 @@ func TestLocalTerminalOpensInGhosttyElseTerminal(t *testing.T) {
 }
 
 // launchedScript is the one-shot script a launch step runs: the last word of
-// Terminal's open, or the command in Ghostty's AppleScript.
+// Terminal's open, the command in Ghostty's AppleScript, or the .command
+// script referenced inside Herdr's helper script.
 func launchedScript(t *testing.T, step []string) string {
 	t.Helper()
-	path := regexp.MustCompile("/[^\\s\"']*super-cage-[0-9a-f-]+\\.command").FindString(strings.Join(step, "\n"))
-	if path == "" {
-		t.Fatalf("no script in %q", step)
+	re := regexp.MustCompile("/[^\\s\"']*super-cage-[0-9a-f-]+\\.command")
+	if path := re.FindString(strings.Join(step, "\n")); path != "" {
+		return path
 	}
-	return path
+	if len(step) == 2 && step[0] == "/bin/sh" && strings.HasSuffix(step[1], "-herdr.sh") {
+		data, err := os.ReadFile(step[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if path := re.FindString(string(data)); path != "" {
+			return path
+		}
+	}
+	t.Fatalf("no script in %q", step)
+	return ""
 }
 
 // scriptCommand reads the command a launch step's one-shot script runs: the
@@ -587,5 +621,105 @@ func TestLocalTerminalSettingsWaitForTheLockAnswer(t *testing.T) {
 	}
 	if settings, _ := localterm.LoadSettings(desktop.localTerminalDir()); !settings.ClipboardWrite {
 		t.Fatal("not written with no environment shown")
+	}
+}
+
+// Optional Herdr desktop installation is locked-guarded, single-flighted, and
+// immediately re-detects apps so Herdr takes over from Ghostty.
+func TestLocalTerminalInstallHerdr(t *testing.T) {
+	desktop, workload, _ := desktopBeforeWorkload(t)
+
+	var mu sync.Mutex
+	installedIDs := []string{"ghostty", "terminal"}
+	installCalls := 0
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var installErr error
+
+	oldDetect, oldInstall := localTerminalDetect, localTerminalInstallHerdr
+	localTerminalDetect = func() []localterm.Installed {
+		mu.Lock()
+		defer mu.Unlock()
+		found := make([]localterm.Installed, 0, len(installedIDs))
+		for _, id := range installedIDs {
+			found = append(found, installedAt(id))
+		}
+		return found
+	}
+	localTerminalInstallHerdr = func(context.Context) error {
+		mu.Lock()
+		installCalls++
+		err := installErr
+		mu.Unlock()
+		entered <- struct{}{}
+		<-release
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		installedIDs = []string{"herdr", "ghostty", "terminal"}
+		mu.Unlock()
+		return nil
+	}
+	t.Cleanup(func() {
+		localTerminalDetect, localTerminalInstallHerdr = oldDetect, oldInstall
+	})
+
+	// Refused while locked.
+	workload.account.lock()
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", ""); w.Code != http.StatusLocked {
+		t.Fatal("installed while locked:", w.Code, w.Body.String())
+	}
+	if installCalls != 0 {
+		t.Fatal("installer ran while locked")
+	}
+	workload.account.setKey(make([]byte, 32))
+
+	// Refused while another install is already in progress.
+	first := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		first <- clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", "")
+	}()
+	<-entered
+	second := clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", "")
+	if second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "正在安装 Herdr") {
+		close(release)
+		t.Fatal("concurrent install was not refused:", second.Code, second.Body.String())
+	}
+	close(release)
+	w := <-first
+	want := `{"app":{"id":"herdr","name":"Herdr","automation":false},"installed":true}`
+	if w.Code != http.StatusOK || strings.TrimSpace(w.Body.String()) != want {
+		t.Fatalf("install response = %d %s, want %s", w.Code, w.Body.String(), want)
+	}
+
+	// Failure reports 502 and clears the single-flight guard.
+	release = make(chan struct{})
+	close(release)
+	mu.Lock()
+	installErr = errors.New("network unreachable")
+	mu.Unlock()
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", ""); w.Code != http.StatusBadGateway || !strings.Contains(w.Body.String(), "network unreachable") {
+		t.Fatal("failed install:", w.Code, w.Body.String())
+	}
+	mu.Lock()
+	installErr = nil
+	mu.Unlock()
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", ""); w.Code != http.StatusOK {
+		t.Fatal("retry after failed install:", w.Code, w.Body.String())
+	}
+
+	// Refused when the environment cannot answer the lock check.
+	desktop.remote.desktop.active.cancel()
+	if w := clientCall(desktop, "POST", "/api/client/local-terminal/install-herdr", "{}", ""); w.Code != http.StatusConflict {
+		t.Fatal("installed without lock answer:", w.Code, w.Body.String())
+	}
+
+	// Non-desktop workload does not expose the route.
+	workloadOnly := testServer(t)
+	workloadOnly.remote = newRemoteGateway(workloadOnly.profile)
+	t.Cleanup(workloadOnly.remote.close)
+	if w := clientCall(workloadOnly, "POST", "/api/client/local-terminal/install-herdr", "{}", ""); w.Code != http.StatusNotFound {
+		t.Fatal("workload answered install-herdr:", w.Code, w.Body.String())
 	}
 }

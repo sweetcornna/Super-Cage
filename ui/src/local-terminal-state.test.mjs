@@ -2,20 +2,22 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import {
-  MENU_LABEL, OPEN_PATH, automationNotice, copyCommand, launchFailure, menuItem, normalizeSettings, openRequest, openerLine, settingsChanged,
+  INSTALL_HERDR_PATH, MENU_LABEL, OPEN_PATH, automationNotice, copyCommand, launchFailure, menuItem, normalizeSettings, openRequest, openerLine, settingsChanged,
 } from "./local-terminal-state.mjs";
 
 const desktop = { desktop_gateway: true, connection_id: "c".repeat(64), mode: "local" };
+const herdr = { id: "herdr", name: "Herdr", automation: false };
 const ghostty = { id: "ghostty", name: "Ghostty", automation: true };
 const terminal = { id: "terminal", name: "系统终端", automation: false };
 
-test("the Go table has Ghostty first and the system Terminal second, and nothing else", () => {
+test("the Go table has Herdr first, Ghostty second, and the system Terminal third, and nothing else", () => {
+  assert.equal(INSTALL_HERDR_PATH, "/client/local-terminal/install-herdr");
   const source = readFileSync(new URL("../../internal/localterm/apps.go", import.meta.url), "utf8");
   const table = [...source.matchAll(/\{ID: "([a-z0-9]+)", Name: "([^"]+)"[^\n]*?(Automation: true)?,?\s*$/gm)].map(match => [match[1], match[2], Boolean(match[3])]);
-  assert.deepEqual(table.map(row => row.slice(0, 2)), [["ghostty", ghostty.name], ["terminal", terminal.name]]);
+  assert.deepEqual(table.map(row => row.slice(0, 2)), [["herdr", herdr.name], ["ghostty", ghostty.name], ["terminal", terminal.name]]);
   // The notice before the first open depends on what the server says about
-  // Automation: Ghostty is asked about by macOS, the system Terminal is not.
-  assert.deepEqual(table.map(row => row[2]), [ghostty.automation, terminal.automation]);
+  // Automation: Ghostty is asked about by macOS, Herdr and the system Terminal are not.
+  assert.deepEqual(table.map(row => row[2]), [herdr.automation, ghostty.automation, terminal.automation]);
 });
 
 test("settings are the two switches, on by default as in the web terminal", () => {
@@ -29,12 +31,13 @@ test("settings are the two switches, on by default as in the web terminal", () =
 });
 
 test("one line says which application opens, with no choice offered", () => {
-  assert.equal(openerLine(ghostty), "用 Ghostty 打开");
-  assert.equal(openerLine(terminal), "用系统终端打开；安装 Ghostty 后自动改用 Ghostty");
+  assert.equal(openerLine(herdr), "用 Herdr 打开（已自动替代 Ghostty 接管本机终端）");
+  assert.equal(openerLine(ghostty), "用 Ghostty 打开；安装 Herdr 后自动改用 Herdr");
+  assert.equal(openerLine(terminal), "用系统终端打开；安装 Herdr 或 Ghostty 后自动切换");
   assert.match(openerLine(terminal), new RegExp("^用" + terminal.name + "打开"));
-  assert.match(openerLine(null), /找不到 Ghostty 或系统终端/);
-  assert.match(openerLine(ghostty, false), /暂不支持/);
-  for (const line of [openerLine(ghostty), openerLine(terminal), openerLine(null), openerLine(null, false)]) assert.doesNotMatch(line, /选择|选好|换一个|Herdr|iTerm|kitty/);
+  assert.equal(openerLine(null), "这台电脑上找不到 Herdr、Ghostty 或系统终端，暂时不能在本机终端中打开");
+  assert.match(openerLine(herdr, false), /暂不支持/);
+  for (const line of [openerLine(herdr), openerLine(ghostty), openerLine(terminal), openerLine(null), openerLine(null, false)]) assert.doesNotMatch(line, /选择|选好|换一个|iTerm|kitty/);
 });
 
 test("the menu item shows on a computer that can open, only in the desktop app", () => {
@@ -83,7 +86,8 @@ test("messages follow the design's wording", () => {
   assert.match(notice.body, /^macOS 接下来会询问是否允许 Super Cage 控制 Ghostty。.*如果不允许，窗口不会打开/);
   assert.doesNotMatch(notice.body + launchFailure("Ghostty", "x"), /换一个|选择/);
   assert.deepEqual([notice.cancel, notice.confirm], ["取消", "继续"]);
-  // Asked once: after the owner continued, and for the system Terminal, never.
+  // Asked once: after the owner continued, and for Herdr and the system Terminal, never.
+  assert.equal(automationNotice(herdr), null);
   assert.equal(automationNotice(ghostty, true), null);
   assert.equal(automationNotice(terminal), null);
   assert.equal(automationNotice(null), null);

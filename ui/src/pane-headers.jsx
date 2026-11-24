@@ -42,6 +42,14 @@ export function TerminalHeader({ tab, contentWorkspace, project, metadata, termi
               {tabName(tab, metadata, project)}
             </span>
             {terminalDetail && <span className="terminal-detail" title={terminalDetailHint}>{terminalDetail}</span>}
+            {(tab.herdr_backed || tab.terminalKind === "herdr") && (
+              <span
+                className="terminal-herdr-chip"
+                title="运行在 Herdr 持久工作区中（Ctrl+B 分屏/切换，关闭标签后台任务持续保活）"
+              >
+                Herdr
+              </span>
+            )}
           </>
         )}
       </div>
@@ -83,7 +91,7 @@ export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag,
 }
 
 export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready, busy, focused, compact, triggerRef, vertical,
-  sidebarButton, exitButton, splitDrag, agentsById, onFocusT3CodeChrome, onSelect, onClose, onRename, onPin, onReorder, onNew,
+  sidebarButton, exitButton, splitDrag, agentsById, onFocusT3CodeChrome, onFocusMagpieChrome, onSelect, onClose, onRename, onPin, onReorder, onNew,
   location, menu, back, forward, action, onNavigate, onOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
   const [address, setAddress] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -235,6 +243,11 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
         {onFocusT3CodeChrome && (
           <button className="browser-menu-item" role="menuitem" onClick={onFocusT3CodeChrome}>
             <PanelTopClose size={16} />收起为 T3 极简顶栏
+          </button>
+        )}
+        {onFocusMagpieChrome && (
+          <button className="browser-menu-item" role="menuitem" onClick={onFocusMagpieChrome}>
+            <PanelTopClose size={16} />收起为 Magpie 极简顶栏
           </button>
         )}
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewPrivate}><ScanEye size={16} />新建无痕标签</button>

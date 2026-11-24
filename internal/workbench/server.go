@@ -92,6 +92,8 @@ type Server struct {
 	codexAccounts                                    codexAccountManager
 	agentCLIs                                        agentManager
 	t3code                                           t3CodeManager
+	magpie                                           magpieManager
+	herdr                                            herdrManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
 	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
@@ -447,6 +449,17 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/t3code/install", s.t3CodeInstallHTTP)
 	mux.HandleFunc("POST /api/t3code/open", s.t3CodeOpenHTTP)
 	mux.HandleFunc("POST /api/t3code/{action}", s.t3CodeActionHTTP)
+	mux.HandleFunc("GET /api/magpie", s.magpieStatusHTTP)
+	mux.HandleFunc("POST /api/magpie/config", s.magpieConfigHTTP)
+	mux.HandleFunc("POST /api/magpie/install", s.magpieInstallHTTP)
+	mux.HandleFunc("POST /api/magpie/uninstall", s.magpieUninstallHTTP)
+	mux.HandleFunc("POST /api/magpie/open", s.magpieOpenHTTP)
+	mux.HandleFunc("POST /api/magpie/{action}", s.magpieActionHTTP)
+	mux.HandleFunc("GET /api/herdr", s.herdrStatusHTTP)
+	mux.HandleFunc("POST /api/herdr/config", s.herdrConfigHTTP)
+	mux.HandleFunc("POST /api/herdr/install", s.herdrInstallHTTP)
+	mux.HandleFunc("POST /api/herdr/uninstall", s.herdrUninstallHTTP)
+	mux.HandleFunc("POST /api/herdr/{action}", s.herdrActionHTTP)
 	mux.HandleFunc("GET /api/vault", s.vaultList)
 	mux.HandleFunc("POST /api/vault", s.vaultMutation)
 	mux.HandleFunc("POST /api/vault/browser", s.vaultBrowser)
