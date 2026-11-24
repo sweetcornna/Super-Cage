@@ -47,6 +47,45 @@ function jpegFrameSize(value) {
 // following exact loopback rules can reach authorized local project services.
 const proxyBypass = "<-loopback>,127.0.0.1,localhost,*.cage-editor.localhost";
 const editorHost = value => value === "127.0.0.1" || /^(?:[a-f0-9]{16}|[a-f0-9]{24})\.cage-editor\.localhost$/.test(value);
+const officialLoginHosts = new Set([
+  "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com",
+  "auth.openai.com", "chatgpt.com", "platform.openai.com",
+  "accounts.google.com", "oauth2.googleapis.com", "aistudio.google.com",
+  "github.com", "auth.githubcopilot.com",
+  "opencode.ai", "openrouter.ai",
+  "chat.qwen.ai", "qwen.ai", "account.aliyun.com", "dashscope.console.aliyun.com",
+  "ampcode.com", "sourcegraph.com",
+  "app.cline.bot", "cline.bot", "auth.cline.bot",
+  "cursor.com", "authenticator.cursor.sh",
+  "console.mistral.ai", "mistral.ai",
+  "code.kimi.com", "kimi.com", "platform.moonshot.cn", "platform.moonshot.ai",
+  "app.factory.ai", "auth.factory.ai", "factory.ai",
+  "pi.dev",
+]);
+const validLoginHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const ipv4LoginHost = /^\d+(?:\.\d+){3}$/;
+function isAllowedLoginHost(hostname, extraHosts) {
+  const host = String(hostname || "").toLowerCase().trim();
+  if (!host || host.length > 253) return false;
+  if (officialLoginHosts.has(host)) return true;
+  if (!Array.isArray(extraHosts)) return false;
+  for (const item of extraHosts) {
+    if (typeof item !== "string") continue;
+    const candidate = item.toLowerCase().trim();
+    if (
+      candidate === host &&
+      candidate.length <= 253 &&
+      validLoginHost.test(candidate) &&
+      !ipv4LoginHost.test(candidate) &&
+      candidate !== "localhost" &&
+      !candidate.endsWith(".local") &&
+      !candidate.endsWith(".internal")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 const keys = new Set(["Tab", "Enter", "Backspace", "Delete", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown", "Space", "F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "F9", "F10", "F11", "F12"]);
 const specialKeys = new Map([
   [0xff08, ["Backspace", "Backspace", 8]], [0xff09, ["Tab", "Tab", 9]], [0xff0d, ["Enter", "Enter", 13]], [0xff1b, ["Escape", "Escape", 27]],
@@ -1373,8 +1412,11 @@ export function createNativeBrowserService(options = {}) {
       if (!/^[a-f0-9-]{16,64}$/.test(input.login || "")) throw failure("invalid_input", "登录任务无效");
       let url;
       if (action === "login-open") {
-        url = new URL(input.url);
-        if (url.protocol !== "https:" || url.username || url.password || !["claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com"].includes(url.hostname)) throw failure("invalid_input", "仅可打开官方登录地址");
+        const rawURL = typeof input.url === "string" ? input.url : "";
+        const rawAuth = /^https:\/\//i.test(rawURL) ? rawURL.slice("https://".length).split(/[/?#]/, 1)[0] : "";
+        if (!rawAuth || rawURL !== rawURL.trim() || /[\x00-\x20\x7f\\]/.test(rawURL) || rawAuth.includes(":") || rawAuth.includes("@")) throw failure("invalid_input", "仅可打开官方登录地址");
+        url = new URL(rawURL);
+        if (url.protocol !== "https:" || url.port || url.username || url.password || !isAllowedLoginHost(url.hostname, input.allowed_hosts)) throw failure("invalid_input", "仅可打开官方登录地址");
       }
       const old = logins.get(input.login);
       if (old) { clearTimeout(old.expiry); logins.delete(input.login); privateContexts.delete(old.context); await old.context.close(); }

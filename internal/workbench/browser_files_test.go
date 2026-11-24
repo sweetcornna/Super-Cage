@@ -287,7 +287,7 @@ func TestNativeSaveUsesAuthenticatedControllerAndPersistsChosenPath(t *testing.T
 	endpoint, _ := url.Parse(server.URL)
 	port, _ := strconv.Atoi(endpoint.Port())
 	s.origin = "http://localhost:" + endpoint.Port()
-	if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid()}); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "control.json"), s.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	directory, err := filepath.EvalSymlinks(t.TempDir())

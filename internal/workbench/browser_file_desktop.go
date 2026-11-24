@@ -116,7 +116,7 @@ func BrowserFileForConnection(configPath, connectionID, action, id, destination 
 	if !browserFileID.MatchString(id) || (action != "save" && action != "open" && action != "reveal") {
 		return result, errors.New("下载操作无效")
 	}
-	client, err := connectController(filepath.Dir(configPath))
+	client, err := connectProvenController(filepath.Dir(configPath))
 	if err != nil {
 		return result, err
 	}

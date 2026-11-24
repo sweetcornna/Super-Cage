@@ -69,12 +69,25 @@ func (s *Server) environmentPrepared() bool {
 	return err == nil
 }
 func (s *Server) sshCommand(ctx context.Context, args ...string) *exec.Cmd {
-	return s.sshCommandOptions(ctx, false, args...)
+	return s.sshCommandOptions(ctx, false, false, args...)
 }
 func (s *Server) sshCommandWithForwarding(ctx context.Context, args ...string) *exec.Cmd {
-	return s.sshCommandOptions(ctx, true, args...)
+	return s.sshCommandOptions(ctx, true, false, args...)
 }
-func (s *Server) sshCommandOptions(ctx context.Context, maintenance bool, args ...string) *exec.Cmd {
+func (s *Server) sshLocalForwardCommand(ctx context.Context, localAddr string, guestPort int) *exec.Cmd {
+	spec := fmt.Sprintf("%s:127.0.0.1:%d", localAddr, guestPort)
+	return s.sshCommandOptions(
+		ctx,
+		true,
+		true,
+		"-N",
+		"-o", "ExitOnForwardFailure=yes",
+		"-o", "LocalCommand=echo 1",
+		"-L", spec,
+		s.sshTarget(),
+	)
+}
+func (s *Server) sshCommandOptions(ctx context.Context, maintenance bool, allowLocalCommand bool, args ...string) *exec.Cmd {
 	if s.windowsGuest != nil {
 		return &exec.Cmd{Err: errors.New("Windows 客机不支持 Linux SSH 控制脚本")}
 	}
@@ -83,10 +96,13 @@ func (s *Server) sshCommandOptions(ctx context.Context, maintenance bool, args .
 	}
 	cfg := filepath.Join(s.instanceDir(), "ssh.config")
 	base := []string{"-q", "-e", "none", "-F", cfg, "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PermitLocalCommand=no", "-o", "PasswordAuthentication=no", "-o", "KbdInteractiveAuthentication=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none", "-o", "ConnectTimeout=3", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2", "-o", "ForwardAgent=no", "-o", "IdentityAgent=none", "-o", "ForwardX11=no", "-o", "ClearAllForwardings=yes", "-o", "ControlPath=none"}
-	if maintenance {
+	if maintenance || allowLocalCommand {
 		for index, value := range base {
-			if value == "ClearAllForwardings=yes" {
+			if maintenance && value == "ClearAllForwardings=yes" {
 				base[index] = "ClearAllForwardings=no"
+			}
+			if allowLocalCommand && value == "PermitLocalCommand=no" {
+				base[index] = "PermitLocalCommand=yes"
 			}
 		}
 	}
@@ -768,6 +784,9 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.entryEnvironmentStopped()
 	s.terminals.closeAll()
 	s.mobileCLI.stopAll()
+	s.closeT3CodeProxy()
+	s.invalidateT3CodeStatus()
+	s.invalidateAgentProbeCache()
 	s.closeProjectShares()
 	if _, err := os.Stat(filepath.Join(s.instanceDir(), "lima.yaml")); !containerenv.Configured(s.profile) && os.IsNotExist(err) {
 		return nil

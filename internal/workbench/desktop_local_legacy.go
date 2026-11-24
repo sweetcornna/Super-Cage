@@ -17,7 +17,7 @@ const previousLocalWorkbench = "请用 cage desktop --existing 打开已有本�
 // can release an idle profile via its own authenticated update handoff. Its
 // process and workloads remain under its control throughout this exchange.
 func (d *desktopLocal) handoffOldLocal(ctx context.Context) (bool, error) {
-	c, err := connectController(d.profile)
+	c, err := connectProvenController(d.profile)
 	if controllerIdentityError(err) {
 		return false, err
 	}

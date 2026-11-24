@@ -91,6 +91,21 @@ export async function createWorkbench({
     claudeScience,
     active: "",
     sequence: 0,
+    t3code: {
+      enabled: false,
+      mode: "managed",
+      external_url: "",
+      port: 13773,
+      open_mode: "workbench",
+      focus_chrome: true,
+      account_bindings: {},
+      installed: false,
+      version: "",
+      running: false,
+      url: "",
+      active_bindings: {},
+      error: "",
+    },
   };
   if (codexSessions) seedCodexSessions(state);
   // Terminals draw with the DOM renderer unless CAGE_TERMINAL_RENDERER says
@@ -393,6 +408,73 @@ export async function createWorkbench({
         state.tabs.find((tab) => tab.id === body.id),
         { url: body.url, title: "本地预览" },
       );
+    else if (path === "/agent-clis" && request.method() === "GET")
+      result = {
+        agents: [
+          {
+            spec: {
+              id: "claude",
+              name: "Claude Code",
+              short_name: "Claude",
+              vendor: "Anthropic",
+              category: "first-party",
+              description: "Anthropic 官方终端编码 Agent",
+              accent_color: "#cd745b",
+              glyph: "CL",
+              built_in: true,
+              binary: "claude",
+              default_launch_command: "claude",
+              channels: [{ id: "official-cage", kind: "builtin", label: "官方受管渠道", recommended: true }],
+              isolation: { mode: "claude_native", env_var: "CLAUDE_CONFIG_DIR" },
+              auth: { methods: ["oauth"], oauth_domains: ["claude.ai", "claude.com", "console.anthropic.com"] },
+              terminal: { image_paste_shortcut: true, shift_enter_mode: "bracketed_newline", preset_flags: ["--continue"] },
+            },
+            runtime: { installed: Boolean(state.status.vm_running), version: "1.0.0" },
+            config: { launch_command: state.settings.claude_terminal_command || "claude" },
+            accounts: { total: 0, ready: 0, active: 0, cooling_down: 0 },
+          },
+        ],
+        prerequisites: {},
+        probed_at: 0,
+        probe_error: "",
+      };
+    else if (path.startsWith("/agent-clis/"))
+      result = {
+        agents: [],
+        accounts: [],
+        scheduling: { mode: "smart", project_affinity_minutes: 120, auto_cooldown: true, project_pins: {} },
+      };
+    else if (path === "/t3code" && request.method() === "GET")
+      result = { ...state.t3code, vm_running: Boolean(state.status.vm_running), ready: Boolean(state.status.ready) };
+    else if (path === "/t3code/config") {
+      Object.assign(state.t3code, body || {});
+      result = { ...state.t3code, vm_running: Boolean(state.status.vm_running), ready: Boolean(state.status.ready) };
+    } else if (path === "/t3code/start" || path === "/t3code/restart") {
+      state.t3code.running = true;
+      state.t3code.url = state.t3code.mode === "external" ? state.t3code.external_url : `http://127.0.0.1:${state.t3code.port || 13773}`;
+      result = { ...state.t3code, vm_running: Boolean(state.status.vm_running), ready: Boolean(state.status.ready) };
+    } else if (path === "/t3code/stop") {
+      state.t3code.running = false;
+      result = { ...state.t3code, vm_running: Boolean(state.status.vm_running), ready: Boolean(state.status.ready) };
+    } else if (path === "/t3code/install") {
+      state.t3code.installed = true;
+      state.status.job = { id: "t3code-install-" + ++state.sequence, kind: "t3code-install", running: false };
+      result = state.status.job;
+    } else if (path === "/t3code/open") {
+      const mode = body?.force_mode || state.t3code.open_mode || "workbench";
+      const t3url = state.t3code.mode === "external" ? state.t3code.external_url : `http://127.0.0.1:${state.t3code.port || 13773}`;
+      if (mode === "direct") {
+        result = { mode: "direct", direct_url: `${t3url}/_cage_t3_auth?grant=fixture`, url: t3url };
+      } else {
+        let tab = state.tabs.find((item) => item.kind === "t3code");
+        if (!tab) {
+          tab = { id: "t3code-" + ++state.sequence, kind: "t3code", title: "T3 Code", url: t3url };
+          state.tabs.push(tab);
+        }
+        state.active = tab.id;
+        result = { mode: "workbench", tab_id: tab.id, url: t3url, title: "T3 Code" };
+      }
+    }
     else if (path === "/settings/probe")
       result = {
         country: "United States",

@@ -20,6 +20,7 @@ import {
 import { EarlierPartsDialog } from "./earlier-parts-dialog";
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
+import { AgentIcon } from "./agent-icon";
 import { api } from "./api";
 
 const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
@@ -29,8 +30,12 @@ const ownerChips = {
   external: { label: "外部", tooltip: "在其他 Codex 进程中打开" },
 };
 
-export function TabIcon({ kind, favicon, agent, provider = "claude", accountNumber, size = 16 }) {
+export function TabIcon({ kind, favicon, agent, provider = "claude", agentId = "", glyph = "", accentColor = "", accountNumber, size = 16 }) {
   const [failed, setFailed] = useState("");
+  if (kind === "t3code") return <AgentIcon agentId="t3code" glyph={glyph || "T3"} accentColor={accentColor} size={size} />;
+  if (kind === "terminal" && agentId && agentId !== "claude" && agentId !== "codex") {
+    return <AgentIcon agentId={agentId} glyph={glyph} accentColor={accentColor} accountNumber={accountNumber} size={Math.max(18, size)} />;
+  }
   if (kind === "terminal" && agent) return <ProviderMark provider={provider} accountNumber={accountNumber} />;
   if (kind === "terminal") return <TerminalSquare size={16} />;
   if (kind === "editor") return <FileCode2 size={size} />;
@@ -62,6 +67,7 @@ export function WorkspaceTabs({
   vertical = false,
   busy,
   ready,
+  agentsById = null,
   onSelect,
   onClose,
   onRename,
@@ -383,7 +389,7 @@ export function WorkspaceTabs({
           const errorID = `session-open-error-${tab.cli_session_id}`;
           // The row's chip: the account (the provider is in the mark, so the label
           // is the account alone), or where an ssh terminal came from.
-          const chip = ownerChip ? null : tab.claudeLabel ? { text: tab.claudeLabel.replace(/^Codex · /, "") }
+          const chip = ownerChip ? null : (tab.claudeLabel || tab.account_label) ? { text: (tab.claudeLabel || tab.account_label).replace(/^Codex · /, "") }
             : tab.origin?.kind === "ssh" ? { text: `来自 ${tab.origin.device}${tab.origin.kept ? " · 已保留" : ""}`,
               title: tab.origin.kept ? "来自本机终端，已保留：在本机终端设置里结束" : "来自本机终端，连接断开时结束" } : null;
           const chipElement = chip && <small className="claude-tab-profile" title={chip.title}>{chip.text}</small>;
@@ -467,8 +473,11 @@ export function WorkspaceTabs({
                   if (target && !tabs[target.at].historySession) onSelect(tabs[target.at].id, false);
                 }}
               >
-                <TabIcon kind={tab.kind} favicon={tab.favicon} size={15}
-                  agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
+                <TabIcon kind={tab.isT3Code ? "t3code" : tab.kind} favicon={tab.favicon} size={15}
+                  agentId={tab.agent_id || ""}
+                  glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
+                  accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
+                  agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}
                   provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
                 {/* A phone or external row names its owner instead; the account is in the label and tooltip.
                     In the sidebar the title and the chip share one line: a chip that does not fit whole is not shown (cli-sessions.css). */}
@@ -556,8 +565,11 @@ export function WorkspaceTabs({
                         onSelect(tab.id);
                       }}
                     >
-                      <TabIcon kind={tab.kind} favicon={tab.favicon}
-                        agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id)}
+                      <TabIcon kind={tab.isT3Code ? "t3code" : tab.kind} favicon={tab.favicon}
+                        agentId={tab.agent_id || ""}
+                        glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
+                        accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
+                        agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}
                         provider={terminalProvider(tab)} accountNumber={tab.claudeAccountNumber} />
                       <span>{tabName(tab, saved)}</span>
                       {tab.id === active && (

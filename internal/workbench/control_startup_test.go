@@ -65,7 +65,7 @@ func TestControllerStartsAfterProbeReleasesLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	for {
-		c, err := connectController(profile)
+		c, err := connectProvenController(profile)
 		if err == nil {
 			defer c.close()
 			status, err := c.call("POST", "/api/handoff", map[string]string{"token": c.record.Token}, nil)

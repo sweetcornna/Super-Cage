@@ -100,8 +100,7 @@ func holdLock(t *testing.T, profile string) {
 	t.Cleanup(func() { Unlock(f); f.Close() })
 }
 
-// A client that requires the proof does not contact a controller from
-// before it; others still do (the window completes updates through it).
+// Clients never contact a controller from before the proof.
 func TestConnectProvenRefusesAControllerFromBeforeTheProof(t *testing.T) {
 	profile := t.TempDir()
 	holdLock(t, profile)
@@ -110,7 +109,7 @@ func TestConnectProvenRefusesAControllerFromBeforeTheProof(t *testing.T) {
 	if _, _, err := ConnectProven(profile, open); err != ErrControllerOutdated || len(old.calls) != 0 {
 		t.Fatal(err, old.calls)
 	}
-	if _, _, err := Connect(profile, open); err != ErrUnavailable || len(old.calls) != 1 {
+	if _, _, err := Connect(profile, open); err != ErrControllerOutdated || len(old.calls) != 0 {
 		t.Fatal(err, old.calls)
 	}
 }

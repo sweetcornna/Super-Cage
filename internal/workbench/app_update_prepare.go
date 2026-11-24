@@ -100,7 +100,7 @@ func PrepareAppUpdate(fullConfig string, options AppUpdateOptions) (AppUpdatePre
 			return AppUpdatePrepared{}, errors.New("后台响应无效，未继续更新。")
 		}
 		return finishAppUpdateHandoff(reply, options.Stopped, c.waitForExit, func() error {
-			gateway, err := connectController(filepath.Dir(desktopConfigPath(fullConfig)))
+			gateway, err := connectProvenController(filepath.Dir(desktopConfigPath(fullConfig)))
 			if errors.Is(err, errControllerUnavailable) {
 				return nil
 			}

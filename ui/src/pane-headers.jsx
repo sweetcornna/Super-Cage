@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Archive, ArrowLeft, ArrowRight, ArrowUpRight, ChevronRight, FolderOpen,
-  Globe2, Cookie, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, Plus, RefreshCw, Trash2, X } from "lucide-react";
+  Globe2, Cookie, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, PanelTopClose, Plus, RefreshCw, Trash2, X } from "lucide-react";
 import { BrowserVaultBar } from "./password-vault";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { BrowserFavorites } from "./browser-favorites";
@@ -67,7 +67,7 @@ export function TerminalHeader({ tab, contentWorkspace, project, metadata, termi
 
 // The selected title is primary; tab actions and the add button use the existing
 // muted/hover tokens, 8px spacing and browser-tab typography in either layout.
-export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag, sidebarButton,
+export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag, sidebarButton, agentsById,
   onSelect, onClose, onRename, onPin, onReorder, onNew }) {
   return <aside className="chrome browser-tab-rail" aria-label="竖排标签栏">
     <div className="browser-tab-rail-heading">
@@ -76,13 +76,14 @@ export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag,
         disabled={!ready || busy} onClick={onNew}><Plus size={17} /></button>
     </div>
     <WorkspaceTabs tabs={tabs} saved={metadata} active={active} label="浏览器标签页" vertical
+      agentsById={agentsById}
       ready={ready} busy={busy} splitDrag={splitDrag} onSelect={onSelect} onClose={onClose}
       onRename={onRename} onPin={onPin} onReorder={onReorder} />
   </aside>;
 }
 
 export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready, busy, focused, compact, triggerRef, vertical,
-  sidebarButton, exitButton, splitDrag, onSelect, onClose, onRename, onPin, onReorder, onNew,
+  sidebarButton, exitButton, splitDrag, agentsById, onFocusT3CodeChrome, onSelect, onClose, onRename, onPin, onReorder, onNew,
   location, menu, back, forward, action, onNavigate, onOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
   const [address, setAddress] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -130,6 +131,7 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
         active={tab.id}
         label="浏览器标签页"
         horizontal
+        agentsById={agentsById}
         busy={busy}
         ready={ready}
         onSelect={onSelect}
@@ -230,6 +232,11 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
         if (item && !item.closest(".vault-browser")) { setToolsOpen(false); toolsTrigger.current?.focus(); }
       }}>
       <div className="browser-more-actions">
+        {onFocusT3CodeChrome && (
+          <button className="browser-menu-item" role="menuitem" onClick={onFocusT3CodeChrome}>
+            <PanelTopClose size={16} />收起为 T3 极简顶栏
+          </button>
+        )}
         <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewPrivate}><ScanEye size={16} />新建无痕标签</button>
         {tab.incognito && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={onNewRegular}><Globe2 size={16} />新建普通标签</button>}
         {!tab.login && tab.kind !== "browser-settings" && <button className="browser-menu-item" role="menuitem" disabled={!ready || busy} onClick={() => openBrowserData({ view: "site", tab, fallback: () => setCookiesOpen(true) })}><Cookie size={16} />管理 Cookie</button>}

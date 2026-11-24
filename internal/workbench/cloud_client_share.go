@@ -47,7 +47,7 @@ type clientProjectGrant struct {
 // create a grant. A browser session can enumerate or revoke its own grants.
 func ShareNativeCloudProject(configPath, connection, path string, readonly bool) (ClientProjectShare, error) {
 	var result ClientProjectShare
-	client, err := connectController(filepath.Dir(configPath))
+	client, err := connectProvenController(filepath.Dir(configPath))
 	if err != nil {
 		return result, err
 	}

@@ -94,10 +94,13 @@ func controllerDial(record controlFile) func(context.Context, string, string) (n
 		if network != "tcp" || address != host {
 			return nil, errors.New("拒绝连接本机后台以外的地址")
 		}
+		if record.ProofKey == "" {
+			return nil, errControllerOutdated
+		}
 		dialer := net.Dialer{Timeout: 5 * time.Second}
 		conn, err := dialer.DialContext(ctx, "tcp4", target)
-		if err != nil || record.ProofKey == "" {
-			return conn, err
+		if err != nil {
+			return nil, err
 		}
 		if err = proveController(ctx, conn, record.ProofKey, host); err != nil {
 			conn.Close()

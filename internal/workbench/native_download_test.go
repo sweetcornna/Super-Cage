@@ -351,7 +351,7 @@ func TestNativeBrowserFileSaveUsesProductionHostBridge(t *testing.T) {
 	endpoint, _ = url.Parse(server.URL)
 	port, _ := strconv.Atoi(endpoint.Port())
 	gateway.origin = "http://localhost:" + endpoint.Port()
-	if err = writePrivate(filepath.Join(gateway.profile, "control.json"), controlFile{Port: port, Token: gateway.token, PID: os.Getpid()}); err != nil {
+	if err = writePrivate(filepath.Join(gateway.profile, "control.json"), gateway.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	destination := filepath.Join(workspace, "chosen.bin")

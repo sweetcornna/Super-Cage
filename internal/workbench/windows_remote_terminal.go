@@ -12,7 +12,7 @@ import (
 // The remote adapter starts only a fixed home PowerShell in the paired ordinary
 // account's AppContainer. It does not expose an administrative host terminal.
 func (s *Server) createRemoteWindowsTerminal(input terminalRequest) (*terminalSession, error) {
-	if input.Kind == "claude" || input.Kind == "claude-login" {
+	if input.Kind == "claude" || input.Kind == "claude-login" || ((input.Kind == "agent" || input.Kind == "agent-login") && input.AgentID == "claude") {
 		return s.createWindowsCLITerminal(input)
 	}
 	if input.Kind != "" && input.Kind != "shell" || input.ClaudeAccountID != "" || input.sharedID != "" {

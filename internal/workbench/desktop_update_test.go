@@ -142,11 +142,11 @@ func TestUpdaterTrustedStop(t *testing.T) {
 			port := server.Listener.Addr().(*net.TCPAddr).Port
 			s.origin = "http://localhost:" + strconv.Itoa(port)
 			server.Start()
-			record := controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity}
+			record := s.controlRecord(port)
 			if err := writePrivate(filepath.Join(s.profile, "control.json"), record); err != nil {
 				t.Fatal(err)
 			}
-			c, err := connectController(s.profile)
+			c, err := connectProvenController(s.profile)
 			if err != nil {
 				t.Fatal(err)
 			}

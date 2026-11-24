@@ -11,7 +11,46 @@ import { once } from "node:events";
 import { lstat, readFile, realpath } from "node:fs/promises";
 
 const tabID = "native-chrome";
-const officialLoginHosts = new Set(["claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com"]);
+const officialLoginHosts = new Set([
+  "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com",
+  "auth.openai.com", "chatgpt.com", "platform.openai.com",
+  "accounts.google.com", "oauth2.googleapis.com", "aistudio.google.com",
+  "github.com", "auth.githubcopilot.com",
+  "opencode.ai", "openrouter.ai",
+  "chat.qwen.ai", "qwen.ai", "account.aliyun.com", "dashscope.console.aliyun.com",
+  "ampcode.com", "sourcegraph.com",
+  "app.cline.bot", "cline.bot", "auth.cline.bot",
+  "cursor.com", "authenticator.cursor.sh",
+  "console.mistral.ai", "mistral.ai",
+  "code.kimi.com", "kimi.com", "platform.moonshot.cn", "platform.moonshot.ai",
+  "app.factory.ai", "auth.factory.ai", "factory.ai",
+  "pi.dev",
+]);
+const validLoginHost = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+const ipv4LoginHost = /^\d+(?:\.\d+){3}$/;
+
+function isAllowedLoginHost(hostname, extraHosts) {
+  const host = String(hostname || "").toLowerCase().trim();
+  if (!host || host.length > 253) return false;
+  if (officialLoginHosts.has(host)) return true;
+  if (!Array.isArray(extraHosts)) return false;
+  for (const item of extraHosts) {
+    if (typeof item !== "string") continue;
+    const candidate = item.toLowerCase().trim();
+    if (
+      candidate === host &&
+      candidate.length <= 253 &&
+      validLoginHost.test(candidate) &&
+      !ipv4LoginHost.test(candidate) &&
+      candidate !== "localhost" &&
+      !candidate.endsWith(".local") &&
+      !candidate.endsWith(".internal")
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 export function failure(code, message) {
   return Object.assign(new Error(message), { code, safe: true });
@@ -219,8 +258,11 @@ export function nativeBrowserDispatch({ window, editor, tailnet, settingsInputs,
         lastEventStatus = undefined;
         return { ok: true };
       }
-      const url = webURL(input.url);
-      if (url.protocol !== "https:" || !officialLoginHosts.has(url.host)) throw failure("invalid_input", "仅可打开官方登录地址");
+      const rawURL = typeof input.url === "string" ? input.url : "";
+      const rawAuth = /^https:\/\//i.test(rawURL) ? rawURL.slice("https://".length).split(/[/?#]/, 1)[0] : "";
+      if (!rawAuth || rawURL !== rawURL.trim() || /[\x00-\x20\x7f\\]/.test(rawURL) || rawAuth.includes(":") || rawAuth.includes("@")) throw failure("invalid_input", "仅可打开官方登录地址");
+      const url = webURL(rawURL);
+      if (url.protocol !== "https:" || url.port || !isAllowedLoginHost(url.hostname, input.allowed_hosts)) throw failure("invalid_input", "仅可打开官方登录地址");
       await window("launch", { login: input.login, url: url.href }, signal);
       focusSequence = ++sequence;
       lastEventStatus = undefined;

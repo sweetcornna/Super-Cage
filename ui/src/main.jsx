@@ -29,9 +29,12 @@ import { CodexOpening, CodexTerminalActions, CodexTerminalDetail, codexOutputArr
 import { NetworkStatusButton } from "./network-explanation";
 import { TerminalMenu } from "./terminal-menu";
 import { InitializationGate } from "./initialization";
-import { ClaudeAccountsPanel, useClaudeAccounts } from "./claude-accounts";
-import { CodexAccountsPanel, useCodexAccounts } from "./codex-accounts";
+import { useClaudeAccounts } from "./claude-accounts";
+import { useCodexAccounts } from "./codex-accounts";
 import { codexSurfaces, codexTerminalDetail, codexTerminalLabel } from "./codex-accounts-state.mjs";
+import { AccountsHub } from "./accounts-hub";
+import { useAgents, useT3Code } from "./use-agents";
+import { T3CodeHeader, isT3CodeDirectAvailable, isT3CodeTab } from "./t3code-panel";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
 import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
@@ -110,6 +113,7 @@ function App() {
     return () => window.removeEventListener("cage-client-preferences", refresh);
   }, []);
   const claudeProfiles = useClaudeAccounts();
+  const [agentAccountsRevision, setAgentAccountsRevision] = useState(0);
   const [managementPage, setManagementPage] = useState(() => { try { return Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000 ? "claude-science" : ""; } catch { return ""; } }); // Claude Science reloaded the window once for its frame (claude-science.jsx)
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
@@ -220,6 +224,56 @@ function App() {
   const sessionCapabilities = useSessionSnapshot(sessionList, (list) => list.capabilities);
   const sessionsHeld = useSessionSnapshot(sessionList, (list) => list.held);
   const sessionPane = managementPage.startsWith(sessionPanePrefix) ? managementPage.slice(sessionPanePrefix.length) : "";
+  const isAccountsPage = managementPage === "claude-accounts" || managementPage === "codex-accounts" || managementPage.startsWith("agent-accounts:");
+  const activeAccountsTab = managementPage === "codex-accounts"
+    ? "codex"
+    : managementPage.startsWith("agent-accounts:")
+      ? managementPage.slice("agent-accounts:".length)
+      : "claude";
+  const agentCatalog = useAgents({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const t3code = useT3Code({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const [t3codeShowBrowserBar, setT3codeShowBrowserBar] = useState(false);
+  const browserHeaderRefs = useRef(new Map());
+  const t3codeFocusFrame = useRef(0);
+  useEffect(() => () => cancelAnimationFrame(t3codeFocusFrame.current), []);
+  const toggleT3CodeBrowserBar = (tabId, showBrowserBar) => {
+    setT3codeShowBrowserBar(showBrowserBar);
+    cancelAnimationFrame(t3codeFocusFrame.current);
+    t3codeFocusFrame.current = requestAnimationFrame(() => {
+      const container =
+        browserHeaderRefs.current.get(tabId) ||
+        [...document.querySelectorAll("[data-browser-tab]")].find(
+          (node) => node.dataset.browserTab === tabId,
+        );
+      if (!container) return;
+      const target = showBrowserBar
+        ? (container.querySelector(".browser-more-trigger") ||
+           container.querySelector(".address-bar input") ||
+           container.querySelector("button:not(:disabled)"))
+        : (container.querySelector('[data-t3code-chrome-toggle="true"]') ||
+           container.querySelector("button:not(:disabled)"));
+      target?.focus();
+    });
+  };
+  const allAgentOAuthDomains = React.useMemo(() => {
+    const out = [];
+    for (const entry of agentCatalog.agents) {
+      for (const domain of entry.spec?.auth?.oauth_domains || []) out.push(domain);
+    }
+    return [...new Set(out)];
+  }, [agentCatalog.agents]);
+  const totalReadyAccounts = React.useMemo(() => {
+    let count = (claudeProfiles.accounts || []).filter((a) => a.status === "ready" || a.ready).length;
+    if (codexUI.accounts) {
+      count += (codexProfiles.accounts || []).filter((a) => a.status === "ready" || a.ready).length;
+    }
+    for (const entry of agentCatalog.agents) {
+      const id = entry.spec?.id;
+      if (!id || id === "claude" || (codexUI.accounts && id === "codex")) continue;
+      count += entry.accounts?.ready || 0;
+    }
+    return count;
+  }, [claudeProfiles.accounts, codexProfiles.accounts, codexUI.accounts, agentCatalog.agents]);
   // A touch tablet held upright has the sidebar as a drawer (sidebar-drawer.mjs).
   useSidebarDrawer(sidebarCollapsed, setSidebarCollapsed, clientStorageKey("cage-sidebar-collapsed"), [layout.active, managementPage, showHome, desktopOpen, settingsOpen]);
   useEffect(() => {
@@ -327,6 +381,13 @@ function App() {
   useEffect(() => {
     if (finishedCodexLogins) codexProfiles.load();
   }, [finishedCodexLogins, codexProfiles.load]);
+  const finishedAgentLogins = tabs.filter((tab) => tab.terminalKind === "agent-login" && tab.closed).map((tab) => tab.id).sort().join(",");
+  useEffect(() => {
+    if (finishedAgentLogins) {
+      void agentCatalog.refresh(false);
+      setAgentAccountsRevision((n) => n + 1);
+    }
+  }, [finishedAgentLogins, agentCatalog.refresh]);
   const audio = useAudioOutput(running && guestCapability(status, "audio") && !storageRecovery && !status?.environment_update_required && !connectionError);
   useEffect(() => {
     if (audio.error) setToast(audio.error);
@@ -557,17 +618,29 @@ function App() {
   // The tab of a new terminal appears at once and the server's record
   // replaces it in place; a failure is shown there (terminal-pending.mjs).
   const pendingClosed = useRef(new Set());
-  const createTerminal = async (path, kind, loginAccountId, retrying) => {
+  const createTerminal = async (path, kind, options, retrying) => {
     setTerminalChoice(null);
     const codex = kind === "codex" || kind === "codex-login";
-    const pending = !loginTerminalKind(kind) && (retrying || pendingTerminalTab(path, kind));
+    const isAgentLogin = kind === "agent-login";
+    const extra = typeof options === "string"
+      ? (codex ? { codex_account_id: options } : { claude_account_id: options })
+      : (options && typeof options === "object" ? options : {});
+    let pending = !loginTerminalKind(kind) && !isAgentLogin && (retrying || pendingTerminalTab(path, kind));
+    if (pending && !retrying && extra.agent_id) {
+      pending = {
+        ...pending,
+        agent_id: extra.agent_id,
+        ...(extra.account_id ? { account_id: extra.account_id } : {}),
+        title: `${agentCatalog.byId.get(extra.agent_id)?.spec?.short_name || extra.agent_id} 终端`,
+      };
+    }
     if (retrying) setTabs(list => markPendingTab(list, retrying.id, ""));
     else if (pending) openTerminalTab(pending);
     let result;
     try {
       result = await api(kind === "codex" && sessionCapabilities.sessions ? "/terminals?providers=" + SESSION_PROVIDERS : "/terminals", {
         workspace: path, kind,
-        ...(loginAccountId && (codex ? { codex_account_id: loginAccountId } : { claude_account_id: loginAccountId })),
+        ...extra,
       });
     } catch (error) {
       if (!pending) throw error;
@@ -589,6 +662,122 @@ function App() {
     if (codex && result.codex_account_id &&
         !codexProfiles.accounts?.some((profile) => profile.id === result.codex_account_id)) {
       codexProfiles.load();
+    }
+    if (kind === "agent") {
+      void agentCatalog.refresh(false);
+    }
+  };
+  const openAgentAccounts = (agentId = "claude") => {
+    if (!agentId || agentId === "claude") setManagementPage("claude-accounts");
+    else if (agentId === "codex" && codexUI.accounts) setManagementPage("codex-accounts");
+    else setManagementPage(`agent-accounts:${agentId}`);
+  };
+  const launchAgentTerminal = async (agentId, accountId = "", targetWorkspace = workspace) => {
+    const ws = targetWorkspace || workspace;
+    if (agentId === "claude") {
+      return createTerminal(ws, "claude", accountId || undefined);
+    }
+    if (agentId === "codex" && codexUI.menu && !accountId) {
+      return createTerminal(ws, "codex");
+    }
+    return createTerminal(ws, "agent", {
+      agent_id: agentId,
+      ...(accountId ? { account_id: accountId } : {}),
+    });
+  };
+  const startAgentLogin = async (agentId, accountId = "", loginMode = "") => {
+    if (agentId === "claude") {
+      return createTerminal(workspace, "claude-login", accountId || undefined);
+    }
+    return createTerminal(workspace, "agent-login", {
+      agent_id: agentId,
+      ...(accountId ? { account_id: accountId } : {}),
+      ...(loginMode ? { login_mode: loginMode } : {}),
+    });
+  };
+  const openT3Code = async (forceMode = "") => {
+    const directAvailable = isT3CodeDirectAvailable(t3code);
+    const effectiveForceMode = !directAvailable ? "workbench" : forceMode;
+    const wantDirect = (effectiveForceMode || t3code.open_mode) === "direct" && directAvailable;
+    let popup = null;
+    if (wantDirect) {
+      popup = window.open("about:blank", "_blank");
+      if (popup) {
+        try {
+          popup.opener = null;
+        } catch {
+          // Ignore if opener cannot be cleared in this environment.
+        }
+      }
+    }
+    const closeReservedPopup = () => {
+      if (popup && !popup.closed) {
+        try {
+          popup.close();
+        } catch {
+          // Ignore if popup could not be closed.
+        }
+      }
+      popup = null;
+    };
+    try {
+      const result = await t3code.open({
+        workspace: contentWorkspace || workspace,
+        ...(effectiveForceMode ? { force_mode: effectiveForceMode } : {}),
+      });
+      if (result?.mode === "direct" && result.direct_url) {
+        if (popup && !popup.closed) {
+          popup.location.replace(result.direct_url);
+          popup.focus();
+          notify("已在新窗口极速直连打开 T3 Code");
+          return result;
+        }
+        const opened = window.open(result.direct_url, "_blank", "noopener");
+        if (opened) {
+          notify("已在新窗口极速直连打开 T3 Code");
+          return result;
+        }
+        const fallback = await t3code.open({
+          workspace: contentWorkspace || workspace,
+          force_mode: "workbench",
+        });
+        if (!fallback?.tab_id) {
+          throw new Error("新窗口弹窗被拦截，且未能在工作台标签中打开 T3 Code，请允许弹窗或重试");
+        }
+        showBrowserResult({
+          id: fallback.tab_id,
+          kind: "t3code",
+          url: fallback.url,
+          title: fallback.title || "T3 Code",
+        });
+        notify("当前窗口拦截了新窗口弹窗，已自动在工作台标签中打开 T3 Code");
+        return fallback;
+      }
+      closeReservedPopup();
+      if (result?.tab_id) {
+        showBrowserResult({
+          id: result.tab_id,
+          kind: "t3code",
+          url: result.url,
+          title: result.title || "T3 Code",
+        });
+      }
+      return result;
+    } catch (error) {
+      closeReservedPopup();
+      notify(error.message);
+      throw error;
+    }
+  };
+  const restartT3Code = async (tab) => {
+    try {
+      await t3code.restart();
+      notify("T3 Code 服务已重启");
+      if (tab?.id && status?.ready) {
+        await action("/browser/reload", { id: tab.id });
+      }
+    } catch (error) {
+      notify(error.message);
     }
   };
   const showTerminal = (result, placeholder) => {
@@ -696,9 +885,15 @@ function App() {
   };
   const terminalMenuAt = (location) => terminalChoice?.anchor?.dataset.terminalLocation === location && (
     <TerminalMenu choice={terminalChoice} busy={busy} codex={codexUI.menu} codexLabel={codexMenuLabel(sessionCapabilities)}
+      agents={agentCatalog.agents}
       local={localTerminalItem(location)}
       onClose={() => setTerminalChoice(null)}
-      onSelect={(kind) => createTerminal(terminalChoice.path, kind).catch((e) => notify(e.message))} />
+      onInstallMore={() => openSettings("agents")}
+      onSelect={(kind, agentId) => (
+        kind === "agent"
+          ? launchAgentTerminal(agentId, "", terminalChoice.path)
+          : createTerminal(terminalChoice.path, kind)
+      ).catch((e) => notify(e.message))} />
   );
   const openEditor = async (path = workspace) => {
     if (!browserAvailable || !editorAvailable) {
@@ -1160,15 +1355,16 @@ function App() {
     void check();
     return () => { controller.abort(); clearTimeout(timer); };
   }, [tailnetLogin, managementPage, settingsOpen, desktopOpen, showHome, status?.ready]);
+  const managementPageGroup = isAccountsPage ? "accounts" : managementPage;
   useEffect(() => {
-    if (!managementPage) return;
-    document.getElementById(managementPage + "-title")?.focus();
+    if (!managementPageGroup) return;
+    document.getElementById(managementPageGroup + "-title")?.focus();
     const close = () => {
       if (!document.querySelector('[role="dialog"], .settings-page')) setManagementPage("");
     };
     document.addEventListener("cage-close-modal", close);
     return () => document.removeEventListener("cage-close-modal", close);
-  }, [managementPage]);
+  }, [managementPageGroup]);
   useEffect(() => {
     const key = (event) => {
       // Workbench shortcuts can stop the event before remote input sees it.
@@ -1424,10 +1620,28 @@ function App() {
     : { ...session, claudeAccountNumber: claudeNumbers.get(session.account_id) });
   const terminalAccountName = (tab) => claudeLabels.get(tab.claude_account_id) ||
     (tab.terminalKind === "claude-login" ? "新账号登录" : tab.claude_account_id ? "Claude 账号" : "");
-  const displayTabs = orderedTabs(tabs, metadata).map((tab) =>
-    tab.claude_account_id || tab.terminalKind === "claude-login" ? { ...tab,
-      claudeLabel: terminalAccountName(tab), claudeAccountNumber: claudeNumbers.get(tab.claude_account_id) }
-      : codexTerminalLabel(tab, codexProfiles.accounts) ? { ...tab, claudeLabel: "Codex · " + codexTerminalLabel(tab, codexProfiles.accounts) } : tab);
+  const displayTabs = orderedTabs(tabs, metadata).map((tab) => {
+    const agentSpec = tab.agent_id ? agentCatalog.byId.get(tab.agent_id)?.spec : null;
+    const isT3 = tab.kind !== "terminal" && isT3CodeTab(tab, t3code);
+    const hasClaudeMeta = Boolean(tab.claude_account_id || tab.terminalKind === "claude-login");
+    const codexLabel = !hasClaudeMeta ? codexTerminalLabel(tab, codexProfiles.accounts) : "";
+    if (!hasClaudeMeta && !codexLabel && !agentSpec && !isT3) return tab;
+    return {
+      ...tab,
+      ...(hasClaudeMeta ? {
+        claudeLabel: terminalAccountName(tab),
+        claudeAccountNumber: claudeNumbers.get(tab.claude_account_id),
+      } : codexLabel ? {
+        claudeLabel: "Codex · " + codexLabel,
+      } : {}),
+      ...(agentSpec ? {
+        agentGlyph: agentSpec.glyph,
+        agentAccentColor: agentSpec.accent_color,
+      } : {}),
+      ...(isT3 ? { isT3Code: true } : {}),
+    };
+  });
+  const activeIsT3Code = Boolean(!desktopOpen && !showHome && !managementPage && current && isT3CodeTab(current, t3code));
   const browserTabs = displayTabs.filter((tab) => tab.kind !== "terminal");
   const switchTabs =
     terminal && !showHome
@@ -1528,15 +1742,21 @@ function App() {
   const terminalHeader = tab => {
     const path = tab?.workspace || workspace;
     const account = tab?.claude_account_id && terminalAccountName(tab);
+    const isAgentTab = tab?.terminalKind === "agent" || tab?.terminalKind === "agent-login";
     const detail = tab?.terminalKind === "claude-login" ? `登录 · ${account || "新账号"}`
+      : tab?.terminalKind === "agent-login" ? `${tab.agent_name || tab.agent_id} · 登录`
+      : tab?.terminalKind === "agent" ? `${tab.agent_name || tab.agent_id}${tab.account_label ? ` · ${tab.account_label}` : ""}`
       : account ? `Claude · ${account}${tab.claude_account_source === "default" ? "（启动时账号）" : ""}` : codexTerminalDetail(tab, codexProfiles.accounts);
+    const detailHint = isAgentTab && tab?.schedule_reason
+      ? `${detail}（${tab.schedule_reason}）`
+      : tab?.claude_account_source === "default"
+        ? "此终端按启动时的普通终端登录标记。若普通终端已换号，请重新打开工作会话确认身份。" : detail;
     const location = split && tab ? `heading-${tab.id}` : "heading";
     // A bound Codex terminal: its account and state, stop, rename, pin and reopen.
     const codexBound = isCodexTab(tab) && tab.cli_session_id;
     return <TerminalHeader tab={tab} project={projectName(path, groups)} metadata={metadata}
       contentWorkspace={path} terminalDetail={codexBound ? <CodexTerminalDetail store={sessionList} tab={tab}
-        label={codexTerminalLabel(tab, codexProfiles.accounts)} /> : detail} terminalDetailHint={tab?.claude_account_source === "default"
-        ? "此终端按启动时的普通终端登录标记。若普通终端已换号，请重新打开工作会话确认身份。" : detail}
+        label={codexTerminalLabel(tab, codexProfiles.accounts)} /> : detail} terminalDetailHint={detailHint}
       busy={busy} onHome={() => setHome(true)}
       sidebarButton={sidebarButton(paneSide(tab?.id))} exitButton={codexBound ? <>
         <CodexTerminalActions store={sessionList} tab={tab} pinned={Boolean(metadata[tab.id]?.pinned)} busy={busy}
@@ -1555,23 +1775,46 @@ function App() {
   };
   const paneTabs = tab => !dualBrowser ? browserTabs : browserTabs.filter(item =>
     item.id === tab.id || (tab.id === leftId && item.id !== rightId));
-  const browserHeader = tab => <BrowserHeader vault={passwordVault} onManageVault={() => openSettings("vault")} tab={tab} tabs={paneTabs(tab)} metadata={metadata}
-    vertical={browserTabLayout === "vertical"}
-    ready={status.ready} busy={busy} focused={active === tab.id} compact={split} splitDrag={splitDrag}
-    sidebarButton={sidebarButton(paneSide(tab.id))} exitButton={expandButton(tab)}
-    triggerRef={tab.id === active ? terminalTrigger : undefined}
-    location={split ? `heading-${tab.id}` : "heading"} menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
-    back={tab.kind !== "browser-settings" && (browser.split?.history?.[tab.id]?.back ?? (tab.id === browser.active && browser.back))}
-    forward={tab.kind !== "browser-settings" && (browser.split?.history?.[tab.id]?.forward ?? (tab.id === browser.active && browser.forward))}
-    action={action} onSelect={select} onClose={closeTab} onRename={renameTab} onPin={pinTab} onReorder={reorder}
-    onNew={newPage} onNavigate={address => navigate(tab.id, address)} onOpen={openBrowserPage}
-    onNewPrivate={() => openBrowserPage(undefined, true)} onNewRegular={() => openBrowserPage(undefined, false)}
-    onSettings={openBrowserSettings}
-    onReload={() => tab.kind === "browser-settings" ? setBrowserSettingsRevision(value => value + 1) : action("/browser/reload", { id: tab.id })}
-    onCloseBrowser={!dualBrowser || tab.id === rightId ? closeBrowser : undefined}
-    downloads={downloads} onStatus={notify}
-    onEditor={() => openEditor(tab.workspace || workspace)} recoveringEditor={recoveringEditor}
-    onRecover={() => recoverEditor(tab)} />;
+  const browserHeader = tab => {
+    const isT3 = isT3CodeTab(tab, t3code);
+    if (isT3 && t3code.focus_chrome !== false && !t3codeShowBrowserBar) {
+      return <T3CodeHeader
+        tab={tab}
+        t3code={t3code}
+        ready={status.ready}
+        busy={busy}
+        compact={split}
+        sidebarButton={sidebarButton(paneSide(tab.id))}
+        exitButton={expandButton(tab)}
+        onReload={() => action("/browser/reload", { id: tab.id })}
+        onOpenDirect={() => { void openT3Code("direct").catch(() => {}); }}
+        onRestart={() => restartT3Code(tab)}
+        onToggleBrowserBar={() => toggleT3CodeBrowserBar(tab.id, true)}
+        onSettings={() => openSettings("agents")}
+        onClose={() => closeTab(tab)}
+        menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
+      />;
+    }
+    return <BrowserHeader vault={passwordVault} onManageVault={() => openSettings("vault")} tab={tab} tabs={paneTabs(tab)} metadata={metadata}
+      agentsById={agentCatalog.byId}
+      onFocusT3CodeChrome={isT3 ? () => toggleT3CodeBrowserBar(tab.id, false) : undefined}
+      vertical={browserTabLayout === "vertical"}
+      ready={status.ready} busy={busy} focused={active === tab.id} compact={split} splitDrag={splitDrag}
+      sidebarButton={sidebarButton(paneSide(tab.id))} exitButton={expandButton(tab)}
+      triggerRef={tab.id === active ? terminalTrigger : undefined}
+      location={split ? `heading-${tab.id}` : "heading"} menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
+      back={tab.kind !== "browser-settings" && (browser.split?.history?.[tab.id]?.back ?? (tab.id === browser.active && browser.back))}
+      forward={tab.kind !== "browser-settings" && (browser.split?.history?.[tab.id]?.forward ?? (tab.id === browser.active && browser.forward))}
+      action={action} onSelect={select} onClose={closeTab} onRename={renameTab} onPin={pinTab} onReorder={reorder}
+      onNew={newPage} onNavigate={address => navigate(tab.id, address)} onOpen={openBrowserPage}
+      onNewPrivate={() => openBrowserPage(undefined, true)} onNewRegular={() => openBrowserPage(undefined, false)}
+      onSettings={openBrowserSettings}
+      onReload={() => tab.kind === "browser-settings" ? setBrowserSettingsRevision(value => value + 1) : action("/browser/reload", { id: tab.id })}
+      onCloseBrowser={!dualBrowser || tab.id === rightId ? closeBrowser : undefined}
+      downloads={downloads} onStatus={notify}
+      onEditor={() => openEditor(tab.workspace || workspace)} recoveringEditor={recoveringEditor}
+      onRecover={() => recoverEditor(tab)} />;
+  };
   const dialogs = (
     <>
       <BrowserDataHost tabs={browserTabs} onSettings={openBrowserSettings} onInternal={openInternalPage} onVault={() => openSettings("vault")} />
@@ -1686,10 +1929,14 @@ function App() {
       >
         {!sidebarCollapsed && (
           <SessionListView store={sessionList}>{(list) => <WorkspaceSidebar
-            onClaudeAccounts={() => setManagementPage("claude-accounts")}
-            claudeAccountsOpen={managementPage === "claude-accounts"}
-            onCodexAccounts={codexUI.link ? () => setManagementPage("codex-accounts") : undefined}
-            codexAccountsOpen={managementPage === "codex-accounts"}
+            onAccounts={() => { if (!isAccountsPage) setManagementPage("claude-accounts"); }}
+            accountsOpen={isAccountsPage}
+            accountsReadyCount={totalReadyAccounts}
+            agentsById={agentCatalog.byId}
+            t3code={t3code}
+            t3codeActive={activeIsT3Code}
+            onOpenT3Code={(forceMode) => { void openT3Code(forceMode).catch(() => {}); }}
+            onInstallAgents={() => openSettings("agents")}
             tailscaleOpen={managementPage === "tailscale"}
             updateAction={<AppUpdateButton updates={appUpdates} />}
             workspace={selectedProject || status.workspace}
@@ -1787,10 +2034,10 @@ function App() {
             </Suspense>
           )}
           {managementPage && !sessionPane && (
-            <main className="management-page" aria-labelledby={managementPage + "-title"}>
+            <main className="management-page" aria-labelledby={managementPageGroup + "-title"}>
               <header className="chrome management-header">
                 {sidebarButton()}
-                <h1 id={managementPage + "-title"} tabIndex={-1}>{managementPage === "tailscale" ? "Tailscale" : managementPage === "claude-science" ? "Claude Science" : managementPage === "codex-accounts" ? "Codex 账号管理" : "Claude 账号管理"}</h1>
+                <h1 id={managementPageGroup + "-title"} tabIndex={-1}>{managementPage === "tailscale" ? "Tailscale" : managementPage === "claude-science" ? "Claude Science" : "账号管理"}</h1>
               </header>
               <div className="management-content">
                 <Suspense fallback={quiet}>
@@ -1805,11 +2052,30 @@ function App() {
                     const nativeGuest = ["macos", "windows-11"].includes(status.guest_system);
                     if (nativeGuest && !await confirm({ title: "更新环境组件？", body: "更新会重新连接浏览器和显示组件，请先保存工作。设备身份、公钥和个人数据保留。", confirm: "更新组件" })) return;
                     await action(nativeGuest ? "/environment/update" : "/tailscale/install", {});
-                  }} /> : managementPage === "claude-science" ? <ClaudeSciencePanel status={status} onOpen={showBrowserResult} onConfirm={confirm} onDetails={() => setDetails(true)} /> : managementPage === "codex-accounts" ? <CodexAccountsPanel store={codexProfiles} tabs={tabs} onConfirm={confirm}
-                  running={status.vm_running} environmentBusy={busy || storageRecovery}
-                  login={(id) => createTerminal(workspace, "codex-login", id)} /> : <ClaudeAccountsPanel store={claudeProfiles} tabs={tabs} onConfirm={confirm}
-                  running={status.vm_running} environmentBusy={busy || storageRecovery}
-                  login={(id) => createTerminal(workspace, "claude-login", id)} />}
+                  }} /> : managementPage === "claude-science" ? <ClaudeSciencePanel status={status} onOpen={showBrowserResult} onConfirm={confirm} onDetails={() => setDetails(true)} /> : (
+                  <AccountsHub
+                    activeTab={activeAccountsTab}
+                    onSelectTab={openAgentAccounts}
+                    claudeProfiles={claudeProfiles}
+                    codexProfiles={codexProfiles}
+                    codexNative={codexUI.accounts}
+                    agents={agentCatalog.agents}
+                    agentAccountsRevision={agentAccountsRevision}
+                    tabs={tabs}
+                    workspace={workspace}
+                    projects={projects}
+                    projectGroups={groups}
+                    running={status.vm_running}
+                    environmentBusy={busy || storageRecovery}
+                    onConfirm={confirm}
+                    onClaudeLogin={(id) => createTerminal(workspace, "claude-login", id)}
+                    onCodexLogin={(id) => createTerminal(workspace, "codex-login", id)}
+                    onStartAgentLogin={(id, accountId, mode) => startAgentLogin(id, accountId, mode).catch((e) => notify(e.message))}
+                    onLaunchAgent={(id, accountId) => launchAgentTerminal(id, accountId).catch((e) => notify(e.message))}
+                    onOpenSettings={() => openSettings("agents")}
+                    onAgentChanged={() => { void agentCatalog.refresh(false); }}
+                  />
+                )}
                 </Suspense>
               </div>
             </main>
@@ -1849,15 +2115,23 @@ function App() {
                     </Suspense>
                   </section>
                 )}
-                {!macGuest && !desktopOpen && !showHome && webPanes.length > 0 && (
-                  <section className={`pane-lane browser-lane ${browserTabLayout === "vertical" ? "vertical-browser" : ""} ${dualBrowser ? "" : "split-" + paneSide(webPanes[0].id)}`}>
-                    {browserTabLayout === "vertical" && <BrowserTabRail tabs={browserTabs} metadata={metadata}
+                {!macGuest && !desktopOpen && !showHome && webPanes.length > 0 && (() => {
+                  const t3FocusSingle = webPanes.length === 1 && isT3CodeTab(webPanes[0], t3code) && t3code.focus_chrome !== false && !t3codeShowBrowserBar;
+                  const showVerticalRail = browserTabLayout === "vertical" && !t3FocusSingle;
+                  return (
+                  <section className={`pane-lane browser-lane ${showVerticalRail ? "vertical-browser" : ""} ${dualBrowser ? "" : "split-" + paneSide(webPanes[0].id)}`}>
+                    {showVerticalRail && <BrowserTabRail tabs={browserTabs} metadata={metadata}
+                      agentsById={agentCatalog.byId}
                       active={liveBrowser?.id} ready={status.ready} busy={busy} splitDrag={splitDrag}
                       sidebarButton={sidebarButton(paneSide(webPanes[0].id))}
                       onSelect={select} onClose={closeTab} onRename={renameTab} onPin={pinTab} onReorder={reorder}
                       onNew={newPage} />}
                     <div className="browser-headers">{webPanes.map(tab =>
                       <div key={paneSide(tab.id) || "single"} className="browser-header-cell" data-focused={active === tab.id}
+                        ref={(node) => {
+                          if (node) browserHeaderRefs.current.set(tab.id, node);
+                          else browserHeaderRefs.current.delete(tab.id);
+                        }}
                         onPointerDownCapture={() => focusHeader(tab)} onFocusCapture={() => focusHeader(tab)}>
                         {browserHeader(tab)}
                       </div>)}</div>
@@ -1890,9 +2164,11 @@ function App() {
                       {status.ready && !splitReady && <div className="view-overlay">正在调整浏览器布局…</div>}
                     </div>
                   </section>
-                )}
+                  );
+                })()}
                 {tabs.filter(t => t.kind === "terminal").map(tab => {
                   const visible = !desktopOpen && !showHome && panes.some(pane => pane.id === tab.id);
+                  const agentEntry = agentCatalog.byId.get(tab.agent_id || (tab.terminalKind === "claude" || (tab.cli_session_id && !isCodexTab(tab)) ? "claude" : ""));
                   return <section key={tab.id} className={`pane-lane terminal-lane split-${paneSide(tab.id)}`}
                     data-focused={active === tab.id} hidden={!visible}
                     onPointerDownCapture={() => focusHeader(tab)} onFocusCapture={() => focusHeader(tab)}>
@@ -1900,10 +2176,25 @@ function App() {
                     <div className="pane-body">
                       <Suspense fallback={null}>
                       {tab.pending && <TerminalPending error={tab.error}
-                        onRetry={() => createTerminal(tab.workspace, tab.terminalKind, undefined, tab)} />}
+                        onRetry={() => createTerminal(
+                          tab.workspace,
+                          tab.terminalKind,
+                          tab.agent_id ? { agent_id: tab.agent_id, ...(tab.account_id ? { account_id: tab.account_id } : {}) } : undefined,
+                          tab,
+                        )} />}
                       {!tab.pending && isCodexTab(tab) && tab.cli_session_id && !tab.closed && visible && <CodexOpening id={tab.id} />}
                       {!tab.pending && <TerminalView
                         session={terminalSession(tab)}
+                        agentSpec={agentEntry?.spec || null}
+                        agentConfig={agentEntry ? {
+                          image_paste: typeof agentEntry.config?.image_paste === "boolean"
+                            ? agentEntry.config.image_paste
+                            : agentEntry.spec?.terminal?.image_paste_shortcut !== false,
+                          shift_enter_mode: agentEntry.config?.shift_enter_mode || agentEntry.spec?.terminal?.shift_enter_mode || "bracketed_newline",
+                        } : null}
+                        agentOAuthDomains={allAgentOAuthDomains}
+                        onLaunchAgent={(id, accountId, ws) => launchAgentTerminal(id, accountId, ws || tab.workspace).catch((e) => notify(e.message))}
+                        onOpenAgentAccounts={openAgentAccounts}
                         onOutput={isCodexTab(tab) && tab.cli_session_id ? () => codexOutputArrived(tab.id) : undefined}
                         onLoginTab={({ id }) => showBrowserResult({ id, kind: "web", login: true, incognito: true, title: "账号授权" })}
                         onControls={(control) =>
@@ -2064,10 +2355,15 @@ function App() {
         <SettingsPanel
           current={settings}
           status={status}
+          agents={agentCatalog}
+          t3code={t3code}
           initialSection={settingsSection}
           onClose={() => setSettingsOpen(false)}
           onSaved={refreshSettings}
           onConfirm={confirm}
+          onOpenAgentAccounts={openAgentAccounts}
+          onLaunchAgent={(id) => launchAgentTerminal(id).catch((e) => notify(e.message))}
+          onOpenT3Code={openT3Code}
         />
       )}
       </Suspense>

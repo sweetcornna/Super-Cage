@@ -149,7 +149,7 @@ func exportDiagnostics(configPath, connectionID, destination string, agentLocal 
 		if agentLocal {
 			c, e = agentConnect(context.Background(), configPath)
 		} else {
-			c, e = connectController(profile)
+			c, e = connectProvenController(profile)
 		}
 		if e != nil {
 			if connectionID != "" && connectionID != "local" {

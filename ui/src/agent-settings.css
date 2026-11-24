@@ -1,0 +1,329 @@
+.agent-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.agent-settings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-settings-header .section-title {
+  margin-bottom: 0;
+}
+
+.agent-prereq-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--s-radius, 10px);
+  background: var(--chrome);
+  font-size: var(--s-xs, 0.86rem);
+}
+
+.agent-prereq-label {
+  color: var(--muted);
+  font-weight: 550;
+  margin-right: 4px;
+}
+
+.agent-prereq-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-prereq-chip::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.agent-prereq-chip[data-ok="true"]::before {
+  background: var(--success);
+}
+
+.agent-job-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--accent);
+  border-radius: var(--s-radius, 10px);
+  background: color-mix(in srgb, var(--accent) 6%, var(--paper));
+  font-size: var(--s-sm, 0.92rem);
+}
+
+.agent-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.agent-section-heading h4 {
+  margin: 0;
+  font-size: var(--s-lg, 1.15rem);
+  font-weight: 600;
+  color: var(--strong);
+}
+
+.agent-section-heading small {
+  color: var(--muted);
+  font-size: var(--s-xs, 0.85rem);
+}
+
+.agent-installed-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agent-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition: border-color 0.14s ease;
+}
+
+.agent-card:hover {
+  border-color: color-mix(in srgb, var(--line) 55%, var(--muted));
+}
+
+.agent-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.agent-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.agent-card-title strong {
+  font-size: var(--s-md, 1.02rem);
+  font-weight: 620;
+  color: var(--strong);
+}
+
+.agent-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--chrome);
+  color: var(--ink);
+  font-size: 0.76rem;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-pill--ok {
+  background: color-mix(in srgb, var(--success) 13%, var(--paper));
+  color: var(--success);
+}
+
+.agent-pill--warn {
+  background: color-mix(in srgb, var(--danger) 12%, var(--paper));
+  color: var(--danger);
+}
+
+.agent-card-desc {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: var(--s-xs, 0.86rem);
+  line-height: 1.55;
+}
+
+.agent-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.79rem;
+}
+
+.agent-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.agent-card-actions .agent-channel-select {
+  min-width: 170px;
+  max-width: 240px;
+}
+
+.agent-config-panel {
+  border-top: 1px dashed var(--line);
+  padding-top: 14px;
+  display: grid;
+  gap: 14px;
+}
+
+.agent-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.agent-config-panel label:not(.toggle-row) {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.agent-presets {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.agent-presets span {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.agent-preset-chip {
+  min-height: 26px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--chrome);
+  color: var(--ink);
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  cursor: pointer;
+}
+
+.agent-preset-chip:hover {
+  background: var(--hover);
+  color: var(--strong);
+}
+
+.agent-preset-chip[data-active="true"] {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--paper));
+  color: var(--strong);
+}
+
+.agent-catalog-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.agent-catalog-search {
+  flex: 1 1 220px;
+  min-width: 180px;
+}
+
+.agent-filter-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-filter-pills button {
+  min-height: 32px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 0.82rem;
+}
+
+.agent-filter-pills button.selected {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--button-ink);
+}
+
+.agent-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(310px, 1fr));
+  gap: 12px;
+}
+
+.agent-custom-form {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--chrome);
+  padding: 18px;
+  display: grid;
+  gap: 14px;
+}
+
+.agent-custom-form h5 {
+  margin: 0;
+}
+
+.agent-custom-form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 12px;
+}
+
+.agent-custom-form label:not(.check-line):not(.toggle-row) {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.agent-auth-checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: center;
+}
+
+.agent-custom-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+/* Match settings.css label specificity inside Agent CLI settings. */
+.settings-page .settings-content .agent-settings-panel label:not(.check-line):not(.choice):not(.toggle-row),
+.settings-page .settings-content .agent-config-panel label:not(.check-line):not(.choice):not(.toggle-row),
+.settings-page .settings-content .agent-custom-form label:not(.check-line):not(.choice):not(.toggle-row) {
+  margin-bottom: 10px;
+}

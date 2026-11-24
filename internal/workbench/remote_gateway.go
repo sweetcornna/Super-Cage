@@ -356,6 +356,11 @@ func (s *Server) routeRemote(w http.ResponseWriter, r *http.Request) bool {
 			p.SetURL(target)
 			p.Out.Host = target.Host
 			p.Out.Header.Del(connectionHeader)
+			if remote {
+				p.Out.Header.Set("X-Cage-Remote-Client", "1")
+			} else {
+				p.Out.Header.Del("X-Cage-Remote-Client")
+			}
 			query := p.Out.URL.Query()
 			query.Del("connection")
 			p.Out.URL.RawQuery = query.Encode()

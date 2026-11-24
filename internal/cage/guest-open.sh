@@ -46,9 +46,18 @@ browser_request() {
     sudo -u cage-browser /usr/bin/node "$@"
   fi
 }
+allowed_hosts=""
+if [ "${1:-}" = "/login-open" ]; then
+  allowed_hosts="${CAGE_LOGIN_ALLOWED_HOSTS:-}"
+fi
 printf '%s' "${2:-}" | browser_request --input-type=module -e '
 import {readFileSync} from "node:fs";
 const {token}=JSON.parse(readFileSync("/etc/claude-cage/browser-control.json","utf8"));
-const response=await fetch("http://127.0.0.1:18500"+process.argv[1],{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify({url:readFileSync(0,"utf8"),login:process.argv[2]})});
+const payload={url:readFileSync(0,"utf8"),login:process.argv[2]};
+if(process.argv[1]==="/login-open"&&process.argv[3]){
+  const extra=process.argv[3].split(",").map(s=>s.trim().toLowerCase()).filter(Boolean);
+  if(extra.length)payload.allowed_hosts=extra;
+}
+const response=await fetch("http://127.0.0.1:18500"+process.argv[1],{method:"POST",headers:{Authorization:"Bearer "+token,"Content-Type":"application/json"},body:JSON.stringify(payload)});
 if(!response.ok)process.exit(1);
-' "$1" "${3:-}"
+' "$1" "${3:-}" "$allowed_hosts"

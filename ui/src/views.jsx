@@ -10,7 +10,7 @@ import { useAppearance } from "./appearance";
 import { terminalTheme, systemCodeFont } from "./appearance-state.mjs";
 import { Terminal } from "../.generated/xterm.mjs";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { claudeLoginLink, codexDeviceLink, isClaudeLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
+import { agentLoginLinkRegex, codexDeviceLink, isAgentLoginLink, isCodexDeviceLink } from "./terminal-login-link.mjs";
 import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { attachTouchScroll } from "./terminal-touch-scroll.mjs";
@@ -31,6 +31,7 @@ import { displayRestoreAfterMs } from "./display-session.mjs";
 import { displayKey, displaySessions } from "./remote-session.js";
 import { RefreshCw, Clipboard, ArrowUpRight } from "lucide-react";
 import { SessionAccount } from "./session-account";
+import { AgentTerminalBar } from "./agent-terminal-bar";
 import { codexLaunchRefused, createTerminalRenderer, terminalLastLine } from "./terminal-renderer.mjs";
 import { cagePerf } from "./display-perf.mjs";
 import { EmptyState } from "./drawings";
@@ -299,14 +300,29 @@ export const RemoteView = forwardRef(function RemoteView(
   );
 });
 
-export function TerminalView({ session, visible, focused = true, onStatus, onControls, onAccountChanged, onLoginTab, onOutput }) {
+export function TerminalView({
+  session,
+  visible,
+  focused = true,
+  agentConfig = null,
+  agentSpec = null,
+  agentOAuthDomains = [],
+  onStatus,
+  onControls,
+  onAccountChanged,
+  onLoginTab,
+  onOutput,
+  onLaunchAgent,
+  onOpenAgentAccounts,
+}) {
   const { appearance, theme, variant } = useAppearance();
   const box = useRef(),
     instance = useRef(),
     fit = useRef(),
     socket = useRef(),
     renderer = useRef(),
-    streamVisibility = useRef();
+    streamVisibility = useRef(),
+    activateLoginRef = useRef(null);
   // "connecting" until the first stream opens, then "open" or "retrying";
   // "stalled" after repeated quick failures and "ended" once the session exits.
   const [link, setLink] = useState("connecting"),
@@ -323,8 +339,15 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
   // Told of every output frame (main.jsx: "正在打开 Codex…" until the first).
   const outputRef = useRef(onOutput);
   outputRef.current = onOutput;
+  const agentOptsRef = useRef({ agentConfig, agentOAuthDomains, sessionOAuthDomains: session.oauth_domains });
+  agentOptsRef.current = { agentConfig, agentOAuthDomains, sessionOAuthDomains: session.oauth_domains };
+  const domainsKey = [...new Set([...(session.oauth_domains || []), ...(agentOAuthDomains || [])])].sort().join(",");
   useEffect(() => {
     let disposed = false, emittingPaste = false, inputChain = Promise.resolve();
+    const getAllowedHosts = () => [
+      ...(agentOptsRef.current.sessionOAuthDomains || []),
+      ...(agentOptsRef.current.agentOAuthDomains || []),
+    ];
     const enqueue = (action) => {
       const result = inputChain.then(action);
       inputChain = result;
@@ -332,19 +355,40 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       result.then(reset, reset);
       return result;
     };
+    const openExternalTerminalLink = (uri) => {
+      let parsed;
+      try {
+        parsed = new URL(uri);
+      } catch {
+        return;
+      }
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+      if (window.confirm(`打开此终端链接？\n${uri}`)) {
+        window.open(uri, "_blank", "noopener,noreferrer");
+      }
+    };
     const activateLogin = async (_event, uri) => {
-      if (disposed || !visibleRef.current || !focusedRef.current || !isClaudeLoginLink(uri)) return;
+      if (disposed || !visibleRef.current || !focusedRef.current) return;
+      if (isCodexDeviceLink(uri)) {
+        window.open(uri, "_blank", "noopener,noreferrer");
+        return;
+      }
+      if (!isAgentLoginLink(uri, getAllowedHosts())) {
+        openExternalTerminalLink(uri);
+        return;
+      }
       try {
         const tab = await api(`/terminals/${session.id}/login-link`, { url: uri });
         if (!disposed && visibleRef.current && focusedRef.current) onLoginTab?.(tab);
       } catch (error) { if (!disposed) onStatus(error.message); }
     };
+    activateLoginRef.current = activateLogin;
     const terminal = new Terminal({
       linkHandler: { activate(event, uri) {
-        if (isClaudeLoginLink(uri)) return void activateLogin(event, uri);
         if (isCodexDeviceLink(uri)) return void window.open(uri, "_blank", "noopener,noreferrer");
+        if (isAgentLoginLink(uri, getAllowedHosts())) return void activateLogin(event, uri);
         // Keep xterm's user confirmation for other explicit HTTP(S) links.
-        if (window.confirm(`打开此终端链接？\n${uri}`)) window.open(uri, "_blank", "noopener,noreferrer");
+        openExternalTerminalLink(uri);
       } },
       fontFamily: theme.fonts.code || systemCodeFont,
       fontSize: appearance.codeFontSize,
@@ -364,7 +408,6 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
     // gives many one, which shifts the rest of their line.
     terminal.loadAddon(new Unicode11Addon());
     terminal.unicode.activeVersion = "11";
-    terminal.loadAddon(new WebLinksAddon(activateLogin, { urlRegex: claudeLoginLink }));
     // The Codex device page opens in the user's own browser; the one-time
     // code stays in this terminal and no credential crosses into the page.
     terminal.loadAddon(new WebLinksAddon((_event, uri) => {
@@ -744,15 +787,21 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
           !event.isComposing && event.keyCode !== 229) {
         event.preventDefault();
         if (event.type === "keydown") {
-          // Bracketed insertion adds a line inside shell/CLI editors. Programs
-          // without paste mode receive the distinct CSI-u Shift+Enter key.
-          void enqueue(() => send(terminal.modes.bracketedPasteMode
-            ? "\x1b[200~\n\x1b[201~" : "\x1b[13;2u")).catch(() => {});
+          const shiftMode = agentOptsRef.current.agentConfig?.shift_enter_mode || "bracketed_newline";
+          const seq = shiftMode === "plain"
+            ? "\n"
+            : shiftMode === "csi_u"
+              ? "\x1b[13;2u"
+              : (terminal.modes.bracketedPasteMode ? "\x1b[200~\n\x1b[201~" : "\x1b[13;2u");
+          void enqueue(() => send(seq)).catch(() => {});
         }
         return false;
       }
       if (event.type !== "keydown") return true;
-      const claudeImagePaste = ((session.terminalKind || session.kind) === "claude" || session.cli_session_id) &&
+      const tKind = session.terminalKind || session.kind;
+      const isAgentTerm = tKind === "claude" || tKind === "agent" || Boolean(session.cli_session_id);
+      const imagePasteEnabled = agentOptsRef.current.agentConfig?.image_paste !== false;
+      const claudeImagePaste = isAgentTerm && imagePasteEnabled &&
         event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "v";
       if (claudeImagePaste && nativeAvailable()) {
         event.preventDefault();
@@ -828,8 +877,18 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       }
       terminal.dispose();
       instance.current = null;
+      activateLoginRef.current = null;
     };
   }, [session.id]);
+  useEffect(() => {
+    const terminal = instance.current;
+    const activateLogin = activateLoginRef.current;
+    if (!terminal || !activateLogin) return;
+    const hosts = domainsKey ? domainsKey.split(",") : [];
+    const addon = new WebLinksAddon(activateLogin, { urlRegex: agentLoginLinkRegex(hosts) });
+    terminal.loadAddon(addon);
+    return () => { addon.dispose(); };
+  }, [domainsKey, session.id]);
   useEffect(() => {
     if (visible) renderer.current?.show();
     else renderer.current?.hide();
@@ -861,6 +920,15 @@ export function TerminalView({ session, visible, focused = true, onStatus, onCon
       {session.workspace_notice && <p className="connection-banner" role="status">{session.workspace_notice}</p>}
       {visible && session.cli_session_id && <SessionAccount id={session.cli_session_id} request={terminalAccountRequest} compact
         onChanged={onAccountChanged} />}
+      {visible && session.terminalKind === "agent" && session.agent_id && (
+        <AgentTerminalBar
+          session={session}
+          agentSpec={agentSpec}
+          onLaunchAgent={onLaunchAgent}
+          onOpenAccounts={onOpenAgentAccounts}
+          onStatus={onStatus}
+        />
+      )}
       <div className={`terminal-host ${preparing ? "terminal-preparing" : ""}`} ref={box} aria-hidden={preparing || undefined} />
       {preparing && (
         <div className="terminal-startup" role="status">

@@ -162,6 +162,19 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 	if kind == "" {
 		kind = "shell"
 	}
+	if (kind == "agent" || kind == "agent-login") && input.AgentID == "claude" {
+		if kind == "agent-login" {
+			kind = "claude-login"
+		} else {
+			kind = "claude"
+		}
+		if input.AccountID != "" && input.ClaudeAccountID == "" {
+			input.ClaudeAccountID = input.AccountID
+		}
+	}
+	if kind == "agent" || kind == "agent-login" {
+		return nil, errors.New("当前 Windows 原生客机暂未支持独立 Agent 终端包装，请在 PowerShell 终端中运行")
+	}
 	if kind != "shell" && kind != "claude" && kind != "claude-login" {
 		return nil, errors.New("终端类型无效")
 	}
@@ -321,7 +334,7 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 			return nil, errMobileLocked
 		}
 	}
-	session, err := s.terminals.startSessionWithPTY(cmd, workspace, input.Kind, selection, finished, func() (terminalPTY, error) { return startWindowsGuestTerminalRequest(cmd, request) })
+	session, err := s.terminals.startSessionWithPTY(cmd, workspace, kind, selection, finished, func() (terminalPTY, error) { return startWindowsGuestTerminalRequest(cmd, request) })
 	if input.requestContext != nil {
 		s.account.mu.Unlock()
 	}

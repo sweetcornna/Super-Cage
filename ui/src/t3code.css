@@ -1,0 +1,378 @@
+/* T3 Code optional integration settings card and ultra-slim 36px focus header. */
+
+.t3code-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.t3code-card-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.t3code-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.t3code-card-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.t3code-card-title strong {
+  font-size: var(--s-md, 1.02rem);
+  font-weight: 620;
+  color: var(--strong);
+}
+
+.t3code-optin-switch {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  margin: 0 !important;
+  padding-top: 2px;
+}
+
+.t3code-optin-switch input[role="switch"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--chrome-dark);
+  cursor: pointer;
+  transition: background 0.16s ease, border-color 0.16s ease;
+}
+
+.t3code-optin-switch input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--paper);
+  box-shadow: 0 1px 3px #00000026;
+  transition: transform 0.16s ease;
+}
+
+.t3code-optin-switch input[role="switch"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.t3code-optin-switch input[role="switch"]:checked::after {
+  transform: translateX(16px);
+}
+
+.t3code-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+.t3code-quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.t3code-config-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.t3code-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.t3code-field-label {
+  font-size: var(--s-xs, 0.86rem);
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.t3code-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 6px;
+}
+
+.t3code-mode-btn {
+  min-height: var(--s-control, 40px);
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--chrome);
+  color: var(--ink);
+  font-size: var(--s-xs, 0.84rem);
+  font-weight: 520;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.t3code-mode-btn:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--strong);
+}
+
+.t3code-mode-btn.selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 13%, var(--paper));
+  color: var(--strong);
+}
+
+.t3code-info-banner {
+  margin: 0 !important;
+}
+
+.t3code-external-form-wrap {
+  display: grid;
+  gap: 8px;
+}
+
+.t3code-mode-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--s-xs, 0.82rem);
+  line-height: 1.45;
+}
+
+.t3code-card-body label:not(.toggle-row) {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 0;
+}
+
+.t3code-managed-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.t3code-install-box,
+.t3code-port-form,
+.t3code-external-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.t3code-install-box > label,
+.t3code-port-form > label,
+.t3code-external-form > label {
+  flex: 1;
+  min-width: 0;
+}
+
+.t3code-install-box > button,
+.t3code-port-form > button,
+.t3code-external-form > button {
+  flex: none;
+  height: var(--s-control, 40px);
+}
+
+.t3code-toggle-row {
+  margin: 0 !important;
+  padding: 10px 0 !important;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line) !important;
+}
+
+.t3code-bindings {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.t3code-bindings-head {
+  display: grid;
+  gap: 3px;
+}
+
+.t3code-bindings-head strong {
+  font-size: var(--s-sm, 0.92rem);
+  color: var(--strong);
+}
+
+.t3code-bindings-head small {
+  font-size: var(--s-xs, 0.82rem);
+  color: var(--muted);
+}
+
+.t3code-restart-hint {
+  margin: 0 !important;
+}
+
+.t3code-bindings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.t3code-binding-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(190px, 260px);
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--chrome);
+}
+
+.t3code-binding-agent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.t3code-binding-agent > span:first-of-type {
+  font-size: var(--s-sm, 0.9rem);
+  font-weight: 550;
+  color: var(--strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Ultra-slim 36px header giving ~97% viewport to T3 Code Web UI. */
+.t3code-chrome {
+  border-bottom: 1px solid var(--line);
+  background: var(--chrome);
+}
+
+.t3code-header-row {
+  height: 36px;
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px;
+  min-width: 0;
+}
+
+.t3code-header-identity {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.t3code-header-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--strong);
+  white-space: nowrap;
+}
+
+.t3code-status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.t3code-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.t3code-status-chip--on {
+  color: var(--ink);
+}
+
+.t3code-status-chip--on .t3code-status-dot {
+  background: var(--success);
+}
+
+.t3code-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+
+.t3code-header-actions .icon-button {
+  width: 26px;
+  height: 26px;
+  min-height: 26px;
+}
+
+.t3code-header-pill-btn {
+  min-height: 24px;
+  height: 24px;
+  padding: 0 8px;
+  gap: 5px;
+  border-radius: 6px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: var(--strong);
+}
+
+.t3code-header-pill-btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.t3code-header-pill-btn--quiet:hover:not(:disabled) {
+  background: var(--hover);
+  color: var(--strong);
+}
+
+.t3code-chrome.split-chrome .t3code-header-pill-btn span,
+.t3code-chrome.split-chrome .t3code-status-chip {
+  display: none;
+}
+
+@media (max-width: 720px) {
+  .t3code-managed-row,
+  .t3code-binding-row {
+    grid-template-columns: 1fr;
+  }
+  .t3code-header-pill-btn span {
+    display: none;
+  }
+}
+
+/* Match settings.css label specificity inside T3 Code settings card. */
+.settings-page .settings-content .t3code-card label:not(.check-line):not(.choice):not(.toggle-row) {
+  margin-bottom: 10px;
+}

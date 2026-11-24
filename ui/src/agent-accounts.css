@@ -1,0 +1,448 @@
+.agent-accounts-page {
+  container-type: inline-size;
+  width: 100%;
+  max-width: 780px;
+  min-width: 0;
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.agent-accounts-hero {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--chrome);
+}
+
+.agent-accounts-hero-id {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.agent-accounts-hero-id h3 {
+  margin: 0;
+  font-size: 1.08rem;
+  font-weight: 620;
+  color: var(--strong);
+}
+
+.agent-accounts-hero-id p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
+.agent-accounts-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.agent-schedule-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 11px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  font-size: 0.86rem;
+}
+
+.agent-schedule-preview strong {
+  color: var(--strong);
+}
+
+.agent-schedule-preview span {
+  color: var(--muted);
+}
+
+.agent-auth-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-apikey-form {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--chrome);
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+
+.agent-apikey-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.agent-apikey-form label {
+  display: grid;
+  gap: 5px;
+  font-size: 0.84rem;
+  font-weight: 550;
+  color: var(--strong);
+}
+
+.agent-apikey-form input,
+.agent-apikey-form .inline-select-trigger,
+.agent-accounts-page input:not([type="checkbox"]),
+.agent-accounts-page .inline-select-trigger {
+  width: 100%;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 6px 10px;
+  font: inherit;
+}
+
+.agent-scheduling-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.agent-pins-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.agent-pin-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(170px, 240px);
+  align-items: center;
+  gap: 10px;
+  font-size: 0.84rem;
+}
+
+.agent-pin-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+.agent-account-card {
+  padding: 14px 16px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--paper);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.agent-account-card[data-cooling="true"] {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger) 3%, var(--paper));
+}
+
+.agent-account-card[data-enabled="false"] {
+  opacity: 0.72;
+}
+
+.agent-account-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  font-size: 0.81rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-account-tuning {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--chrome);
+}
+
+.agent-account-tuning label {
+  display: grid;
+  gap: 4px;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.agent-cooldown-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--danger) 12%, var(--paper));
+  color: var(--danger);
+  font-size: 0.76rem;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-health-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--success) 11%, var(--paper));
+  color: var(--success);
+  font-size: 0.75rem;
+  font-weight: 550;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-health-badge[data-tier="warn"] {
+  background: color-mix(in srgb, #d97706 14%, var(--paper));
+  color: #b45309;
+}
+
+.agent-health-badge[data-tier="bad"] {
+  background: color-mix(in srgb, var(--danger) 12%, var(--paper));
+  color: var(--danger);
+}
+
+.agent-quota-grid {
+  display: grid;
+  grid-template-columns: auto minmax(3rem, 1fr) auto;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--chrome);
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-quota-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: center;
+}
+
+.agent-quota-period {
+  font: 600 0.8rem/1.3 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: var(--strong);
+}
+
+.agent-quota-bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.agent-quota-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 0.25s ease;
+}
+
+.agent-quota-row[data-tier="warn"] .agent-quota-fill {
+  background: #d97706;
+}
+
+.agent-quota-row[data-tier="high"] .agent-quota-fill {
+  background: var(--danger);
+}
+
+.agent-quota-reading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.agent-quota-reading strong {
+  color: var(--strong);
+  font-weight: 600;
+}
+
+.agent-quota-reset {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.agent-terminal-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--chrome);
+  font-size: 0.83rem;
+}
+
+.agent-terminal-bar[data-rate-limited="true"] {
+  border-bottom-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  background: color-mix(in srgb, var(--danger) 6%, var(--chrome));
+}
+
+.agent-terminal-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-terminal-bar-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--strong);
+  font: inherit;
+  cursor: pointer;
+}
+
+.agent-terminal-rate-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--danger) 14%, var(--paper));
+  color: var(--danger);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
+
+.agent-terminal-failover-btn {
+  margin-left: auto;
+  flex: none;
+  min-height: 26px;
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--danger);
+  background: var(--danger);
+  color: #ffffff;
+  font-size: 0.78rem;
+  font-weight: 550;
+  gap: 5px;
+}
+
+.agent-terminal-failover-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--danger) 85%, #000000);
+  border-color: color-mix(in srgb, var(--danger) 85%, #000000);
+}
+
+.agent-terminal-bar-reason {
+  color: var(--muted);
+  font-size: 0.79rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.agent-terminal-bar-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--paper);
+}
+
+.agent-terminal-bar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Super Cage 0.1.18 CSS harmonization: claude-accounts.css uses display:contents
+   on .claude-profile-heading for its subgrid; scope flex layout cleanly here. */
+.agent-accounts-page .claude-profile-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.agent-accounts-page .claude-profile-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--soft);
+  color: var(--ink);
+  font-weight: 600;
+  font-size: 0.9rem;
+  flex: none;
+}
+.agent-accounts-page .claude-profile-identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+.agent-accounts-page .claude-participation {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  margin: 0;
+}
+.agent-accounts-page .claude-profile-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.agent-accounts-page .claude-detected {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 10px);
+  background: var(--surface);
+  margin-bottom: 12px;
+}
+.agent-accounts-page .claude-profile-empty {
+  padding: 18px 16px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md, 10px);
+  background: var(--surface);
+  color: var(--muted);
+}
+.agent-terminal-failover-btn {
+  background: color-mix(in srgb, var(--error) 12%, transparent) !important;
+  color: var(--error) !important;
+  border: 1px solid color-mix(in srgb, var(--error) 45%, transparent) !important;
+}
+.agent-terminal-failover-btn:hover {
+  background: color-mix(in srgb, var(--error) 20%, transparent) !important;
+}

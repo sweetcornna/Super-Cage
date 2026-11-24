@@ -42,7 +42,7 @@ func testServer(t *testing.T) *Server {
 	account := &localAccount{path: filepath.Join(profile, "account.json"), record: &accountRecord{Version: 1, Username: "Test"}}
 	account.setKey(make([]byte, 32))
 	t.Cleanup(account.lock)
-	return &Server{account: account, profile: profile, configPath: path, origin: "http://localhost:17777", token: strings.Repeat("a", 64), session: strings.Repeat("b", 64), preferences: Preferences{Keyboard: "mac"}, keepAwake: fakeKeepAwake}
+	return &Server{account: account, profile: profile, configPath: path, origin: "http://localhost:17777", token: strings.Repeat("a", 64), session: strings.Repeat("b", 64), proofKey: randomToken(), preferences: Preferences{Keyboard: "mac"}, keepAwake: fakeKeepAwake}
 }
 
 // fakeKeepAwake stands in for keepawake.Run (caffeinate on macOS) in tests.

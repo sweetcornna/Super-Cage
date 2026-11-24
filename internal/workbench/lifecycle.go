@@ -138,6 +138,8 @@ func (s *Server) closeService() error {
 		defer s.op.Unlock()
 		s.closeMacOSScreenSharing()
 		s.closeProjectShares()
+		s.closeT3CodeProxy()
+		s.closeAgents()
 		s.closeWindowsBrowser()
 		if s.windowsGuest != nil {
 			s.closeErr = s.closeProxyGate("控制服务正在退出，外网保持关闭")

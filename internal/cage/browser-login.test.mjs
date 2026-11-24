@@ -32,3 +32,36 @@ test("login redirects and popups stay private, closing one login leaves the othe
   await browser.finish("b".repeat(24));
   assert.deepEqual(closed, ["1", "2"]);
 });
+
+test("mainstream and explicitly authorized custom agent login hosts open while untrusted hosts fail", async () => {
+  let contexts = 0;
+  const browser = new LoginBrowser(async (method) => {
+    if (method === "Target.createBrowserContext") return { browserContextId: String(++contexts) };
+    if (method === "Target.createTarget") return { targetId: "tab-" + contexts };
+  });
+  for (const url of [
+    "https://auth.openai.com/oauth/authorize?client_id=test",
+    "https://AUTH.OPENAI.COM/oauth/authorize?client_id=case",
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=test",
+    "https://github.com/login/device",
+    "https://auth.githubcopilot.com/login",
+    "https://auth.factory.ai/authorize",
+    "https://app.factory.ai/login",
+    "https://pi.dev/login",
+  ]) {
+    const res = await browser.open("c".repeat(24), url, async () => "sid");
+    assert.ok(res.id);
+  }
+  const customRes = await browser.open("d".repeat(24), "https://auth.custom-agent.dev/login", async () => "sid", ["AUTH.CUSTOM-AGENT.DEV"]);
+  assert.ok(customRes.id);
+  await assert.rejects(() => browser.open("e".repeat(24), "https://evil.example.org/phish", async () => "sid"));
+  await assert.rejects(() => browser.open("e".repeat(24), "http://auth.openai.com/oauth/authorize", async () => "sid"));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://auth.openai.com:8443/oauth/authorize", async () => "sid"));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://claude.ai:8443/oauth/authorize", async () => "sid"));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://auth.custom-agent.dev:9443/login", async () => "sid", ["auth.custom-agent.dev"]));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://127.0.0.1/login", async () => "sid", ["127.0.0.1"]));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://auth.internal/login", async () => "sid", ["auth.internal"]));
+  await assert.rejects(() => browser.open("e".repeat(24), "https://dev.local/login", async () => "sid", ["dev.local"]));
+  await browser.finish("c".repeat(24));
+  await browser.finish("d".repeat(24));
+});
