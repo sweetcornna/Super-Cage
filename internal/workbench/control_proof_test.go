@@ -527,6 +527,34 @@ func TestControllerProofInEveryMode(t *testing.T) {
 	}
 }
 
+// TestManagementRequiresSessionProvesController ensures the safety boundary
+// self-probe supplies the server's proof key when dialing its own loopback
+// listener (0.1.19 removed unproven controller dials).
+func TestManagementRequiresSessionProvesController(t *testing.T) {
+	s := testServer(t)
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	s.origin = "http://localhost:" + strconv.Itoa(port)
+	server := httptest.NewUnstartedServer(s.handler())
+	server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+
+	if !s.managementRequiresSession(t.Context()) {
+		t.Fatal("managementRequiresSession returned false against proven self controller")
+	}
+
+	// Without a proof key, the self-probe must fail closed.
+	s.proofKey = ""
+	if s.managementRequiresSession(t.Context()) {
+		t.Fatal("managementRequiresSession succeeded without a proof key")
+	}
+}
+
 // BenchmarkControllerDial measures the cost of a proven controller connection.
 func BenchmarkControllerDial(b *testing.B) {
 	s := &Server{proofKey: randomToken(), token: randomToken(), session: randomToken()}
