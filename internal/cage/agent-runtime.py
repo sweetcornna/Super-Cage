@@ -32,9 +32,11 @@ import signal
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 from urllib.parse import urlparse
 
 HOME = Path.home()
@@ -60,21 +62,6 @@ MAGPIE_LOG_MAX_BYTES = 65536
 MAGPIE_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,}$")
 HERDR_ROOT = HOME / ".local/share/cage/herdr"
 HERDR_LOCK_FILE = HERDR_ROOT / "lifecycle.lock"
-HERDR_CONFIG_FILE = HOME / ".config/herdr/config.toml"
-HERDR_VALID_THEMES = {
-    "default",
-    "terminal",
-    "catppuccin",
-    "tokyo-night",
-    "dracula",
-    "nord",
-    "gruvbox",
-    "one-dark",
-    "solarized",
-    "kanagawa",
-    "rose-pine",
-    "vesper",
-}
 CACHE_DIR = HOME / ".cache/cage"
 PROBE_CACHE_FILE = CACHE_DIR / "agent-probe-cache.json"
 OPEN_BIN = "/usr/local/libexec/cage-cli/bin/cage-open" if sys.platform == "darwin" else "/usr/local/bin/cage-open"
@@ -3104,12 +3091,29 @@ def magpie_open_url(payload):
 
 
 # ---------------------------------------------------------------------------
-# Managed Herdr (herdrdev/herdr) Guest Lifecycle & Interactive Takeover
+# Herdr: herdr-core (hc), the environment's one terminal store
 # ---------------------------------------------------------------------------
+#
+# Cage's terminals are hc terminals, so every hc client in the environment
+# (the Herdr app through hc connect, hc in a shell) sees them, and Cage lists
+# the others. Every hc command starts the core when it is down; whatever only
+# looks (status, list, close, the attach loop) first checks the core's socket
+# and never starts it. Only opening a terminal does.
+
+HERDR_RELEASES = "https://releases.herdr.dev"
+HC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
+HC_ADDRESS_RE = re.compile(r"^t[0-9a-z]{1,15}$")
+HC_SESSION_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+HC_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+HC_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+HERDR_LIST_MAX = 64
+HERDR_HISTORY_LINES = 1000
+HERDR_LABEL_KEYS = ("cage", "cage.project", "cage.kind", "cage.title")
+
 
 @contextmanager
 def _herdr_lifecycle_lock():
-    """Serialize Herdr server lifecycle and config updates."""
+    """Serialize core start, terminal creation and install."""
     os.umask(0o077)
     HERDR_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(str(HERDR_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
@@ -3120,6 +3124,517 @@ def _herdr_lifecycle_lock():
             yield
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _hc_binary(path_str=None):
+    """herdr-core itself. A bare hc on PATH may be another program
+    (herbstluftwm ships one), so Cage never runs hc by that name."""
+    local = HOME / ".local/bin/herdr-core"
+    if local.is_file() and os.access(local, os.X_OK):
+        return str(local)
+    return shutil.which("herdr-core", path=path_str or enriched_path()) or ""
+
+
+def _hc_env(path_str):
+    env = os.environ.copy()
+    env["PATH"] = path_str
+    # Cage's terminals have no parent, never the hc terminal this runs in.
+    env.pop("HC_TERMINAL_ID", None)
+    return env
+
+
+def _hc_version(binary, env=None):
+    """The version a working herdr-core reports ("hc 0.1.22"), or ""."""
+    if not binary:
+        return ""
+    try:
+        res = subprocess.run([binary, "--version"], env=env, stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    out = (res.stdout or "").strip()
+    if res.returncode != 0 or not out.startswith("hc "):
+        return ""
+    version = out[3:].split()[0] if out[3:].split() else ""
+    return version if HC_VERSION_RE.match(version) else ""
+
+
+def _hc_text(value, limit=120):
+    """A guest-written string made safe to show: no control or format
+    characters, at most limit characters."""
+    if not isinstance(value, str):
+        return ""
+    clean = "".join(ch for ch in value if unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Co"))
+    return clean.strip()[:limit]
+
+
+def _hc_core_socket():
+    """Where the running core listens, read from its lock file; "" when
+    unknown. Unknown counts as not running: nothing here starts a core."""
+    explicit = os.environ.get("HC_SOCKET", "")
+    if explicit.startswith("/"):
+        return explicit
+    session = os.environ.get("HC_SESSION") or "default"
+    if not HC_SESSION_RE.match(session):
+        return ""
+    roots = []
+    xdg = os.environ.get("XDG_STATE_HOME", "")
+    if xdg.startswith("/"):
+        roots.append(Path(xdg))
+    roots.append(HOME / ".local/state")
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
+    if runtime_dir.startswith("/"):
+        roots.append(Path(runtime_dir))  # in case a Linux core keeps its lock there
+    for root in roots:
+        try:
+            with open(root / "herdr-core" / session / "core.lock", "rb") as f:
+                text = f.read(4096).decode("utf-8", "replace").strip()
+        except OSError:
+            continue
+        line = text.splitlines()[0].strip() if text else ""
+        if line.startswith("/"):
+            return line
+    return ""
+
+
+def _hc_core_running(timeout=0.3):
+    path = _hc_core_socket()
+    if not path:
+        return False
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(timeout)
+    try:
+        probe.connect(path)
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def _hc_json(binary, args, env, timeout=3.0):
+    """Runs herdr-core; (exit code, its JSON object or None)."""
+    try:
+        res = subprocess.run([binary, *args], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return -1, None
+    text = (res.stdout or "").strip() or (res.stderr or "").strip()
+    try:
+        data = json.loads(text) if text else None
+    except ValueError:
+        data = None
+    return res.returncode, data if isinstance(data, dict) else None
+
+
+def _hc_error(data, fallback):
+    err = data.get("error") if isinstance(data, dict) else None
+    message = _hc_text(err.get("message"), 200) if isinstance(err, dict) else ""
+    return f"{fallback}：{message}" if message else fallback
+
+
+def _hc_rpc(binary, env, requests, timeout=3.0):
+    """Sends JSON-RPC requests through hc connect, one line each; results by id."""
+    lines = "".join(json.dumps({"jsonrpc": "2.0", "id": i + 1, "method": m, "params": p}) + "\n"
+                    for i, (m, p) in enumerate(requests))
+    try:
+        res = subprocess.run([binary, "connect"], env=env, input=lines, stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    results = {}
+    for line in (res.stdout or "").splitlines()[:16]:
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(msg, dict) and isinstance(msg.get("id"), int) and isinstance(msg.get("result"), dict):
+            results[msg["id"]] = msg["result"]
+    return results
+
+
+def _hc_live_count(binary, env):
+    rc, st = _hc_json(binary, ["server", "status", "--json"], env, timeout=3.0)
+    live = st.get("live") if rc == 0 and st else None
+    return live if isinstance(live, int) and live > 0 else 0
+
+
+def _herdr_legacy_binary():
+    """The Herdr TUI (herdr) Cage 0.1.21 installed into ~/.local/bin."""
+    local = HOME / ".local/bin/herdr"
+    return str(local) if local.is_file() and os.access(local, os.X_OK) else ""
+
+
+def herdr_status(payload=None):
+    path_str = enriched_path()
+    binary = _hc_binary(path_str)
+    version = _read_cached_cli_version(binary, path_str) if binary else ""
+    running = bool(binary) and _hc_core_running()
+    live, linger = 0, None
+    if running:
+        rc, st = _hc_json(binary, ["server", "status", "--json"], _hc_env(path_str), timeout=2.0)
+        if rc == 0 and st:
+            if isinstance(st.get("live"), int):
+                live = max(0, st["live"])
+            if isinstance(st.get("version"), str) and HC_VERSION_RE.match(st["version"]):
+                version = st["version"]
+            if isinstance(st.get("keeps_running_after_logout"), bool):
+                linger = st["keeps_running_after_logout"]
+    return {
+        "installed": bool(binary and version),
+        "binary_path": binary,
+        "version": version,
+        "server_running": running,
+        "terminals_count": live,
+        "keeps_running_after_logout": linger,
+        "legacy_installed": bool(_herdr_legacy_binary()),
+    }
+
+
+def _herdr_fetch(curl, url, dest, env, max_time=300):
+    res = subprocess.run(
+        [curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL",
+         "--connect-timeout", "20", "--max-time", str(max_time), "-o", str(dest), url],
+        env=env, stdin=subprocess.DEVNULL,
+    )
+    if res.returncode != 0:
+        raise ValueError(f"下载失败（curl 退出码 {res.returncode}）：{url}")
+
+
+def _hc_newer(candidate, current):
+    def parts(version):
+        try:
+            return tuple(int(x) for x in re.split(r"[-+]", version, maxsplit=1)[0].split("."))
+        except ValueError:
+            return ()
+    return parts(candidate) > parts(current)
+
+
+def _hc_link_hc(path_str):
+    """hc beside herdr-core, only when no hc exists (the official rule)."""
+    link = HOME / ".local/bin/hc"
+    if not (HOME / ".local/bin/herdr-core").exists() or link.exists() or link.is_symlink():
+        return
+    if shutil.which("hc", path=path_str):
+        return
+    try:
+        link.symlink_to("herdr-core")
+    except OSError:
+        pass
+
+
+def _herdr_install_linux(existing, current, path_str, env):
+    """The release build for this machine, checked against the SHA-256 the
+    release manifest publishes, as the official install.sh does."""
+    machine = os.uname().machine.lower()
+    arch = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(machine)
+    if not arch:
+        raise ValueError(f"herdr-core 没有适用于 {machine} 的版本")
+    target = f"linux-{arch}"
+    curl = shutil.which("curl", path=path_str)
+    if not curl:
+        raise ValueError("环境中未找到 curl")
+    bin_dir = HOME / ".local/bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="cage-herdr-core-") as tmp:
+        manifest_file = Path(tmp) / "manifest.json"
+        print(f"Reading the herdr-core release manifest from {HERDR_RELEASES}...", flush=True)
+        _herdr_fetch(curl, HERDR_RELEASES + "/core/latest.json", manifest_file, env, max_time=60)
+        try:
+            if manifest_file.stat().st_size > 1 << 20:
+                raise ValueError("manifest too large")
+            manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
+            entry = manifest["targets"][target]
+            url, want, version = entry["url"], entry["sha256"], manifest["version"]
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ValueError(f"herdr-core 发布清单里没有 {target} 的版本") from None
+        if not (isinstance(url, str) and url.startswith(HERDR_RELEASES + "/core/") and url.endswith(".tar.gz")
+                and not any(ch in url for ch in "?#") and isinstance(want, str) and HC_SHA256_RE.match(want)
+                and isinstance(version, str) and HC_VERSION_RE.match(version)):
+            raise ValueError("herdr-core 发布清单格式不正确")
+        if existing and current and not _hc_newer(version, current):
+            print(f"herdr-core {current} is current.", flush=True)
+            return
+        archive = Path(tmp) / "herdr-core.tar.gz"
+        print(f"Downloading herdr-core {version} ({target})...", flush=True)
+        _herdr_fetch(curl, url, archive, env)
+        digest = hashlib.sha256()
+        with open(archive, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != want:
+            raise ValueError("下载的 herdr-core 校验失败（SHA-256 与官方发布清单不一致），请重试")
+        print("SHA-256 matches the release manifest.", flush=True)
+        staged = bin_dir / "herdr-core.staged"
+        try:
+            with tarfile.open(archive, "r:gz") as tar:
+                member = tar.getmember("herdr-core")
+                if not member.isfile() or member.size > 256 << 20:
+                    raise ValueError("bad member")
+                src = tar.extractfile(member)
+                with open(staged, "wb") as out:
+                    shutil.copyfileobj(src, out)
+            os.chmod(staged, 0o755)
+            if not _hc_version(str(staged), env):
+                raise ValueError("下载的 herdr-core 无法在此环境运行")
+            local = bin_dir / "herdr-core"
+            if existing and Path(existing) == local:
+                # The planned swap keeps running terminals alive.
+                res = subprocess.run([existing, "update", "--from", str(staged)], env=env,
+                                     stdin=subprocess.DEVNULL, timeout=120)
+                if res.returncode != 0:
+                    raise ValueError("herdr-core 更新失败，请查看操作详情")
+            else:
+                os.replace(staged, local)
+        except (KeyError, OSError) as exc:
+            raise ValueError(f"herdr-core 安装包无法解开：{exc}") from None
+        finally:
+            staged.unlink(missing_ok=True)
+        print(f"herdr-core {version} installed into {bin_dir}.", flush=True)
+
+
+def _herdr_install_official(path_str, env):
+    """macOS: the official installer, which checks the SHA-256 and the
+    release's code signature and installs Herdr Core.app."""
+    curl = shutil.which("curl", path=path_str)
+    if not curl:
+        raise ValueError("环境中未找到 curl")
+    with tempfile.TemporaryDirectory(prefix="cage-herdr-core-") as tmp:
+        script = Path(tmp) / "install.sh"
+        print("Downloading the official herdr-core installer from releases.herdr.dev...", flush=True)
+        _herdr_fetch(curl, HERDR_RELEASES + "/core/install.sh", script, env, max_time=60)
+        res = subprocess.run(["/bin/sh", str(script)], env={**env, "HC_INSTALL_DIR": str(HOME / ".local/bin")},
+                             stdin=subprocess.DEVNULL, timeout=600)
+        if res.returncode != 0:
+            raise ValueError(f"herdr-core 官方安装脚本执行失败（退出码 {res.returncode}）")
+
+
+def herdr_install(payload=None):
+    """Installs herdr-core, or keeps the working one already here (the
+    Herdr app may have put it there). update asks for a newer release."""
+    update = isinstance(payload, dict) and payload.get("update") is True
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        env = _hc_env(path_str)
+        existing = _hc_binary(path_str)
+        current = _hc_version(existing, env)
+        if existing and current and not update:
+            print(f"herdr-core {current} is already installed at {existing}; using it.", flush=True)
+            _hc_link_hc(path_str)
+            return {"installed": True, "binary_path": existing, "version": current, "reused": True}
+        if sys.platform == "darwin":
+            _herdr_install_official(path_str, env)
+        elif sys.platform.startswith("linux"):
+            _herdr_install_linux(existing if current else "", current, path_str, env)
+        else:
+            raise ValueError("herdr-core 目前只支持 Linux 与 macOS 环境")
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        refreshed = enriched_path()
+        _hc_link_hc(refreshed)
+        binary = _hc_binary(refreshed)
+        version = _hc_version(binary, env)
+        if not version:
+            raise ValueError("安装完成但 herdr-core 无法运行，请查看安装日志")
+        return {"installed": True, "binary_path": binary, "version": version, "reused": False}
+
+
+def herdr_uninstall(payload=None):
+    """Removes the herdr-core in ~/.local/bin (one a package manager owns
+    stays). Its state and config stay. Refuses while terminals run, unless
+    forced: stopping the core ends them."""
+    force = isinstance(payload, dict) and payload.get("force") is True
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        env = _hc_env(path_str)
+        binary = _hc_binary(path_str)
+        if binary and _hc_core_running():
+            live = _hc_live_count(binary, env)
+            if live and not force:
+                raise ValueError(f"Herdr 里还有 {live} 个终端在运行，卸载会结束它们")
+            _hc_json(binary, ["server", "stop", "--json"], env, timeout=10)
+        local = HOME / ".local/bin/herdr-core"
+        link = HOME / ".local/bin/hc"
+        try:
+            if link.is_symlink() and (os.readlink(link) == "herdr-core" or link.resolve() == local.resolve()):
+                link.unlink()
+        except OSError:
+            pass
+        try:
+            if local.is_file() or local.is_symlink():
+                local.unlink()
+        except OSError:
+            pass
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"installed": bool(_hc_binary(enriched_path())), "server_running": False}
+
+
+def herdr_start(payload=None):
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = _hc_binary(path_str)
+        if not binary:
+            raise ValueError("未找到 herdr-core，请先安装 Herdr")
+        if not _hc_core_running():
+            rc, data = _hc_json(binary, ["server", "start", "--json"], _hc_env(path_str), timeout=10)
+            if rc != 0:
+                raise ValueError(_hc_error(data, "Herdr 服务没有启动"))
+    return herdr_status({})
+
+
+def herdr_stop(payload=None):
+    """Stopping the core ends every program in it, so it refuses while
+    terminals run unless forced."""
+    force = isinstance(payload, dict) and payload.get("force") is True
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = _hc_binary(path_str)
+        if binary and _hc_core_running():
+            env = _hc_env(path_str)
+            live = _hc_live_count(binary, env)
+            if live and not force:
+                raise ValueError(f"Herdr 里还有 {live} 个终端在运行，停止服务会结束它们")
+            _hc_json(binary, ["server", "stop", "--json"], env, timeout=10)
+    return herdr_status({})
+
+
+def herdr_restart(payload=None):
+    """hc server restart keeps programs running; viewers re-attach."""
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = _hc_binary(path_str)
+        if not binary:
+            raise ValueError("未找到 herdr-core，请先安装 Herdr")
+        action = "restart" if _hc_core_running() else "start"
+        rc, data = _hc_json(binary, ["server", action, "--json"], _hc_env(path_str), timeout=20)
+        if rc != 0:
+            raise ValueError(_hc_error(data, "Herdr 服务没有重启"))
+    return herdr_status({})
+
+
+def herdr_list(payload=None):
+    """This machine's live hc terminals, for Cage's terminal list. Never
+    starts the core; at most HERDR_LIST_MAX entries; strings cleaned."""
+    path_str = enriched_path()
+    binary = _hc_binary(path_str)
+    if not binary or not _hc_core_running():
+        return {"running": False, "terminals": []}
+    results = _hc_rpc(binary, _hc_env(path_str), [("terminal.list", {})])
+    listed = results.get(1)
+    if not isinstance(listed, dict) or not isinstance(listed.get("terminals"), list):
+        raise ValueError("无法读取 Herdr 终端列表")
+    out = []
+    for item in listed["terminals"]:
+        if not isinstance(item, dict) or item.get("state") != "live":
+            continue
+        address = item.get("address")
+        # Another machine's terminal (machine/t7) is never listed or opened.
+        if not isinstance(address, str) or not HC_ADDRESS_RE.match(address):
+            continue
+        name = item.get("name")
+        labels = item.get("labels") if isinstance(item.get("labels"), dict) else {}
+        argv = item.get("argv") if isinstance(item.get("argv"), list) else []
+        program = argv[0] if argv and isinstance(argv[0], str) else ""
+        created = item.get("created_ms")
+        out.append({
+            "address": address,
+            "name": name if isinstance(name, str) and HC_NAME_RE.match(name) else "",
+            "title": _hc_text(item.get("title")),
+            "program": _hc_text(program.rsplit("/", 1)[-1], 64),
+            "cwd": _hc_text(item.get("cwd"), 1024),
+            "created_ms": created if isinstance(created, int) and created > 0 else 0,
+            "labels": {k: _hc_text(labels[k]) for k in HERDR_LABEL_KEYS if isinstance(labels.get(k), str)},
+        })
+        if len(out) >= HERDR_LIST_MAX:
+            break
+    return {"running": True, "terminals": out}
+
+
+def _hc_target(value):
+    target = str(value or "").strip()
+    return target if HC_NAME_RE.match(target) or HC_ADDRESS_RE.match(target) else ""
+
+
+def herdr_close(payload=None):
+    """Ends a terminal Cage closed: kill, then rm. A core that is down is
+    left down; its terminals ended with it."""
+    target = _hc_target(payload.get("terminal") if isinstance(payload, dict) else "")
+    if not target:
+        raise ValueError("Herdr 终端名称无效")
+    path_str = enriched_path()
+    binary = _hc_binary(path_str)
+    if not binary or not _hc_core_running():
+        return {"closed": False, "running": False}
+    env = _hc_env(path_str)
+    rc_kill, _ = _hc_json(binary, ["kill", "--json", "--", target], env, timeout=10)
+    rc_rm, _ = _hc_json(binary, ["rm", "--json", "--", target], env, timeout=5)
+    return {"closed": rc_kill == 0 and rc_rm == 0, "running": True}
+
+
+def herdr_legacy_status(payload=None):
+    """The Herdr TUI from Cage 0.1.21: whether it runs and how many panes it
+    holds. Every pane holds at least a shell, so any pane is a running
+    program; a count it cannot read counts as running programs."""
+    binary = _herdr_legacy_binary()
+    if not binary:
+        return {"installed": False, "server_running": False, "panes": 0, "busy": False}
+    path_str = enriched_path()
+    env = os.environ.copy()
+    env["PATH"] = path_str
+    running = _herdr_server_running(binary, env, timeout=2.0)
+    panes = 0
+    busy = False
+    if running:
+        resp = _herdr_run_json(binary, ["pane", "list"], env, timeout=2.0)
+        result = resp.get("result") if isinstance(resp, dict) else None
+        items = result.get("panes") if isinstance(result, dict) else None
+        if isinstance(items, list):
+            panes = len(items)
+            busy = panes > 0
+        else:
+            busy = True
+    return {
+        "installed": True,
+        "binary_path": binary,
+        "version": _read_cached_cli_version(binary, path_str),
+        "server_running": running,
+        "panes": panes,
+        "busy": busy,
+    }
+
+
+def herdr_legacy_uninstall(payload=None):
+    """Stops the Herdr TUI server when it holds no panes (or when forced) and
+    removes ~/.local/bin/herdr; ~/.config/herdr stays."""
+    force = isinstance(payload, dict) and payload.get("force") is True
+    status = herdr_legacy_status({})
+    if not status["installed"]:
+        return status
+    if status["busy"] and not force:
+        raise ValueError(f"旧版 Herdr 里还有 {status['panes'] or '一些'} 个终端在运行，卸载会结束它们")
+    binary = status["binary_path"]
+    if status["server_running"]:
+        env = os.environ.copy()
+        env["PATH"] = enriched_path()
+        try:
+            subprocess.run([binary, "server", "stop"], env=env, stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        Path(binary).unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        PROBE_CACHE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return herdr_legacy_status({})
 
 
 def _herdr_run_json(binary, args, env, timeout=2.0):
@@ -3169,458 +3684,6 @@ def _herdr_server_running(binary, env, timeout=2.0):
     return False
 
 
-def _herdr_extract_workspaces(resp):
-    if not isinstance(resp, dict):
-        return []
-    result = resp.get("result")
-    if isinstance(result, dict) and isinstance(result.get("workspaces"), list):
-        return result["workspaces"]
-    if isinstance(resp.get("workspaces"), list):
-        return resp["workspaces"]
-    return []
-
-
-def _herdr_extract_agents(resp):
-    if not isinstance(resp, dict):
-        return []
-    result = resp.get("result")
-    if isinstance(result, dict) and isinstance(result.get("agents"), list):
-        return result["agents"]
-    if isinstance(resp.get("agents"), list):
-        return resp["agents"]
-    return []
-
-
-def _herdr_extract_pane_id(resp):
-    if not isinstance(resp, dict):
-        return ""
-    res = resp.get("result") if isinstance(resp.get("result"), dict) else resp
-    if not isinstance(res, dict):
-        return ""
-    root_pane = res.get("root_pane")
-    if isinstance(root_pane, dict) and root_pane.get("pane_id"):
-        return str(root_pane["pane_id"])
-    if res.get("pane_id"):
-        return str(res["pane_id"])
-    tab = res.get("tab")
-    if isinstance(tab, dict):
-        if tab.get("pane_id"):
-            return str(tab["pane_id"])
-        tab_root = tab.get("root_pane")
-        if isinstance(tab_root, dict) and tab_root.get("pane_id"):
-            return str(tab_root["pane_id"])
-    return ""
-
-
-def _herdr_extract_tab_id(resp):
-    if not isinstance(resp, dict):
-        return ""
-    res = resp.get("result") if isinstance(resp.get("result"), dict) else resp
-    if not isinstance(res, dict):
-        return ""
-    tab = res.get("tab")
-    if isinstance(tab, dict) and tab.get("tab_id"):
-        return str(tab["tab_id"])
-    if res.get("tab_id"):
-        return str(res["tab_id"])
-    return ""
-
-
-# Herdr's own settings open with a key in its client: keys.settings, by
-# default "prefix+s" with keys.prefix "ctrl+b" (upstream src/config/model.rs).
-# Super Cage types that key into the Herdr tab it opens, so it reports the
-# bytes a legacy terminal sends for it, or none when the key cannot be typed.
-HERDR_DEFAULT_PREFIX = "ctrl+b"
-HERDR_DEFAULT_SETTINGS_KEY = "prefix+s"
-_HERDR_NAMED_KEYS = {
-    "space": " ", "enter": "\r", "tab": "\t", "esc": "\x1b", "escape": "\x1b",
-    "minus": "-", "plus": "+", "comma": ",", "period": ".", "slash": "/",
-    "backslash": "\\", "semicolon": ";", "quote": "'", "backtick": "`", "equal": "=",
-}
-
-
-def _herdr_key_bytes(key):
-    parts = str(key or "").strip().lower().split("+")
-    if not parts or any(not part for part in parts):
-        return None
-    *mods, base = parts
-    if base in _HERDR_NAMED_KEYS:
-        ch = _HERDR_NAMED_KEYS[base]
-    elif len(base) == 1 and 0x21 <= ord(base) <= 0x7E:
-        ch = base
-    else:
-        return None
-    mods = set(mods)
-    if len(mods) != len(parts) - 1 or not mods <= {"ctrl", "alt", "shift"}:
-        return None
-    if "shift" in mods:
-        if "ctrl" in mods or not ("a" <= ch <= "z"):
-            return None
-        ch = ch.upper()
-    if "ctrl" in mods:
-        if ch == " ":
-            ch = "\x00"
-        elif "a" <= ch <= "z" or ch in "[\\]^_":
-            ch = chr(ord(ch.upper()) & 0x1F)
-        else:
-            return None
-    return "\x1b" + ch if "alt" in mods else ch
-
-
-def _herdr_bindings(value, default):
-    if isinstance(value, str):
-        value = [value]
-    if not isinstance(value, list):
-        return [default]
-    found = [item.strip() for item in value if isinstance(item, str) and item.strip()]
-    return found or [default]
-
-
-def _herdr_read_config(text):
-    """The parts of config.toml this needs: top-level onboarding and [keys]."""
-    try:
-        import tomllib
-    except ImportError:
-        tomllib = None
-    if tomllib is not None:
-        try:
-            return tomllib.loads(text)
-        except (tomllib.TOMLDecodeError, ValueError):
-            return None
-    # Python before 3.11 (a macOS guest): the few simple lines read here.
-    config, section = {}, ""
-    for raw in text.splitlines():
-        line = raw.strip()
-        if line.startswith("["):
-            section = line.strip("[] ")
-            continue
-        match = re.match(r"(onboarding|prefix|settings)\s*=\s*(.+)$", line)
-        if not match:
-            continue
-        name, value = match.groups()
-        if (section, name) == ("", "onboarding"):
-            config["onboarding"] = not value.startswith("false")
-        elif section == "keys" and name in ("prefix", "settings"):
-            strings = [a or b for a, b in re.findall(r'"([^"]*)"|\'([^\']*)\'', value)]
-            config.setdefault("keys", {})[name] = strings
-    return config
-
-
-def _herdr_settings_keys():
-    path = Path(os.environ.get("HERDR_CONFIG_PATH") or HERDR_CONFIG_FILE)
-    try:
-        text = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        text = ""
-    except (OSError, UnicodeError):
-        text = None
-    config = _herdr_read_config(text) if text is not None else None
-    if config is None:
-        # Herdr falls back to its defaults for a config it cannot read.
-        config = {"onboarding": False}
-    onboarding = config.get("onboarding", True) is not False
-    keys = config.get("keys") if isinstance(config.get("keys"), dict) else {}
-    prefix = _herdr_bindings(keys.get("prefix"), HERDR_DEFAULT_PREFIX)[0]
-    bindings = _herdr_bindings(keys.get("settings"), HERDR_DEFAULT_SETTINGS_KEY)
-    for binding in bindings:
-        if binding.lower().startswith("prefix+"):
-            rest = binding[len("prefix+"):]
-            chunks = [_herdr_key_bytes(prefix), _herdr_key_bytes(rest)]
-            label = f"{prefix} {rest}"
-        else:
-            chunks, label = [_herdr_key_bytes(binding)], binding
-        if all(chunks):
-            return {"onboarding": onboarding, "chunks": chunks, "shortcut": label}
-    first = bindings[0]
-    label = f"{prefix} {first[len('prefix+'):]}" if first.lower().startswith("prefix+") else first
-    return {"onboarding": onboarding, "chunks": None, "shortcut": label}
-
-
-def herdr_status(payload=None):
-    path_str = enriched_path()
-    binary = shutil.which("herdr", path=path_str) or ""
-    version = _read_cached_cli_version(binary, path_str) if binary else ""
-    server_running = False
-    workspaces_count = 0
-    agents_count = 0
-    blocked_agents_count = 0
-    if binary:
-        env = os.environ.copy()
-        env["PATH"] = path_str
-        server_running = _herdr_server_running(binary, env, timeout=2.0)
-        if server_running:
-            ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=1.5)
-            workspaces_count = len(_herdr_extract_workspaces(ws_resp))
-            ag_resp = _herdr_run_json(binary, ["agent", "list"], env, timeout=1.5)
-            agents = _herdr_extract_agents(ag_resp)
-            agents_count = len(agents)
-            blocked_agents_count = sum(
-                1
-                for a in agents
-                if isinstance(a, dict) and str(a.get("status") or a.get("agent_status") or "").lower() == "blocked"
-            )
-    return {
-        "installed": bool(binary),
-        "binary_path": binary,
-        "version": version,
-        "server_running": server_running,
-        "workspaces_count": workspaces_count,
-        "agents_count": agents_count,
-        "blocked_agents_count": blocked_agents_count,
-        "settings_keys": _herdr_settings_keys(),
-    }
-
-
-def herdr_install(payload=None):
-    path_str = enriched_path()
-    curl = shutil.which("curl", path=path_str)
-    if not curl:
-        raise ValueError("环境中未找到 curl")
-    (HOME / ".local/bin").mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["HERDR_INSTALL_DIR"] = str(HOME / ".local/bin")
-    env["PATH"] = path_str
-    script_url = "https://herdr.dev/install.sh"
-    print("Downloading official Herdr installer from herdr.dev...", flush=True)
-    with tempfile.NamedTemporaryFile(prefix="cage-herdr-install-", suffix=".sh", delete=False) as tmp:
-        script_path = tmp.name
-    try:
-        dl = subprocess.run(
-            [curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL", "--connect-timeout", "20", "-o", script_path, script_url],
-            env=env, stdin=subprocess.DEVNULL,
-        )
-        if dl.returncode != 0:
-            raise ValueError(f"下载 Herdr 安装脚本失败（curl 退出码 {dl.returncode}）")
-        res = subprocess.run(["/bin/sh", script_path], env=env, stdin=subprocess.DEVNULL)
-        if res.returncode != 0:
-            raise ValueError(f"Herdr 安装脚本执行失败（退出码 {res.returncode}）")
-    finally:
-        try:
-            os.unlink(script_path)
-        except OSError:
-            pass
-
-    try:
-        PROBE_CACHE_FILE.unlink(missing_ok=True)
-    except OSError:
-        pass
-    refreshed_path = enriched_path()
-    binary = shutil.which("herdr", path=refreshed_path)
-    if not binary:
-        raise ValueError("安装完成但未在 PATH 中找到 herdr 命令，请检查安装日志")
-    version, _ = read_cli_version(binary, ["--version"], refreshed_path, {})
-    return {"installed": True, "binary_path": binary, "version": version}
-
-
-def herdr_uninstall(payload=None):
-    with _herdr_lifecycle_lock():
-        path_str = enriched_path()
-        binary = shutil.which("herdr", path=path_str) or ""
-        if binary:
-            env = os.environ.copy()
-            env["PATH"] = path_str
-            try:
-                subprocess.run(
-                    [binary, "server", "stop"],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
-        local_bin = HOME / ".local/bin/herdr"
-        if local_bin.is_file() or local_bin.is_symlink():
-            try:
-                local_bin.unlink(missing_ok=True)
-            except OSError:
-                pass
-        if binary:
-            bpath = Path(binary)
-            safe_dirs = set()
-            for candidate in (HOME / ".local/bin", HOME / ".cargo/bin"):
-                try:
-                    safe_dirs.add(candidate.resolve())
-                except OSError:
-                    safe_dirs.add(candidate)
-            try:
-                parent_resolved = bpath.parent.resolve()
-            except OSError:
-                parent_resolved = bpath.parent
-            if parent_resolved in safe_dirs and (bpath.is_file() or bpath.is_symlink()):
-                try:
-                    bpath.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        try:
-            PROBE_CACHE_FILE.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return {"installed": False, "server_running": False}
-
-
-def herdr_start(payload=None):
-    with _herdr_lifecycle_lock():
-        path_str = enriched_path()
-        binary = shutil.which("herdr", path=path_str)
-        if not binary:
-            raise ValueError("未找到 herdr 命令，请先安装 Herdr")
-        env = os.environ.copy()
-        env["PATH"] = path_str
-        if _herdr_server_running(binary, env, timeout=2.0):
-            return herdr_status({})
-        workspace = str(payload.get("workspace") or "").strip() if isinstance(payload, dict) else ""
-        cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
-        subprocess.Popen(
-            [binary, "server"],
-            cwd=cwd,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-        )
-        deadline = time.monotonic() + 4.0
-        while time.monotonic() < deadline:
-            if _herdr_server_running(binary, env, timeout=0.8):
-                break
-            time.sleep(0.08)
-    return herdr_status({})
-
-
-def herdr_stop(payload=None):
-    with _herdr_lifecycle_lock():
-        path_str = enriched_path()
-        binary = shutil.which("herdr", path=path_str) or ""
-        if binary:
-            env = os.environ.copy()
-            env["PATH"] = path_str
-            try:
-                subprocess.run(
-                    [binary, "server", "stop"],
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except (OSError, subprocess.SubprocessError):
-                pass
-    return herdr_status({})
-
-
-def _update_herdr_theme_toml(text, theme):
-    lines = text.splitlines(keepends=True)
-    theme_header_re = re.compile(r"^\s*\[\s*theme\s*\](?:\s*#.*)?$")
-    any_header_re = re.compile(r"^\s*\[")
-    key_re = re.compile(r"^(\s*)name\s*=.*$")
-    value_line = f'name = "{theme}"\n'
-
-    theme_start = None
-    theme_end = len(lines)
-    for idx, line in enumerate(lines):
-        if theme_start is None:
-            if theme_header_re.match(line):
-                theme_start = idx
-        else:
-            if any_header_re.match(line):
-                theme_end = idx
-                break
-
-    if theme_start is None:
-        out = text
-        if out and not out.endswith("\n"):
-            out += "\n"
-        if out and not out.endswith("\n\n"):
-            out += "\n"
-        return out + f"[theme]\n{value_line}"
-
-    for idx in range(theme_start + 1, theme_end):
-        m = key_re.match(lines[idx])
-        if m:
-            lines[idx] = f'{m.group(1)}name = "{theme}"\n'
-            return "".join(lines)
-
-    if not lines[theme_start].endswith("\n"):
-        lines[theme_start] = lines[theme_start] + "\n"
-    lines.insert(theme_start + 1, value_line)
-    return "".join(lines)
-
-
-def _remove_herdr_theme_toml(text):
-    lines = text.splitlines(keepends=True)
-    theme_header_re = re.compile(r"^\s*\[\s*theme\s*\](?:\s*#.*)?$")
-    any_header_re = re.compile(r"^\s*\[")
-    key_re = re.compile(r"^\s*name\s*=.*$")
-
-    theme_start = None
-    theme_end = len(lines)
-    for idx, line in enumerate(lines):
-        if theme_start is None:
-            if theme_header_re.match(line):
-                theme_start = idx
-        elif any_header_re.match(line):
-            theme_end = idx
-            break
-    if theme_start is None:
-        return text
-
-    kept_section = [line for line in lines[theme_start + 1 : theme_end] if not key_re.match(line)]
-    has_other_content = any(line.strip() and not line.lstrip().startswith("#") for line in kept_section)
-    if has_other_content:
-        return "".join(lines[: theme_start + 1] + kept_section + lines[theme_end:])
-    # Section only had name = ... (and maybe blank lines): drop the empty [theme] header too.
-    return "".join(lines[:theme_start] + lines[theme_end:])
-
-
-def herdr_apply_theme(payload):
-    theme = str(payload.get("theme") or "").strip().lower() if isinstance(payload, dict) else ""
-    if not theme:
-        theme = "default"
-    if theme != "default" and theme not in HERDR_VALID_THEMES:
-        raise ValueError(f"不支持的 Herdr 主题：{theme}")
-    with _herdr_lifecycle_lock():
-        existing = ""
-        existed = False
-        try:
-            if HERDR_CONFIG_FILE.is_file():
-                existed = True
-                existing = HERDR_CONFIG_FILE.read_text(encoding="utf-8", errors="ignore")
-        except OSError:
-            existing = ""
-        if theme == "default":
-            if existed:
-                updated = _remove_herdr_theme_toml(existing)
-                if updated != existing:
-                    atomic_write_text(HERDR_CONFIG_FILE, updated, mode=0o600)
-        else:
-            updated = _update_herdr_theme_toml(existing, theme)
-            atomic_write_text(HERDR_CONFIG_FILE, updated, mode=0o600)
-        path_str = enriched_path()
-        binary = shutil.which("herdr", path=path_str) or ""
-        if binary:
-            env = os.environ.copy()
-            env["PATH"] = path_str
-            if _herdr_server_running(binary, env, timeout=1.5):
-                try:
-                    subprocess.run(
-                        [binary, "server", "reload-config"],
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                        timeout=2,
-                        check=False,
-                    )
-                except (OSError, subprocess.SubprocessError):
-                    pass
-    return {"ok": True, "theme": theme}
-
-
 def _herdr_fallback_exec(shell, workspace, inner_cmd):
     target = workspace if workspace and Path(workspace).is_dir() else str(HOME)
     try:
@@ -3639,8 +3702,92 @@ def _herdr_fallback_exec(shell, workspace, inner_cmd):
     os.execv(shell, [shell, "-l"])
 
 
+# The viewer: hc attach, again whenever it returns while the terminal still
+# lives (ctrl+\ detaches hc attach; a core restart ends its streams), so a
+# Cage tab never turns into a dead or detached screen. It stops when the core
+# is gone (no attach restarts it), the terminal finished, or attach keeps
+# failing at once.
+HERDR_ATTACH_LOOP = r'''hc=$1 t=$2 h=$3 sock=$4 n=0 since=$(date +%s)
+while :; do
+  "$hc" attach --history "$h" -- "$t"
+  if [ -n "$sock" ] && [ ! -S "$sock" ]; then exit 0; fi
+  case $("$hc" get --json -- "$t" 2>/dev/null) in
+    *'"state":"live"'* | *'"state": "live"'*) ;;
+    *) exit 0 ;;
+  esac
+  now=$(date +%s)
+  if [ $((now - since)) -ge 10 ]; then since=$now n=0; fi
+  n=$((n + 1))
+  if [ "$n" -gt 5 ]; then exit 0; fi
+done
+'''
+
+
+def _herdr_exec_viewer(binary, target, env, workspace, history):
+    try:
+        os.chdir(workspace)
+    except OSError:
+        pass
+    os.execve("/bin/sh", ["/bin/sh", "-c", HERDR_ATTACH_LOOP, "cage-herdr-attach",
+                          binary, target, str(history), _hc_core_socket()], env)
+
+
+def _herdr_label(value, limit=64):
+    return _hc_text(value, limit).replace("\n", " ")
+
+
+# What hc runs first in a Cage terminal (herdr_attach). hc starts programs
+# in the core's environment, which another hc client or a user service may
+# have started with a different one: this takes the environment, folder and
+# command herdr-attach saw from their private file, deletes it, keeps only
+# hc's own HC_* variables for this terminal, and becomes the command the
+# plain path would run. Small on purpose: python -I -S runs it before the
+# terminal's first byte (about 10 ms, against about 50 ms for this file).
+HERDR_EXEC_CODE = r"""
+import json, os, stat, sys
+path = sys.argv[1]
+name = os.path.basename(path)
+ours = name.startswith("run-") and name.endswith(".json")
+spec = None
+try:
+    info = os.lstat(path)
+    if ours and stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid():
+        with open(path, encoding="utf-8") as f:
+            spec = json.load(f)
+except (OSError, ValueError):
+    pass
+finally:
+    if ours:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+if not isinstance(spec, dict):
+    sys.exit("Super Cage: 读不到这个终端的启动信息。")
+env = {str(k): str(v) for k, v in (spec.get("env") or {}).items() if not str(k).startswith("HC_")}
+env.update((k, v) for k, v in os.environ.items() if k.startswith("HC_"))
+try:
+    os.chdir(spec.get("cwd") or env.get("HOME") or "/")
+except OSError:
+    pass
+shell = spec.get("shell") or "/bin/sh"
+command = spec.get("command") or ""
+argv = [shell, "-c", command] if command else [shell, "-l"]
+try:
+    os.execve(shell, argv, env)
+except OSError:
+    os.execve("/bin/sh", ["/bin/sh"] + argv[1:], env)
+"""
+
+
 def herdr_attach():
-    """Interactive TTY entrypoint for Herdr standalone launch and terminal takeover."""
+    """The interactive entry of a Cage terminal backed by herdr-core.
+
+    CAGE_HERDR_MODE create (default): start the terminal CAGE_HERDR_NAME
+    (unless it already lives) with the inner command, then view it. attach:
+    view the live terminal CAGE_HERDR_TARGET (a name or tN), never starting a
+    core. picker: hc's own picker. A create that fails runs the inner command
+    in a plain shell instead, never a dead terminal."""
     workspace_raw = os.environ.pop("CAGE_HERDR_WORKSPACE", "").strip()
     workspace = workspace_raw if workspace_raw and Path(workspace_raw).is_dir() else str(HOME)
     project_label = os.environ.pop("CAGE_HERDR_PROJECT_LABEL", "").strip() or Path(workspace).name or "workspace"
@@ -3649,10 +3796,32 @@ def herdr_attach():
     inner_cmd = os.environ.pop("CAGE_HERDR_INNER_CMD", "").strip()
     default_shell = "/bin/zsh" if sys.platform == "darwin" else "/bin/bash"
     shell = os.environ.pop("CAGE_HERDR_SHELL", "").strip() or default_shell
+    mode = os.environ.pop("CAGE_HERDR_MODE", "").strip().lower() or ("picker" if kind == "herdr" else "create")
+    name = os.environ.pop("CAGE_HERDR_NAME", "").strip()
+    target = _hc_target(os.environ.pop("CAGE_HERDR_TARGET", ""))
+    try:
+        history = max(0, min(int(os.environ.pop("CAGE_HERDR_HISTORY", "") or HERDR_HISTORY_LINES), 100000))
+    except ValueError:
+        history = HERDR_HISTORY_LINES
 
     path_str = enriched_path()
-    binary = shutil.which("herdr", path=path_str) or ""
-    if os.environ.get("HERDR_ENV") == "1" or not binary:
+    binary = _hc_binary(path_str)
+    env = _hc_env(path_str)
+    if mode == "attach":
+        if not binary or not target or not _hc_core_running():
+            print("这个 Herdr 终端已经结束。", flush=True)
+            return 0
+        _herdr_exec_viewer(binary, target, env, workspace, history)
+    nested = os.environ.get("HERDR_ENV") == "1" or bool(os.environ.get("HC_TERMINAL_ID"))
+    if nested or not binary:
+        _herdr_fallback_exec(shell, workspace, inner_cmd)
+    if mode == "picker":
+        try:
+            os.chdir(workspace)
+        except OSError:
+            pass
+        os.execve(binary, [binary], env)
+    if not HC_NAME_RE.match(name):
         _herdr_fallback_exec(shell, workspace, inner_cmd)
 
     original_umask = os.umask(0o077)
@@ -3660,7 +3829,7 @@ def herdr_attach():
     now = time.time()
     try:
         for entry in HERDR_ROOT.iterdir():
-            if entry.name.startswith("run-") and entry.name.endswith(".sh") and entry.is_file():
+            if entry.name.startswith("run-") and entry.name.endswith((".sh", ".json")) and entry.is_file():
                 try:
                     if now - entry.stat().st_mtime > 300:
                         entry.unlink(missing_ok=True)
@@ -3669,154 +3838,49 @@ def herdr_attach():
     except OSError:
         pass
 
-    env = os.environ.copy()
-    env["PATH"] = path_str
-
-    if kind == "herdr" and not inner_cmd:
-        with _herdr_lifecycle_lock():
-            if _herdr_server_running(binary, env, timeout=1.5) and Path(workspace).is_dir():
-                ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=1.5)
-                if ws_resp is not None and not _herdr_extract_workspaces(ws_resp):
-                    try:
-                        subprocess.run(
-                            [binary, "workspace", "create", f"--cwd={workspace}", f"--label={project_label}", "--focus"],
-                            env=env,
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=3,
-                            check=False,
-                        )
-                    except (OSError, subprocess.SubprocessError):
-                        pass
-        os.umask(original_umask)
-        try:
-            os.chdir(workspace)
-        except OSError:
-            pass
-        os.execve(binary, [binary], env)
-
-    # Takeover mode for shell / claude / codex / agent / magpie-tui.
-    # Serialize server autostart + workspace/tab creation so concurrent opens
-    # never race daemon boot or spawn duplicate project workspaces.
-    need_inner = bool(inner_cmd and (kind != "shell" or "cage-macos-terminal" in inner_cmd))
-    server_ok = False
-    create_resp = None
-    pane_id = ""
-    created_tab_id = ""
-    created_ws_id = ""
+    ok = False
+    run_script = None
+    # One lock around starting the core and the terminal: concurrent opens
+    # never race the core's start or create the same name twice.
     with _herdr_lifecycle_lock():
-        server_ok = _herdr_server_running(binary, env, timeout=1.5)
-        if not server_ok:
+        if not _hc_core_running():
+            _hc_json(binary, ["server", "start", "--json"], env, timeout=10)
+        rc, existing = _hc_json(binary, ["get", "--json", "--", name], env, timeout=3)
+        if rc == 0 and existing and existing.get("state") == "live":
+            ok = True  # the same Cage terminal, seen again: view it
+        else:
+            if rc == 0 and existing:
+                _hc_json(binary, ["rm", "--json", "--", name], env, timeout=3)
+            # The program runs in the core's environment, which another hc
+            # client or a user service may have started: HERDR_EXEC_CODE gives
+            # it Cage's instead, from a private file it deletes (never argv).
+            run_script = HERDR_ROOT / f"run-{os.getpid()}-{secrets.token_hex(6)}.json"
+            body = json.dumps({"env": {k: v for k, v in os.environ.items() if not k.startswith("HC_")},
+                               "cwd": workspace, "shell": shell, "command": inner_cmd})
+            args = ["run", "--bg", "--json", "--name", name, "--no-parent", "--no-notify", "--cwd", workspace,
+                    "--label", "cage=1", "--label", f"cage.project={_herdr_label(project_label)}",
+                    "--label", f"cage.kind={_herdr_label(kind, 32)}"]
+            if tab_label:
+                args += ["--label", f"cage.title={_herdr_label(tab_label)}"]
             try:
-                subprocess.Popen(
-                    [binary, "server"],
-                    cwd=workspace,
-                    env=env,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    close_fds=True,
-                    start_new_session=True,
-                )
-                deadline = time.monotonic() + 3.5
-                while time.monotonic() < deadline:
-                    if _herdr_server_running(binary, env, timeout=0.8):
-                        server_ok = True
-                        break
-                    time.sleep(0.08)
+                atomic_write_text(run_script, body, mode=0o600)
+                runner = [sys.executable or "python3", "-I", "-S", "-c", HERDR_EXEC_CODE, str(run_script)]
+                rc, created = _hc_json(binary, [*args, "--", *runner], env, timeout=15)
+                ok = rc == 0 and bool(created) and created.get("state") == "live"
             except OSError:
-                server_ok = False
-
-        if server_ok:
-            ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=2.0)
-            existing_ws_id = ""
-            for ws in _herdr_extract_workspaces(ws_resp):
-                if isinstance(ws, dict) and ws.get("label") == project_label:
-                    ws_id = ws.get("workspace_id") or ws.get("id")
-                    if ws_id:
-                        existing_ws_id = str(ws_id)
-                        break
-
-            if existing_ws_id:
-                tab_args = ["tab", "create", f"--workspace={existing_ws_id}", f"--cwd={workspace}"]
-                if tab_label:
-                    tab_args.append(f"--label={tab_label}")
-                tab_args.append("--focus")
-                create_resp = _herdr_run_json(binary, tab_args, env, timeout=3.0)
-                pane_id = _herdr_extract_pane_id(create_resp)
-                created_tab_id = _herdr_extract_tab_id(create_resp)
-            else:
-                create_resp = _herdr_run_json(
-                    binary,
-                    ["workspace", "create", f"--cwd={workspace}", f"--label={project_label}", "--focus"],
-                    env,
-                    timeout=3.0,
-                )
-                pane_id = _herdr_extract_pane_id(create_resp)
-                created_tab_id = _herdr_extract_tab_id(create_resp)
-                if isinstance(create_resp, dict):
-                    res_obj = create_resp.get("result") if isinstance(create_resp.get("result"), dict) else create_resp
-                    ws_obj = res_obj.get("workspace") if isinstance(res_obj, dict) else None
-                    if isinstance(ws_obj, dict):
-                        created_ws_id = str(ws_obj.get("workspace_id") or ws_obj.get("id") or "")
-                if create_resp is not None and tab_label and created_tab_id:
-                    try:
-                        subprocess.run(
-                            [binary, "tab", "rename", "--", created_tab_id, tab_label],
-                            env=env,
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            timeout=2,
-                            check=False,
-                        )
-                    except (OSError, subprocess.SubprocessError):
-                        pass
-
-    if not server_ok or create_resp is None or (need_inner and not pane_id):
-        os.umask(original_umask)
-        _herdr_fallback_exec(shell, workspace, inner_cmd)
-
-    if pane_id and need_inner:
-        run_script = HERDR_ROOT / f"run-{os.getpid()}-{secrets.token_hex(6)}.sh"
-        script_body = (
-            "#!/bin/sh\n"
-            'rm -f -- "$0"\n'
-            f"exec {shlex.quote(shell)} -c {shlex.quote(inner_cmd)}\n"
-        )
-        try:
-            atomic_write_text(run_script, script_body, mode=0o700)
-            pr = subprocess.run(
-                [binary, "pane", "run", pane_id, f"exec {shlex.quote(str(run_script))}"],
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=4,
-            )
-            if pr.returncode != 0:
-                raise ValueError("herdr pane run failed")
-        except (OSError, subprocess.SubprocessError, ValueError):
-            if run_script is not None:
-                run_script.unlink(missing_ok=True)
-            # Best-effort cleanup of the just-created empty tab/workspace before fallback.
-            try:
-                if created_ws_id:
-                    subprocess.run([binary, "workspace", "close", created_ws_id], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, check=False)
-                elif created_tab_id:
-                    subprocess.run([binary, "tab", "close", created_tab_id], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, check=False)
-            except (OSError, subprocess.SubprocessError):
-                pass
-            os.umask(original_umask)
-            _herdr_fallback_exec(shell, workspace, inner_cmd)
-
+                ok = False
+            if not ok:
+                # It may have started after all (a slow core): never leave a
+                # second copy running beside the fallback.
+                _hc_json(binary, ["kill", "--json", "--", name], env, timeout=5)
+                _hc_json(binary, ["rm", "--json", "--", name], env, timeout=5)
     os.umask(original_umask)
-    try:
-        os.chdir(workspace)
-    except OSError:
-        pass
-    os.execve(binary, [binary], env)
+    if not ok:
+        if run_script is not None:
+            run_script.unlink(missing_ok=True)
+        _herdr_fallback_exec(shell, workspace, inner_cmd)
+    _herdr_exec_viewer(binary, name, env, workspace, history)
+
 
 
 def main(argv):
@@ -3942,8 +4006,20 @@ def main(argv):
     if cmd == "herdr-stop":
         print(json.dumps(herdr_stop(payload), ensure_ascii=False))
         return 0
-    if cmd == "herdr-apply-theme":
-        print(json.dumps(herdr_apply_theme(payload), ensure_ascii=False))
+    if cmd == "herdr-restart":
+        print(json.dumps(herdr_restart(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-list":
+        print(json.dumps(herdr_list(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-close":
+        print(json.dumps(herdr_close(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-legacy-status":
+        print(json.dumps(herdr_legacy_status(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-legacy-uninstall":
+        print(json.dumps(herdr_legacy_uninstall(payload), ensure_ascii=False))
         return 0
     raise ValueError(f"unknown subcommand: {cmd}")
 

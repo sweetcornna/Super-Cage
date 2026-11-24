@@ -169,16 +169,6 @@
   flex: none;
   margin-left: auto;
 }
-.sidebar-herdr-blocked {
-  margin-left: auto;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--warn, #d97706) 18%, transparent);
-  color: var(--warn, #b45309);
-  font-size: 0.72rem;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
-}
 .terminal-herdr-chip {
   display: inline-flex;
   align-items: center;
@@ -190,4 +180,8 @@
   font-size: 0.72rem;
   font-weight: 500;
   flex: none;
+}
+.terminal-herdr-chip[data-imported] {
+  border-style: dashed;
+  color: var(--ink);
 }

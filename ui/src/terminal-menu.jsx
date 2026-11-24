@@ -94,9 +94,9 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
         </button>
       ))}
       {herdr?.enabled && herdr?.installed && (
-        <button role="menuitem" disabled={busy} onClick={() => onSelect("herdr")}>
+        <button role="menuitem" disabled={busy} title="打开 Herdr 的终端选择器" onClick={() => onSelect("herdr")}>
           <AgentIcon agentId="herdr" size={17} />
-          <span className="terminal-menu-label">Herdr 工作区</span>
+          <span className="terminal-menu-label">Herdr 终端</span>
           {herdr.takeover_terminals && (
             <small className="terminal-menu-badge" aria-hidden="true">接管</small>
           )}

@@ -642,6 +642,8 @@ function App() {
     setTerminalChoice((previous) =>
       previous?.anchor === anchor ? null : { path, anchor },
     );
+    // Terminals other Herdr clients opened show up on the next list: read it now.
+    if (herdr.enabled) refreshStatus.current?.();
   };
   // The tab of a new terminal appears at once and the server's record
   // replaces it in place; a failure is shown there (terminal-pending.mjs).
@@ -649,6 +651,8 @@ function App() {
   // Authorization page tab id -> the login terminal it was opened from, so
   // the page can lead back there with the code it shows (login-terminals.mjs).
   const [loginReturns, setLoginReturns] = useState({});
+  // Herdr tab id -> how many times it was attached again (its view's key).
+  const [herdrViews, setHerdrViews] = useState({});
   const createTerminal = async (path, kind, options, retrying) => {
     setTerminalChoice(null);
     const codex = kind === "codex" || kind === "codex-login";
@@ -934,36 +938,6 @@ function App() {
     void herdr.refresh(false);
     return created;
   };
-  // Herdr's own settings: open (or reuse) the Herdr tab, then type the key
-  // its config binds to settings (official_settings.go). First-run setup
-  // ends in Settings by itself; a key no terminal can type is shown instead.
-  const openHerdrSettings = async () => {
-    const status = await herdr.refresh(true);
-    const keys = (status || herdr.data)?.settings_keys;
-    const opened = await openHerdr();
-    if (!opened?.id) return opened;
-    const tabId = String(opened.id).startsWith("terminal:") ? opened.id : "terminal:" + opened.id;
-    const hint = `在 Herdr 中按 ${keys?.shortcut || "ctrl+b s"} 打开设置`;
-    if (keys?.onboarding) {
-      notify("Herdr 会先显示首次设置引导，完成后进入设置");
-      return opened;
-    }
-    if (!keys?.chunks?.length) {
-      notify(hint);
-      return opened;
-    }
-    try {
-      let control;
-      for (let waited = 0; !(control = terminalControls.current.get(tabId))?.sendKeys; waited += 100) {
-        if (waited >= 10000) throw new Error("timeout");
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      await control.sendKeys(keys.chunks);
-    } catch {
-      notify(hint);
-    }
-    return opened;
-  };
   const showTerminal = (result, placeholder) => {
     const tab = {
       ...result, id: "terminal:" + result.id, sessionId: result.id,
@@ -1119,11 +1093,16 @@ function App() {
     // Nothing runs yet; a terminal that still arrives is closed then.
     if (tab.pending) { if (!tab.error) pendingClosed.current.add(tab.id); }
     else if (tab.kind === "terminal") {
+      // A Herdr terminal ends in Herdr too, even when this tab no longer views it.
       if (
-        !tab.closed &&
+        (!tab.closed || tab.herdr_live) &&
         !(await confirm({
           title: "关闭这个终端会话？",
-          body: "该终端中的交互命令可能被中断。网页和其他终端不受影响。",
+          body: tab.herdr_imported
+            ? "这个终端来自其他 Herdr 客户端，关闭会结束其中的程序。"
+            : tab.herdr_backed
+              ? "关闭会结束 Herdr 里这个终端的程序。只想暂时离开的话，切到别的标签即可。"
+              : "该终端中的交互命令可能被中断。网页和其他终端不受影响。",
           confirm: "关闭终端",
         }))
       )
@@ -1936,7 +1915,7 @@ function App() {
     const detail = tab?.terminalKind === "claude-login" ? `登录 · ${account || "新账号"}`
       : tab?.terminalKind === "agent-login" ? `${tab.agent_name || tab.agent_id} · 登录`
       : tab?.terminalKind === "agent" ? `${tab.agent_name || tab.agent_id}${tab.account_label ? ` · ${tab.account_label}` : ""}`
-      : tab?.terminalKind === "herdr" ? "Herdr 持久工作区"
+      : tab?.terminalKind === "herdr" ? "Herdr 选择器"
       : tab?.terminalKind === "magpie-tui" ? "Magpie TUI"
       : account ? `Claude · ${account}${tab.claude_account_source === "default" ? "（启动时账号）" : ""}` : codexTerminalDetail(tab, codexProfiles.accounts);
     const detailHint = isAgentTab && tab?.schedule_reason
@@ -2410,6 +2389,7 @@ function App() {
                         )} />}
                       {!tab.pending && isCodexTab(tab) && tab.cli_session_id && !tab.closed && visible && <CodexOpening id={tab.id} />}
                       {!tab.pending && <TerminalView
+                        key={herdrViews[tab.id] || 0}
                         session={terminalSession(tab)}
                         agentSpec={agentEntry?.spec || null}
                         agentConfig={agentEntry ? {
@@ -2421,14 +2401,11 @@ function App() {
                         agentOAuthDomains={allAgentOAuthDomains}
                         onLaunchAgent={(id, accountId, ws) => launchAgentTerminal(id, accountId, ws || tab.workspace).catch((e) => notify(e.message))}
                         onOpenAgentAccounts={openAgentAccounts}
-                        onReattachHerdr={(sess) => {
-                          if (sess?.id) {
-                            api("/terminals/" + sess.id, undefined, "DELETE").catch(() => {});
-                            setTabs((list) => list.filter((item) => item.sessionId !== sess.id));
-                          }
-                          void createTerminal(sess.workspace || workspace, "herdr")
-                            .then(() => { void herdr.refresh(false); })
-                            .catch((e) => notify(e.message));
+                        onReattachHerdr={() => {
+                          // Its hc terminal still runs: a new view of the same tab
+                          // asks for its stream, which attaches again (herdr_terminals.go).
+                          setTabs((list) => list.map((item) => item.id === tab.id ? { ...item, closed: false, herdr_live: false } : item));
+                          setHerdrViews((previous) => ({ ...previous, [tab.id]: (previous[tab.id] || 0) + 1 }));
                         }}
                         onOutput={isCodexTab(tab) && tab.cli_session_id ? () => codexOutputArrived(tab.id) : undefined}
                         onLoginTab={({ id }) => {
@@ -2607,7 +2584,6 @@ function App() {
           onOpenMagpie={openMagpie}
           onOpenMagpieTUI={() => openMagpieTUI().catch((e) => notify(e.message))}
           onOpenHerdr={() => openHerdr().catch((e) => notify(e.message))}
-          onOpenHerdrSettings={() => openHerdrSettings().catch((e) => notify(e.message))}
         />
       )}
       </Suspense>

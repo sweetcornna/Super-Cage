@@ -51,31 +51,6 @@ func TestOfficialSettingsAddresses(t *testing.T) {
 	}
 }
 
-func TestHerdrSettingsKeysSanitized(t *testing.T) {
-	keep := (&herdrSettingsKeys{Chunks: []string{"\x02", "s"}, Shortcut: "ctrl+b s"}).sanitized()
-	if len(keep.Chunks) != 2 || keep.Chunks[0] != "\x02" || keep.Shortcut != "ctrl+b s" {
-		t.Fatalf("default key dropped: %+v", keep)
-	}
-	for _, chunks := range [][]string{
-		{"rm -rf ~\r"},          // longer than any key press
-		{"\x02", "s", "x", "y"}, // more presses than any binding
-		{"\x02", "\u00e9"},      // not something a key sends
-		{"\x02", ""},
-	} {
-		got := (&herdrSettingsKeys{Onboarding: true, Chunks: chunks, Shortcut: "x\x1by"}).sanitized()
-		if got.Chunks != nil || !got.Onboarding || got.Shortcut != "xy" {
-			t.Errorf("sanitized(%q) = %+v", chunks, got)
-		}
-	}
-	if (*herdrSettingsKeys)(nil).sanitized() != nil {
-		t.Fatal("nil keys became non-nil")
-	}
-	var status herdrGuestStatus
-	if err := json.Unmarshal([]byte(`{"installed":true,"settings_keys":{"onboarding":false,"chunks":["\u0002","s"],"shortcut":"ctrl+b s"}}`), &status); err != nil || status.SettingsKeys == nil || len(status.SettingsKeys.Chunks) != 2 {
-		t.Fatalf("guest settings_keys not decoded: %+v %v", status, err)
-	}
-}
-
 // fakeSettingsBrowser is the Cage browser for the official-settings tests:
 // tabs answers from urls, and every new, activate and navigate is recorded.
 type fakeSettingsBrowser struct {

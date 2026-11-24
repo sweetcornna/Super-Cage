@@ -475,7 +475,7 @@ export function WorkspaceTabs({
                 }}
               >
                 <TabIcon kind={tab.isT3Code ? "t3code" : tab.isMagpie ? "magpie" : tab.kind} favicon={tab.favicon} size={15}
-                  agentId={tab.agent_id || (tab.terminalKind === "herdr" ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
+                  agentId={tab.agent_id || (tab.terminalKind === "herdr" || tab.herdr_imported ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
                   glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
                   accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}
@@ -567,7 +567,7 @@ export function WorkspaceTabs({
                       }}
                     >
                       <TabIcon kind={tab.isT3Code ? "t3code" : tab.isMagpie ? "magpie" : tab.kind} favicon={tab.favicon}
-                        agentId={tab.agent_id || (tab.terminalKind === "herdr" ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
+                        agentId={tab.agent_id || (tab.terminalKind === "herdr" || tab.herdr_imported ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
                         glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
                         accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
                         agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}

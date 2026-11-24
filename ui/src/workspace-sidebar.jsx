@@ -244,18 +244,14 @@ export function WorkspaceSidebar({
               onClick={() => onOpenHerdr?.()}
               disabled={busy || !running || !herdr.installed}
               aria-current={herdrActive ? "page" : undefined}
-              aria-label="打开 Herdr 工作区"
+              aria-label="打开 Herdr"
               title={herdr.installed
-                ? (herdr.server_running ? "打开 Herdr 持久终端工作区（运行中）" : "打开 Herdr 持久终端工作区")
+                ? (herdr.server_running ? `打开 Herdr 的终端选择器（${herdr.terminals_count} 个终端在运行）` : "打开 Herdr 的终端选择器")
                 : "尚未在客机中安装 Herdr，请前往设置安装"}
             >
               <AgentIcon agentId="herdr" size={17} />
               <span className="sidebar-t3code-label">Herdr</span>
-              {herdr.blocked_agents_count > 0 ? (
-                <small className="sidebar-herdr-blocked" title={`${herdr.blocked_agents_count} 个 Agent 待处理`}>
-                  {herdr.blocked_agents_count}
-                </small>
-              ) : herdr.server_running ? (
+              {herdr.server_running ? (
                 <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />
               ) : null}
             </button>

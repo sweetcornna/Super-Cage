@@ -459,6 +459,8 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/herdr/config", s.herdrConfigHTTP)
 	mux.HandleFunc("POST /api/herdr/install", s.herdrInstallHTTP)
 	mux.HandleFunc("POST /api/herdr/uninstall", s.herdrUninstallHTTP)
+	mux.HandleFunc("GET /api/herdr/legacy", s.herdrLegacyHTTP)
+	mux.HandleFunc("POST /api/herdr/legacy/uninstall", s.herdrLegacyUninstallHTTP)
 	mux.HandleFunc("POST /api/herdr/{action}", s.herdrActionHTTP)
 	mux.HandleFunc("GET /api/vault", s.vaultList)
 	mux.HandleFunc("POST /api/vault", s.vaultMutation)

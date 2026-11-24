@@ -362,7 +362,7 @@ export function useMagpie({ vmRunning = false, ready = false, job = null } = {})
   };
 }
 
-// Manages the optional Herdr persistent multi-agent terminal workspace integration without idle polling.
+// Manages the optional Herdr (herdr-core) persistent terminals without idle polling.
 export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -421,12 +421,14 @@ export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) 
     return applyPayload(result);
   }, [applyPayload]);
 
-  const install = useCallback(async () => {
-    return await api("/herdr/install", {});
+  // update: also replace a working herdr-core with a newer release.
+  const install = useCallback(async (update = false) => {
+    return await api("/herdr/install", { update: Boolean(update) });
   }, []);
 
-  const uninstall = useCallback(async () => {
-    return await api("/herdr/uninstall", {});
+  // force: end the terminals still running in Herdr (the card asks first).
+  const uninstall = useCallback(async (force = false) => {
+    return await api("/herdr/uninstall", { force: Boolean(force) });
   }, []);
 
   const start = useCallback(async () => {
@@ -434,8 +436,8 @@ export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) 
     return applyPayload(result);
   }, [applyPayload]);
 
-  const stop = useCallback(async () => {
-    const result = await api("/herdr/stop", {});
+  const stop = useCallback(async (force = false) => {
+    const result = await api("/herdr/stop", { force: Boolean(force) });
     return applyPayload(result);
   }, [applyPayload]);
 
@@ -448,14 +450,12 @@ export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) 
     data,
     enabled: Boolean(data?.enabled),
     takeover_terminals: data?.takeover_terminals !== false,
-    theme: data?.theme || "default",
     installed: Boolean(data?.installed),
     version: data?.version || "",
     binary_path: data?.binary_path || "",
     server_running: Boolean(data?.server_running),
-    workspaces_count: Number(data?.workspaces_count) || 0,
-    agents_count: Number(data?.agents_count) || 0,
-    blocked_agents_count: Number(data?.blocked_agents_count) || 0,
+    terminals_count: Number(data?.terminals_count) || 0,
+    legacy_installed: Boolean(data?.legacy_installed),
     supports_managed: data?.supports_managed,
     serverError: data?.error || "",
     loading,

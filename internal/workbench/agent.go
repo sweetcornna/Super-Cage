@@ -132,13 +132,15 @@ func AgentOperations() []AgentOperation {
 	for _, action := range []string{"start", "stop", "restart"} {
 		post("magpie."+action, "Control the managed Magpie guest server", "/api/magpie/"+action, object(nil))
 	}
-	get("herdr.get", "Read optional Herdr persistent multi-agent terminal workspace status", "/api/herdr")
-	post("herdr.config", "Configure optional Herdr integration, terminal takeover and theme", "/api/herdr/config", object(map[string]string{"enabled": "boolean", "takeover_terminals": "boolean", "theme": "string"}))
-	post("herdr.install", "Install official Herdr CLI inside the Cage guest", "/api/herdr/install", object(map[string]string{"channel": "string"}))
-	post("herdr.uninstall", "Uninstall Herdr inside the Cage guest while preserving user config", "/api/herdr/uninstall", object(nil))
+	get("herdr.get", "Read optional Herdr (herdr-core) status: installed, version, core running, terminal count", "/api/herdr")
+	post("herdr.config", "Configure optional Herdr integration and whether workbench terminals are Herdr terminals", "/api/herdr/config", object(map[string]string{"enabled": "boolean", "takeover_terminals": "boolean"}))
+	post("herdr.install", "Install official herdr-core inside the Cage guest, or keep a working one; update asks for a newer release", "/api/herdr/install", object(map[string]string{"channel": "string", "update": "boolean"}))
+	post("herdr.uninstall", "Uninstall herdr-core inside the Cage guest; refuses while terminals run unless force", "/api/herdr/uninstall", object(map[string]string{"force": "boolean"}))
 	for _, action := range []string{"start", "stop", "restart"} {
-		post("herdr."+action, "Control the managed Herdr guest daemon", "/api/herdr/"+action, object(nil))
+		post("herdr."+action, "Control the Herdr core in the guest; stop refuses while terminals run unless force, restart keeps them", "/api/herdr/"+action, object(map[string]string{"force": "boolean"}))
 	}
+	get("herdr.legacy", "Read whether the old Herdr TUI is still installed or running with panes", "/api/herdr/legacy")
+	post("herdr.legacy_uninstall", "Remove the old Herdr TUI; refuses while it holds panes unless force", "/api/herdr/legacy/uninstall", object(map[string]string{"force": "boolean"}))
 	get("vault.get", "List metadata; passwords remain hidden exactly as in the UI", "/api/vault")
 	post("vault.change", "Save/delete/unblock; reveal requires the same account_password reauthentication as the UI", "/api/vault", object(map[string]string{"action": "string", "entry": "object", "id": "string", "origin": "string", "account_password": "string"}))
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})

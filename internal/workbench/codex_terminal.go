@@ -78,10 +78,14 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 	}
 	script := codexTerminalScript(s.cliWorkspace(workspace), command, selection.GuestID, selection.Subject, login)
 	var codexSetup func(*terminalSession, int)
+	herdrID := ""
 	if !login && s.shouldTakeoverWithHerdr() {
-		script = s.herdrAttachScript(s.cliWorkspace(workspace), herdrProjectLabel(workspace), "Codex", "codex", script)
+		herdrID = randomToken()[:16]
+		script = s.herdrAttachScript(herdrAttach{Mode: "create", Name: herdrTerminalName(herdrID), Workspace: s.cliWorkspace(workspace),
+			Project: herdrProjectLabel(workspace), Title: "Codex", Kind: "codex", Inner: script})
 		codexSetup = func(session *terminalSession, _ int) {
 			session.herdrBacked = true
+			session.id, session.herdrName = herdrID, herdrTerminalName(herdrID)
 		}
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
@@ -98,6 +102,9 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 	}
 	if err == nil && !login && selection.ID != "" {
 		s.noteCodexSelection(selection.ID, workspace)
+	}
+	if err == nil && herdrID != "" {
+		s.rememberHerdrSession(session, "codex")
 	}
 	return session, err
 }

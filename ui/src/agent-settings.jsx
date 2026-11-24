@@ -292,7 +292,6 @@ export function AgentSettings({
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
-  onOpenHerdrSettings,
   onSavedClaudeCommand,
 }) {
   const [query, setQuery] = useState("");
@@ -550,7 +549,6 @@ export function AgentSettings({
           status={status}
           onConfirm={onConfirm}
           onOpenHerdr={onOpenHerdr}
-          onOpenHerdrSettings={onOpenHerdrSettings}
         />
       )}
 

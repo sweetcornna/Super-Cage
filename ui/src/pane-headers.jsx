@@ -45,7 +45,12 @@ export function TerminalHeader({ tab, contentWorkspace, project, metadata, termi
             {(tab.herdr_backed || tab.terminalKind === "herdr") && (
               <span
                 className="terminal-herdr-chip"
-                title="运行在 Herdr 持久工作区中（Ctrl+B 分屏/切换，关闭标签后台任务持续保活）"
+                data-imported={tab.herdr_imported ? "true" : undefined}
+                title={tab.herdr_imported
+                  ? "其他 Herdr 客户端开的终端：在这里查看和输入，关闭会结束它"
+                  : tab.terminalKind === "herdr"
+                    ? "Herdr 的终端选择器"
+                    : "运行在 Herdr 里：断线或关掉页面后继续运行，关闭标签才结束"}
               >
                 Herdr
               </span>

@@ -6,8 +6,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // The tools' own settings pages, opened from Super Cage ("官方设置"). Each
@@ -20,9 +18,6 @@ import (
 //   - Magpie: its window reads ?view=settings&tab= on load (upstream
 //     internal/gui/assets/start.js and app.js SET_TABS), and the one-time
 //     ?k= sign-in keeps the other parameters when it redirects (web.go).
-//   - Herdr: a terminal UI; its settings open with a key in the client
-//     (keys.settings, default "prefix+s"). The guest runtime reports the
-//     configured key; the browser types it into the tab it opened.
 const officialSettingsPage = "settings"
 
 // t3CodeSettingsWait bounds how long a fresh T3 Code tab may take to pair
@@ -134,45 +129,4 @@ func (s *Server) browserTabURL(ctx context.Context, id string) (current string, 
 		}
 	}
 	return "", false
-}
-
-// herdrSettingsKeys is how a Herdr client opens its settings: the configured
-// key as the bytes a terminal sends (one chunk per key press), its label, and
-// whether first-run setup (which ends in Settings) shows first.
-type herdrSettingsKeys struct {
-	Onboarding bool     `json:"onboarding"`
-	Chunks     []string `json:"chunks,omitempty"`
-	Shortcut   string   `json:"shortcut,omitempty"`
-}
-
-// sanitized keeps the key presses short and free of anything a key could
-// not send, and the label printable, whatever the guest reported.
-func (k *herdrSettingsKeys) sanitized() *herdrSettingsKeys {
-	if k == nil {
-		return nil
-	}
-	out := &herdrSettingsKeys{Onboarding: k.Onboarding}
-	label := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return -1
-		}
-		return r
-	}, strings.TrimSpace(k.Shortcut))
-	if utf8.RuneCountInString(label) <= 40 {
-		out.Shortcut = label
-	}
-	total := 0
-	for _, chunk := range k.Chunks {
-		total += len(chunk)
-		if len(k.Chunks) > 3 || chunk == "" || len(chunk) > 4 || total > 8 {
-			return out
-		}
-		for i := 0; i < len(chunk); i++ {
-			if chunk[i] > 0x7e {
-				return out
-			}
-		}
-	}
-	out.Chunks = append([]string(nil), k.Chunks...)
-	return out
 }
