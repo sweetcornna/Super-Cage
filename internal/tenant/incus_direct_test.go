@@ -58,6 +58,18 @@ func newDirectFixture(t *testing.T, vsock bool) *directFixture {
 	started := filepath.Join(f.dir, "started")
 	stopped := filepath.Join(f.dir, "stopped")
 	config := filepath.Join(f.dir, "relay-config")
+	// Registered after t.TempDir() and before workspace.close(), so LIFO cleanup
+	// closes the workspace first, waits for the fake relay shell script to finish
+	// writing its "stopped" marker, and only then removes f.dir.
+	t.Cleanup(func() {
+		for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			s1, _ := os.ReadFile(started)
+			s2, _ := os.ReadFile(stopped)
+			if strings.Count(string(s1), "\n") <= strings.Count(string(s2), "\n") {
+				return
+			}
+		}
+	})
 	f.runtime, f.calls = fakeIncus(t, `"--force-local --project cage-tenant exec local:cage-`+id+` --mode=non-interactive -- /usr/bin/head -c 8193 -- `+control+`") echo '{"port":45001,"token":"`+fixtureLauncher+`"}' ;;
 "--force-local query local:/1.0/instances/cage-`+id+`?project=cage-tenant") echo '{"name":"cage-`+id+`","type":"virtual-machine","config":{"user.cage-tenant.id":"`+id+`","volatile.vsock_id":"42"}}' ;;
 *"exec local:cage-`+id+` --mode=non-interactive -- /usr/local/bin/cage vsock-relay") IFS= read -r line; printf '%s\n' "$line" > '`+config+`'; echo started >> '`+started+`'; trap "echo stopped >> '`+stopped+`'; exit 0" TERM; exec 3<&0; cat <&3 >/dev/null & wait; echo stopped >> '`+stopped+`' ;;`)
