@@ -77,10 +77,9 @@ func (s *Server) controllerProof(w http.ResponseWriter, r *http.Request) {
 
 // controllerDial reaches one profile's controller. It never resolves a name:
 // "localhost" can resolve to ::1 first, where another local user may listen
-// on the same port. When the record carries a proof key, each new
-// connection must first prove that the server holds it, before net/http
-// writes a request on it, so the launcher token, tickets and cookies reach
-// only this profile's controller.
+// on the same port. Each new connection must first prove that the server holds
+// the record's proof key, before net/http writes a request on it, so the
+// launcher token, tickets and cookies reach only this profile's controller.
 //
 // Residual (A2 of the review of controller-dial-hardening, documented, not
 // fixed): the desktop windows' web views load http://localhost:<port>

@@ -655,7 +655,7 @@ func (s *Server) inspectVMLayout() (bool, bool) {
 func (s *Server) managementRequiresSession(ctx context.Context) bool {
 	control, _ := url.Parse(s.origin)
 	port, _ := strconv.Atoi(control.Port())
-	client := &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: controllerDial(controlFile{Port: port})}, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
+	client := &http.Client{Transport: &http.Transport{Proxy: nil, DialContext: controllerDial(s.controlRecord(port))}, Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}
 	defer client.CloseIdleConnections()
 	req, _ := http.NewRequestWithContext(ctx, "GET", s.origin+"/api/settings", nil)
 	response, err := client.Do(req)
