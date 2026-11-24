@@ -677,10 +677,16 @@ func (s *Server) t3CodeOpenHTTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Workspace string `json:"workspace"`
 		ForceMode string `json:"force_mode"` // "" | "workbench" | "direct"
+		Page      string `json:"page"`       // "" | "settings": T3 Code's own settings
 	}
 	if !readJSON(w, r, &in) {
 		return
 	}
+	if !validOfficialPage(in.Page) {
+		http.Error(w, "不支持打开 T3 Code 的这个页面", http.StatusBadRequest)
+		return
+	}
+	settings := in.Page == officialSettingsPage
 	s.t3code.opMu.Lock()
 	defer s.t3code.opMu.Unlock()
 
@@ -700,6 +706,11 @@ func (s *Server) t3CodeOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		mode = in.ForceMode
 	}
 	if mode == "direct" && !s.t3CodeDirectAvailable(r) {
+		mode = "workbench"
+	}
+	if settings {
+		// Pairing always lands on T3 Code's home page; only a workbench tab
+		// can be moved on to Settings after it.
 		mode = "workbench"
 	}
 
@@ -744,12 +755,17 @@ func (s *Server) t3CodeOpenHTTP(w http.ResponseWriter, r *http.Request) {
 	// so activating an already-paired tab never consumes a fresh pairing URL.
 	if existingID := s.findExistingT3CodeTab(r.Context(), publicBase); existingID != "" {
 		if _, err := s.browserAction(r.Context(), "activate", &browserInput{ID: existingID}); err == nil {
-			jsonReply(w, map[string]any{
+			reply := map[string]any{
 				"mode":   "workbench",
 				"tab_id": existingID,
 				"url":    publicBase,
 				"title":  "T3 Code",
-			})
+			}
+			if settings {
+				target := t3CodeSettingsURL(publicBase)
+				reply["settings_opened"] = target != "" && s.navigateBrowserTab(r.Context(), existingID, target) == nil
+			}
+			jsonReply(w, reply)
 			return
 		}
 	}
@@ -766,12 +782,16 @@ func (s *Server) t3CodeOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Cage 浏览器未能打开 T3 Code 标签页，请检查浏览器连接后重试", http.StatusBadGateway)
 		return
 	}
-	jsonReply(w, map[string]any{
+	reply := map[string]any{
 		"mode":   "workbench",
 		"tab_id": created.ID,
 		"url":    publicBase,
 		"title":  "T3 Code",
-	})
+	}
+	if settings {
+		reply["settings_opened"] = s.openT3CodeSettingsAfterPairing(r.Context(), created.ID, publicBase)
+	}
+	jsonReply(w, reply)
 }
 
 func validBrowserTabID(id string) bool {

@@ -1325,6 +1325,52 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(res_a4.returncode, 0, res_a4.stderr)
         self.assertEqual(res_a4.stdout, "FALLBACK_MISSING")
 
+    def test_herdr_settings_keys_follow_config(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("agent_runtime_settings_keys", RUNTIME)
+        rt = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rt)
+        config = self.home / "herdr-config.toml"
+        saved = os.environ.get("HERDR_CONFIG_PATH")
+        os.environ["HERDR_CONFIG_PATH"] = str(config)
+        self.addCleanup(lambda: os.environ.pop("HERDR_CONFIG_PATH", None) if saved is None else os.environ.__setitem__("HERDR_CONFIG_PATH", saved))
+        cases = [
+            # No config: first-run setup shows first, and ends in Settings.
+            (None, {"onboarding": True, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
+            ("onboarding = false\n", {"onboarding": False, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
+            ('onboarding = false\n[keys]\nprefix = ["ctrl+space", "ctrl+s"]\nsettings = "prefix+comma"\n',
+             {"onboarding": False, "chunks": ["\x00", ","], "shortcut": "ctrl+space comma"}),
+            ('onboarding = false\n[keys]\nsettings = ["cmd+comma", "alt+s"]\n',
+             {"onboarding": False, "chunks": ["\x1bs"], "shortcut": "alt+s"}),
+            # A key no terminal can type: only its label, for the user to press.
+            ('onboarding = false\n[keys]\nsettings = "cmd+comma"\n',
+             {"onboarding": False, "chunks": None, "shortcut": "cmd+comma"}),
+            # Herdr reads an invalid config as its defaults.
+            ("onboarding = = nope\n", {"onboarding": False, "chunks": ["\x02", "s"], "shortcut": "ctrl+b s"}),
+        ]
+        for text, want in cases:
+            if text is None:
+                config.unlink(missing_ok=True)
+            else:
+                config.write_text(text)
+            self.assertEqual(rt._herdr_settings_keys(), want, text)
+        # Without tomllib (a macOS guest's Python 3.9) the same simple lines read the same.
+        saved_module = sys.modules.get("tomllib")
+        sys.modules["tomllib"] = None
+        try:
+            for text, want in cases[1:5]:
+                config.write_text(text)
+                self.assertEqual(rt._herdr_settings_keys(), want, text)
+        finally:
+            if saved_module is None:
+                sys.modules.pop("tomllib", None)
+            else:
+                sys.modules["tomllib"] = saved_module
+        self.assertIsNone(rt._herdr_key_bytes("super+s"))
+        self.assertIsNone(rt._herdr_key_bytes("ctrl+shift+s"))
+        self.assertEqual(rt._herdr_key_bytes("shift+n"), "N")
+        self.assertEqual(rt._herdr_key_bytes("ctrl+["), "\x1b")
+
 
 if __name__ == "__main__":
     unittest.main()

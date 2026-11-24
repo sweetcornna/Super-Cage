@@ -697,6 +697,7 @@ function App() {
     if (kind === "agent") {
       void agentCatalog.refresh(false);
     }
+    return result;
   };
   const openAgentAccounts = (agentId = "claude") => {
     if (!agentId || agentId === "claude") setManagementPage("claude-accounts");
@@ -726,9 +727,11 @@ function App() {
       ...(loginMode ? { login_mode: loginMode } : {}),
     });
   };
-  const openT3Code = async (forceMode = "") => {
+  // page "settings" opens T3 Code's own settings page (official_settings.go).
+  const openT3Code = async (forceMode = "", page = "") => {
     const directAvailable = isT3CodeDirectAvailable(t3code);
-    const effectiveForceMode = !directAvailable ? "workbench" : forceMode;
+    // Settings open in a workbench tab: only it can be moved on after pairing.
+    const effectiveForceMode = !directAvailable || page ? "workbench" : forceMode;
     const wantDirect = (effectiveForceMode || t3code.open_mode) === "direct" && directAvailable;
     let popup = null;
     if (wantDirect) {
@@ -755,7 +758,9 @@ function App() {
       const result = await t3code.open({
         workspace: contentWorkspace || workspace,
         ...(effectiveForceMode ? { force_mode: effectiveForceMode } : {}),
+        ...(page ? { page } : {}),
       });
+      if (page && result?.settings_opened === false) notify("T3 Code 已打开；配对完成后，在它的侧栏打开「设置」");
       if (result?.mode === "direct" && result.direct_url) {
         if (popup && !popup.closed) {
           popup.location.replace(result.direct_url);
@@ -811,7 +816,8 @@ function App() {
       notify(error.message);
     }
   };
-  const openMagpie = async (forceMode = "") => {
+  // page "settings" opens Magpie's own Settings › General (official_settings.go).
+  const openMagpie = async (forceMode = "", page = "") => {
     const directAvailable = isMagpieDirectAvailable(magpie);
     const effectiveForceMode = !directAvailable ? "workbench" : forceMode;
     const wantDirect = (effectiveForceMode || magpie.open_mode) === "direct" && directAvailable;
@@ -840,6 +846,7 @@ function App() {
       const result = await magpie.open({
         workspace: contentWorkspace || workspace,
         ...(effectiveForceMode ? { force_mode: effectiveForceMode } : {}),
+        ...(page ? { page } : {}),
       });
       if (result?.mode === "direct" && result.direct_url) {
         if (popup && !popup.closed) {
@@ -856,6 +863,7 @@ function App() {
         const fallback = await magpie.open({
           workspace: contentWorkspace || workspace,
           force_mode: "workbench",
+          ...(page ? { page } : {}),
         });
         if (!fallback?.tab_id) {
           throw new Error("新窗口弹窗被拦截，且未能在工作台标签中打开 Magpie，请允许弹窗或重试");
@@ -925,6 +933,36 @@ function App() {
     const created = await createTerminal(ws, "herdr");
     void herdr.refresh(false);
     return created;
+  };
+  // Herdr's own settings: open (or reuse) the Herdr tab, then type the key
+  // its config binds to settings (official_settings.go). First-run setup
+  // ends in Settings by itself; a key no terminal can type is shown instead.
+  const openHerdrSettings = async () => {
+    const status = await herdr.refresh(true);
+    const keys = (status || herdr.data)?.settings_keys;
+    const opened = await openHerdr();
+    if (!opened?.id) return opened;
+    const tabId = String(opened.id).startsWith("terminal:") ? opened.id : "terminal:" + opened.id;
+    const hint = `在 Herdr 中按 ${keys?.shortcut || "ctrl+b s"} 打开设置`;
+    if (keys?.onboarding) {
+      notify("Herdr 会先显示首次设置引导，完成后进入设置");
+      return opened;
+    }
+    if (!keys?.chunks?.length) {
+      notify(hint);
+      return opened;
+    }
+    try {
+      let control;
+      for (let waited = 0; !(control = terminalControls.current.get(tabId))?.sendKeys; waited += 100) {
+        if (waited >= 10000) throw new Error("timeout");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      await control.sendKeys(keys.chunks);
+    } catch {
+      notify(hint);
+    }
+    return opened;
   };
   const showTerminal = (result, placeholder) => {
     const tab = {
@@ -1945,6 +1983,7 @@ function App() {
         onOpenDirect={() => { void openT3Code("direct").catch(() => {}); }}
         onRestart={() => restartT3Code(tab)}
         onToggleBrowserBar={() => toggleT3CodeBrowserBar(tab.id, true)}
+        onOfficialSettings={() => { void openT3Code("", "settings").catch(() => {}); }}
         onSettings={() => openSettings("agents")}
         onClose={() => closeTab(tab)}
         menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
@@ -1964,6 +2003,7 @@ function App() {
         onOpenTUI={() => { void openMagpieTUI().catch((e) => notify(e.message)); }}
         onRestart={() => restartMagpie(tab)}
         onToggleBrowserBar={() => toggleMagpieBrowserBar(tab.id, true)}
+        onOfficialSettings={() => { void openMagpie("workbench", "settings").catch(() => {}); }}
         onSettings={() => openSettings("agents")}
         onClose={() => closeTab(tab)}
         menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
@@ -2567,6 +2607,7 @@ function App() {
           onOpenMagpie={openMagpie}
           onOpenMagpieTUI={() => openMagpieTUI().catch((e) => notify(e.message))}
           onOpenHerdr={() => openHerdr().catch((e) => notify(e.message))}
+          onOpenHerdrSettings={() => openHerdrSettings().catch((e) => notify(e.message))}
         />
       )}
       </Suspense>

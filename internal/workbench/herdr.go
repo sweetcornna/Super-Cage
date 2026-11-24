@@ -71,6 +71,8 @@ type herdrGuestStatus struct {
 	WorkspacesCount    int    `json:"workspaces_count,omitempty"`
 	AgentsCount        int    `json:"agents_count,omitempty"`
 	BlockedAgentsCount int    `json:"blocked_agents_count,omitempty"`
+	// SettingsKeys is how a client opens Herdr's own settings (official_settings.go).
+	SettingsKeys *herdrSettingsKeys `json:"settings_keys,omitempty"`
 }
 
 type herdrManager struct {
@@ -186,6 +188,7 @@ func (s *Server) herdrStatusPayload(r *http.Request, force bool) (map[string]any
 		"workspaces_count":     st.WorkspacesCount,
 		"agents_count":         st.AgentsCount,
 		"blocked_agents_count": st.BlockedAgentsCount,
+		"settings_keys":        st.SettingsKeys.sanitized(),
 		"error":                probeErr,
 		"vm_running":           runningVM,
 		"ready":                ready,

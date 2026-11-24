@@ -6,6 +6,7 @@ import {
   Play,
   RefreshCw,
   RotateCw,
+  SlidersHorizontal,
   Square,
   TerminalSquare,
   Trash2,
@@ -49,6 +50,7 @@ export function HerdrSettingsCard({
   status,
   onConfirm,
   onOpenHerdr,
+  onOpenHerdrSettings,
 }) {
   const supportsManaged = isHerdrManagedSupported(store, status);
   const [submitting, setSubmitting] = useState("");
@@ -201,6 +203,17 @@ export function HerdrSettingsCard({
               >
                 {submitting === "open" ? <LoaderCircle size={14} className="spin" /> : <TerminalSquare size={14} />}
                 立即打开 Herdr 工作区
+              </button>
+            )}
+            {store.installed && onOpenHerdrSettings && (
+              <button
+                type="button"
+                title={`打开 Herdr 工作区并进入它自己的设置（${store.data?.settings_keys?.shortcut || "ctrl+b s"}）`}
+                disabled={!canOpen || busy}
+                onClick={() => void runAction("open-settings", () => onOpenHerdrSettings?.())}
+              >
+                {submitting === "open-settings" ? <LoaderCircle size={14} className="spin" /> : <SlidersHorizontal size={14} />}
+                Herdr 官方设置
               </button>
             )}
             {store.installed && (

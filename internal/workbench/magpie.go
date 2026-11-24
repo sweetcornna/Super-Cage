@@ -656,9 +656,24 @@ func (s *Server) magpieOpenHTTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Workspace string `json:"workspace"`
 		ForceMode string `json:"force_mode"` // "" | "workbench" | "direct"
+		Page      string `json:"page"`       // "" | "settings": Magpie's own settings
 	}
 	if !readJSON(w, r, &in) {
 		return
+	}
+	if !validOfficialPage(in.Page) {
+		http.Error(w, "不支持打开 Magpie 的这个页面", http.StatusBadRequest)
+		return
+	}
+	settings := in.Page == officialSettingsPage
+	// withPage opens target on Magpie's settings when they were asked for.
+	withPage := func(target string) string {
+		if settings {
+			if moved := magpieSettingsURL(target); moved != "" {
+				return moved
+			}
+		}
+		return target
 	}
 	s.magpie.opMu.Lock()
 	defer s.magpie.opMu.Unlock()
@@ -706,7 +721,7 @@ func (s *Server) magpieOpenHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		openURL := s.consumeMagpieOpenURL(r.Context(), cfg)
+		openURL := withPage(s.consumeMagpieOpenURL(r.Context(), cfg))
 		directURL, err := proxy.issueDirectURL(openURL)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -735,6 +750,11 @@ func (s *Server) magpieOpenHTTP(w http.ResponseWriter, r *http.Request) {
 				"url":    publicBase,
 				"title":  "Magpie",
 			}
+			if settings {
+				// The tab is signed in already: its address needs no key.
+				target := magpieSettingsURL(publicBase)
+				reply["settings_opened"] = target != "" && s.navigateBrowserTab(r.Context(), existingID, target) == nil
+			}
 			if cfg.Mode == "managed" {
 				reply["gateway_running"] = managedStatus.GatewayRunning
 			}
@@ -742,7 +762,7 @@ func (s *Server) magpieOpenHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	openURL := s.consumeMagpieOpenURL(r.Context(), cfg)
+	openURL := withPage(s.consumeMagpieOpenURL(r.Context(), cfg))
 	data, err := s.browserAction(r.Context(), "new", &browserInput{URL: openURL})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)

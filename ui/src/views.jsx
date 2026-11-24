@@ -766,6 +766,22 @@ export function TerminalView({
     };
     host.addEventListener("copy", onCopy, true);
     onControls?.({
+      // Herdr's own settings (official_settings.go): its configured key,
+      // one press per chunk, once the full-screen client is drawing.
+      async sendKeys(chunks, timeout = 15000) {
+        const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const started = Date.now();
+        while (!disposed && terminal.buffer.active.type !== "alternate") {
+          if (Date.now() - started > timeout) throw new Error("Herdr 还没有准备好");
+          await pause(100);
+        }
+        if (disposed) throw new Error("终端已关闭");
+        await pause(300);
+        for (const [index, chunk] of chunks.entries()) {
+          if (index) await pause(150);
+          await enqueue(() => send(chunk));
+        }
+      },
       edit(action) {
         if (!box.current?.contains(document.activeElement)) return false;
         if (action === "copy") {
