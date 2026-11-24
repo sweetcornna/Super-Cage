@@ -390,6 +390,10 @@
 .browser-more-trigger[aria-expanded="true"] { background: var(--selected); }
 .browser-private-badge { display: inline-flex; align-items: center; gap: 4px; flex: none; color: var(--ink); font-size: var(--fs-caption); }
 .browser-private-note { margin: 0; padding: 3px 12px 6px; color: var(--muted); font-size: var(--fs-caption); }
+/* Authorization page opened from a login terminal: the way back to paste its code. */
+.browser-login-return { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 12px 6px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); color: var(--ink); font-size: var(--fs-secondary); }
+.browser-login-return > span { flex: 1 1 220px; min-width: 0; color: var(--muted); }
+.browser-login-return > button { display: inline-flex; align-items: center; gap: 6px; flex: none; }
 /* Cookie panel: a quiet sheet under the toolbar; records are hairline rows
    with ghost actions, the panel title is serif like the downloads panel. */
 .browser-cookies { margin: 4px 12px 8px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--surface); font-size: var(--fs-secondary); }
