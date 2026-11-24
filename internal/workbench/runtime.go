@@ -786,6 +786,9 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.mobileCLI.stopAll()
 	s.closeT3CodeProxy()
 	s.invalidateT3CodeStatus()
+	s.closeMagpieProxy()
+	s.invalidateMagpieStatus()
+	s.invalidateHerdrStatus()
 	s.invalidateAgentProbeCache()
 	s.closeProjectShares()
 	if _, err := os.Stat(filepath.Join(s.instanceDir(), "lima.yaml")); !containerenv.Configured(s.profile) && os.IsNotExist(err) {

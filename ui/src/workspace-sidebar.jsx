@@ -33,6 +33,7 @@ import { GuestSystemIcon } from "./guest-system-icon";
 import { getClientContext, isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
 import { VirtualMachines } from "./virtual-machines";
 import { AgentIcon } from "./agent-icon";
+import { isMagpieDirectAvailable } from "./magpie-panel";
 
 const SESSION_PREVIEW_LIMIT = 5;
 
@@ -86,6 +87,12 @@ export function WorkspaceSidebar({
   t3code = null,
   t3codeActive = false,
   onOpenT3Code,
+  magpie = null,
+  magpieActive = false,
+  onOpenMagpie,
+  herdr = null,
+  herdrActive = false,
+  onOpenHerdr,
   onInstallAgents,
   onClaudeWeb,
   onClaudeDesktop,
@@ -139,7 +146,7 @@ export function WorkspaceSidebar({
             <Home size={17} />
             工作台
           </button>
-          <div className={`sidebar-browser-row ${!desktopOpen && !home && !t3codeActive && tabs.some((tab) => tab.id === active && tab.kind !== "terminal") ? "selected" : ""}`}>
+          <div className={`sidebar-browser-row ${!desktopOpen && !home && !t3codeActive && !magpieActive && tabs.some((tab) => tab.id === active && tab.kind !== "terminal") ? "selected" : ""}`}>
             <button
               className="sidebar-link"
               onClick={onBrowser}
@@ -194,6 +201,59 @@ export function WorkspaceSidebar({
               </div>
             );
           })()}
+          {magpie?.enabled && (() => {
+            const magpieDirectAvailable = isMagpieDirectAvailable(magpie);
+            const magpieUsesWorkbench = !magpieDirectAvailable || magpie.open_mode !== "direct";
+            return (
+              <div className={`sidebar-browser-row sidebar-t3code-row ${magpieActive ? "selected" : ""}`}>
+                <button
+                  className="sidebar-link"
+                  onClick={() => onOpenMagpie?.()}
+                  disabled={busy || (!running && magpie.mode === "managed") || (magpieUsesWorkbench && (!ready || !browserAvailable))}
+                  aria-current={magpieActive ? "page" : undefined}
+                  aria-label="打开 Magpie"
+                  title={magpie.running ? "打开 Magpie（运行中）" : "打开 Magpie"}
+                >
+                  <AgentIcon agentId="magpie" size={17} />
+                  <span className="sidebar-t3code-label">Magpie</span>
+                  {magpie.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
+                </button>
+                {magpieDirectAvailable && (
+                  <button
+                    className="icon-button sidebar-claude-shortcut"
+                    onClick={() => onOpenMagpie?.("direct")}
+                    disabled={busy || (!running && magpie.mode === "managed")}
+                    aria-label="原生极速直连打开 Magpie"
+                    title="原生极速直连窗口打开 Magpie（0 VNC 延迟）"
+                  >
+                    <Zap size={14} />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+          {herdr?.enabled && (
+            <button
+              className={`sidebar-link ${herdrActive ? "selected" : ""}`}
+              onClick={() => onOpenHerdr?.()}
+              disabled={busy || !running || !herdr.installed}
+              aria-current={herdrActive ? "page" : undefined}
+              aria-label="打开 Herdr 工作区"
+              title={herdr.installed
+                ? (herdr.server_running ? "打开 Herdr 持久终端工作区（运行中）" : "打开 Herdr 持久终端工作区")
+                : "尚未在客机中安装 Herdr，请前往设置安装"}
+            >
+              <AgentIcon agentId="herdr" size={17} />
+              <span className="sidebar-t3code-label">Herdr</span>
+              {herdr.blocked_agents_count > 0 ? (
+                <small className="sidebar-herdr-blocked" title={`${herdr.blocked_agents_count} 个 Agent 待处理`}>
+                  {herdr.blocked_agents_count}
+                </small>
+              ) : herdr.server_running ? (
+                <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />
+              ) : null}
+            </button>
+          )}
           <button className={`sidebar-link ${desktopOpen ? "selected" : ""}`} onClick={onClaudeDesktop} disabled={!running || busy} title="安装或打开 Claude Desktop"><Monitor size={17} />Claude Desktop</button>
           <button className={`sidebar-link ${claudeScienceOpen ? "selected" : ""}`} aria-current={claudeScienceOpen ? "page" : undefined} onClick={onClaudeScience} disabled={!running} title="安装或打开 Claude Science"><FlaskConical size={17} />Claude Science</button>
         </div>

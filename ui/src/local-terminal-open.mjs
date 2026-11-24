@@ -22,12 +22,12 @@ export async function localTerminalOpener(changed) {
     async open(target, { confirm, notify }) {
       if (pending) return;
       // The application is found at each open, so that one installed since
-      // (Ghostty) is the one used, with its notice.
+      // (Herdr or Ghostty) is the one used, with its notice if needed.
       let app;
       try {
         app = (await api(APP_PATH)).app;
       } catch (error) { notify(error.message); return; }
-      if (!app) { notify("这台电脑上找不到 Ghostty 或系统终端"); return; }
+      if (!app) { notify("这台电脑上找不到 Herdr、Ghostty 或系统终端"); return; }
       // Before the request: it waits until the owner answers macOS.
       const notice = automationNotice(app, localStorage.getItem(acknowledged(app.id)) === "1");
       if (notice) {

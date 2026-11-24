@@ -34,5 +34,28 @@ func applicationPath(bundleID string) string {
 			}
 		}
 	}
+	return fallbackBundlePath(bundleID)
+}
+
+func fallbackBundlePath(bundleID string) string {
+	if bundleID != "dev.herdr.app" {
+		return ""
+	}
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, "Applications", "Herdr.app"))
+	}
+	candidates = append(candidates, "/Applications/Herdr.app")
+	for _, candidate := range candidates {
+		for _, marker := range []string{
+			filepath.Join(candidate, "Contents", "MacOS", "Herdr"),
+			filepath.Join(candidate, "Contents", "MacOS", "herdr-app"),
+			filepath.Join(candidate, "Contents", "Info.plist"),
+		} {
+			if info, err := os.Stat(marker); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+	}
 	return ""
 }

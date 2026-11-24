@@ -124,6 +124,21 @@ func AgentOperations() []AgentOperation {
 	for _, action := range []string{"start", "stop", "restart"} {
 		post("t3code."+action, "Control the managed T3 Code guest server", "/api/t3code/"+action, object(nil))
 	}
+	get("magpie.get", "Read optional Magpie model router and local gateway status", "/api/magpie")
+	post("magpie.config", "Configure optional Magpie mode, port, gateway-only flag, open mode and focus chrome", "/api/magpie/config", object(map[string]string{"enabled": "boolean", "mode": "string", "external_url": "string", "port": "integer", "gateway_only": "boolean", "open_mode": "string", "focus_chrome": "boolean"}))
+	post("magpie.install", "Install official Magpie inside the Cage guest", "/api/magpie/install", object(map[string]string{"channel": "string"}))
+	post("magpie.uninstall", "Uninstall Magpie inside the Cage guest while preserving user data", "/api/magpie/uninstall", object(nil))
+	post("magpie.open", "Open Magpie original web UI in the workbench or direct zero-VNC loopback window", "/api/magpie/open", object(map[string]string{"workspace": "string", "force_mode": "string"}))
+	for _, action := range []string{"start", "stop", "restart"} {
+		post("magpie."+action, "Control the managed Magpie guest server", "/api/magpie/"+action, object(nil))
+	}
+	get("herdr.get", "Read optional Herdr persistent multi-agent terminal workspace status", "/api/herdr")
+	post("herdr.config", "Configure optional Herdr integration, terminal takeover and theme", "/api/herdr/config", object(map[string]string{"enabled": "boolean", "takeover_terminals": "boolean", "theme": "string"}))
+	post("herdr.install", "Install official Herdr CLI inside the Cage guest", "/api/herdr/install", object(map[string]string{"channel": "string"}))
+	post("herdr.uninstall", "Uninstall Herdr inside the Cage guest while preserving user config", "/api/herdr/uninstall", object(nil))
+	for _, action := range []string{"start", "stop", "restart"} {
+		post("herdr."+action, "Control the managed Herdr guest daemon", "/api/herdr/"+action, object(nil))
+	}
 	get("vault.get", "List metadata; passwords remain hidden exactly as in the UI", "/api/vault")
 	post("vault.change", "Save/delete/unblock; reveal requires the same account_password reauthentication as the UI", "/api/vault", object(map[string]string{"action": "string", "entry": "object", "id": "string", "origin": "string", "account_password": "string"}))
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})

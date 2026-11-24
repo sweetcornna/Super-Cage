@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -72,7 +74,11 @@ func (m *terminalManager) startSessionWithSetup(cmd *exec.Cmd, workspace, kind s
 
 // finished receives the ended session, so it can read the exit status.
 func (m *terminalManager) startCodexSession(cmd *exec.Cmd, workspace, kind string, selection codexSelection, finished func(*terminalSession)) (*terminalSession, error) {
-	return m.startSessionWith(cmd, workspace, kind, claudeSelection{}, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) }, nil)
+	return m.startCodexSessionWithSetup(cmd, workspace, kind, selection, finished, nil)
+}
+
+func (m *terminalManager) startCodexSessionWithSetup(cmd *exec.Cmd, workspace, kind string, selection codexSelection, finished func(*terminalSession), setup func(*terminalSession, int)) (*terminalSession, error) {
+	return m.startSessionWith(cmd, workspace, kind, claudeSelection{}, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) }, setup)
 }
 
 // Account bindings are published together with the session, so a concurrent
@@ -97,6 +103,10 @@ func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string
 		title = fmt.Sprintf("Codex %d", m.sequence)
 	} else if kind == "codex-login" {
 		title = "Codex 账号登录"
+	} else if kind == "herdr" {
+		title = "Herdr"
+	} else if kind == "magpie-tui" {
+		title = "Magpie TUI"
 	}
 	session := newTerminalSession(file)
 	session.id, session.title, session.workspace, session.cmd = randomToken()[:16], title, workspace, cmd
@@ -512,7 +522,7 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			return nil, err
 		}
 	}
-	if input.Kind != "" && input.Kind != "shell" && input.Kind != "claude" && input.Kind != "claude-login" && input.Kind != "agent" && input.Kind != "agent-login" {
+	if input.Kind != "" && input.Kind != "shell" && input.Kind != "claude" && input.Kind != "claude-login" && input.Kind != "agent" && input.Kind != "agent-login" && input.Kind != "herdr" && input.Kind != "magpie-tui" {
 		return nil, errors.New("终端类型无效")
 	}
 	isAgentKind := input.Kind == "agent" || input.Kind == "agent-login"
@@ -546,8 +556,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			return nil, err
 		}
 	}
+	herdrTakeover := s.shouldTakeoverWithHerdr()
 	launchCommand := command
-	if input.Kind == "claude" && !sharedCLILauncher(command) {
+	if input.Kind == "claude" && (!sharedCLILauncher(command) || (input.sharedID == "" && herdrTakeover)) {
 		directories, err := s.projectAdditionalDirectories(workspace)
 		if err != nil {
 			return nil, err
@@ -659,10 +670,50 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	var conversation *mobileRecord
-	if input.Kind == "claude" && sharedCLILauncher(command) {
+	// When Herdr takeover is active for a freshly created Claude terminal
+	// (not resuming an existing mobile/history session), launch Claude directly
+	// inside Herdr instead of binding a mobile conversation channel whose host
+	// lifecycle would desync on Herdr detach.
+	if input.Kind == "claude" && sharedCLILauncher(command) && !(input.sharedID == "" && herdrTakeover) {
 		script, conversation, err = s.prepareTerminalConversation(workspace, selection, input.sharedID)
 		if err != nil {
 			return nil, err
+		}
+	}
+	guestWorkspace := s.cliWorkspace(workspace)
+	if s.macosGuest != nil && input.Kind != "claude-login" && input.Kind != "agent-login" {
+		guestWorkspace = macOSProjectPath(s.macosGuest.User, workspace)
+	}
+	herdrBacked := false
+	projectLabel := herdrProjectLabel(workspace)
+	switch input.Kind {
+	case "herdr":
+		script = s.herdrAttachScript(guestWorkspace, projectLabel, "Herdr", "herdr", "")
+		herdrBacked = true
+	case "magpie-tui":
+		script = s.magpieTUIScript(guestWorkspace)
+		if herdrTakeover {
+			script = s.herdrAttachScript(guestWorkspace, projectLabel, "Magpie TUI", "magpie-tui", script)
+			herdrBacked = true
+		}
+	case "", "shell", "claude", "agent":
+		if herdrTakeover && conversation == nil {
+			herdrKind := input.Kind
+			tabLabel := "Shell"
+			if herdrKind == "" {
+				herdrKind = "shell"
+			}
+			switch herdrKind {
+			case "claude":
+				tabLabel = "Claude"
+			case "agent":
+				tabLabel = agentSpecName
+				if tabLabel == "" {
+					tabLabel = input.AgentID
+				}
+			}
+			script = s.herdrAttachScript(guestWorkspace, projectLabel, tabLabel, herdrKind, script)
+			herdrBacked = true
 		}
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
@@ -674,24 +725,27 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	var setup func(*terminalSession, int)
-	if isAgentKind {
+	if isAgentKind || herdrBacked {
 		setup = func(session *terminalSession, seq int) {
-			session.agentID = agentSel.AgentID
-			session.agentName = agentSpecName
-			session.accountID = agentSel.ID
-			session.accountLabel = agentSel.Label
-			session.accountAuthMode = agentSel.AuthMode
-			session.scheduleReason = agentSel.Reason
-			session.agentOAuthDomains = agentDomains
-			if input.Kind == "agent-login" {
-				session.title = agentSpecName + " 账号登录"
-				session.loginGuestID = agentSel.GuestID
-			} else {
-				session.title = fmt.Sprintf("%s %d", agentSpecName, seq)
-				if agentSel.ID != "" {
-					aid, accID := agentSel.AgentID, agentSel.ID
-					session.onRateLimit = func(kind string) {
-						s.onAgentRateLimit(aid, accID, kind)
+			session.herdrBacked = herdrBacked
+			if isAgentKind {
+				session.agentID = agentSel.AgentID
+				session.agentName = agentSpecName
+				session.accountID = agentSel.ID
+				session.accountLabel = agentSel.Label
+				session.accountAuthMode = agentSel.AuthMode
+				session.scheduleReason = agentSel.Reason
+				session.agentOAuthDomains = agentDomains
+				if input.Kind == "agent-login" {
+					session.title = agentSpecName + " 账号登录"
+					session.loginGuestID = agentSel.GuestID
+				} else {
+					session.title = fmt.Sprintf("%s %d", agentSpecName, seq)
+					if agentSel.ID != "" {
+						aid, accID := agentSel.AgentID, agentSel.ID
+						session.onRateLimit = func(kind string) {
+							s.onAgentRateLimit(aid, accID, kind)
+						}
 					}
 				}
 			}
@@ -840,4 +894,16 @@ func terminalScript(workspace, kind, command string) string {
 		return prefix + "bash -l"
 	}
 	return prefix + "CAGE_TERMINAL_COMMAND=" + shellescape.Quote(command) + " bash -lic " + shellescape.Quote("eval \"$CAGE_TERMINAL_COMMAND\"; unset CAGE_TERMINAL_COMMAND; exec bash -il")
+}
+
+func herdrProjectLabel(workspace string) string {
+	cleaned := strings.TrimRight(strings.TrimSpace(workspace), "/\\")
+	if cleaned == "" {
+		return "Super Cage"
+	}
+	base := filepath.Base(cleaned)
+	if base == "" || base == "." || base == "/" || base == "\\" {
+		return "Super Cage"
+	}
+	return base
 }

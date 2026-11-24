@@ -454,7 +454,7 @@ func TestWindowsGuestAgentsAndT3CodeDoNotDeadlock(t *testing.T) {
 	s.windowsGuest = &guestos.WindowsProfile{}
 	s.ready = true
 
-	for _, path := range []string{"/api/agent-clis", "/api/agent-clis/codex/accounts?skip_detect=1", "/api/t3code"} {
+	for _, path := range []string{"/api/agent-clis", "/api/agent-clis/codex/accounts?skip_detect=1", "/api/t3code", "/api/magpie", "/api/herdr"} {
 		r := httptest.NewRequest(http.MethodGet, s.origin+path, nil)
 		r.AddCookie(&http.Cookie{Name: s.cookieName(), Value: s.session})
 		r.AddCookie(&http.Cookie{Name: s.cookieName() + "-desktop", Value: trustedViewProof(s.token)})

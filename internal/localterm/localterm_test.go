@@ -19,7 +19,11 @@ var attachCommand = Command{"/Applications/Super Cage.app/Contents/MacOS/cage", 
 // installed is an application of the table as if found at its usual place.
 func installed(t *testing.T, id string) Installed {
 	t.Helper()
-	paths := map[string]string{"ghostty": "/Applications/Ghostty.app", "terminal": "/System/Applications/Utilities/Terminal.app"}
+	paths := map[string]string{
+		"herdr":    "/Applications/Herdr.app",
+		"ghostty":  "/Applications/Ghostty.app",
+		"terminal": "/System/Applications/Utilities/Terminal.app",
+	}
 	for _, app := range macApps {
 		if app.ID == id {
 			return Installed{App: app, Path: paths[id]}
@@ -39,23 +43,32 @@ func planFor(t *testing.T, id string) (Plan, string) {
 	return plan, filepath.Join(scratch, "super-cage-0123456789abcdef.command")
 }
 
-// The table keeps exactly two applications, and each opens its window its own
-// way: Terminal runs the script as a document, Ghostty gets a window through
-// AppleScript (after macOS's Automation question).
+// The table keeps three applications in priority order (Herdr, Ghostty,
+// system Terminal), and each opens its window its own way: Herdr uses its own
+// control CLI (no Automation prompt), Ghostty gets a window through AppleScript
+// (after macOS's Automation question), and Terminal runs the script as a document.
 func TestPlansPerApplication(t *testing.T) {
-	if got := len(macApps); got != 2 || macApps[0].ID != "ghostty" || macApps[1].ID != "terminal" {
+	if got := len(macApps); got != 3 || macApps[0].ID != "herdr" || macApps[1].ID != "ghostty" || macApps[2].ID != "terminal" {
 		t.Fatalf("the table is %+v", macApps)
+	}
+	if macApps[0].Automation || !macApps[1].Automation || macApps[2].Automation {
+		t.Fatalf("unexpected automation flags: %+v", macApps)
 	}
 	quotedCage := "'/Applications/Super Cage.app/Contents/MacOS/cage'"
 	for _, row := range []struct {
 		id     string
 		prompt bool
+		files  int
 		steps  func(script string) [][]string
 	}{
-		{"terminal", false, func(s string) [][]string {
+		{"herdr", false, 2, func(s string) [][]string {
+			helper := strings.TrimSuffix(s, ".command") + "-herdr.sh"
+			return [][]string{{"/bin/sh", helper}}
+		}},
+		{"terminal", false, 1, func(s string) [][]string {
 			return [][]string{{"/usr/bin/open", "-a", "/System/Applications/Utilities/Terminal.app", s}}
 		}},
-		{"ghostty", true, func(s string) [][]string {
+		{"ghostty", true, 1, func(s string) [][]string {
 			return [][]string{
 				{"/usr/bin/osascript", "-e", "tell application id \"com.mitchellh.ghostty\"\nset cfg to new surface configuration\nset command of cfg to \"" + s + "\"\nnew window with configuration cfg\nend tell"},
 			}
@@ -74,11 +87,32 @@ func TestPlansPerApplication(t *testing.T) {
 				t.Errorf("%s step %d: prompt %v, want %v", row.id, i, step.Prompt, row.prompt)
 			}
 		}
-		if len(plan.Files) != 1 || plan.Files[0].Path != script {
+		if len(plan.Files) != row.files || plan.Files[0].Path != script {
 			t.Fatalf("%s: files %+v", row.id, plan.Files)
 		}
 		if f := plan.Files[0]; f.Mode != 0o700 || !strings.Contains(f.Content, "rm -f -- \"$0\"\n"+quotedCage+" attach --terminal 0123456789abcdef\nstatus=$?\n") || !strings.Contains(f.Content, "\t"+quotedCage+" attach --reset 2>/dev/null\n") {
 			t.Errorf("%s script %o %q", row.id, f.Mode, f.Content)
+		}
+		if row.id == "herdr" {
+			helper := plan.Files[1]
+			wantHelper := strings.TrimSuffix(script, ".command") + "-herdr.sh"
+			argvJSON, _ := json.Marshal([]string{"/bin/sh", script})
+			if helper.Path != wantHelper || helper.Mode != 0o700 {
+				t.Fatalf("herdr helper: %+v", helper)
+			}
+			for _, snippet := range []string{
+				"rm -f -- \"$0\"\n",
+				"/Applications/Herdr.app/Contents/MacOS/Herdr",
+				"/Applications/Herdr.app/Contents/MacOS/herdr-app",
+				"$HOME/.local/bin/herdr-app",
+				`do terminal.open --name "Super Cage" --argv ` + ShellQuote(string(argvJSON)),
+				"/usr/bin/open -a /Applications/Herdr.app",
+				`"$herdr_bin" status`,
+			} {
+				if !strings.Contains(helper.Content, snippet) {
+					t.Errorf("herdr helper missing %q in:\n%s", snippet, helper.Content)
+				}
+			}
 		}
 	}
 	// An application this build no longer knows cannot be planned.
@@ -88,20 +122,96 @@ func TestPlansPerApplication(t *testing.T) {
 	}
 }
 
-// Ghostty opens the window when it is installed, the system Terminal when it
-// is not: there is nothing to choose, however many others are installed.
-func TestPickPrefersGhosttyElseTerminal(t *testing.T) {
+func TestHerdrHelperScriptQuotingAndExecution(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell test")
+	}
+	root := t.TempDir()
+	scratch := filepath.Join(root, "it's scratch dir")
+	appDir := filepath.Join(root, "My Herdr.app")
+	binDir := filepath.Join(appDir, "Contents", "MacOS")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	argsLog := filepath.Join(root, "herdr-args.txt")
+	stub := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\"; done > " + ShellQuote(argsLog) + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "Herdr"), []byte(stub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	herdrApp := installed(t, "herdr")
+	herdrApp.Path = appDir
+	plan, err := PlanLaunch(PlanInput{App: herdrApp, Command: attachCommand, Name: "0123456789abcdef", Scratch: scratch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Launch(context.Background(), plan, ExecRunner{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(plan.Files[1].Path); !os.IsNotExist(err) {
+		t.Fatalf("herdr helper script did not remove itself: %v", err)
+	}
+	raw, err := os.ReadFile(argsLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotArgs := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n")
+	if len(gotArgs) != 6 || gotArgs[0] != "do" || gotArgs[1] != "terminal.open" || gotArgs[2] != "--name" || gotArgs[3] != "Super Cage" || gotArgs[4] != "--argv" {
+		t.Fatalf("unexpected herdr-app args: %q", gotArgs)
+	}
+	var decoded []string
+	if err := json.Unmarshal([]byte(gotArgs[5]), &decoded); err != nil {
+		t.Fatalf("invalid --argv JSON %q: %v", gotArgs[5], err)
+	}
+	if len(decoded) != 2 || decoded[0] != "/bin/sh" || decoded[1] != plan.Files[0].Path {
+		t.Fatalf("decoded argv = %q, want [/bin/sh %q]", decoded, plan.Files[0].Path)
+	}
+
+	// Fallback to $HOME/.local/bin/herdr-app when bundle binary is absent.
+	if err := os.Remove(filepath.Join(binDir, "Herdr")); err != nil {
+		t.Fatal(err)
+	}
+	fakeHome := filepath.Join(root, "home")
+	localBin := filepath.Join(fakeHome, ".local", "bin")
+	if err := os.MkdirAll(localBin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fallbackLog := filepath.Join(root, "fallback-args.txt")
+	fallbackStub := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + ShellQuote(fallbackLog) + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(localBin, "herdr-app"), []byte(fallbackStub), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", fakeHome)
+	plan2, err := PlanLaunch(PlanInput{App: herdrApp, Command: attachCommand, Name: "fedcba9876543210", Scratch: scratch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Launch(context.Background(), plan2, ExecRunner{}); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(fallbackLog); err != nil || !strings.Contains(string(data), "terminal.open") {
+		t.Fatalf("fallback herdr-app did not run: %q %v", data, err)
+	}
+}
+
+// Herdr opens the window when it is installed, else Ghostty, else the system
+// Terminal: there is nothing to choose, however many others are installed.
+func TestPickPrefersHerdrThenGhosttyElseTerminal(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS table")
 	}
-	ghostty, terminal := installed(t, "ghostty"), installed(t, "terminal")
+	herdr, ghostty, terminal := installed(t, "herdr"), installed(t, "ghostty"), installed(t, "terminal")
 	for _, row := range []struct {
 		name  string
 		found []Installed
 		want  string
 	}{
-		{"both", []Installed{terminal, ghostty}, "ghostty"},
-		{"both in table order", []Installed{ghostty, terminal}, "ghostty"},
+		{"all three reverse", []Installed{terminal, ghostty, herdr}, "herdr"},
+		{"all three in table order", []Installed{herdr, ghostty, terminal}, "herdr"},
+		{"Herdr and Ghostty", []Installed{ghostty, herdr}, "herdr"},
+		{"Herdr and Terminal", []Installed{terminal, herdr}, "herdr"},
+		{"Herdr alone", []Installed{herdr}, "herdr"},
+		{"Ghostty and Terminal", []Installed{terminal, ghostty}, "ghostty"},
+		{"Ghostty and Terminal in table order", []Installed{ghostty, terminal}, "ghostty"},
 		{"Ghostty alone", []Installed{ghostty}, "ghostty"},
 		{"Terminal alone", []Installed{terminal}, "terminal"},
 		{"neither", nil, ""},
@@ -184,24 +294,28 @@ func TestLaunchWritesPrivateFilesAndFallsBack(t *testing.T) {
 	// Scripts never run are removed later; recent ones and other files stay.
 	dir := filepath.Dir(script)
 	stale := filepath.Join(dir, "super-cage-0123456789abcdef.command")
-	kept := []string{filepath.Join(dir, "super-cage-fresh.command"), filepath.Join(dir, "my-own.command"), filepath.Join(dir, "super-cage-other.yaml")}
-	for _, path := range kept {
+	staleHerdr := filepath.Join(dir, "super-cage-0123456789abcdef-herdr.sh")
+	kept := []string{
+		filepath.Join(dir, "super-cage-fresh.command"),
+		filepath.Join(dir, "super-cage-fresh-herdr.sh"),
+		filepath.Join(dir, "my-own.command"),
+		filepath.Join(dir, "my-own-herdr.sh"),
+		filepath.Join(dir, "super-cage-other.yaml"),
+	}
+	for _, path := range append([]string{staleHerdr}, kept...) {
 		if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
 	old := time.Now().Add(-time.Hour)
-	for _, path := range []string{stale, kept[1], kept[2]} {
-		if path != stale {
-			if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-		}
+	for _, path := range []string{stale, staleHerdr, kept[2], kept[3], kept[4]} {
 		_ = os.Chtimes(path, old, old)
 	}
 	PruneScratch(dir, 10*time.Minute)
-	if _, err := os.Stat(stale); !os.IsNotExist(err) {
-		t.Fatal("stale script kept")
+	for _, gone := range []string{stale, staleHerdr} {
+		if _, err := os.Stat(gone); !os.IsNotExist(err) {
+			t.Fatalf("stale script kept: %s", gone)
+		}
 	}
 	for _, path := range kept {
 		if _, err := os.Stat(path); err != nil {
@@ -237,6 +351,26 @@ func TestDetectWithoutPermission(t *testing.T) {
 		t.Fatalf("Terminal.app not detected: %+v", found)
 	}
 	t.Logf("detected %d of %d known applications in %v: %+v", len(found), len(macApps), elapsed, found)
+}
+
+func TestDetectFindsFreshHerdrBundleInHomeApplications(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS fallback detection")
+	}
+	fakeHome := t.TempDir()
+	herdrBin := filepath.Join(fakeHome, "Applications", "Herdr.app", "Contents", "MacOS", "herdr-app")
+	if err := os.MkdirAll(filepath.Dir(herdrBin), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(herdrBin, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", fakeHome)
+	found := Detect()
+	picked, ok := Pick(found)
+	if !ok || picked.ID != "herdr" || !strings.HasSuffix(picked.Path, "/Herdr.app") {
+		t.Fatalf("expected freshly installed Herdr.app to be picked, got %+v (%v), found=%+v", picked, ok, found)
+	}
 }
 
 func TestSettingsDefaults(t *testing.T) {

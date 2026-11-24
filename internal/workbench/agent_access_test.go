@@ -185,7 +185,7 @@ func TestAgentTransportRefusesWindowOnlyRoutes(t *testing.T) {
 		}
 	}
 	for _, route := range [][2]string{
-		{"PUT", "/api/client/local-terminal"}, {"POST", "/api/client/local-terminal/open"}, {"GET", "/api/client/local-terminal/app"},
+		{"PUT", "/api/client/local-terminal"}, {"POST", "/api/client/local-terminal/open"}, {"POST", "/api/client/local-terminal/install-herdr"}, {"GET", "/api/client/local-terminal/app"},
 		{"POST", "/api/claude-science/host-render"}, {"POST", "/api/claude-science/ticket"}, {"POST", "/api/claude-science/release"},
 		{"POST", "/api/app-update/policy"}, {"GET", "/api/app-update/interruptions"}, {"POST", "/api/desktop-local/app-update-handoff"},
 		{"GET", "/api/entry"}, {"POST", "/api/entry/on"}, {"GET", "/api/entry/include"}, {"POST", "/api/entry/devices/x/revoke"}, {"POST", "/api/client/entry/keys"},

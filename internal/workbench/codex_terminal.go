@@ -15,7 +15,10 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 	if !s.codexGuestSupported() {
 		return nil, errors.New("Codex 终端目前只支持 Linux 环境")
 	}
-	if input.Kind == "codex" && input.ClaudeAccountID == "" && (input.sharedID != "" || input.codexSession && s.codexSessionsPossible()) {
+	// Resuming a specific bound Codex history/mobile session stays on the bound
+	// session path; freshly launched menu Codex terminals follow Herdr takeover
+	// when active so detach/archive and thread leases never split-brain.
+	if input.Kind == "codex" && input.ClaudeAccountID == "" && (input.sharedID != "" || (input.codexSession && s.codexSessionsPossible() && !s.shouldTakeoverWithHerdr())) {
 		return s.createCodexSessionLocked(input)
 	}
 	if input.ClaudeAccountID != "" || input.sharedID != "" {
@@ -74,6 +77,13 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 		finished = s.codexTerminalFinished(selection.ID, login)
 	}
 	script := codexTerminalScript(s.cliWorkspace(workspace), command, selection.GuestID, selection.Subject, login)
+	var codexSetup func(*terminalSession, int)
+	if !login && s.shouldTakeoverWithHerdr() {
+		script = s.herdrAttachScript(s.cliWorkspace(workspace), herdrProjectLabel(workspace), "Codex", "codex", script)
+		codexSetup = func(session *terminalSession, _ int) {
+			session.herdrBacked = true
+		}
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {
 		s.account.mu.Lock()
@@ -82,7 +92,7 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 			return nil, errMobileLocked
 		}
 	}
-	session, err := s.terminals.startCodexSession(cmd, workspace, input.Kind, selection, finished)
+	session, err := s.terminals.startCodexSessionWithSetup(cmd, workspace, input.Kind, selection, finished, codexSetup)
 	if input.requestContext != nil {
 		s.account.mu.Unlock()
 	}

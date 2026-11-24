@@ -13,15 +13,17 @@ import { createWorkbench } from "./workbench-fixture.mjs";
 const output = new URL("../../output/local-terminal-settings/", import.meta.url);
 await fs.mkdir(output, { recursive: true });
 const apps = {
+  herdr: { id: "herdr", name: "Herdr", automation: false },
   ghostty: { id: "ghostty", name: "Ghostty", automation: true },
   terminal: { id: "terminal", name: "系统终端", automation: false },
 };
 const lines = {
-  ghostty: "用 Ghostty 打开",
-  terminal: "用系统终端打开；安装 Ghostty 后自动改用 Ghostty",
+  herdr: "用 Herdr 打开（已自动替代 Ghostty 接管本机终端）",
+  ghostty: "用 Ghostty 打开；安装 Herdr 后自动改用 Herdr",
+  terminal: "用系统终端打开；安装 Herdr 或 Ghostty 后自动切换",
 };
 // What the page must never offer or name any more.
-const gone = /iTerm2|WezTerm|kitty|Alacritty|Warp|Herdr|内置终端|选择终端应用|换一个/;
+const gone = /iTerm2|WezTerm|kitty|Alacritty|Warp|内置终端|选择终端应用|换一个/;
 
 async function run({ theme, viewport, desktop = true, app = "ghostty", supported = true, line = lines[app] }) {
   const context = { mode: "local", connection_id: "g".repeat(64), desktop_gateway: desktop, client_platform: "darwin", server_platform: "darwin", connection: { state: "connected" } };
@@ -38,6 +40,9 @@ async function run({ theme, viewport, desktop = true, app = "ghostty", supported
       if (path === "/client/local-terminal/app") {
         detections++;
         return route.fulfill({ json: { app: app ? apps[app] : null } });
+      }
+      if (path === "/client/local-terminal/install-herdr" && route.request().method() === "POST") {
+        return route.fulfill({ json: { app: apps.herdr, installed: true } });
       }
       if (path === "/client/local-terminal") {
         if (route.request().method() === "PUT") { puts.push(body); settings = body; }
@@ -79,8 +84,10 @@ async function run({ theme, viewport, desktop = true, app = "ghostty", supported
     assert.equal(await section.getByRole("radio").count(), 0);
     assert.equal(await section.getByRole("radiogroup").count(), 0);
     assert.equal(await section.locator(".choice-list, .local-terminal-chip").count(), 0);
-    assert.equal(await page.locator(".settings-content").getByText(gone).count(), 0, "no other application, chooser or Herdr is named");
+    assert.equal(await page.locator(".settings-content").getByText(gone).count(), 0, "no other application or chooser is named");
     assert.equal(await section.locator(".local-terminal-opener").count(), 1);
+    const installBtn = section.getByRole("button", { name: "安装 Herdr 桌面端（安装后自动改用 Herdr）", exact: true });
+    assert.equal(await installBtn.count(), supported && app !== "herdr" ? 1 : 0, "optional Herdr install button visibility");
     assert.equal(await section.getByText(/macOS 会询问/).count(), 0, "the macOS question is the notice's, not the page's");
     const switches = section.getByRole("switch");
     assert.equal(await switches.count(), 2);
@@ -134,10 +141,11 @@ async function run({ theme, viewport, desktop = true, app = "ghostty", supported
 
 for (const theme of ["light", "dark"]) {
   for (const viewport of [{ width: 1440, height: 900 }, { width: 1000, height: 700 }]) {
+    await run({ theme, viewport, app: "herdr" });
     await run({ theme, viewport, app: "ghostty" });
     await run({ theme, viewport, app: "terminal" });
   }
 }
-await run({ theme: "light", viewport: { width: 1000, height: 700 }, app: null, line: "这台电脑上找不到 Ghostty 或系统终端，暂时不能在本机终端中打开" });
+await run({ theme: "light", viewport: { width: 1000, height: 700 }, app: null, line: "这台电脑上找不到 Herdr、Ghostty 或系统终端，暂时不能在本机终端中打开" });
 await run({ theme: "light", viewport: { width: 1000, height: 700 }, supported: false, line: "这台电脑的系统暂不支持在本机终端中打开，终端会在 Super Cage 的标签页中打开" });
 await run({ theme: "light", viewport: { width: 1000, height: 700 }, desktop: false });

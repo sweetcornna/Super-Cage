@@ -314,6 +314,7 @@ export function TerminalView({
   onOutput,
   onLaunchAgent,
   onOpenAgentAccounts,
+  onReattachHerdr,
 }) {
   const { appearance, theme, variant } = useAppearance();
   const box = useRef(),
@@ -939,8 +940,18 @@ export function TerminalView({
       {link !== "open" && (ended || link === "stalled" || notice) && (
         <div className={`terminal-note ${ended || link === "stalled" ? "" : "terminal-note-quiet"}`} role="status">
           {ended
-            ? codexLaunchRefused(session) ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示") : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
+            ? codexLaunchRefused(session)
+              ? "未能打开：" + (terminalLastLine(instance.current?.buffer.active) || "原因见终端中的提示")
+              : (session.terminalKind === "herdr" || session.herdr_backed) && onReattachHerdr
+                ? "已从 Herdr 分离（后台终端与 Agent 仍在运行）。"
+                : "终端会话已结束。可点击项目右侧的终端图标新建终端。"
             : link === "stalled" ? "终端连接已断开。" : link === "connecting" ? "正在连接终端…" : "正在重新连接…"}
+          {ended && (session.terminalKind === "herdr" || session.herdr_backed) && onReattachHerdr && (
+            <button className="primary" onClick={() => onReattachHerdr(session)}>
+              <RefreshCw size={13} />
+              重新连接 Herdr
+            </button>
+          )}
           {!ended && link === "stalled" && (
             <button onClick={() => reconnectNow.current?.()}>
               <RefreshCw size={13} />

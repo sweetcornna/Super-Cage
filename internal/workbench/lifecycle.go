@@ -139,6 +139,7 @@ func (s *Server) closeService() error {
 		s.closeMacOSScreenSharing()
 		s.closeProjectShares()
 		s.closeT3CodeProxy()
+		s.closeMagpieProxy()
 		s.closeAgents()
 		s.closeWindowsBrowser()
 		if s.windowsGuest != nil {

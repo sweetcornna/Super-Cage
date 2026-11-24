@@ -2,6 +2,7 @@ package localterm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -63,6 +64,19 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 	script := filepath.Join(in.Scratch, ScriptPrefix+in.Name+".command")
 	scriptFile := PlanFile{Path: script, Mode: 0o700, Content: launchScript(in.Command)}
 	switch in.App.ID {
+	case "herdr":
+		// Herdr opens a native terminal tab/window via its own herdr-app control
+		// socket, requiring no macOS AppleScript Automation prompt.
+		helper := filepath.Join(in.Scratch, ScriptPrefix+in.Name+"-herdr.sh")
+		helperContent, err := herdrLaunchScript(in.App.Path, script)
+		if err != nil {
+			return Plan{}, err
+		}
+		helperFile := PlanFile{Path: helper, Mode: 0o700, Content: helperContent}
+		return Plan{
+			Files: []PlanFile{scriptFile, helperFile},
+			Steps: []Step{{Argv: []string{"/bin/sh", helper}, Prompt: false}},
+		}, nil
 	case "terminal":
 		// Terminal runs a .command file in a new window; no permission is asked.
 		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/open", "-a", in.App.Path, script}}}}, nil
@@ -80,6 +94,51 @@ func PlanLaunch(in PlanInput) (Plan, error) {
 		return Plan{Files: []PlanFile{scriptFile}, Steps: []Step{{Argv: []string{"/usr/bin/osascript", "-e", source}, Prompt: true}}}, nil
 	}
 	return Plan{}, errors.New("不支持这个本机终端应用")
+}
+
+// herdrLaunchScript builds a self-deleting /bin/sh helper that asks Herdr's
+// control CLI to open a terminal running script, starting Herdr.app and
+// waiting briefly for its socket if it is not running yet.
+func herdrLaunchScript(appPath, script string) (string, error) {
+	argvJSON, err := json.Marshal([]string{"/bin/sh", script})
+	if err != nil {
+		return "", err
+	}
+	bundledHerdr := filepath.Join(appPath, "Contents", "MacOS", "Herdr")
+	bundledBin := filepath.Join(appPath, "Contents", "MacOS", "herdr-app")
+	quotedApp := ShellQuote(appPath)
+	quotedHerdr := ShellQuote(bundledHerdr)
+	quotedBin := ShellQuote(bundledBin)
+	quotedArgv := ShellQuote(string(argvJSON))
+	return "#!/bin/sh\n" +
+		"# Super Cage: opens one terminal in Herdr, then removes itself.\n" +
+		"rm -f -- \"$0\"\n" +
+		"herdr_bin=" + quotedHerdr + "\n" +
+		"if [ ! -x \"$herdr_bin\" ]; then\n" +
+		"\therdr_bin=" + quotedBin + "\n" +
+		"fi\n" +
+		"if [ ! -x \"$herdr_bin\" ] && [ -x \"$HOME/.local/bin/herdr-app\" ]; then\n" +
+		"\therdr_bin=\"$HOME/.local/bin/herdr-app\"\n" +
+		"fi\n" +
+		"if [ ! -x \"$herdr_bin\" ]; then\n" +
+		"\tprintf '%s\\n' '找不到 Herdr 控制程序（herdr-app）' >&2\n" +
+		"\texit 1\n" +
+		"fi\n" +
+		"if \"$herdr_bin\" do terminal.open --name \"Super Cage\" --argv " + quotedArgv + " >/dev/null 2>&1; then\n" +
+		"\t/usr/bin/open -a " + quotedApp + " >/dev/null 2>&1 || true\n" +
+		"\texit 0\n" +
+		"fi\n" +
+		"/usr/bin/open -a " + quotedApp + " || exit $?\n" +
+		"i=0\n" +
+		"while [ \"$i\" -lt 34 ]; do\n" +
+		"\tif \"$herdr_bin\" status >/dev/null 2>&1; then\n" +
+		"\t\tbreak\n" +
+		"\tfi\n" +
+		"\t/bin/sleep 0.15\n" +
+		"\ti=$((i + 1))\n" +
+		"done\n" +
+		"\"$herdr_bin\" do terminal.open --name \"Super Cage\" --argv " + quotedArgv + " || exit $?\n" +
+		"/usr/bin/open -a " + quotedApp + " >/dev/null 2>&1 || true\n", nil
 }
 
 // launchScript runs command in the new window. A clean exit (the terminal
@@ -223,6 +282,7 @@ func privateDir(dir string) error {
 // permission, say).
 func PruneScratch(dir string, age time.Duration) {
 	pruneFiles(dir, ".command", age)
+	pruneFiles(dir, "-herdr.sh", age)
 }
 
 func pruneFiles(dir, suffix string, age time.Duration) {

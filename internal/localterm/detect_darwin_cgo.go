@@ -24,15 +24,48 @@ static char *cage_application_path(const char *bundle) {
 */
 import "C"
 
-import "unsafe"
+import (
+	"os"
+	"path/filepath"
+	"unsafe"
+)
 
 func applicationPath(bundleID string) string {
 	name := C.CString(bundleID)
 	defer C.free(unsafe.Pointer(name))
 	path := C.cage_application_path(name)
-	if path == nil {
+	if path != nil {
+		defer C.free(unsafe.Pointer(path))
+		if found := C.GoString(path); found != "" {
+			if _, err := os.Stat(found); err == nil {
+				return found
+			}
+		}
+	}
+	return fallbackBundlePath(bundleID)
+}
+
+// fallbackBundlePath checks well-known bundle locations directly so a freshly
+// installed Herdr.app is detected immediately before LaunchServices indexes it.
+func fallbackBundlePath(bundleID string) string {
+	if bundleID != "dev.herdr.app" {
 		return ""
 	}
-	defer C.free(unsafe.Pointer(path))
-	return C.GoString(path)
+	var candidates []string
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, "Applications", "Herdr.app"))
+	}
+	candidates = append(candidates, "/Applications/Herdr.app")
+	for _, candidate := range candidates {
+		for _, marker := range []string{
+			filepath.Join(candidate, "Contents", "MacOS", "Herdr"),
+			filepath.Join(candidate, "Contents", "MacOS", "herdr-app"),
+			filepath.Join(candidate, "Contents", "Info.plist"),
+		} {
+			if info, err := os.Stat(marker); err == nil && !info.IsDir() {
+				return candidate
+			}
+		}
+	}
+	return ""
 }

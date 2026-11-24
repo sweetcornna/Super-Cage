@@ -34,11 +34,12 @@ class AgentRuntimeTests(unittest.TestCase):
         self.env = {**os.environ, "HOME": str(self.home), "PATH": f"{self.home / '.local/bin'}:{os.environ.get('PATH', '')}"}
 
     def tearDown(self):
-        # Ensure any mock t3 server started by a test is stopped cleanly.
-        try:
-            self.run_rt("t3code-stop", {}, check=False)
-        except Exception:
-            pass
+        # Ensure any mock servers started by a test are stopped cleanly.
+        for stop_cmd in ("t3code-stop", "magpie-stop", "herdr-stop"):
+            try:
+                self.run_rt(stop_cmd, {}, check=False)
+            except Exception:
+                pass
         self.tmp.cleanup()
 
     def run_rt(self, subcmd, payload, extra_args=(), check=True, env=None):
@@ -820,6 +821,509 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(seen["login"], account_id)
         self.assertEqual(seen["hosts"], "app.factory.ai,auth.factory.ai")
         self.assertTrue(seen["home"].endswith(f"/droid/{account_id}/config"))
+
+    def test_magpie_lifecycle_mock_server_auth_redaction_and_uninstall(self):
+        port = free_port()
+        gw_port = free_port()
+        other_port = free_port()
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        seen_dump = self.home / "magpie-seen.json"
+        uninstall_log = self.home / "magpie-uninstall.log"
+
+        mock_magpie = bin_dir / "magpie"
+        mock_magpie.write_text(
+            f"#!{sys.executable}\n"
+            "import http.server, json, os, pathlib, signal, socketserver, sys, threading\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['--version']:\n"
+            "    print('magpie v0.1.20260417')\n"
+            "    sys.exit(0)\n"
+            "if args and args[0] == 'uninstall':\n"
+            f"    pathlib.Path({str(uninstall_log)!r}).write_text(json.dumps(args))\n"
+            "    sys.exit(0)\n"
+            "port = 3430\n"
+            "for i, a in enumerate(args):\n"
+            "    if a == '--addr' and i + 1 < len(args):\n"
+            "        port = int(args[i + 1].rsplit(':', 1)[1])\n"
+            f"gw_port = {gw_port}\n"
+            "web_key = os.environ.get('MAGPIE_WEB_KEY', '')\n"
+            f"pathlib.Path({str(seen_dump)!r}).write_text(json.dumps({{'args': args, 'MAGPIE_WEB_KEY': web_key}}))\n"
+            "class H(http.server.BaseHTTPRequestHandler):\n"
+            "    def do_GET(self):\n"
+            "        self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+            "    def log_message(self, *a): pass\n"
+            "socketserver.TCPServer.allow_reuse_address = True\n"
+            "web_srv = socketserver.TCPServer(('127.0.0.1', port), H)\n"
+            "gw_srv = socketserver.TCPServer(('127.0.0.1', gw_port), H)\n"
+            "t = threading.Thread(target=gw_srv.serve_forever, daemon=True)\n"
+            "t.start()\n"
+            "signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
+            "print('Magpie Web UI ready on 127.0.0.1', flush=True)\n"
+            "print(f'Open http://127.0.0.1:{port}/?k={web_key}', flush=True)\n"
+            "print(f'Auth MAGPIE_WEB_KEY={web_key}', flush=True)\n"
+            "print(f'Cookie magpie_web_{port}={web_key}', flush=True)\n"
+            "print(f'Query http://127.0.0.1:{port}/api?foo=1&k=another_secret_key_99', flush=True)\n"
+            "web_srv.serve_forever()\n"
+        )
+        mock_magpie.chmod(0o755)
+
+        # 1. Status before start.
+        st0 = json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)
+        self.assertTrue(st0["installed"])
+        self.assertEqual(st0["binary_path"], str(mock_magpie))
+        self.assertEqual(st0["version"], "0.1.20260417")
+        self.assertFalse(st0["running"])
+        self.assertEqual(st0["pid"], 0)
+        self.assertEqual(st0["port"], port)
+        self.assertEqual(st0["gateway_port"], gw_port)
+        self.assertFalse(st0["gateway_running"])
+        self.assertFalse(st0["gateway_only"])
+
+        # Open URL before key exists falls back to unauthenticated base URL.
+        open0 = json.loads(self.run_rt("magpie-open-url", {"port": port}).stdout)
+        self.assertFalse(open0["authenticated"])
+        self.assertEqual(open0["url"], f"http://127.0.0.1:{port}/")
+
+        # Port colliding with gateway port must be rejected.
+        collide_default = self.run_rt("magpie-start", {"port": 3425}, check=False)
+        self.assertNotEqual(collide_default.returncode, 0)
+        collide_custom = self.run_rt("magpie-start", {"port": gw_port, "gateway_port": gw_port}, check=False)
+        self.assertNotEqual(collide_custom.returncode, 0)
+
+        # 2. Start Magpie and verify key (0600), env-only passing, log redaction, and gateway detection.
+        started = json.loads(self.run_rt("magpie-start", {
+            "port": port,
+            "gateway_port": gw_port,
+            "workspace": str(self.home),
+        }).stdout)
+        self.assertTrue(started["installed"])
+        self.assertEqual(started["binary_path"], str(mock_magpie))
+        self.assertEqual(started["version"], "0.1.20260417")
+        self.assertTrue(started["running"])
+        self.assertGreater(started["pid"], 0)
+        self.assertEqual(started["port"], port)
+        self.assertEqual(started["gateway_port"], gw_port)
+        self.assertTrue(started["gateway_running"])
+        self.assertFalse(started["gateway_only"])
+
+        key_file = self.home / ".local/share/cage/magpie/web.key"
+        state_file = self.home / ".local/share/cage/magpie/runtime.json"
+        log_file = self.home / ".local/share/cage/magpie/server.log"
+        self.assertEqual(stat.S_IMODE(key_file.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(state_file.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+
+        web_key = key_file.read_text().strip()
+        self.assertEqual(len(web_key), 32)
+        self.assertNotIn(web_key, json.dumps(started))
+        self.assertNotIn(web_key, state_file.read_text())
+
+        seen = json.loads(seen_dump.read_text())
+        self.assertEqual(seen["MAGPIE_WEB_KEY"], web_key)
+        self.assertEqual(seen["args"], ["web", "--addr", f"127.0.0.1:{port}", "--no-open"])
+        self.assertNotIn(web_key, " ".join(seen["args"]))
+
+        time.sleep(0.15)
+        log_text = log_file.read_text()
+        self.assertIn("Magpie Web UI ready on 127.0.0.1", log_text)
+        for forbidden in (web_key, "another_secret_key_99", "MAGPIE_WEB_KEY=", f"magpie_web_{port}=", "?k=", "&k="):
+            self.assertNotIn(forbidden, log_text, f"secret leaked in magpie server.log: {forbidden}")
+
+        # 3. Open URL returns authenticated URL with web.key.
+        open1 = json.loads(self.run_rt("magpie-open-url", {}).stdout)
+        self.assertTrue(open1["authenticated"])
+        self.assertEqual(open1["url"], f"http://127.0.0.1:{port}/?k={web_key}")
+
+        # 4. Status matching vs mismatched port & unverified PID identity.
+        st1 = json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)
+        self.assertTrue(st1["running"])
+        self.assertEqual(st1["pid"], started["pid"])
+        self.assertTrue(st1["gateway_running"])
+
+        st_mismatch = json.loads(self.run_rt("magpie-status", {"port": other_port, "gateway_port": gw_port}).stdout)
+        self.assertFalse(st_mismatch["running"])
+        self.assertEqual(st_mismatch["pid"], 0)
+        self.assertTrue(st_mismatch["gateway_running"])
+
+        state_obj = json.loads(state_file.read_text())
+        self.assertTrue(bool(state_obj.get("pid_identity")))
+        unverified = dict(state_obj, pid_identity="")
+        state_file.write_text(json.dumps(unverified))
+        self.assertFalse(json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)["running"])
+        state_file.write_text(json.dumps(state_obj))
+
+        # 5. Idempotent start reuses existing PID; restart replaces PID & applies gateway_only flag.
+        reused = json.loads(self.run_rt("magpie-start", {"port": port, "gateway_port": gw_port}).stdout)
+        self.assertEqual(reused["pid"], started["pid"])
+
+        restarted = json.loads(self.run_rt("magpie-restart", {
+            "port": port,
+            "gateway_port": gw_port,
+            "gateway_only": True,
+        }).stdout)
+        self.assertTrue(restarted["running"])
+        self.assertNotEqual(restarted["pid"], started["pid"])
+        self.assertTrue(restarted["gateway_only"])
+        seen2 = json.loads(seen_dump.read_text())
+        self.assertIn("--gateway", seen2["args"])
+        self.assertEqual(seen2["MAGPIE_WEB_KEY"], web_key)
+
+        # 6. Stop rejects mismatched port, then stops cleanly on matching port.
+        skip_stop = json.loads(self.run_rt("magpie-stop", {"port": other_port}).stdout)
+        self.assertTrue(skip_stop.get("skipped_port_mismatch"))
+        self.assertTrue(json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)["running"])
+
+        stopped = json.loads(self.run_rt("magpie-stop", {"port": port}).stdout)
+        self.assertFalse(stopped["running"])
+        self.assertFalse(state_file.exists())
+        st_after = json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)
+        self.assertFalse(st_after["running"])
+        self.assertFalse(st_after["gateway_running"])
+
+        # 7. Uninstall stops running process, invokes `magpie uninstall --yes --keep-data`, and removes binary.
+        self.run_rt("magpie-start", {"port": port, "gateway_port": gw_port})
+        uninst = json.loads(self.run_rt("magpie-uninstall", {}).stdout)
+        self.assertFalse(uninst["installed"])
+        self.assertFalse(uninst["running"])
+        self.assertEqual(json.loads(uninstall_log.read_text()), ["uninstall", "--yes", "--keep-data"])
+        self.assertFalse(mock_magpie.exists())
+        self.assertFalse(state_file.exists())
+        st_uninst = json.loads(self.run_rt("magpie-status", {"port": port, "gateway_port": gw_port}).stdout)
+        self.assertFalse(st_uninst["installed"])
+        self.assertFalse(st_uninst["running"])
+
+    def test_herdr_lifecycle_theme_and_interactive_attach(self):
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        proj_dir = self.home / "my-project"
+        proj_dir.mkdir(parents=True, exist_ok=True)
+        mock_state_file = self.home / "herdr-mock-state.json"
+        mock_calls_file = self.home / "herdr-mock-calls.jsonl"
+        mock_state_file.write_text(json.dumps({
+            "running": False,
+            "server_pid": 0,
+            "workspaces": [],
+            "agents": [],
+            "next_id": 1,
+        }))
+
+        mock_herdr = bin_dir / "herdr"
+        mock_herdr.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, pathlib, shlex, signal, stat, subprocess, sys, time\n"
+            f"STATE = pathlib.Path({str(mock_state_file)!r})\n"
+            f"CALLS = pathlib.Path({str(mock_calls_file)!r})\n"
+            "def load_state():\n"
+            "    return json.loads(STATE.read_text())\n"
+            "def save_state(st):\n"
+            "    STATE.write_text(json.dumps(st))\n"
+            "def log_call(entry):\n"
+            "    with CALLS.open('a') as f:\n"
+            "        f.write(json.dumps(entry) + '\\n')\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['--version']:\n"
+            "    print('herdr 0.4.2')\n"
+            "    sys.exit(0)\n"
+            "if args == ['status', 'server', '--json']:\n"
+            "    st = load_state()\n"
+            "    running = bool(st.get('running'))\n"
+            "    print(json.dumps({'running': running, 'status': 'running' if running else 'stopped'}))\n"
+            "    sys.exit(0)\n"
+            "if args == ['server']:\n"
+            "    st = load_state()\n"
+            "    st['running'] = True\n"
+            "    st['server_pid'] = os.getpid()\n"
+            "    save_state(st)\n"
+            "    log_call({'cmd': 'server'})\n"
+            "    def stop_sig(*_a):\n"
+            "        s = load_state()\n"
+            "        s['running'] = False\n"
+            "        s['server_pid'] = 0\n"
+            "        save_state(s)\n"
+            "        sys.exit(0)\n"
+            "    signal.signal(signal.SIGTERM, stop_sig)\n"
+            "    while True:\n"
+            "        time.sleep(0.2)\n"
+            "if args == ['server', 'stop']:\n"
+            "    st = load_state()\n"
+            "    pid = st.get('server_pid') or 0\n"
+            "    st['running'] = False\n"
+            "    st['server_pid'] = 0\n"
+            "    save_state(st)\n"
+            "    log_call({'cmd': 'server-stop'})\n"
+            "    if pid > 0:\n"
+            "        try:\n"
+            "            os.kill(pid, signal.SIGTERM)\n"
+            "        except OSError:\n"
+            "            pass\n"
+            "    sys.exit(0)\n"
+            "if args == ['server', 'reload-config']:\n"
+            "    log_call({'cmd': 'reload-config'})\n"
+            "    sys.exit(0)\n"
+            "if args == ['workspace', 'list']:\n"
+            "    st = load_state()\n"
+            "    print(json.dumps({'result': {'workspaces': st.get('workspaces', [])}}))\n"
+            "    sys.exit(0)\n"
+            "if args == ['agent', 'list']:\n"
+            "    st = load_state()\n"
+            "    print(json.dumps({'result': {'agents': st.get('agents', [])}}))\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['workspace', 'create']:\n"
+            "    st = load_state()\n"
+            "    nid = st.get('next_id', 1)\n"
+            "    st['next_id'] = nid + 1\n"
+            "    def opt(flag):\n"
+            "        for i, a in enumerate(args):\n"
+            "            if a == flag and i + 1 < len(args):\n"
+            "                return args[i + 1]\n"
+            "            if a.startswith(flag + '='):\n"
+            "                return a.split('=', 1)[1]\n"
+            "        return ''\n"
+            "    label = opt('--label')\n"
+            "    cwd = opt('--cwd')\n"
+            "    ws = {'workspace_id': f'ws-{nid}', 'label': label, 'cwd': cwd}\n"
+            "    st['workspaces'].append(ws)\n"
+            "    save_state(st)\n"
+            "    log_call({'cmd': 'workspace-create', 'args': args})\n"
+            "    print(json.dumps({'result': {'workspace': ws, 'tab': {'tab_id': f'tab-{nid}'}, 'root_pane': {'pane_id': f'pane-{nid}'}}}))\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['tab', 'rename']:\n"
+            "    log_call({'cmd': 'tab-rename', 'args': args})\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['tab', 'create']:\n"
+            "    st = load_state()\n"
+            "    nid = st.get('next_id', 1)\n"
+            "    st['next_id'] = nid + 1\n"
+            "    save_state(st)\n"
+            "    log_call({'cmd': 'tab-create', 'args': args})\n"
+            "    print(json.dumps({'result': {'tab': {'tab_id': f'tab-{nid}'}, 'root_pane': {'pane_id': f'pane-{nid}'}}}))\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['pane', 'run']:\n"
+            "    pane_id = args[2]\n"
+            "    shell_cmd = args[3]\n"
+            "    parts = shlex.split(shell_cmd)\n"
+            "    script_path = pathlib.Path(parts[-1])\n"
+            "    mode = stat.S_IMODE(script_path.stat().st_mode)\n"
+            "    body = script_path.read_text()\n"
+            "    res = subprocess.run(['/bin/sh', '-c', shell_cmd], check=False)\n"
+            "    log_call({\n"
+            "        'cmd': 'pane-run',\n"
+            "        'pane_id': pane_id,\n"
+            "        'shell_cmd': shell_cmd,\n"
+            "        'mode': mode,\n"
+            "        'body': body,\n"
+            "        'rc': res.returncode,\n"
+            "        'deleted_after': not script_path.exists(),\n"
+            "    })\n"
+            "    sys.exit(0)\n"
+            "if not args:\n"
+            "    leaked = [k for k in os.environ if k.startswith('CAGE_HERDR_')]\n"
+            "    log_call({'cmd': 'attach', 'cwd': os.getcwd(), 'leaked': leaked})\n"
+            "    print(f'HERDR_ATTACHED:{os.getcwd()}')\n"
+            "    sys.exit(0)\n"
+            "sys.exit(1)\n"
+        )
+        mock_herdr.chmod(0o755)
+
+        # 1. Status while stopped.
+        st0 = json.loads(self.run_rt("herdr-status", {}).stdout)
+        self.assertTrue(st0["installed"])
+        self.assertEqual(st0["binary_path"], str(mock_herdr))
+        self.assertEqual(st0["version"], "0.4.2")
+        self.assertFalse(st0["server_running"])
+        self.assertEqual(st0["workspaces_count"], 0)
+        self.assertEqual(st0["agents_count"], 0)
+        self.assertEqual(st0["blocked_agents_count"], 0)
+
+        # 2. Start server and verify workspace/agent/blocked counts.
+        started = json.loads(self.run_rt("herdr-start", {"workspace": str(proj_dir)}).stdout)
+        self.assertTrue(started["server_running"])
+        st_data = json.loads(mock_state_file.read_text())
+        st_data["workspaces"] = [{"workspace_id": "ws-init", "label": "init"}]
+        st_data["agents"] = [
+            {"id": "a1", "status": "running"},
+            {"id": "a2", "status": "blocked"},
+            {"id": "a3", "agent_status": "BLOCKED"},
+        ]
+        mock_state_file.write_text(json.dumps(st_data))
+        st1 = json.loads(self.run_rt("herdr-status", {}).stdout)
+        self.assertTrue(st1["server_running"])
+        self.assertEqual(st1["workspaces_count"], 1)
+        self.assertEqual(st1["agents_count"], 3)
+        self.assertEqual(st1["blocked_agents_count"], 2)
+
+        # 3. Apply theme: preserves existing TOML sections/comments and triggers server reload-config.
+        cfg_file = self.home / ".config/herdr/config.toml"
+        cfg_file.parent.mkdir(parents=True, exist_ok=True)
+        cfg_file.write_text(
+            "# Top-level user comment\n"
+            "[server]\n"
+            "port = 9999\n"
+            "\n"
+            "[other]\n"
+            'name = "keep-this-name"\n'
+        )
+        th1 = json.loads(self.run_rt("herdr-apply-theme", {"theme": "tokyo-night"}).stdout)
+        self.assertEqual(th1, {"ok": True, "theme": "tokyo-night"})
+        self.assertEqual(stat.S_IMODE(cfg_file.stat().st_mode), 0o600)
+        cfg1 = cfg_file.read_text()
+        self.assertIn("# Top-level user comment", cfg1)
+        self.assertIn("port = 9999", cfg1)
+        self.assertIn('[other]\nname = "keep-this-name"', cfg1)
+        self.assertIn('[theme]\nname = "tokyo-night"', cfg1)
+
+        # Updating existing [theme] replaces name in-place without touching [other] or duplicating [theme].
+        th2 = json.loads(self.run_rt("herdr-apply-theme", {"theme": "catppuccin"}).stdout)
+        self.assertEqual(th2, {"ok": True, "theme": "catppuccin"})
+        cfg2 = cfg_file.read_text()
+        self.assertEqual(cfg2.count("[theme]"), 1)
+        self.assertIn('name = "catppuccin"', cfg2)
+        self.assertNotIn('name = "tokyo-night"', cfg2)
+        self.assertIn('[other]\nname = "keep-this-name"', cfg2)
+
+        # Default theme removes the managed [theme] override while keeping other sections; unknown theme is rejected.
+        th_def = json.loads(self.run_rt("herdr-apply-theme", {"theme": "default"}).stdout)
+        self.assertEqual(th_def, {"ok": True, "theme": "default"})
+        cfg_def = cfg_file.read_text()
+        self.assertNotIn('name = "catppuccin"', cfg_def)
+        self.assertIn("# Top-level user comment", cfg_def)
+        self.assertIn("port = 9999", cfg_def)
+        self.assertIn('[other]\nname = "keep-this-name"', cfg_def)
+        bad_theme = self.run_rt("herdr-apply-theme", {"theme": "nonexistent-theme"}, check=False)
+        self.assertNotEqual(bad_theme.returncode, 0)
+
+        calls = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
+        self.assertTrue(any(c.get("cmd") == "reload-config" for c in calls))
+
+        # 4. Stop server cleanly.
+        stopped = json.loads(self.run_rt("herdr-stop", {}).stdout)
+        self.assertFalse(stopped["server_running"])
+
+        # Reset mock workspaces and call log before testing herdr-attach takeover flow.
+        st_data = json.loads(mock_state_file.read_text())
+        st_data["workspaces"] = []
+        mock_state_file.write_text(json.dumps(st_data))
+        mock_calls_file.write_text("")
+
+        # Seed a stale run-*.sh older than 5 minutes to verify pruning.
+        herdr_root = self.home / ".local/share/cage/herdr"
+        herdr_root.mkdir(parents=True, exist_ok=True)
+        stale_script = herdr_root / "run-stale-old.sh"
+        stale_script.write_text("#!/bin/sh\n")
+        old_ts = time.time() - 600
+        os.utime(stale_script, (old_ts, old_ts))
+
+        # 5a. herdr-attach autostarts server, creates workspace, renames tab, runs self-deleting 0700 script.
+        marker1 = self.home / "claude-ran.txt"
+        attach_env1 = {
+            **self.env,
+            "CAGE_HERDR_WORKSPACE": str(proj_dir),
+            "CAGE_HERDR_PROJECT_LABEL": "my-project",
+            "CAGE_HERDR_TAB_LABEL": "Claude",
+            "CAGE_HERDR_KIND": "claude",
+            "CAGE_HERDR_INNER_CMD": f"printf 'CLAUDE_OK' > '{marker1}'",
+            "CAGE_HERDR_SHELL": "/bin/sh",
+        }
+        res_a1 = subprocess.run(
+            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
+            env=attach_env1,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(res_a1.returncode, 0, res_a1.stderr)
+        self.assertIn("HERDR_ATTACHED:", res_a1.stdout)
+        attached_cwd = res_a1.stdout.strip().split("HERDR_ATTACHED:", 1)[1]
+        self.assertEqual(Path(attached_cwd).resolve(), proj_dir.resolve())
+        self.assertFalse(stale_script.exists(), "stale run-*.sh should be pruned")
+        self.assertEqual(marker1.read_text(), "CLAUDE_OK")
+
+        calls1 = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
+        cmds1 = [c["cmd"] for c in calls1]
+        self.assertIn("server", cmds1)
+        self.assertIn("workspace-create", cmds1)
+        self.assertIn("tab-rename", cmds1)
+        pane_runs = [c for c in calls1 if c["cmd"] == "pane-run"]
+        self.assertEqual(len(pane_runs), 1)
+        self.assertEqual(pane_runs[0]["mode"], 0o700)
+        self.assertTrue(pane_runs[0]["deleted_after"])
+        self.assertIn('rm -f -- "$0"', pane_runs[0]["body"])
+        attach_calls = [c for c in calls1 if c["cmd"] == "attach"]
+        self.assertEqual(attach_calls[-1]["leaked"], [])
+
+        # 5b. Second attach for same project reuses workspace via `tab create` instead of creating a new workspace.
+        mock_calls_file.write_text("")
+        marker2 = self.home / "codex-ran.txt"
+        attach_env2 = {
+            **self.env,
+            "CAGE_HERDR_WORKSPACE": str(proj_dir),
+            "CAGE_HERDR_PROJECT_LABEL": "my-project",
+            "CAGE_HERDR_TAB_LABEL": "Codex",
+            "CAGE_HERDR_KIND": "codex",
+            "CAGE_HERDR_INNER_CMD": f"printf 'CODEX_OK' > '{marker2}'",
+            "CAGE_HERDR_SHELL": "/bin/sh",
+        }
+        res_a2 = subprocess.run(
+            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
+            env=attach_env2,
+            text=True,
+            capture_output=True,
+            timeout=15,
+        )
+        self.assertEqual(res_a2.returncode, 0, res_a2.stderr)
+        self.assertEqual(marker2.read_text(), "CODEX_OK")
+        calls2 = [json.loads(line) for line in mock_calls_file.read_text().splitlines() if line.strip()]
+        cmds2 = [c["cmd"] for c in calls2]
+        self.assertNotIn("workspace-create", cmds2)
+        self.assertIn("tab-create", cmds2)
+        self.assertIn("pane-run", cmds2)
+
+        # 5c. Fallback when HERDR_ENV=1 runs inner command directly via shell without invoking herdr.
+        mock_calls_file.write_text("")
+        attach_env3 = {
+            **self.env,
+            "HERDR_ENV": "1",
+            "CAGE_HERDR_WORKSPACE": str(proj_dir),
+            "CAGE_HERDR_KIND": "claude",
+            "CAGE_HERDR_INNER_CMD": "printf 'FALLBACK_NESTED'",
+            "CAGE_HERDR_SHELL": "/bin/sh",
+        }
+        res_a3 = subprocess.run(
+            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
+            env=attach_env3,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(res_a3.returncode, 0, res_a3.stderr)
+        self.assertEqual(res_a3.stdout, "FALLBACK_NESTED")
+        self.assertEqual(mock_calls_file.read_text().strip(), "")
+
+        # 5d. Uninstall stops server, removes ~/.local/bin/herdr, preserves ~/.config/herdr/config.toml.
+        uninst = json.loads(self.run_rt("herdr-uninstall", {}).stdout)
+        self.assertEqual(uninst, {"installed": False, "server_running": False})
+        self.assertFalse(mock_herdr.exists())
+        self.assertTrue(cfg_file.is_file())
+        self.assertIn('name = "keep-this-name"', cfg_file.read_text())
+
+        # 5e. Fallback when herdr binary is missing executes inner command cleanly.
+        attach_env4 = {
+            **self.env,
+            "CAGE_HERDR_WORKSPACE": str(proj_dir),
+            "CAGE_HERDR_KIND": "codex",
+            "CAGE_HERDR_INNER_CMD": "printf 'FALLBACK_MISSING'",
+            "CAGE_HERDR_SHELL": "/bin/sh",
+        }
+        res_a4 = subprocess.run(
+            [sys.executable, "-I", str(RUNTIME), "herdr-attach"],
+            env=attach_env4,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(res_a4.returncode, 0, res_a4.stderr)
+        self.assertEqual(res_a4.stdout, "FALLBACK_MISSING")
 
 
 if __name__ == "__main__":

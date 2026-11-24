@@ -33,6 +33,7 @@ const ownerChips = {
 export function TabIcon({ kind, favicon, agent, provider = "claude", agentId = "", glyph = "", accentColor = "", accountNumber, size = 16 }) {
   const [failed, setFailed] = useState("");
   if (kind === "t3code") return <AgentIcon agentId="t3code" glyph={glyph || "T3"} accentColor={accentColor} size={size} />;
+  if (kind === "magpie") return <AgentIcon agentId="magpie" glyph={glyph || "MP"} accentColor={accentColor} size={size} />;
   if (kind === "terminal" && agentId && agentId !== "claude" && agentId !== "codex") {
     return <AgentIcon agentId={agentId} glyph={glyph} accentColor={accentColor} accountNumber={accountNumber} size={Math.max(18, size)} />;
   }
@@ -473,8 +474,8 @@ export function WorkspaceTabs({
                   if (target && !tabs[target.at].historySession) onSelect(tabs[target.at].id, false);
                 }}
               >
-                <TabIcon kind={tab.isT3Code ? "t3code" : tab.kind} favicon={tab.favicon} size={15}
-                  agentId={tab.agent_id || ""}
+                <TabIcon kind={tab.isT3Code ? "t3code" : tab.isMagpie ? "magpie" : tab.kind} favicon={tab.favicon} size={15}
+                  agentId={tab.agent_id || (tab.terminalKind === "herdr" ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
                   glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
                   accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
                   agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}
@@ -565,8 +566,8 @@ export function WorkspaceTabs({
                         onSelect(tab.id);
                       }}
                     >
-                      <TabIcon kind={tab.isT3Code ? "t3code" : tab.kind} favicon={tab.favicon}
-                        agentId={tab.agent_id || ""}
+                      <TabIcon kind={tab.isT3Code ? "t3code" : tab.isMagpie ? "magpie" : tab.kind} favicon={tab.favicon}
+                        agentId={tab.agent_id || (tab.terminalKind === "herdr" ? "herdr" : tab.terminalKind === "magpie-tui" ? "magpie" : "")}
                         glyph={tab.agentGlyph || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.glyph : "") || ""}
                         accentColor={tab.agentAccentColor || (tab.agent_id ? agentsById?.get?.(tab.agent_id)?.spec?.accent_color : "") || ""}
                         agent={tab.terminalKind === "claude" || tab.terminalKind === "claude-login" || tab.terminalKind === "codex" || tab.terminalKind === "codex-login" || tab.terminalKind === "agent" || tab.terminalKind === "agent-login" || Boolean(tab.cli_session_id) || Boolean(tab.claude_account_id) || Boolean(tab.agent_id)}

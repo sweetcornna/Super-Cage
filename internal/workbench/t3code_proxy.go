@@ -26,8 +26,21 @@ type t3CodeGrant struct {
 	expires  time.Time
 }
 
+// directProxySpec parameterizes the authenticated zero-VNC loopback proxy so
+// T3 Code, Magpie, and future opt-in web workbenches share one hardened proxy
+// implementation with strict account unlock epoch revocation.
+type directProxySpec struct {
+	appName      string // e.g. "T3 Code" or "Magpie"
+	authPath     string // e.g. "/_cage_t3_auth" or "/_cage_magpie_auth"
+	cookiePrefix string // e.g. "cage_t3_session_" or "cage_magpie_session_"
+	mode         string // "managed" | "external"
+	port         int
+	externalURL  string
+}
+
 // t3CodeProxy provides a zero-VNC, ultra-low-latency authenticated loopback
-// origin (http://127.0.0.1:<ephemeral>) dedicated exclusively to T3 Code Web.
+// origin (http://127.0.0.1:<ephemeral>) dedicated to an opt-in web workbench
+// such as T3 Code Web or Magpie Web.
 //
 // Security invariants:
 //   - Bound strictly to the active localAccount unlock epoch: locking Cage
@@ -35,14 +48,17 @@ type t3CodeGrant struct {
 //     and immediately closes every established HTTP and WebSocket connection.
 //   - Strict Host (exact loopback authority) and Origin checks prevent DNS
 //     rebinding and cross-port loopback CSRF/CSWSH.
-//   - Unique per-proxy cookie name (`cage_t3_session_<port>`, HttpOnly,
+//   - Unique per-proxy cookie name (`<cookiePrefix><port>`, HttpOnly,
 //     SameSite=Strict) prevents cross-proxy cookie collisions across ports.
 //   - Supplies canonical X-Forwarded-Host / X-Forwarded-Proto and aligned
-//     Origin on WebSocket upgrades so T3 Code v0.1.11's origin validation passes.
+//     Origin while preserving Sec-Fetch-Site so both T3 Code v0.1.11 and
+//     yetone/magpie's http.NewCrossOriginProtection pass cleanly.
 type t3CodeProxy struct {
 	server        *Server
+	appName       string
+	authPath      string
 	targetKey     string
-	managedPort   int // >0 for guest-forwarded managed T3 Code
+	managedPort   int // >0 for guest-forwarded managed web server
 	upstreamURL   *url.URL
 	listener      net.Listener
 	authority     string // "127.0.0.1:<port>"
@@ -64,14 +80,32 @@ type t3CodeProxy struct {
 	closed        bool
 }
 
-func (s *Server) closeT3CodeProxy() {
-	s.t3code.mu.Lock()
-	proxy := s.t3code.proxy
-	s.t3code.proxy = nil
-	s.t3code.mu.Unlock()
+func (p *t3CodeProxy) displayAppName() string {
+	if p.appName != "" {
+		return p.appName
+	}
+	return "T3 Code"
+}
+
+func (p *t3CodeProxy) grantAuthPath() string {
+	if p.authPath != "" {
+		return p.authPath
+	}
+	return "/_cage_t3_auth"
+}
+
+func (s *Server) closeDirectWebProxy(mu *sync.Mutex, slot **t3CodeProxy) {
+	mu.Lock()
+	proxy := *slot
+	*slot = nil
+	mu.Unlock()
 	if proxy != nil {
 		proxy.close()
 	}
+}
+
+func (s *Server) closeT3CodeProxy() {
+	s.closeDirectWebProxy(&s.t3code.mu, &s.t3code.proxy)
 }
 
 func (p *t3CodeProxy) isClosed() bool {
@@ -139,7 +173,7 @@ func (p *t3CodeProxy) ensureLiveTunnel(ctx context.Context) (string, error) {
 	p.tunnelMu.Lock()
 	defer p.tunnelMu.Unlock()
 	if p.isClosed() {
-		return "", errors.New("T3 Code 本地代理已关闭")
+		return "", fmt.Errorf("%s 本地代理已关闭", p.displayAppName())
 	}
 	if p.tunnelAddr != "" && p.tunnelDone != nil {
 		select {
@@ -261,13 +295,13 @@ func (p *t3CodeProxy) dialUpstream(ctx context.Context, network, addr string) (n
 func (p *t3CodeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Strict account epoch & closed check.
 	if p.isClosed() || (p.epoch != nil && p.epoch.Err() != nil) {
-		http.Error(w, "Cage 已锁定，请先解锁工作台后重新打开 T3 Code。", http.StatusLocked)
+		http.Error(w, fmt.Sprintf("Cage 已锁定，请先解锁工作台后重新打开 %s。", p.displayAppName()), http.StatusLocked)
 		return
 	}
 	if p.server.account != nil {
 		if epoch, unlocked := p.server.account.access(); !unlocked || (p.epoch != nil && epoch != p.epoch) {
 			p.close()
-			http.Error(w, "Cage 已锁定，请先解锁工作台后重新打开 T3 Code。", http.StatusLocked)
+			http.Error(w, fmt.Sprintf("Cage 已锁定，请先解锁工作台后重新打开 %s。", p.displayAppName()), http.StatusLocked)
 			return
 		}
 	}
@@ -279,11 +313,11 @@ func (p *t3CodeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Single-use grant exchange -> unique-per-proxy HttpOnly SameSite=Strict cookie.
-	if r.URL.Path == "/_cage_t3_auth" && r.Method == http.MethodGet {
+	if r.URL.Path == p.grantAuthPath() && r.Method == http.MethodGet {
 		grant := strings.TrimSpace(r.URL.Query().Get("grant"))
 		redirectTarget, secret, ok := p.consumeGrant(grant)
 		if !ok {
-			http.Error(w, "T3 Code 直连授权已过期或无效，请从 Cage 重新打开。", http.StatusUnauthorized)
+			http.Error(w, fmt.Sprintf("%s 直连授权已过期或无效，请从 Cage 重新打开。", p.displayAppName()), http.StatusUnauthorized)
 			return
 		}
 		http.SetCookie(w, &http.Cookie{
@@ -311,7 +345,7 @@ func (p *t3CodeProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 5. Session cookie verification bound to current unlock epoch.
 	cookie, err := r.Cookie(p.cookieName)
 	if err != nil || !p.checkSession(cookie.Value) {
-		http.Error(w, "请通过 Cage 工作台授权打开 T3 Code。", http.StatusUnauthorized)
+		http.Error(w, fmt.Sprintf("请通过 Cage 工作台授权打开 %s。", p.displayAppName()), http.StatusUnauthorized)
 		return
 	}
 
@@ -358,20 +392,21 @@ func (p *t3CodeProxy) dialWebSocketUpstream(ctx context.Context) (net.Conn, erro
 
 func sanitizeUpstreamRequestHeaders(h http.Header, proxyCookieName, proxyAuthority, upstreamOrigin string) {
 	// Strip ALL untrusted client forwarding headers (including arbitrary X-Forwarded-*)
-	// and Cage's own proxy cookie before forwarding upstream.
+	// and Cage's own proxy cookies before forwarding upstream.
 	for name := range h {
 		lower := strings.ToLower(name)
 		if strings.HasPrefix(lower, "x-forwarded-") || lower == "x-real-ip" || lower == "forwarded" {
 			h.Del(name)
 		}
 	}
-	// Supply canonical forwarding headers for T3 Code v0.1.11 origin verification.
+	// Supply canonical forwarding headers for T3 Code v0.1.11 and yetone/magpie
+	// (webOwnPage / http.NewCrossOriginProtection) origin verification.
 	h.Set("X-Forwarded-Host", proxyAuthority)
 	h.Set("X-Forwarded-Proto", "http")
 	if origin := strings.TrimSpace(h.Get("Origin")); origin != "" && upstreamOrigin != "" {
 		// Proxy already verified Origin == p.origin; align Origin with upstream
-		// authority so T3 Code's /ws & POST origin checks succeed even without
-		// Sec-Fetch-Site headers.
+		// authority so T3 Code & Magpie /ws & POST origin checks succeed with
+		// or without Sec-Fetch-Site headers.
 		h.Set("Origin", upstreamOrigin)
 	}
 	if rawCookies := h.Values("Cookie"); len(rawCookies) > 0 {
@@ -385,7 +420,10 @@ func sanitizeUpstreamRequestHeaders(h http.Header, proxyCookieName, proxyAuthori
 				}
 				name, _, _ := strings.Cut(part, "=")
 				name = strings.TrimSpace(name)
-				if name == proxyCookieName || strings.HasPrefix(name, "cage_t3_session_") || strings.HasPrefix(name, cookieName+"_") {
+				if name == proxyCookieName ||
+					strings.HasPrefix(name, "cage_t3_session_") ||
+					strings.HasPrefix(name, "cage_magpie_session_") ||
+					strings.HasPrefix(name, cookieName+"_") {
 					continue
 				}
 				kept = append(kept, part)
@@ -409,7 +447,7 @@ func (p *t3CodeProxy) serveWebSocket(w http.ResponseWriter, r *http.Request) {
 	upstream, err := p.dialWebSocketUpstream(dialCtx)
 	dialCancel()
 	if err != nil {
-		http.Error(w, "无法连接到 T3 Code 实时通道", http.StatusBadGateway)
+		http.Error(w, fmt.Sprintf("无法连接到 %s 实时通道", p.displayAppName()), http.StatusBadGateway)
 		return
 	}
 
@@ -536,7 +574,7 @@ func (s *Server) startGuestLocalForward(parent context.Context, guestPort int) (
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
-		return "", nil, nil, fmt.Errorf("无法建立到 T3 Code 的极速本地通道: %w", err)
+		return "", nil, nil, fmt.Errorf("无法建立到目标服务的极速本地通道: %w", err)
 	}
 
 	bound := make(chan bool, 1)
@@ -564,10 +602,20 @@ func (s *Server) startGuestLocalForward(parent context.Context, guestPort int) (
 	case <-done:
 	case <-time.After(2 * time.Second):
 	}
-	return "", nil, nil, errors.New("T3 Code 极速本地通道建立失败或超时，请重试或改用工作台内置标签")
+	return "", nil, nil, errors.New("极速本地通道建立失败或超时，请重试或改用工作台内置标签")
 }
 
-func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3CodeProxy, error) {
+func (s *Server) ensureDirectWebProxy(ctx context.Context, mu *sync.Mutex, slot **t3CodeProxy, spec directProxySpec) (*t3CodeProxy, error) {
+	if spec.appName == "" {
+		spec.appName = "T3 Code"
+	}
+	if spec.authPath == "" {
+		spec.authPath = "/_cage_t3_auth"
+	}
+	if spec.cookiePrefix == "" {
+		spec.cookiePrefix = "cage_t3_session_"
+	}
+
 	var epoch context.Context
 	if s.account != nil {
 		var unlocked bool
@@ -576,11 +624,11 @@ func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3Co
 			return nil, errors.New("Cage 已锁定，请先解锁工作台")
 		}
 	}
-	targetKey := fmt.Sprintf("%s:%d:%s", cfg.Mode, cfg.Port, cfg.ExternalURL)
+	targetKey := fmt.Sprintf("%s:%s:%d:%s", spec.authPath, spec.mode, spec.port, spec.externalURL)
 
-	s.t3code.mu.Lock()
-	if p := s.t3code.proxy; p != nil && p.targetKey == targetKey && !p.isClosed() && (p.epoch == nil || p.epoch == epoch) {
-		s.t3code.mu.Unlock()
+	mu.Lock()
+	if p := *slot; p != nil && p.targetKey == targetKey && !p.isClosed() && (p.epoch == nil || p.epoch == epoch) {
+		mu.Unlock()
 		if p.managedPort > 0 {
 			if _, err := p.ensureLiveTunnel(ctx); err != nil {
 				return nil, err
@@ -588,27 +636,30 @@ func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3Co
 		}
 		return p, nil
 	}
-	old := s.t3code.proxy
-	s.t3code.proxy = nil
-	s.t3code.mu.Unlock()
+	old := *slot
+	*slot = nil
+	mu.Unlock()
 	if old != nil {
 		old.close()
 	}
 
 	var upstream *url.URL
 	managedPort := 0
-	if cfg.Mode == "external" {
-		u, err := url.Parse(cfg.ExternalURL)
+	if spec.mode == "external" {
+		u, err := url.Parse(spec.externalURL)
 		if err != nil || u.Host == "" {
-			return nil, errors.New("外部 T3 Code 地址无效")
+			return nil, fmt.Errorf("外部 %s 地址无效", spec.appName)
 		}
-		upstream = u
+		// Keep only scheme+host on the reverse-proxy base URL; issueDirectURL
+		// redirects the browser to the configured path so requests are not
+		// double-prefixed (e.g. /magpie/magpie/).
+		upstream = &url.URL{Scheme: u.Scheme, Host: u.Host}
 	} else {
 		if s.windowsGuest != nil {
-			return nil, errors.New("Windows 原生客机暂不支持托管 T3 Code 本地隧道，请使用外部地址模式")
+			return nil, fmt.Errorf("Windows 原生客机暂不支持托管 %s 本地隧道，请使用外部地址模式", spec.appName)
 		}
-		upstream = &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", cfg.Port)}
-		managedPort = cfg.Port
+		upstream = &url.URL{Scheme: "http", Host: fmt.Sprintf("127.0.0.1:%d", spec.port)}
+		managedPort = spec.port
 	}
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -622,13 +673,15 @@ func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3Co
 
 	p := &t3CodeProxy{
 		server:        s,
+		appName:       spec.appName,
+		authPath:      spec.authPath,
 		targetKey:     targetKey,
 		managedPort:   managedPort,
 		upstreamURL:   upstream,
 		listener:      ln,
 		authority:     authority,
 		origin:        origin,
-		cookieName:    fmt.Sprintf("cage_t3_session_%d", proxyPort),
+		cookieName:    fmt.Sprintf("%s%d", spec.cookiePrefix, proxyPort),
 		epoch:         epoch,
 		sessionSecret: randomToken(),
 		grants:        map[string]t3CodeGrant{},
@@ -672,11 +725,11 @@ func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3Co
 	if epoch != nil {
 		stop := context.AfterFunc(epoch, func() {
 			p.close()
-			s.t3code.mu.Lock()
-			if s.t3code.proxy == p {
-				s.t3code.proxy = nil
+			mu.Lock()
+			if *slot == p {
+				*slot = nil
 			}
-			s.t3code.mu.Unlock()
+			mu.Unlock()
 		})
 		p.mu.Lock()
 		if p.closed {
@@ -693,33 +746,45 @@ func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3Co
 	}()
 
 	var displaced *t3CodeProxy
-	s.t3code.mu.Lock()
+	mu.Lock()
 	if p.isClosed() || (epoch != nil && epoch.Err() != nil) {
-		s.t3code.mu.Unlock()
+		mu.Unlock()
 		p.close()
 		return nil, errors.New("Cage 已锁定，请先解锁工作台")
 	}
-	if existing := s.t3code.proxy; existing != nil && !existing.isClosed() {
+	if existing := *slot; existing != nil && !existing.isClosed() {
 		if existing.targetKey == targetKey && (existing.epoch == nil || existing.epoch == epoch) {
-			s.t3code.mu.Unlock()
+			mu.Unlock()
 			p.close()
 			return existing, nil
 		}
 		displaced = existing
 	}
-	s.t3code.proxy = p
-	s.t3code.mu.Unlock()
+	*slot = p
+	mu.Unlock()
 	if displaced != nil {
 		displaced.close()
 	}
 	return p, nil
 }
 
+func (s *Server) ensureT3CodeProxy(ctx context.Context, cfg t3CodeConfig) (*t3CodeProxy, error) {
+	return s.ensureDirectWebProxy(ctx, &s.t3code.mu, &s.t3code.proxy, directProxySpec{
+		appName:      "T3 Code",
+		authPath:     "/_cage_t3_auth",
+		cookiePrefix: "cage_t3_session_",
+		mode:         cfg.Mode,
+		port:         cfg.Port,
+		externalURL:  cfg.ExternalURL,
+	})
+}
+
 func (p *t3CodeProxy) issueDirectURL(openURL string) (string, error) {
 	redirectTarget := "/"
 	if u, err := url.Parse(openURL); err == nil {
 		path := u.EscapedPath()
-		if path == "" {
+		// Guard against protocol-relative redirects ("//evil.com", "/\evil.com").
+		if path == "" || !strings.HasPrefix(path, "/") || strings.HasPrefix(path, "//") || strings.HasPrefix(path, `/\`) {
 			path = "/"
 		}
 		if u.RawQuery != "" {
@@ -734,7 +799,7 @@ func (p *t3CodeProxy) issueDirectURL(openURL string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("%s/_cage_t3_auth?grant=%s", p.origin, grant), nil
+	return fmt.Sprintf("%s%s?grant=%s", p.origin, p.grantAuthPath(), grant), nil
 }
 
 func (s *Server) issueT3CodeDirectURL(ctx context.Context, cfg t3CodeConfig, openURL string) (string, error) {

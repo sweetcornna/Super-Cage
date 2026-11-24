@@ -25,6 +25,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shlex
 import shutil
 import signal
@@ -48,6 +49,32 @@ T3CODE_LOG_FILE = T3CODE_ROOT / "server.log"
 T3CODE_LOCK_FILE = T3CODE_ROOT / "lifecycle.lock"
 T3CODE_PAIR_FILE = T3CODE_ROOT / "pair.once"
 T3CODE_LOG_MAX_BYTES = 65536
+MAGPIE_ROOT = HOME / ".local/share/cage/magpie"
+MAGPIE_STATE_FILE = MAGPIE_ROOT / "runtime.json"
+MAGPIE_LOG_FILE = MAGPIE_ROOT / "server.log"
+MAGPIE_LOCK_FILE = MAGPIE_ROOT / "lifecycle.lock"
+MAGPIE_KEY_FILE = MAGPIE_ROOT / "web.key"
+MAGPIE_DEFAULT_PORT = 3430
+MAGPIE_DEFAULT_GATEWAY_PORT = 3425
+MAGPIE_LOG_MAX_BYTES = 65536
+MAGPIE_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,}$")
+HERDR_ROOT = HOME / ".local/share/cage/herdr"
+HERDR_LOCK_FILE = HERDR_ROOT / "lifecycle.lock"
+HERDR_CONFIG_FILE = HOME / ".config/herdr/config.toml"
+HERDR_VALID_THEMES = {
+    "default",
+    "terminal",
+    "catppuccin",
+    "tokyo-night",
+    "dracula",
+    "nord",
+    "gruvbox",
+    "one-dark",
+    "solarized",
+    "kanagawa",
+    "rose-pine",
+    "vesper",
+}
 CACHE_DIR = HOME / ".cache/cage"
 PROBE_CACHE_FILE = CACHE_DIR / "agent-probe-cache.json"
 OPEN_BIN = "/usr/local/libexec/cage-cli/bin/cage-open" if sys.platform == "darwin" else "/usr/local/bin/cage-open"
@@ -66,7 +93,8 @@ T3_SENSITIVE_LINE_RE = re.compile(
     r"(?i)(?:token="
     r"|['\"]?(?:access_?token|refresh_?token|id_?token|auth_?token|session_?token"
     r"|token|api[_-]?key|secret|client_?secret|authorization|cookie|set-cookie)['\"]?\s*[:=]\s*\S+"
-    r"|pair#|/pair[/?#]|t3://|t3code://|bearer\s+\S+)"
+    r"|pair#|/pair[/?#]|t3://|t3code://|bearer\s+\S+"
+    r"|[?&]k=[A-Za-z0-9._~-]{8,}|MAGPIE_WEB_KEY\s*[:=]\s*\S+|magpie_web_[A-Za-z0-9_]+\s*=\s*\S+)"
     r"|sk-|eyJ|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[0-9A-Za-z_]{20,}"
     r"|github_pat_[0-9A-Za-z_]{20,}|gsk_[0-9A-Za-z]{20,}|xai-[0-9A-Za-z]{20,}"
     r"|ak_[0-9A-Za-z]{20,}|r8_[0-9A-Za-z]{20,}|hf_[0-9A-Za-z]{20,}"
@@ -2550,6 +2578,1136 @@ def t3code_mint_pair(payload):
         return _t3code_open_url_locked(payload)
 
 
+# ---------------------------------------------------------------------------
+# Managed Magpie (yetone/magpie) Guest Lifecycle
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _magpie_lifecycle_lock():
+    """Serialize all Magpie lifecycle and web key operations."""
+    os.umask(0o077)
+    MAGPIE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(MAGPIE_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+    os.chmod(MAGPIE_LOCK_FILE, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _validate_magpie_port(port, label="Magpie 端口"):
+    if isinstance(port, bool) or not isinstance(port, int) or not (1024 <= port <= 65535):
+        raise ValueError(f"{label}须在 1024-65535 之间")
+    return port
+
+
+def _requested_magpie_port(payload, key="port", default=MAGPIE_DEFAULT_PORT, label="Magpie 端口"):
+    raw = payload.get(key) if isinstance(payload, dict) else None
+    if raw is None or raw == "" or raw == 0:
+        return _validate_magpie_port(default, label=label)
+    if isinstance(raw, bool):
+        raise ValueError(f"{label}须在 1024-65535 之间")
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label}须在 1024-65535 之间") from exc
+    return _validate_magpie_port(port, label=label)
+
+
+def _read_magpie_web_key():
+    try:
+        key = MAGPIE_KEY_FILE.read_text(encoding="utf-8", errors="ignore").strip()
+    except OSError:
+        return ""
+    if MAGPIE_KEY_RE.match(key):
+        return key
+    return ""
+
+
+def _ensure_magpie_web_key():
+    """Load validated Magpie web auth key or generate a fresh 32-char hex key (0600)."""
+    existing = _read_magpie_web_key()
+    if existing:
+        try:
+            os.chmod(MAGPIE_KEY_FILE, 0o600)
+        except OSError:
+            pass
+        return existing
+    key = secrets.token_hex(16)
+    atomic_write_text(MAGPIE_KEY_FILE, key + "\n", mode=0o600)
+    return key
+
+
+def _read_cached_cli_version(binary, path_str):
+    if not binary:
+        return ""
+    cache = read_json(PROBE_CACHE_FILE, {}) or {}
+    if not isinstance(cache, dict):
+        cache = {}
+    ver, dirty = read_cli_version(binary, ["--version"], path_str, cache)
+    if dirty:
+        try:
+            atomic_write_json(PROBE_CACHE_FILE, cache, mode=0o600)
+        except OSError:
+            pass
+    return ver
+
+
+def magpie_supervise(cfg):
+    """Detached supervisor for `magpie web` with live redaction and 64 KiB log cap."""
+    os.umask(0o077)
+    cmd = cfg["cmd"]
+    cwd = cfg.get("cwd") or str(HOME)
+    log_file = Path(cfg.get("log_file") or MAGPIE_LOG_FILE)
+    handshake_file = Path(cfg["handshake_file"])
+
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    logger = _BoundedRedactedLog(log_file, max_bytes=MAGPIE_LOG_MAX_BYTES)
+    child = None
+    term_state = {"requested": False, "sent": False}
+
+    def forward_term(_signum, _frame):
+        term_state["requested"] = True
+        if child is not None and not term_state["sent"]:
+            term_state["sent"] = True
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except OSError:
+                try:
+                    child.terminate()
+                except OSError:
+                    pass
+
+    signal.signal(signal.SIGTERM, forward_term)
+    signal.signal(signal.SIGINT, forward_term)
+
+    try:
+        child = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        logger.write_raw_line(f"Failed to start magpie: {exc}")
+        logger.close()
+        try:
+            atomic_write_json(handshake_file, {"error": str(exc), "supervisor_pid": os.getpid()}, mode=0o600)
+        except OSError:
+            pass
+        return 1
+
+    if term_state["requested"] and not term_state["sent"]:
+        forward_term(signal.SIGTERM, None)
+
+    try:
+        atomic_write_json(
+            handshake_file,
+            {"child_pid": child.pid, "supervisor_pid": os.getpid()},
+            mode=0o600,
+        )
+    except OSError:
+        pass
+
+    try:
+        assert child.stdout is not None
+        secret_key = os.environ.get("MAGPIE_WEB_KEY", "")
+        while True:
+            raw = child.stdout.readline(65536)
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace")
+            if secret_key and secret_key in line:
+                logger.write_raw_line("[REDACTED]\n")
+                continue
+            logger.write_raw_line(line)
+    finally:
+        if child.stdout is not None:
+            try:
+                child.stdout.close()
+            except OSError:
+                pass
+        rc = child.wait()
+        logger.close()
+    return rc if isinstance(rc, int) else 0
+
+
+def magpie_status(payload):
+    requested_port = _requested_magpie_port(payload, key="port", default=MAGPIE_DEFAULT_PORT)
+    gateway_port = _requested_magpie_port(
+        payload, key="gateway_port", default=MAGPIE_DEFAULT_GATEWAY_PORT, label="Magpie Gateway 端口"
+    )
+    path_str = enriched_path()
+    binary = shutil.which("magpie", path=path_str) or ""
+    version = _read_cached_cli_version(binary, path_str) if binary else ""
+    state = read_json(MAGPIE_STATE_FILE)
+    running = False
+    pid = 0
+    if isinstance(state, dict):
+        cand_pid = state.get("pid")
+        cand_port = state.get("port")
+        cand_ident = str(state.get("pid_identity") or "")
+        if (
+            not isinstance(cand_pid, bool)
+            and isinstance(cand_pid, int)
+            and cand_pid > 0
+            and not isinstance(cand_port, bool)
+            and isinstance(cand_port, int)
+            and cand_port == requested_port
+            and _pid_matches(cand_pid, cand_ident)
+            and _http_responsive("127.0.0.1", requested_port, timeout=0.45)
+        ):
+            running = True
+            pid = cand_pid
+    gateway_running = _http_responsive("127.0.0.1", gateway_port, timeout=0.35)
+    return {
+        "installed": bool(binary),
+        "binary_path": binary,
+        "version": version,
+        "running": running,
+        "pid": pid if running else 0,
+        "port": requested_port,
+        "gateway_port": gateway_port,
+        "gateway_running": gateway_running,
+        "gateway_only": bool(state.get("gateway_only")) if running and isinstance(state, dict) else False,
+    }
+
+
+def magpie_install(payload):
+    path_str = enriched_path()
+    curl = shutil.which("curl", path=path_str)
+    if not curl:
+        raise ValueError("环境中未找到 curl")
+    (HOME / ".local/bin").mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["MAGPIE_BIN"] = str(HOME / ".local/bin")
+    env["PATH"] = path_str
+    script_url = "https://usemagpie.ai/install.sh"
+    print("Downloading official Magpie installer from usemagpie.ai...", flush=True)
+    with tempfile.NamedTemporaryFile(prefix="cage-magpie-install-", suffix=".sh", delete=False) as tmp:
+        script_path = tmp.name
+    try:
+        dl = subprocess.run(
+            [curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL", "--connect-timeout", "20", "-o", script_path, script_url],
+            env=env, stdin=subprocess.DEVNULL,
+        )
+        if dl.returncode != 0:
+            raise ValueError(f"下载 Magpie 安装脚本失败（curl 退出码 {dl.returncode}）")
+        install_cmd = ["/bin/sh", script_path] if sys.platform == "darwin" else ["/bin/sh", script_path, "--tui"]
+        res = subprocess.run(install_cmd, env=env, stdin=subprocess.DEVNULL)
+        if res.returncode != 0:
+            raise ValueError(f"Magpie 安装脚本执行失败（退出码 {res.returncode}）")
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
+
+    try:
+        PROBE_CACHE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    refreshed_path = enriched_path()
+    binary = shutil.which("magpie", path=refreshed_path)
+    if not binary:
+        raise ValueError("安装完成但未在 PATH 中找到 magpie 命令，请检查安装日志")
+    version, _ = read_cli_version(binary, ["--version"], refreshed_path, {})
+    return {"installed": True, "binary_path": binary, "version": version}
+
+
+def _magpie_stop_locked(requested_port=None):
+    state = read_json(MAGPIE_STATE_FILE)
+    if isinstance(state, dict):
+        state_port = state.get("port")
+        if (
+            requested_port is not None
+            and not isinstance(state_port, bool)
+            and isinstance(state_port, int)
+            and state_port != requested_port
+        ):
+            return {"running": False, "skipped_port_mismatch": True}
+        sup_pid = state.get("supervisor_pid")
+        sup_ident = str(state.get("supervisor_identity") or "")
+        pid = state.get("pid")
+        pid_ident = str(state.get("pid_identity") or "")
+        has_sup = not isinstance(sup_pid, bool) and isinstance(sup_pid, int) and sup_pid > 0
+        has_pid = not isinstance(pid, bool) and isinstance(pid, int) and pid > 0
+        if has_sup:
+            sup_st = _pid_state(sup_pid, sup_ident)
+            if sup_st == "unknown":
+                raise ValueError(f"无法验证 Magpie 守护进程 ({sup_pid}) 身份，已保留运行状态文件")
+            if sup_st == "matched":
+                try:
+                    os.kill(sup_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline:
+                    s_done = _pid_state(sup_pid, sup_ident) in ("gone", "mismatch")
+                    p_done = (not has_pid) or (_pid_state(pid, pid_ident) in ("gone", "mismatch"))
+                    if s_done and p_done:
+                        break
+                    time.sleep(0.08)
+        if has_pid:
+            pid_st = _pid_state(pid, pid_ident)
+            if pid_st == "unknown":
+                raise ValueError(f"无法验证 Magpie 进程 ({pid}) 身份，已保留运行状态文件")
+            if pid_st == "matched":
+                if not _stop_managed_pid(pid, expected_identity=pid_ident, wait_secs=1.5):
+                    raise ValueError(f"Magpie 进程 ({pid}) 未能终止，已保留运行状态文件")
+        if has_sup:
+            sup_st = _pid_state(sup_pid, sup_ident)
+            if sup_st == "unknown":
+                raise ValueError(f"无法验证 Magpie 守护进程 ({sup_pid}) 身份，已保留运行状态文件")
+            if sup_st == "matched":
+                if not _stop_managed_pid(sup_pid, expected_identity=sup_ident, wait_secs=1.0):
+                    raise ValueError(f"Magpie 守护进程 ({sup_pid}) 未能终止，已保留运行状态文件")
+    MAGPIE_STATE_FILE.unlink(missing_ok=True)
+    return {"running": False}
+
+
+def magpie_stop(payload=None):
+    req_port = None
+    if isinstance(payload, dict) and payload.get("port") not in (None, "", 0):
+        req_port = _requested_magpie_port(payload, key="port", default=MAGPIE_DEFAULT_PORT)
+    with _magpie_lifecycle_lock():
+        return _magpie_stop_locked(requested_port=req_port)
+
+
+def magpie_uninstall(payload=None):
+    with _magpie_lifecycle_lock():
+        _magpie_stop_locked()
+        path_str = enriched_path()
+        binary = shutil.which("magpie", path=path_str) or ""
+        if binary:
+            env = os.environ.copy()
+            env["PATH"] = path_str
+            try:
+                res = subprocess.run(
+                    [binary, "uninstall", "--yes", "--keep-data"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                if res.stdout:
+                    print(res.stdout, end="", flush=True)
+                if res.stderr:
+                    print(res.stderr, end="", file=sys.stderr, flush=True)
+            except (OSError, subprocess.SubprocessError) as exc:
+                print(f"magpie uninstall helper exited with error: {exc}", file=sys.stderr, flush=True)
+        local_bin = HOME / ".local/bin/magpie"
+        if local_bin.is_file() or local_bin.is_symlink():
+            try:
+                local_bin.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if sys.platform == "darwin":
+            for app_name in ("Magpie.app", "magpie.app"):
+                user_app = HOME / "Applications" / app_name
+                try:
+                    if user_app.is_symlink():
+                        user_app.unlink(missing_ok=True)
+                    elif user_app.is_dir():
+                        shutil.rmtree(user_app, ignore_errors=True)
+                except OSError:
+                    pass
+        MAGPIE_STATE_FILE.unlink(missing_ok=True)
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+        remaining = shutil.which("magpie", path=enriched_path()) or ""
+        if remaining:
+            raise ValueError(f"检测到系统路径仍存在 magpie（{remaining}），未能完全卸载，请手动移除")
+    return {"installed": False, "running": False}
+
+
+def magpie_start(payload, restart=False):
+    port = _requested_magpie_port(payload, key="port", default=MAGPIE_DEFAULT_PORT)
+    gateway_port = _requested_magpie_port(
+        payload, key="gateway_port", default=MAGPIE_DEFAULT_GATEWAY_PORT, label="Magpie Gateway 端口"
+    )
+    if port == gateway_port:
+        raise ValueError(f"Magpie Web 端口 ({port}) 不能与 Gateway 端口 ({gateway_port}) 冲突")
+    gateway_only = bool(payload.get("gateway_only")) if isinstance(payload, dict) else False
+
+    with _magpie_lifecycle_lock():
+        path_str = enriched_path()
+        binary = shutil.which("magpie", path=path_str)
+        if not binary:
+            raise ValueError("未找到 magpie 命令，请先安装 Magpie")
+        version = _read_cached_cli_version(binary, path_str)
+
+        existing = read_json(MAGPIE_STATE_FILE)
+        if restart:
+            _magpie_stop_locked()
+        elif isinstance(existing, dict):
+            old_pid = existing.get("pid")
+            old_pid_ident = str(existing.get("pid_identity") or "")
+            old_sup = existing.get("supervisor_pid")
+            old_sup_ident = str(existing.get("supervisor_identity") or "")
+            old_port = existing.get("port")
+            old_gw_only = bool(existing.get("gateway_only"))
+            if (
+                not isinstance(old_pid, bool)
+                and isinstance(old_pid, int)
+                and old_port == port
+                and old_gw_only == gateway_only
+                and _pid_matches(old_pid, old_pid_ident)
+                and _http_responsive("127.0.0.1", port, timeout=0.45)
+            ):
+                return {
+                    "installed": bool(binary),
+                    "binary_path": binary,
+                    "version": version,
+                    "running": True,
+                    "pid": old_pid,
+                    "port": port,
+                    "gateway_port": gateway_port,
+                    "gateway_running": _http_responsive("127.0.0.1", gateway_port, timeout=0.35),
+                    "gateway_only": gateway_only,
+                }
+            if (
+                (not isinstance(old_pid, bool) and isinstance(old_pid, int) and _pid_matches(old_pid, old_pid_ident))
+                or (not isinstance(old_sup, bool) and isinstance(old_sup, int) and _pid_matches(old_sup, old_sup_ident))
+            ):
+                _magpie_stop_locked()
+
+        os.umask(0o077)
+        MAGPIE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        web_key = _ensure_magpie_web_key()
+
+        env = os.environ.copy()
+        env["PATH"] = path_str
+        env["MAGPIE_WEB_KEY"] = web_key
+
+        cmd = [binary, "web", "--addr", f"127.0.0.1:{port}", "--no-open"]
+        if gateway_only:
+            cmd.append("--gateway")
+        workspace = str(payload.get("workspace") or "").strip() if isinstance(payload, dict) else ""
+        cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
+
+        handshake_file = MAGPIE_ROOT / f".sup-{os.getpid()}-{time.time_ns()}.json"
+        sup_cfg = {
+            "cmd": cmd,
+            "cwd": cwd,
+            "log_file": str(MAGPIE_LOG_FILE),
+            "handshake_file": str(handshake_file),
+        }
+        sup_proc = subprocess.Popen(
+            [sys.executable, "-I", str(Path(__file__).resolve()), "magpie-supervise"],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        try:
+            assert sup_proc.stdin is not None
+            sup_proc.stdin.write(json.dumps(sup_cfg, ensure_ascii=False).encode("utf-8"))
+            sup_proc.stdin.close()
+        except OSError:
+            pass
+
+        child_pid = 0
+        deadline = time.monotonic() + 12.0
+        ready = False
+        try:
+            while time.monotonic() < deadline:
+                if not child_pid and handshake_file.is_file():
+                    hs = read_json(handshake_file)
+                    if isinstance(hs, dict):
+                        if hs.get("error"):
+                            raise ValueError(f"Magpie 启动失败：{hs['error']}")
+                        cpid = hs.get("child_pid")
+                        if not isinstance(cpid, bool) and isinstance(cpid, int) and cpid > 0:
+                            child_pid = cpid
+                rc = sup_proc.poll()
+                if rc is not None:
+                    tail = _redact_t3_log_tail(MAGPIE_LOG_FILE)
+                    suffix = f"：{tail}" if tail else ""
+                    raise ValueError(f"Magpie 启动失败（退出码 {rc}）{suffix}")
+                if child_pid and not _pid_alive(child_pid):
+                    try:
+                        rc = sup_proc.wait(timeout=0.5)
+                    except subprocess.TimeoutExpired:
+                        rc = 1
+                    tail = _redact_t3_log_tail(MAGPIE_LOG_FILE)
+                    suffix = f"：{tail}" if tail else ""
+                    raise ValueError(f"Magpie 启动失败（退出码 {rc}）{suffix}")
+                if child_pid and _http_responsive("127.0.0.1", port, timeout=0.45):
+                    ready = True
+                    break
+                time.sleep(0.1)
+
+            if not ready:
+                if child_pid:
+                    _stop_managed_pid(child_pid, expected_identity=_pid_identity(child_pid), wait_secs=1.5, require_identity=False)
+                _stop_managed_pid(sup_proc.pid, expected_identity=_pid_identity(sup_proc.pid), wait_secs=1.0, require_identity=False)
+                tail = _redact_t3_log_tail(MAGPIE_LOG_FILE)
+                suffix = f"：{tail}" if tail else ""
+                raise ValueError(f"Magpie 启动超时（端口 {port} 未就绪）{suffix}")
+
+            state = {
+                "pid": child_pid,
+                "pid_identity": _pid_identity(child_pid),
+                "supervisor_pid": sup_proc.pid,
+                "supervisor_identity": _pid_identity(sup_proc.pid),
+                "port": port,
+                "gateway_port": gateway_port,
+                "gateway_only": gateway_only,
+                "version": version,
+                "binary": binary,
+                "started_at": int(time.time()),
+            }
+            atomic_write_json(MAGPIE_STATE_FILE, state, mode=0o600)
+            return {
+                "installed": bool(binary),
+                "binary_path": binary,
+                "version": version,
+                "running": True,
+                "pid": child_pid,
+                "port": port,
+                "gateway_port": gateway_port,
+                "gateway_running": _http_responsive("127.0.0.1", gateway_port, timeout=0.35),
+                "gateway_only": gateway_only,
+            }
+        finally:
+            handshake_file.unlink(missing_ok=True)
+
+
+def magpie_open_url(payload):
+    with _magpie_lifecycle_lock():
+        state = read_json(MAGPIE_STATE_FILE)
+        default_port = MAGPIE_DEFAULT_PORT
+        if isinstance(state, dict):
+            sp = state.get("port")
+            if not isinstance(sp, bool) and isinstance(sp, int) and 1024 <= sp <= 65535:
+                default_port = sp
+        requested_port = _requested_magpie_port(payload, key="port", default=default_port)
+        key = _read_magpie_web_key()
+        if key:
+            return {"url": f"http://127.0.0.1:{requested_port}/?k={key}", "authenticated": True}
+        return {"url": f"http://127.0.0.1:{requested_port}/", "authenticated": False}
+
+
+# ---------------------------------------------------------------------------
+# Managed Herdr (herdrdev/herdr) Guest Lifecycle & Interactive Takeover
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _herdr_lifecycle_lock():
+    """Serialize Herdr server lifecycle and config updates."""
+    os.umask(0o077)
+    HERDR_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(HERDR_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+    os.chmod(HERDR_LOCK_FILE, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _herdr_run_json(binary, args, env, timeout=2.0):
+    try:
+        res = subprocess.run(
+            [binary, *args],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if res.returncode != 0:
+        return None
+    out = (res.stdout or "").strip()
+    if not out:
+        return None
+    try:
+        data = json.loads(out)
+        return data if isinstance(data, dict) else None
+    except ValueError:
+        for line in reversed(out.splitlines()):
+            line = line.strip()
+            if line.startswith("{") and line.endswith("}"):
+                try:
+                    data = json.loads(line)
+                    if isinstance(data, dict):
+                        return data
+                except ValueError:
+                    continue
+        return None
+
+
+def _herdr_server_running(binary, env, timeout=2.0):
+    data = _herdr_run_json(binary, ["status", "server", "--json"], env, timeout=timeout)
+    if not isinstance(data, dict):
+        return False
+    if data.get("running") is True or str(data.get("status") or "").lower() == "running":
+        return True
+    result = data.get("result")
+    if isinstance(result, dict):
+        if result.get("running") is True or str(result.get("status") or "").lower() == "running":
+            return True
+    return False
+
+
+def _herdr_extract_workspaces(resp):
+    if not isinstance(resp, dict):
+        return []
+    result = resp.get("result")
+    if isinstance(result, dict) and isinstance(result.get("workspaces"), list):
+        return result["workspaces"]
+    if isinstance(resp.get("workspaces"), list):
+        return resp["workspaces"]
+    return []
+
+
+def _herdr_extract_agents(resp):
+    if not isinstance(resp, dict):
+        return []
+    result = resp.get("result")
+    if isinstance(result, dict) and isinstance(result.get("agents"), list):
+        return result["agents"]
+    if isinstance(resp.get("agents"), list):
+        return resp["agents"]
+    return []
+
+
+def _herdr_extract_pane_id(resp):
+    if not isinstance(resp, dict):
+        return ""
+    res = resp.get("result") if isinstance(resp.get("result"), dict) else resp
+    if not isinstance(res, dict):
+        return ""
+    root_pane = res.get("root_pane")
+    if isinstance(root_pane, dict) and root_pane.get("pane_id"):
+        return str(root_pane["pane_id"])
+    if res.get("pane_id"):
+        return str(res["pane_id"])
+    tab = res.get("tab")
+    if isinstance(tab, dict):
+        if tab.get("pane_id"):
+            return str(tab["pane_id"])
+        tab_root = tab.get("root_pane")
+        if isinstance(tab_root, dict) and tab_root.get("pane_id"):
+            return str(tab_root["pane_id"])
+    return ""
+
+
+def _herdr_extract_tab_id(resp):
+    if not isinstance(resp, dict):
+        return ""
+    res = resp.get("result") if isinstance(resp.get("result"), dict) else resp
+    if not isinstance(res, dict):
+        return ""
+    tab = res.get("tab")
+    if isinstance(tab, dict) and tab.get("tab_id"):
+        return str(tab["tab_id"])
+    if res.get("tab_id"):
+        return str(res["tab_id"])
+    return ""
+
+
+def herdr_status(payload=None):
+    path_str = enriched_path()
+    binary = shutil.which("herdr", path=path_str) or ""
+    version = _read_cached_cli_version(binary, path_str) if binary else ""
+    server_running = False
+    workspaces_count = 0
+    agents_count = 0
+    blocked_agents_count = 0
+    if binary:
+        env = os.environ.copy()
+        env["PATH"] = path_str
+        server_running = _herdr_server_running(binary, env, timeout=2.0)
+        if server_running:
+            ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=1.5)
+            workspaces_count = len(_herdr_extract_workspaces(ws_resp))
+            ag_resp = _herdr_run_json(binary, ["agent", "list"], env, timeout=1.5)
+            agents = _herdr_extract_agents(ag_resp)
+            agents_count = len(agents)
+            blocked_agents_count = sum(
+                1
+                for a in agents
+                if isinstance(a, dict) and str(a.get("status") or a.get("agent_status") or "").lower() == "blocked"
+            )
+    return {
+        "installed": bool(binary),
+        "binary_path": binary,
+        "version": version,
+        "server_running": server_running,
+        "workspaces_count": workspaces_count,
+        "agents_count": agents_count,
+        "blocked_agents_count": blocked_agents_count,
+    }
+
+
+def herdr_install(payload=None):
+    path_str = enriched_path()
+    curl = shutil.which("curl", path=path_str)
+    if not curl:
+        raise ValueError("环境中未找到 curl")
+    (HOME / ".local/bin").mkdir(parents=True, exist_ok=True)
+    env = os.environ.copy()
+    env["HERDR_INSTALL_DIR"] = str(HOME / ".local/bin")
+    env["PATH"] = path_str
+    script_url = "https://herdr.dev/install.sh"
+    print("Downloading official Herdr installer from herdr.dev...", flush=True)
+    with tempfile.NamedTemporaryFile(prefix="cage-herdr-install-", suffix=".sh", delete=False) as tmp:
+        script_path = tmp.name
+    try:
+        dl = subprocess.run(
+            [curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "-fsSL", "--connect-timeout", "20", "-o", script_path, script_url],
+            env=env, stdin=subprocess.DEVNULL,
+        )
+        if dl.returncode != 0:
+            raise ValueError(f"下载 Herdr 安装脚本失败（curl 退出码 {dl.returncode}）")
+        res = subprocess.run(["/bin/sh", script_path], env=env, stdin=subprocess.DEVNULL)
+        if res.returncode != 0:
+            raise ValueError(f"Herdr 安装脚本执行失败（退出码 {res.returncode}）")
+    finally:
+        try:
+            os.unlink(script_path)
+        except OSError:
+            pass
+
+    try:
+        PROBE_CACHE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    refreshed_path = enriched_path()
+    binary = shutil.which("herdr", path=refreshed_path)
+    if not binary:
+        raise ValueError("安装完成但未在 PATH 中找到 herdr 命令，请检查安装日志")
+    version, _ = read_cli_version(binary, ["--version"], refreshed_path, {})
+    return {"installed": True, "binary_path": binary, "version": version}
+
+
+def herdr_uninstall(payload=None):
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = shutil.which("herdr", path=path_str) or ""
+        if binary:
+            env = os.environ.copy()
+            env["PATH"] = path_str
+            try:
+                subprocess.run(
+                    [binary, "server", "stop"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+        local_bin = HOME / ".local/bin/herdr"
+        if local_bin.is_file() or local_bin.is_symlink():
+            try:
+                local_bin.unlink(missing_ok=True)
+            except OSError:
+                pass
+        if binary:
+            bpath = Path(binary)
+            safe_dirs = set()
+            for candidate in (HOME / ".local/bin", HOME / ".cargo/bin"):
+                try:
+                    safe_dirs.add(candidate.resolve())
+                except OSError:
+                    safe_dirs.add(candidate)
+            try:
+                parent_resolved = bpath.parent.resolve()
+            except OSError:
+                parent_resolved = bpath.parent
+            if parent_resolved in safe_dirs and (bpath.is_file() or bpath.is_symlink()):
+                try:
+                    bpath.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"installed": False, "server_running": False}
+
+
+def herdr_start(payload=None):
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = shutil.which("herdr", path=path_str)
+        if not binary:
+            raise ValueError("未找到 herdr 命令，请先安装 Herdr")
+        env = os.environ.copy()
+        env["PATH"] = path_str
+        if _herdr_server_running(binary, env, timeout=2.0):
+            return herdr_status({})
+        workspace = str(payload.get("workspace") or "").strip() if isinstance(payload, dict) else ""
+        cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
+        subprocess.Popen(
+            [binary, "server"],
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            if _herdr_server_running(binary, env, timeout=0.8):
+                break
+            time.sleep(0.08)
+    return herdr_status({})
+
+
+def herdr_stop(payload=None):
+    with _herdr_lifecycle_lock():
+        path_str = enriched_path()
+        binary = shutil.which("herdr", path=path_str) or ""
+        if binary:
+            env = os.environ.copy()
+            env["PATH"] = path_str
+            try:
+                subprocess.run(
+                    [binary, "server", "stop"],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return herdr_status({})
+
+
+def _update_herdr_theme_toml(text, theme):
+    lines = text.splitlines(keepends=True)
+    theme_header_re = re.compile(r"^\s*\[\s*theme\s*\](?:\s*#.*)?$")
+    any_header_re = re.compile(r"^\s*\[")
+    key_re = re.compile(r"^(\s*)name\s*=.*$")
+    value_line = f'name = "{theme}"\n'
+
+    theme_start = None
+    theme_end = len(lines)
+    for idx, line in enumerate(lines):
+        if theme_start is None:
+            if theme_header_re.match(line):
+                theme_start = idx
+        else:
+            if any_header_re.match(line):
+                theme_end = idx
+                break
+
+    if theme_start is None:
+        out = text
+        if out and not out.endswith("\n"):
+            out += "\n"
+        if out and not out.endswith("\n\n"):
+            out += "\n"
+        return out + f"[theme]\n{value_line}"
+
+    for idx in range(theme_start + 1, theme_end):
+        m = key_re.match(lines[idx])
+        if m:
+            lines[idx] = f'{m.group(1)}name = "{theme}"\n'
+            return "".join(lines)
+
+    if not lines[theme_start].endswith("\n"):
+        lines[theme_start] = lines[theme_start] + "\n"
+    lines.insert(theme_start + 1, value_line)
+    return "".join(lines)
+
+
+def _remove_herdr_theme_toml(text):
+    lines = text.splitlines(keepends=True)
+    theme_header_re = re.compile(r"^\s*\[\s*theme\s*\](?:\s*#.*)?$")
+    any_header_re = re.compile(r"^\s*\[")
+    key_re = re.compile(r"^\s*name\s*=.*$")
+
+    theme_start = None
+    theme_end = len(lines)
+    for idx, line in enumerate(lines):
+        if theme_start is None:
+            if theme_header_re.match(line):
+                theme_start = idx
+        elif any_header_re.match(line):
+            theme_end = idx
+            break
+    if theme_start is None:
+        return text
+
+    kept_section = [line for line in lines[theme_start + 1 : theme_end] if not key_re.match(line)]
+    has_other_content = any(line.strip() and not line.lstrip().startswith("#") for line in kept_section)
+    if has_other_content:
+        return "".join(lines[: theme_start + 1] + kept_section + lines[theme_end:])
+    # Section only had name = ... (and maybe blank lines): drop the empty [theme] header too.
+    return "".join(lines[:theme_start] + lines[theme_end:])
+
+
+def herdr_apply_theme(payload):
+    theme = str(payload.get("theme") or "").strip().lower() if isinstance(payload, dict) else ""
+    if not theme:
+        theme = "default"
+    if theme != "default" and theme not in HERDR_VALID_THEMES:
+        raise ValueError(f"不支持的 Herdr 主题：{theme}")
+    with _herdr_lifecycle_lock():
+        existing = ""
+        existed = False
+        try:
+            if HERDR_CONFIG_FILE.is_file():
+                existed = True
+                existing = HERDR_CONFIG_FILE.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            existing = ""
+        if theme == "default":
+            if existed:
+                updated = _remove_herdr_theme_toml(existing)
+                if updated != existing:
+                    atomic_write_text(HERDR_CONFIG_FILE, updated, mode=0o600)
+        else:
+            updated = _update_herdr_theme_toml(existing, theme)
+            atomic_write_text(HERDR_CONFIG_FILE, updated, mode=0o600)
+        path_str = enriched_path()
+        binary = shutil.which("herdr", path=path_str) or ""
+        if binary:
+            env = os.environ.copy()
+            env["PATH"] = path_str
+            if _herdr_server_running(binary, env, timeout=1.5):
+                try:
+                    subprocess.run(
+                        [binary, "server", "reload-config"],
+                        env=env,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    pass
+    return {"ok": True, "theme": theme}
+
+
+def _herdr_fallback_exec(shell, workspace, inner_cmd):
+    target = workspace if workspace and Path(workspace).is_dir() else str(HOME)
+    try:
+        os.chdir(target)
+    except OSError:
+        pass
+    if not (shell and os.path.isfile(shell) and os.access(shell, os.X_OK)):
+        if sys.platform == "darwin" and os.path.isfile("/bin/zsh"):
+            shell = "/bin/zsh"
+        elif os.path.isfile("/bin/bash"):
+            shell = "/bin/bash"
+        else:
+            shell = "/bin/sh"
+    if inner_cmd:
+        os.execv(shell, [shell, "-c", inner_cmd])
+    os.execv(shell, [shell, "-l"])
+
+
+def herdr_attach():
+    """Interactive TTY entrypoint for Herdr standalone launch and terminal takeover."""
+    workspace_raw = os.environ.pop("CAGE_HERDR_WORKSPACE", "").strip()
+    workspace = workspace_raw if workspace_raw and Path(workspace_raw).is_dir() else str(HOME)
+    project_label = os.environ.pop("CAGE_HERDR_PROJECT_LABEL", "").strip() or Path(workspace).name or "workspace"
+    tab_label = os.environ.pop("CAGE_HERDR_TAB_LABEL", "").strip()
+    kind = os.environ.pop("CAGE_HERDR_KIND", "").strip().lower() or "shell"
+    inner_cmd = os.environ.pop("CAGE_HERDR_INNER_CMD", "").strip()
+    default_shell = "/bin/zsh" if sys.platform == "darwin" else "/bin/bash"
+    shell = os.environ.pop("CAGE_HERDR_SHELL", "").strip() or default_shell
+
+    path_str = enriched_path()
+    binary = shutil.which("herdr", path=path_str) or ""
+    if os.environ.get("HERDR_ENV") == "1" or not binary:
+        _herdr_fallback_exec(shell, workspace, inner_cmd)
+
+    original_umask = os.umask(0o077)
+    HERDR_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    now = time.time()
+    try:
+        for entry in HERDR_ROOT.iterdir():
+            if entry.name.startswith("run-") and entry.name.endswith(".sh") and entry.is_file():
+                try:
+                    if now - entry.stat().st_mtime > 300:
+                        entry.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    env = os.environ.copy()
+    env["PATH"] = path_str
+
+    if kind == "herdr" and not inner_cmd:
+        with _herdr_lifecycle_lock():
+            if _herdr_server_running(binary, env, timeout=1.5) and Path(workspace).is_dir():
+                ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=1.5)
+                if ws_resp is not None and not _herdr_extract_workspaces(ws_resp):
+                    try:
+                        subprocess.run(
+                            [binary, "workspace", "create", f"--cwd={workspace}", f"--label={project_label}", "--focus"],
+                            env=env,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=3,
+                            check=False,
+                        )
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+        os.umask(original_umask)
+        try:
+            os.chdir(workspace)
+        except OSError:
+            pass
+        os.execve(binary, [binary], env)
+
+    # Takeover mode for shell / claude / codex / agent / magpie-tui.
+    # Serialize server autostart + workspace/tab creation so concurrent opens
+    # never race daemon boot or spawn duplicate project workspaces.
+    need_inner = bool(inner_cmd and (kind != "shell" or "cage-macos-terminal" in inner_cmd))
+    server_ok = False
+    create_resp = None
+    pane_id = ""
+    created_tab_id = ""
+    created_ws_id = ""
+    with _herdr_lifecycle_lock():
+        server_ok = _herdr_server_running(binary, env, timeout=1.5)
+        if not server_ok:
+            try:
+                subprocess.Popen(
+                    [binary, "server"],
+                    cwd=workspace,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                    start_new_session=True,
+                )
+                deadline = time.monotonic() + 3.5
+                while time.monotonic() < deadline:
+                    if _herdr_server_running(binary, env, timeout=0.8):
+                        server_ok = True
+                        break
+                    time.sleep(0.08)
+            except OSError:
+                server_ok = False
+
+        if server_ok:
+            ws_resp = _herdr_run_json(binary, ["workspace", "list"], env, timeout=2.0)
+            existing_ws_id = ""
+            for ws in _herdr_extract_workspaces(ws_resp):
+                if isinstance(ws, dict) and ws.get("label") == project_label:
+                    ws_id = ws.get("workspace_id") or ws.get("id")
+                    if ws_id:
+                        existing_ws_id = str(ws_id)
+                        break
+
+            if existing_ws_id:
+                tab_args = ["tab", "create", f"--workspace={existing_ws_id}", f"--cwd={workspace}"]
+                if tab_label:
+                    tab_args.append(f"--label={tab_label}")
+                tab_args.append("--focus")
+                create_resp = _herdr_run_json(binary, tab_args, env, timeout=3.0)
+                pane_id = _herdr_extract_pane_id(create_resp)
+                created_tab_id = _herdr_extract_tab_id(create_resp)
+            else:
+                create_resp = _herdr_run_json(
+                    binary,
+                    ["workspace", "create", f"--cwd={workspace}", f"--label={project_label}", "--focus"],
+                    env,
+                    timeout=3.0,
+                )
+                pane_id = _herdr_extract_pane_id(create_resp)
+                created_tab_id = _herdr_extract_tab_id(create_resp)
+                if isinstance(create_resp, dict):
+                    res_obj = create_resp.get("result") if isinstance(create_resp.get("result"), dict) else create_resp
+                    ws_obj = res_obj.get("workspace") if isinstance(res_obj, dict) else None
+                    if isinstance(ws_obj, dict):
+                        created_ws_id = str(ws_obj.get("workspace_id") or ws_obj.get("id") or "")
+                if create_resp is not None and tab_label and created_tab_id:
+                    try:
+                        subprocess.run(
+                            [binary, "tab", "rename", "--", created_tab_id, tab_label],
+                            env=env,
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=2,
+                            check=False,
+                        )
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+
+    if not server_ok or create_resp is None or (need_inner and not pane_id):
+        os.umask(original_umask)
+        _herdr_fallback_exec(shell, workspace, inner_cmd)
+
+    if pane_id and need_inner:
+        run_script = HERDR_ROOT / f"run-{os.getpid()}-{secrets.token_hex(6)}.sh"
+        script_body = (
+            "#!/bin/sh\n"
+            'rm -f -- "$0"\n'
+            f"exec {shlex.quote(shell)} -c {shlex.quote(inner_cmd)}\n"
+        )
+        try:
+            atomic_write_text(run_script, script_body, mode=0o700)
+            pr = subprocess.run(
+                [binary, "pane", "run", pane_id, f"exec {shlex.quote(str(run_script))}"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=4,
+            )
+            if pr.returncode != 0:
+                raise ValueError("herdr pane run failed")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            if run_script is not None:
+                run_script.unlink(missing_ok=True)
+            # Best-effort cleanup of the just-created empty tab/workspace before fallback.
+            try:
+                if created_ws_id:
+                    subprocess.run([binary, "workspace", "close", created_ws_id], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, check=False)
+                elif created_tab_id:
+                    subprocess.run([binary, "tab", "close", created_tab_id], env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2, check=False)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            os.umask(original_umask)
+            _herdr_fallback_exec(shell, workspace, inner_cmd)
+
+    os.umask(original_umask)
+    try:
+        os.chdir(workspace)
+    except OSError:
+        pass
+    os.execve(binary, [binary], env)
+
+
 def main(argv):
     if not argv:
         raise ValueError("missing subcommand")
@@ -2571,6 +3729,18 @@ def main(argv):
             pass
         cfg = json.loads(raw_cfg) if raw_cfg.strip() else {}
         return t3code_supervise(cfg)
+
+    if cmd == "magpie-supervise":
+        raw_cfg = sys.stdin.read(65536)
+        try:
+            sys.stdin.close()
+        except OSError:
+            pass
+        cfg = json.loads(raw_cfg) if raw_cfg.strip() else {}
+        return magpie_supervise(cfg)
+
+    if cmd == "herdr-attach":
+        return herdr_attach()
 
     if cmd == "login":
         raw_env = os.environ.pop("CAGE_CLI_LOGIN_JSON", "")
@@ -2624,6 +3794,45 @@ def main(argv):
         return 0
     if cmd == "t3code-mint-pair":
         print(json.dumps(t3code_mint_pair(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-status":
+        print(json.dumps(magpie_status(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-install":
+        print(json.dumps(magpie_install(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-uninstall":
+        print(json.dumps(magpie_uninstall(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-start":
+        print(json.dumps(magpie_start(payload, restart=False), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-restart":
+        print(json.dumps(magpie_start(payload, restart=True), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-stop":
+        print(json.dumps(magpie_stop(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-open-url":
+        print(json.dumps(magpie_open_url(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-status":
+        print(json.dumps(herdr_status(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-install":
+        print(json.dumps(herdr_install(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-uninstall":
+        print(json.dumps(herdr_uninstall(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-start":
+        print(json.dumps(herdr_start(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-stop":
+        print(json.dumps(herdr_stop(payload), ensure_ascii=False))
+        return 0
+    if cmd == "herdr-apply-theme":
+        print(json.dumps(herdr_apply_theme(payload), ensure_ascii=False))
         return 0
     raise ValueError(f"unknown subcommand: {cmd}")
 

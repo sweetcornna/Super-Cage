@@ -14,6 +14,8 @@ import {
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
 import { T3CodeSettingsCard } from "./t3code-panel";
+import { MagpieSettingsCard } from "./magpie-panel";
+import { HerdrSettingsCard } from "./herdr-panel";
 import "./agent-settings.css";
 
 const CATEGORY_LABELS = {
@@ -280,11 +282,16 @@ function AgentConfigEditor({ entry, busy, onSave }) {
 export function AgentSettings({
   store,
   t3code,
+  magpie,
+  herdr,
   status,
   onConfirm,
   onOpenAccounts,
   onLaunchAgent,
   onOpenT3Code,
+  onOpenMagpie,
+  onOpenMagpieTUI,
+  onOpenHerdr,
   onSavedClaudeCommand,
 }) {
   const [query, setQuery] = useState("");
@@ -523,6 +530,25 @@ export function AgentSettings({
           agentsStore={store}
           status={status}
           onOpenT3Code={onOpenT3Code}
+        />
+      )}
+
+      {magpie && (
+        <MagpieSettingsCard
+          store={magpie}
+          status={status}
+          onConfirm={onConfirm}
+          onOpenMagpie={onOpenMagpie}
+          onOpenMagpieTUI={onOpenMagpieTUI}
+        />
+      )}
+
+      {herdr && (
+        <HerdrSettingsCard
+          store={herdr}
+          status={status}
+          onConfirm={onConfirm}
+          onOpenHerdr={onOpenHerdr}
         />
       )}
 

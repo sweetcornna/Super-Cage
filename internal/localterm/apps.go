@@ -24,9 +24,11 @@ type App struct {
 }
 
 // macApps is macOS's table, in the order of preference: there is no choice
-// to make. Ghostty opens the window when it is installed, the system
-// Terminal otherwise.
+// to make. Herdr opens the window when it is installed, else Ghostty, else
+// the system Terminal.
 var macApps = []App{
+	{ID: "herdr", Name: "Herdr", BundleIDs: []string{"dev.herdr.app"},
+		Evidence: "herdr-app CFBundleIdentifier=dev.herdr.app (installs to ~/Applications/Herdr.app or /Applications/Herdr.app)"},
 	{ID: "ghostty", Name: "Ghostty", BundleIDs: []string{"com.mitchellh.ghostty"}, Automation: true,
 		Evidence: "ghostty macos/Ghostty.xcodeproj/project.pbxproj PRODUCT_BUNDLE_IDENTIFIER (release; the tip channel ships the same id per Homebrew cask ghostty@tip)"},
 	{ID: "terminal", Name: "系统终端", BundleIDs: []string{"com.apple.Terminal"},
@@ -67,7 +69,7 @@ func Detect() []Installed {
 }
 
 // Pick is the application "在本机终端中打开" uses among those found: the
-// first of the table (Ghostty), else the next (the system Terminal). It
+// first of the table (Herdr), else Ghostty, else the system Terminal. It
 // reports false when none is installed.
 func Pick(found []Installed) (Installed, bool) {
 	for _, app := range Apps() {

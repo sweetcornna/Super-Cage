@@ -63,6 +63,7 @@ const settingsURL = `chrome-extension://${extensionId}/settings.html`;
 const extensionRepairURL = "chrome://extensions/?cage-browser-controller";
 const isSettingsTab = tab => tab.url === settingsURL || tab.url.startsWith(settingsURL + "#");
 const t3codePort = Number.isInteger(config.t3codePort) && config.t3codePort >= 1024 && config.t3codePort <= 65535 ? config.t3codePort : 13773;
+const magpiePort = Number.isInteger(config.magpiePort) && config.magpiePort >= 1024 && config.magpiePort <= 65535 ? config.magpiePort : 3430;
 const isLoopbackHost = host => {
   const h = String(host || "").toLowerCase();
   return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]" || h.endsWith(".localhost");
@@ -76,17 +77,35 @@ const isT3CodeTab = tab => {
     return false;
   }
 };
+const isMagpieTab = tab => {
+  if (typeof tab?.url !== "string") return false;
+  try {
+    const u = new URL(tab.url);
+    return u.protocol === "http:" && isLoopbackHost(u.hostname) && Number(u.port) === magpiePort;
+  } catch {
+    return false;
+  }
+};
 const isLoopbackPairingURL = raw => {
   if (typeof raw !== "string") return false;
   try {
     const u = new URL(raw);
-    if (!["http:", "https:"].includes(u.protocol) || !isLoopbackHost(u.hostname)) return false;
-    const combined = `${u.pathname}${u.search}${u.hash}`;
-    if (/(?:^|\/)pair(?:[/?#]|$)/i.test(u.pathname) || /\/pair(?:[/?#&]|$)/i.test(u.search + u.hash)) return true;
-    if (u.searchParams.has("token") || /token=/i.test(combined)) return true;
+    if (!["http:", "https:"].includes(u.protocol)) return false;
+    if (isLoopbackHost(u.hostname)) {
+      const combined = `${u.pathname}${u.search}${u.hash}`;
+      if (/(?:^|\/)pair(?:[/?#]|$)/i.test(u.pathname) || /\/pair(?:[/?#&]|$)/i.test(u.search + u.hash)) return true;
+      if (u.searchParams.has("token") || /token=/i.test(combined)) return true;
+      if (u.searchParams.has("k") || /(?:^|[?&])k=/i.test(u.search)) return true;
+      return false;
+    }
+    // External Magpie auth links (`https://host/?k=<16+ char key>`): never persist or expose the auth key.
+    const kVal = u.searchParams.get("k");
+    if ((u.pathname === "/" || u.pathname === "") && typeof kVal === "string" && /^[A-Za-z0-9._~-]{16,}$/.test(kVal)) {
+      return true;
+    }
     return false;
   } catch {
-    return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/.*(?:(?:^|\/)pair(?:[/?#]|$)|token=)/i.test(raw);
+    return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/.*(?:(?:^|\/)pair(?:[/?#]|$)|token=|[?&]k=)/i.test(raw);
   }
 };
 if (isLoopbackPairingURL(restoreURL)) restoreURL = "";
@@ -738,8 +757,9 @@ function displayTitle(tab) {
   if (isScienceTab(tab)) return scienceTitle;
   if (tab.url === "about:blank") return "新标签页";
   const title = tab.title;
-  if (isLoopbackPairingURL(tab.url) && (!title || /(?:token=|\/pair)/i.test(title))) {
+  if (isLoopbackPairingURL(tab.url) && (!title || /(?:token=|\/pair|[?&]k=)/i.test(title))) {
     if (isT3CodeTab(tab)) return "T3 Code";
+    if (isMagpieTab(tab)) return "Magpie";
     try { return new URL(tab.url).hostname; } catch { return "新标签页"; }
   }
   if (
@@ -771,7 +791,7 @@ function publicState() {
       url: publicURL(t),
       document: documents.get(t.targetId) || "",
       favicon: favicons.get(t.targetId) || "",
-      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : isScienceTab(t) ? "science" : isT3CodeTab(t) ? "t3code" : "web",
+      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : isScienceTab(t) ? "science" : isT3CodeTab(t) ? "t3code" : isMagpieTab(t) ? "magpie" : "web",
       workspace: t.url.startsWith("http://127.0.0.1:18080/") ? new URL(t.url).searchParams.get("folder") || config.workspace : undefined,
     })),
   };

@@ -45,6 +45,7 @@ type terminalSession struct {
 	claudeAccountSource   string
 	codexAccountID        string
 	codexAccountSource    string
+	herdrBacked           bool
 	cmd                   *exec.Cmd
 	file                  terminalPTY
 	exitCode              int
@@ -154,6 +155,9 @@ func (t *terminalSession) summary() map[string]any {
 	}
 	if t.origin != "" {
 		summary["origin"] = map[string]any{"kind": t.origin, "device": t.originDevice, "kept": t.kept}
+	}
+	if t.herdrBacked {
+		summary["herdr_backed"] = true
 	}
 	// How it ended, once it has: a Codex launch the guest refused ends with 75
 	// and must not look like an ordinary close. Absent while it runs and when

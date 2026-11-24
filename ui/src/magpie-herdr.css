@@ -1,0 +1,138 @@
+/* Optional Magpie & Herdr integration styles extending t3code.css tokens. */
+
+.magpie-gateway-chip {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.magpie-chrome.split-chrome .magpie-gateway-chip {
+  display: none;
+}
+
+.magpie-install-row,
+.herdr-install-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 10px);
+  background: var(--chrome);
+}
+
+.magpie-install-actions,
+.herdr-install-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.magpie-install-note,
+.herdr-install-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--s-xs, 0.82rem);
+  line-height: 1.5;
+}
+
+.magpie-install-note code,
+.herdr-install-note code,
+.magpie-toggle-row--sub code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.92em;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  color: var(--ink);
+}
+
+.magpie-uninstall-btn:hover:not(:disabled),
+.herdr-uninstall-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger, var(--error)) 45%, var(--line));
+  background: color-mix(in srgb, var(--danger, var(--error)) 10%, var(--paper));
+  color: var(--danger, var(--error));
+}
+
+.magpie-port-gateway-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.magpie-gateway-readonly {
+  min-height: var(--s-control, 40px);
+  padding: 0 10px;
+  border-radius: var(--r-sm, 8px);
+  border: 1px solid var(--line);
+  background: var(--chrome);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.magpie-gateway-value {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--s-xs, 0.84rem);
+  color: var(--strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.magpie-toggle-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.magpie-toggle-row--sub {
+  border-top: 0 !important;
+}
+
+/* Herdr live blocked-agent attention pill (amber in light & dark themes). */
+.herdr-pill--blocked {
+  background: color-mix(in srgb, var(--warning, var(--amber, #9a6700)) 15%, var(--paper));
+  color: var(--warning, var(--amber, #9a6700));
+  border: 1px solid color-mix(in srgb, var(--warning, var(--amber, #9a6700)) 30%, transparent);
+}
+
+/* Prominent Herdr terminal-takeover switch container. */
+.herdr-takeover-row {
+  margin: 0 !important;
+  padding: 12px 14px !important;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md, 10px);
+  background: var(--chrome);
+  transition: border-color var(--dur, 160ms) var(--ease-out, ease),
+    background var(--dur, 160ms) var(--ease-out, ease);
+}
+
+.herdr-takeover-row[data-active="true"] {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: color-mix(in srgb, var(--accent) 7%, var(--paper));
+}
+
+.herdr-theme-row {
+  display: grid;
+  grid-template-columns: minmax(0, 320px);
+  gap: 8px;
+}
+
+@media (max-width: 720px) {
+  .magpie-port-gateway-grid,
+  .herdr-theme-row {
+    grid-template-columns: 1fr;
+  }
+  .magpie-gateway-chip {
+    display: none;
+  }
+}
+
+/* Match settings.css label specificity inside Magpie & Herdr settings cards. */
+.settings-page .settings-content .magpie-card label:not(.check-line):not(.choice):not(.toggle-row),
+.settings-page .settings-content .herdr-card label:not(.check-line):not(.choice):not(.toggle-row) {
+  margin-bottom: 10px;
+}

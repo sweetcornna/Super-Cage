@@ -72,12 +72,17 @@ export function SettingsPanel({
   status,
   agents,
   t3code,
+  magpie,
+  herdr,
   onClose,
   onSaved,
   onConfirm,
   onOpenAgentAccounts,
   onLaunchAgent,
   onOpenT3Code,
+  onOpenMagpie,
+  onOpenMagpieTUI,
+  onOpenHerdr,
   initialSection = "keyboard",
 }) {
   const [localKeyboard, setLocalKeyboard] = useState(() => clientKeyboard(current.keyboard));
@@ -293,6 +298,8 @@ export function SettingsPanel({
             <AgentSettings
               store={agents}
               t3code={t3code}
+              magpie={magpie}
+              herdr={herdr}
               status={status}
               onConfirm={onConfirm}
               onOpenAccounts={(id) => {
@@ -307,6 +314,19 @@ export function SettingsPanel({
                 const opened = await onOpenT3Code?.(forceMode);
                 if (opened?.mode === "workbench") onClose();
                 return opened;
+              }}
+              onOpenMagpie={async (forceMode) => {
+                const opened = await onOpenMagpie?.(forceMode);
+                if (opened?.mode === "workbench") onClose();
+                return opened;
+              }}
+              onOpenMagpieTUI={async () => {
+                onClose();
+                return await onOpenMagpieTUI?.();
+              }}
+              onOpenHerdr={async () => {
+                onClose();
+                return await onOpenHerdr?.();
               }}
               onSavedClaudeCommand={onSaved}
             />
@@ -611,7 +631,7 @@ export function SettingsPanel({
                 {agents && (
                   <div className="inline-info">
                     <Bot size={16} />
-                    <span>需要安装 Antigravity CLI、OpenCode、Copilot、Qwen Code，或注册自定义 Agent（如 Grok 等）与 T3 Code？</span>
+                    <span>需要安装 Antigravity CLI、OpenCode、Copilot、Qwen Code，或启用 T3 Code、Magpie 与 Herdr 终端工作区？</span>
                     <button type="button" className="text-button" onClick={() => setSection("agents")}>
                       管理 Agent CLI
                     </button>
