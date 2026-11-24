@@ -38,6 +38,7 @@ import { T3CodeHeader, isT3CodeDirectAvailable, isT3CodeTab } from "./t3code-pan
 import { MagpieHeader, isMagpieDirectAvailable, isMagpieTab } from "./magpie-panel";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
+import { loginReturnTerminal } from "./login-terminals.mjs";
 import { BrowserDataHost, openBrowserData } from "./browser-data-launcher";
 import { useDownloadNotifications, useDesktopFiles } from "./browser-downloads";
 import { BrowserUploads } from "./browser-uploads";
@@ -645,6 +646,9 @@ function App() {
   // The tab of a new terminal appears at once and the server's record
   // replaces it in place; a failure is shown there (terminal-pending.mjs).
   const pendingClosed = useRef(new Set());
+  // Authorization page tab id -> the login terminal it was opened from, so
+  // the page can lead back there with the code it shows (login-terminals.mjs).
+  const [loginReturns, setLoginReturns] = useState({});
   const createTerminal = async (path, kind, options, retrying) => {
     setTerminalChoice(null);
     const codex = kind === "codex" || kind === "codex-login";
@@ -1980,6 +1984,10 @@ function App() {
       onNew={newPage} onNavigate={address => navigate(tab.id, address)} onOpen={openBrowserPage}
       onNewPrivate={() => openBrowserPage(undefined, true)} onNewRegular={() => openBrowserPage(undefined, false)}
       onSettings={openBrowserSettings}
+      onReturnToLogin={(() => {
+        const terminal = loginReturnTerminal(loginReturns, tab.id, tabs);
+        return terminal ? () => { void select(terminal.id); } : undefined;
+      })()}
       onReload={() => tab.kind === "browser-settings" ? setBrowserSettingsRevision(value => value + 1) : action("/browser/reload", { id: tab.id })}
       onCloseBrowser={!dualBrowser || tab.id === rightId ? closeBrowser : undefined}
       downloads={downloads} onStatus={notify}
@@ -2383,7 +2391,10 @@ function App() {
                             .catch((e) => notify(e.message));
                         }}
                         onOutput={isCodexTab(tab) && tab.cli_session_id ? () => codexOutputArrived(tab.id) : undefined}
-                        onLoginTab={({ id }) => showBrowserResult({ id, kind: "web", login: true, incognito: true, title: "账号授权" })}
+                        onLoginTab={({ id }) => {
+                          setLoginReturns((previous) => previous[id] === tab.id ? previous : { ...previous, [id]: tab.id });
+                          showBrowserResult({ id, kind: "web", login: true, incognito: true, title: "账号授权" });
+                        }}
                         onControls={(control) =>
                           control
                             ? terminalControls.current.set(tab.id, control)

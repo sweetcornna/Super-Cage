@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Archive, ArrowLeft, ArrowRight, ArrowUpRight, ChevronRight, FolderOpen,
-  Globe2, Cookie, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, PanelTopClose, Plus, RefreshCw, Trash2, X } from "lucide-react";
+  Globe2, Cookie, Settings, Puzzle, ScanEye, Maximize2, MoreHorizontal, PanelLeftOpen, PanelTopClose, Plus, RefreshCw, SquareTerminal, Trash2, X } from "lucide-react";
 import { BrowserVaultBar } from "./password-vault";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { BrowserFavorites } from "./browser-favorites";
@@ -92,7 +92,7 @@ export function BrowserTabRail({ tabs, metadata, active, ready, busy, splitDrag,
 
 export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready, busy, focused, compact, triggerRef, vertical,
   sidebarButton, exitButton, splitDrag, agentsById, onFocusT3CodeChrome, onFocusMagpieChrome, onSelect, onClose, onRename, onPin, onReorder, onNew,
-  location, menu, back, forward, action, onNavigate, onOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
+  location, menu, back, forward, action, onNavigate, onOpen, onNewPrivate, onNewRegular, onCloseBrowser, onSettings, onReturnToLogin, onReload, downloads, onStatus, onEditor, onRecover, recoveringEditor }) {
   const [address, setAddress] = useState("");
   const [toolsOpen, setToolsOpen] = useState(false);
   const [cookiesOpen, setCookiesOpen] = useState(false);
@@ -267,6 +267,10 @@ export function BrowserHeader({ vault, onManageVault, tab, tabs, metadata, ready
     </div>
     {cookiesOpen && <BrowserCookies key={`${tab.id}:${tab.url}`} tab={tab} onClose={() => { setCookiesOpen(false); toolsTrigger.current?.focus(); }} />}
     {tab.incognito && <p className="browser-private-note">无痕会话 · 关闭全部无痕标签后清理网站数据；下载和主动保存的收藏会保留。</p>}
+    {onReturnToLogin && <div className="browser-login-return" role="note">
+      <span>完成授权后，如页面给出授权码或凭证，复制后回到登录终端粘贴。</span>
+      <button type="button" onClick={onReturnToLogin}><SquareTerminal size={15} aria-hidden="true" />回到登录终端</button>
+    </div>}
     {menu}
     {busy && <div className="progress-line" />}
   </header>;

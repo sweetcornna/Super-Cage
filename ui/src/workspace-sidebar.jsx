@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Globe2,
   Home,
+  KeyRound,
   Monitor,
   MonitorSmartphone,
   Network,
@@ -28,6 +29,7 @@ import { WorkspaceTabs } from "./workspace-tabs";
 import { sessionKey } from "./session-order.mjs";
 import { mixedSessionRows } from "./session-provider.mjs";
 import { AccountMenu } from "./account";
+import { orphanLoginTerminals } from "./login-terminals.mjs";
 import { useSSHNavigation } from "./remote-hosts";
 import { GuestSystemIcon } from "./guest-system-icon";
 import { getClientContext, isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
@@ -36,6 +38,10 @@ import { AgentIcon } from "./agent-icon";
 import { isMagpieDirectAvailable } from "./magpie-panel";
 
 const SESSION_PREVIEW_LIMIT = 5;
+
+// The collapse key of the sidebar's login-terminal group; no project path
+// can equal it.
+const LOGIN_GROUP = "\u0000login";
 
 export function WorkspaceSidebar({
   workspace,
@@ -340,6 +346,45 @@ export function WorkspaceSidebar({
             </button>
           </div>
         )}
+        {(() => {
+          // Account-login terminals belong to no project; list them here so
+          // they stay reachable while their authorization page is open.
+          const rows = orphanLoginTerminals(tabs, projects, projectGroups);
+          if (!rows.length) return null;
+          const expanded = !collapsed[LOGIN_GROUP];
+          return (
+            <section className="sidebar-project sidebar-login-terminals" aria-label="账号登录终端">
+              <div className={`project-heading ${rows.some((row) => row.id === active) ? "current-project" : ""}`}>
+                <button
+                  className="project-disclosure"
+                  aria-expanded={expanded}
+                  onClick={() => setCollapsed((previous) => ({ ...previous, [LOGIN_GROUP]: expanded }))}
+                >
+                  <KeyRound size={16} />
+                  <span>账号登录</span>
+                </button>
+              </div>
+              <div className={`project-children ${expanded ? "expanded" : ""}`} inert={!expanded}>
+                <div>
+                  <WorkspaceTabs
+                    tabs={rows}
+                    saved={saved}
+                    agentsById={agentsById}
+                    active={home || desktopOpen ? "" : active}
+                    label="账号登录终端"
+                    busy={busy}
+                    ready={ready}
+                    onSelect={onSelect}
+                    onClose={onClose}
+                    onRename={onRename}
+                    onPin={onPin}
+                    splitDrag={splitDrag}
+                  />
+                </div>
+              </div>
+            </section>
+          );
+        })()}
         {projects.map((path) => {
           const group = projectGroups.find(group => group.workspace === path);
           const folders = group?.folders || [path];
