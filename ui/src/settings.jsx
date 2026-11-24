@@ -611,7 +611,7 @@ export function SettingsPanel({
                 {agents && (
                   <div className="inline-info">
                     <Bot size={16} />
-                    <span>需要安装 Gemini CLI、OpenCode、Copilot、Qwen Code，或注册自定义 Agent（如 Antigravity / Grok）与 T3 Code？</span>
+                    <span>需要安装 Antigravity CLI、OpenCode、Copilot、Qwen Code，或注册自定义 Agent（如 Grok 等）与 T3 Code？</span>
                     <button type="button" className="text-button" onClick={() => setSection("agents")}>
                       管理 Agent CLI
                     </button>

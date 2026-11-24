@@ -12,7 +12,7 @@ func TestBuiltInCatalogIntegrity(t *testing.T) {
 		t.Fatalf("expected 15 built-in mainstream agents, got %d", len(specs))
 	}
 	expectedIDs := []string{
-		"claude", "codex", "gemini", "opencode", "copilot", "qwen",
+		"claude", "codex", "antigravity", "opencode", "copilot", "qwen",
 		"amp", "cline", "cursor", "vibe", "kimi", "aider",
 		"droid", "goose", "pi",
 	}
@@ -66,17 +66,24 @@ func TestBuiltInCatalogIntegrity(t *testing.T) {
 			t.Fatalf("claude missing strip env %q", v)
 		}
 	}
-	// Verify Gemini's critical .gemini subdirectory quirk, AddDirFlag, and cloud strip vars.
-	gemini, ok := Lookup("gemini", nil)
-	if !ok || gemini.Isolation.Mode != "env_home" || gemini.Isolation.EnvVar != "GEMINI_CLI_HOME" || gemini.Isolation.ConfigSubdir != ".gemini" {
-		t.Fatalf("gemini isolation nuance missing: %+v", gemini.Isolation)
+	// Verify Antigravity CLI (agy) replaced Gemini CLI in the built-in catalog.
+	if _, hasGemini := Lookup("gemini", nil); hasGemini {
+		t.Fatal("gemini should not be in the built-in catalog")
 	}
-	if gemini.Terminal.AddDirFlag != "--include-directories" || !slices.Equal(gemini.Terminal.PresetFlags, []string{"--yolo", "--sandbox"}) {
-		t.Fatalf("gemini terminal config mismatch: %+v", gemini.Terminal)
+	agy, ok := Lookup("antigravity", nil)
+	if !ok || agy.Binary != "agy" || agy.DefaultLaunchCommand != "agy" ||
+		len(agy.Channels) == 0 || agy.Channels[0].ScriptURL != "https://antigravity.google/cli/install.sh" {
+		t.Fatalf("antigravity catalog spec mismatch: %+v", agy)
 	}
-	for _, v := range []string{"GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"} {
-		if !slices.Contains(gemini.Auth.StripEnvOnOAuth, v) {
-			t.Fatalf("gemini missing strip env %q", v)
+	if agy.Terminal.AddDirFlag != "--add-dir" || !slices.Equal(agy.Terminal.PresetFlags, []string{"--continue", "--mode auto", "--sandbox"}) {
+		t.Fatalf("antigravity terminal config mismatch: %+v", agy.Terminal)
+	}
+	if !slices.Contains(agy.Auth.OAuthDomains, "antigravity.google") || !slices.Contains(agy.Auth.OAuthDomains, "accounts.google.com") {
+		t.Fatalf("antigravity oauth domains mismatch: %+v", agy.Auth.OAuthDomains)
+	}
+	for _, v := range []string{"GEMINI_API_KEY", "AGY_ADC_AUTH", "GOOGLE_CLOUD_PROJECT", "GOOGLE_APPLICATION_CREDENTIALS"} {
+		if !slices.Contains(agy.Auth.StripEnvOnOAuth, v) {
+			t.Fatalf("antigravity missing strip env %q", v)
 		}
 	}
 	// Verify Codex supports OAuth, device code, API key, AddDirFlag, and preset flags.
