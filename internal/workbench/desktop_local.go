@@ -95,7 +95,7 @@ func (d *desktopLocal) Status(ctx context.Context) (DesktopLocalStatus, error) {
 	if errors.Is(err, errControllerUnavailable) {
 		return d.offlineStatus(ctx, available), nil
 	}
-	if errors.Is(err, errClientOutdated) {
+	if errors.Is(err, errClientOutdated) || errors.Is(err, errControllerOutdated) {
 		return DesktopLocalStatus{Available: available, ServiceRunning: true, Message: err.Error()}, nil
 	}
 	if err != nil {

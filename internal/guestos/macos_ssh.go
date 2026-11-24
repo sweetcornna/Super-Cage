@@ -78,8 +78,14 @@ func MacOSSSHArgs(profile, user string) ([]string, error) {
 // Screen Sharing port. Do not reuse
 // MacOSSSHArgs: that set clears all forwards.
 func MacOSScreenSharingSSHArgs(profile, user string, hostPort int) ([]string, error) {
-	if hostPort < 1 || hostPort > 65535 {
-		return nil, errors.New("本机屏幕共享转发端口无效")
+	return MacOSLocalForwardSSHArgs(profile, user, hostPort, 5900)
+}
+
+// MacOSLocalForwardSSHArgs builds a loopback-only local forward from hostPort
+// to guestPort inside the macOS VM with authenticated LocalCommand readiness.
+func MacOSLocalForwardSSHArgs(profile, user string, hostPort, guestPort int) ([]string, error) {
+	if hostPort < 1 || hostPort > 65535 || guestPort < 1 || guestPort > 65535 {
+		return nil, errors.New("本机转发端口无效")
 	}
 	base, err := macOSSSHBaseArgs(profile, user)
 	if err != nil {
@@ -89,7 +95,7 @@ func MacOSScreenSharingSSHArgs(profile, user string, hostPort int) ([]string, er
 		"-N",
 		"-o", "ExitOnForwardFailure=yes",
 		"-o", "PermitLocalCommand=yes", "-o", "LocalCommand=echo 1",
-		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:5900", hostPort)), nil
+		"-L", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", hostPort, guestPort)), nil
 }
 
 // MacOSProvisionUser reads Lima's installation identity, including older VMs.

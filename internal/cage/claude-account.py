@@ -787,12 +787,52 @@ def macos_open(args):
     finish = args[0] == "--finish-login"
     data = {"action": "login-finish" if finish else "login-open", "login": login}
     if not finish:
+        import ipaddress
         from urllib.parse import urlsplit
         url = urlsplit(args[0])
-        if len(args[0]) > 8192 or url.scheme != "https" or url.username or url.password or url.hostname not in (
-                "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com"):
+        hostname = (url.hostname or "").lower().strip()
+        builtin_hosts = {
+            "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com",
+            "auth.openai.com", "chatgpt.com", "platform.openai.com",
+            "accounts.google.com", "oauth2.googleapis.com", "aistudio.google.com",
+            "github.com", "auth.githubcopilot.com",
+            "opencode.ai", "openrouter.ai",
+            "chat.qwen.ai", "qwen.ai", "account.aliyun.com", "dashscope.console.aliyun.com",
+            "ampcode.com", "sourcegraph.com",
+            "app.cline.bot", "cline.bot", "auth.cline.bot",
+            "cursor.com", "authenticator.cursor.sh",
+            "console.mistral.ai", "mistral.ai",
+            "code.kimi.com", "kimi.com", "platform.moonshot.cn", "platform.moonshot.ai",
+            "app.factory.ai", "auth.factory.ai", "factory.ai",
+            "pi.dev",
+        }
+        host_re = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$")
+        raw_extra = os.environ.get("CAGE_LOGIN_ALLOWED_HOSTS") or _controller_context.get("CAGE_LOGIN_ALLOWED_HOSTS", "")
+        extra_hosts = []
+        for item in raw_extra.split(","):
+            candidate = item.strip().lower()
+            if not candidate or len(candidate) > 253 or not host_re.fullmatch(candidate):
+                continue
+            if candidate == "localhost" or candidate.endswith(".local") or candidate.endswith(".internal"):
+                continue
+            try:
+                ipaddress.ip_address(candidate)
+                continue
+            except ValueError:
+                pass
+            if candidate not in extra_hosts:
+                extra_hosts.append(candidate)
+            if len(extra_hosts) >= 32:
+                break
+        try:
+            port = url.port
+        except ValueError:
+            return 2
+        if len(args[0]) > 8192 or url.scheme != "https" or port is not None or url.username or url.password or (hostname not in builtin_hosts and hostname not in extra_hosts):
             return 2
         data["url"] = args[0]
+        if extra_hosts:
+            data["allowed_hosts"] = extra_hosts
     address = Path.home() / "Library/Application Support/Cage/Login/open.sock"
     owner = address.lstat()
     if not stat.S_ISSOCK(owner.st_mode) or owner.st_uid != os.getuid() or owner.st_mode & 0o077:

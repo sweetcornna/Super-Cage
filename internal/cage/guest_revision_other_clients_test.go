@@ -14,12 +14,13 @@ import (
 // guestDependencies, guestEnv, componentStartScript() and ToolInstallPrelude()
 // and, through them, every script the start script embeds (guest.go).
 
-// guestRevisionAtOtherClientsBase is guestRevision() at the commit the
-// 其他客户端 work branched from (cc3afb92). If this fails you changed a hashed
-// input: either undo it, or, if the change is a product decision that is meant
-// to ship with 更新环境组件, set the new value here in the same commit and say
-// so in the message. Work on 其他客户端 never does.
-const guestRevisionAtOtherClientsBase = "c3dde43f291ef1a158ea7edb079a77542f0c775337b00796416d12b5f0c78cd7"
+// guestRevisionAtOtherClientsBase is guestRevision() at the last intentional
+// guest component update (0.1.19 universal Agent CLI runtime + T3 Code Web
+// browser/login updates, which ship via 更新环境组件). If this fails you changed
+// a hashed input: either undo it, or, if the change is a product decision that
+// is meant to ship with 更新环境组件, set the new value here in the same commit
+// and say so in the message. Work on 其他客户端 never does.
+const guestRevisionAtOtherClientsBase = "8e3843177e81f51aa70cedb3b3487a60e5a9e0700cd21c9bd0f48c23e978083a"
 
 func TestGuestRevisionIsPinnedForOtherClients(t *testing.T) {
 	if got := guestRevision(); got != guestRevisionAtOtherClientsBase {

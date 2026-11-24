@@ -133,8 +133,12 @@ func TestDesktopRejectsUnknownAndDifferentBuildsWithoutStoppingThem(t *testing.T
 			}
 			var stopCalled bool
 			var origin string
+			proofKey := randomToken()
+			proofServer := &Server{proofKey: proofKey}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
+				case controllerProofPath:
+					proofServer.controllerProof(w, r)
 				case "/api/launch":
 					jsonReply(w, launchResponse{URL: origin + "/#ticket", Controller: identity})
 				case "/api/handoff":
@@ -150,7 +154,7 @@ func TestDesktopRejectsUnknownAndDifferentBuildsWithoutStoppingThem(t *testing.T
 			_, portString, _ := net.SplitHostPort(server.Listener.Addr().String())
 			port, _ := strconv.Atoi(portString)
 			origin = "http://localhost:" + portString
-			if err := writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, Token: string(make([]byte, 64)), PID: os.Getpid()}); err != nil {
+			if err := writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, Token: string(make([]byte, 64)), PID: os.Getpid(), Auth: controlAuth, ProofKey: proofKey}); err != nil {
 				t.Fatal(err)
 			}
 			entry, err := Desktop(filepath.Join(profile, "config.json"), DesktopOptions{})
@@ -225,7 +229,7 @@ func TestPrepareUpdateWaitsForRoutineProbeAndPreservesActiveWork(t *testing.T) {
 			_, portString, _ := net.SplitHostPort(server.Listener.Addr().String())
 			port, _ := strconv.Atoi(portString)
 			s.origin = "http://localhost:" + portString
-			if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: port, Token: s.token, PID: os.Getpid(), Controller: s.identity}); err != nil {
+			if err := writePrivate(filepath.Join(s.profile, "control.json"), s.controlRecord(port)); err != nil {
 				t.Fatal(err)
 			}
 			if activeJob {

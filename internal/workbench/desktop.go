@@ -68,63 +68,20 @@ func openController(profile string) (*controllerClient, error) {
 	if err != nil {
 		return nil, err
 	}
+	if record.Auth == 0 {
+		return nil, errControllerOutdated
+	}
 	jar, _ := cookiejar.New(nil)
 	dial := controllerDial(record)
 	c := &controllerClient{profile: profile, record: record, origin: fmt.Sprintf("http://localhost:%d", record.Port), dial: dial, client: &http.Client{Timeout: controllerRequestTimeout, Jar: jar, Transport: &http.Transport{Proxy: nil, DialContext: dial}, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("redirect refused") }}}
 	return c, nil
 }
 
-// olderControllerGraceEndsIn is the release that removes the grace for a
-// controller from the release before the identity proof (a control.json
-// without auth): connectController and openController accept its record and
-// talk to it over 127.0.0.1, unproven, so the window can save and stop its
-// environment and complete an update. The proof ships in 0.1.16. The grace
-// was to end in 0.1.17, which follows 0.1.16 by two days: it stays for that
-// release, so that an install over 0.1.15 (which has no in-app update and
-// may skip 0.1.16) can still save and stop its environment. 0.1.18 is an
-// installer hotfix one day after 0.1.17 and keeps it for the same reason.
-// From 0.1.19 every caller below uses connectProvenController and
-// openController refuses a record without auth.
-// TestOlderControllerGraceCallers fails once the version reaches it.
-const olderControllerGraceEndsIn = "0.1.19"
-
-// olderControllerGraceEntries are the functions that give the grace.
-var olderControllerGraceEntries = []string{"connectController", "openController"}
-
-// olderControllerGraceCallers are the functions that still use the grace
-// (they call or pass one of olderControllerGraceEntries); automation (the agent
-// transport, AgentStartService, ServerEntry, the SSH entry's proxy) uses
-// connectProvenController. TestOlderControllerGraceCallers keeps this list
-// equal to the code.
-var olderControllerGraceCallers = []string{
-	"BrowserFileForConnection", "ClipboardFilesForConnection", "DesktopEntry", "DesktopFileForConnection",
-	"PrepareAppUpdate", "PrepareDesktopUpdate", "ShareNativeCloudProject", "UploadHostFilesForConnection",
-	"desktopGateway.trustedLogin", "desktopLaunch", "desktopLocal.Connect", "desktopLocal.Release",
-	"desktopLocal.ReleaseOwnedIdle", "desktopLocal.ReleaseUnused", "desktopLocal.Status",
-	"desktopLocal.handoffOldLocal", "desktopLocal.releaseFailedLaunch", "exportDiagnostics", "waitControllerReady",
-}
-
-// connectController serves the window and its helpers. Until the next
-// release it also reaches a controller from the release before the identity
-// proof (a record without auth), over 127.0.0.1 and unproven, because saving
-// and stopping that controller's environment is how an update completes.
-// controlclient.Connect holds the checks, shared with cage-attach.
-func connectController(profile string) (*controllerClient, error) {
-	return connectControllerOrOlder(profile, true)
-}
-
-// connectProvenController is connectController for automation (the agent
-// transport): it never talks to a controller that cannot prove itself.
+// connectProvenController proves the controller before carrying any credential.
+// The pre-0.1.16 grace for records without auth ended in 0.1.19; every caller
+// now uses connectProvenController and openController refuses records without auth.
 func connectProvenController(profile string) (*controllerClient, error) {
-	return connectControllerOrOlder(profile, false)
-}
-
-func connectControllerOrOlder(profile string, older bool) (*controllerClient, error) {
-	connect := controlclient.Connect
-	if !older {
-		connect = controlclient.ConnectProven
-	}
-	conn, launch, err := connect(profile, openControllerConn)
+	conn, launch, err := controlclient.ConnectProven(profile, openControllerConn)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +131,7 @@ func (c *controllerClient) setTrustedViewCookie(origin *url.URL) {
 // spawning a replacement against an occupied lock.
 func waitControllerReady(ctx context.Context, profile string) (*controllerClient, error) {
 	for {
-		c, err := connectController(profile)
+		c, err := connectProvenController(profile)
 		if !errors.Is(err, errControllerUnavailable) {
 			return c, err
 		}
@@ -292,7 +249,7 @@ func desktopLaunch(profile string, gateway bool, options DesktopOptions, start f
 		return DesktopResult{}, err
 	}
 	for i := 0; i < 60; i++ {
-		c, readErr := connectController(profile)
+		c, readErr := connectProvenController(profile)
 		if readErr == nil {
 			c.close()
 			if c.launch.DesktopGateway != gateway {

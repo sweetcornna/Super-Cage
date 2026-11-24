@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/controlclient"
+	"github.com/sylvinus/agent-vm/internal/agentcatalog"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
@@ -111,6 +112,18 @@ func AgentOperations() []AgentOperation {
 	post("claude-accounts.change", "Apply the same join, cancel, update, scheduling, refresh and removal actions as the UI", "/api/claude-accounts", from(claudeAccountInput{}))
 	get("codex-accounts.get", "Read Codex account roster, quotas and scheduling (Linux guests)", "/api/codex-accounts")
 	post("codex-accounts.change", "Apply the same update, scheduling, refresh and remove actions as the Codex account panel; log in through a codex-login terminal", "/api/codex-accounts", from(codexAccountInput{}))
+	get("agent-clis.list", "List built-in and custom Agent CLIs, installation status, prerequisites and account summaries", "/api/agent-clis")
+	post("agent-clis.install", "Install or update an Agent CLI through its official channel", "/api/agent-clis/install", object(map[string]string{"agent_id": "string", "channel": "string"}))
+	post("agent-clis.uninstall", "Uninstall a non-core Agent CLI package while preserving accounts and project files", "/api/agent-clis/uninstall", object(map[string]string{"agent_id": "string", "channel": "string"}))
+	post("agent-clis.config", "Update per-agent terminal launch command and ergonomic options", "/api/agent-clis/config", object(map[string]string{"agent_id": "string", "launch_command": "string", "extra_args": "string", "preferred_channel": "string", "image_paste": "boolean", "shift_enter_mode": "string", "hidden_in_menu": "boolean"}))
+	post("agent-clis.custom.save", "Register or update a custom Agent CLI specification", "/api/agent-clis/custom", from(agentcatalog.AgentSpec{}))
+	get("t3code.get", "Read optional T3 Code web workbench status, mode and Cage account bindings", "/api/t3code")
+	post("t3code.config", "Configure optional T3 Code integration mode, port, open mode and account bindings", "/api/t3code/config", object(map[string]string{"enabled": "boolean", "mode": "string", "external_url": "string", "port": "integer", "open_mode": "string", "focus_chrome": "boolean", "account_bindings": "object"}))
+	post("t3code.install", "Install official T3 Code CLI inside the Cage guest", "/api/t3code/install", object(map[string]string{"channel": "string"}))
+	post("t3code.open", "Open T3 Code original web UI in the workbench or direct zero-VNC loopback window", "/api/t3code/open", object(map[string]string{"workspace": "string", "force_mode": "string"}))
+	for _, action := range []string{"start", "stop", "restart"} {
+		post("t3code."+action, "Control the managed T3 Code guest server", "/api/t3code/"+action, object(nil))
+	}
 	get("vault.get", "List metadata; passwords remain hidden exactly as in the UI", "/api/vault")
 	post("vault.change", "Save/delete/unblock; reveal requires the same account_password reauthentication as the UI", "/api/vault", object(map[string]string{"action": "string", "entry": "object", "id": "string", "origin": "string", "account_password": "string"}))
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})

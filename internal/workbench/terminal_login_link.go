@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -28,6 +29,70 @@ func claudeAuthorizationURL(raw string) bool {
 	return false
 }
 
+func hostAllowed(host string, allowedHosts []string) bool {
+	if host == "" {
+		return false
+	}
+	for _, candidate := range allowedHosts {
+		if strings.ToLower(strings.TrimSpace(candidate)) == host {
+			return true
+		}
+	}
+	return false
+}
+
+// agentAuthorizationURL validates official HTTPS OAuth and device-code URLs for
+// any built-in or custom Agent CLI registered in Cage, strictly honoring allowedHosts.
+func agentAuthorizationURL(raw string, allowedHosts []string) bool {
+	if claudeAuthorizationURL(raw) {
+		u, err := url.Parse(raw)
+		return err == nil && hostAllowed(strings.ToLower(u.Hostname()), allowedHosts)
+	}
+	return agentAuthorizationURLOnly(raw, allowedHosts)
+}
+
+func agentAuthorizationURLOnly(raw string, allowedHosts []string) bool {
+	if len(raw) > 8192 || strings.ContainsAny(raw, "\r\n\t \\") {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if !hostAllowed(host, allowedHosts) {
+		return false
+	}
+	// Claude hosts always keep strict path + query checking.
+	switch host {
+	case "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com":
+		return false
+	}
+	// Require a meaningful login/oauth/auth/device path so arbitrary repo or
+	// marketing URLs with query parameters don't hijack ephemeral login tabs.
+	lowerPath := strings.ToLower(strings.TrimSuffix(u.EscapedPath(), "/"))
+	for _, token := range []string{"oauth", "auth", "login", "device", "signin", "sign-in", "authorize", "verify", "cli"} {
+		if strings.Contains(lowerPath, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func terminalAllowsLoginURL(raw, agentID string, allowedHosts []string) bool {
+	if claudeAuthorizationURL(raw) {
+		u, err := url.Parse(raw)
+		if err != nil {
+			return false
+		}
+		if agentID != "" && agentID != "claude" && !hostAllowed(strings.ToLower(u.Hostname()), allowedHosts) {
+			return false
+		}
+		return hostAllowed(strings.ToLower(u.Hostname()), allowedHosts)
+	}
+	return agentAuthorizationURLOnly(raw, allowedHosts)
+}
+
 func (s *Server) terminalLoginLink(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		URL string `json:"url"`
@@ -35,11 +100,23 @@ func (s *Server) terminalLoginLink(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &input) {
 		return
 	}
-	if !claudeAuthorizationURL(input.URL) {
-		http.Error(w, "请选择 Claude 官方授权链接", 400)
+	terminal := s.terminals.get(r.PathValue("id"))
+	allowedHosts := s.allAgentOAuthDomains()
+	agentID := ""
+	if terminal != nil {
+		terminal.mu.Lock()
+		agentID = terminal.agentID
+		if agentID != "" {
+			// Agent terminals are strictly scoped to their own OAuth allowlist
+			// (even when empty, e.g., API-key-only agents never inherit other providers).
+			allowedHosts = slices.Clone(terminal.agentOAuthDomains)
+		}
+		terminal.mu.Unlock()
+	}
+	if !terminalAllowsLoginURL(input.URL, agentID, allowedHosts) {
+		http.Error(w, "请选择受支持的 Agent 官方授权链接", 400)
 		return
 	}
-	terminal := s.terminals.get(r.PathValue("id"))
 	if terminal == nil {
 		http.NotFound(w, r)
 		return
@@ -65,7 +142,11 @@ func (s *Server) terminalLoginLink(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
-	payload, _ := json.Marshal(map[string]string{"login": login, "url": input.URL})
+	bodyMap := map[string]any{"login": login, "url": input.URL}
+	if !claudeAuthorizationURL(input.URL) {
+		bodyMap["allowed_hosts"] = allowedHosts
+	}
+	payload, _ := json.Marshal(bodyMap)
 	data, err := s.guestAPI(ctx, token, "POST", "/login-open", payload)
 	if terminal.loginGuestID == "" {
 		terminal.loginLinkCleanup.Do(func() {

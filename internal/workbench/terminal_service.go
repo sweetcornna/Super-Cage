@@ -26,6 +26,9 @@ type terminalRequest struct {
 	Kind            string `json:"kind"`
 	ClaudeAccountID string `json:"claude_account_id"`
 	CodexAccountID  string `json:"codex_account_id"`
+	AgentID         string `json:"agent_id,omitempty"`
+	AccountID       string `json:"account_id,omitempty"`
+	LoginMode       string `json:"login_mode,omitempty"`
 	sharedID        string
 	// codexSession: the client knows Codex sessions, so a Codex terminal from
 	// the menu becomes one.
@@ -52,25 +55,29 @@ type terminalManager struct {
 }
 
 func (m *terminalManager) startSession(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func()) (*terminalSession, error) {
-	return m.startSessionWithPTY(cmd, workspace, kind, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) })
+	return m.startSessionWithSetup(cmd, workspace, kind, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) }, nil)
 }
 
 func (m *terminalManager) startSessionWithPTY(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func(), start func() (terminalPTY, error)) (*terminalSession, error) {
+	return m.startSessionWithSetup(cmd, workspace, kind, selection, finished, start, nil)
+}
+
+func (m *terminalManager) startSessionWithSetup(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func(), start func() (terminalPTY, error), setup func(*terminalSession, int)) (*terminalSession, error) {
 	var ended func(*terminalSession)
 	if finished != nil {
 		ended = func(*terminalSession) { finished() }
 	}
-	return m.startSessionWith(cmd, workspace, kind, selection, codexSelection{}, ended, start)
+	return m.startSessionWith(cmd, workspace, kind, selection, codexSelection{}, ended, start, setup)
 }
 
 // finished receives the ended session, so it can read the exit status.
 func (m *terminalManager) startCodexSession(cmd *exec.Cmd, workspace, kind string, selection codexSelection, finished func(*terminalSession)) (*terminalSession, error) {
-	return m.startSessionWith(cmd, workspace, kind, claudeSelection{}, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) })
+	return m.startSessionWith(cmd, workspace, kind, claudeSelection{}, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) }, nil)
 }
 
 // Account bindings are published together with the session, so a concurrent
 // allocation always counts a terminal that is already running.
-func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, codex codexSelection, finished func(*terminalSession), start func() (terminalPTY, error)) (*terminalSession, error) {
+func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, codex codexSelection, finished func(*terminalSession), start func() (terminalPTY, error), setup func(*terminalSession, int)) (*terminalSession, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.admissionErrorLocked(); err != nil {
@@ -105,6 +112,9 @@ func (m *terminalManager) startSessionWith(cmd *exec.Cmd, workspace, kind string
 	}
 	if codex.ID != "" {
 		session.codexAccountID, session.codexAccountSource = codex.ID, "managed"
+	}
+	if setup != nil {
+		setup(session, m.sequence)
 	}
 	if m.sessions == nil {
 		m.sessions = make(map[string]*terminalSession)
@@ -305,6 +315,75 @@ func (m *terminalManager) existingCodexLogin(id string, login bool) (*terminalSe
 	return nil, nil
 }
 
+func (m *terminalManager) allAgentCounts() map[string]int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	counts := map[string]int{}
+	for _, session := range m.sessions {
+		select {
+		case <-session.done:
+			continue
+		default:
+		}
+		if session.agentID != "" {
+			counts[session.agentID]++
+		} else if session.kind == "claude" {
+			counts["claude"]++
+		} else if session.kind == "codex" {
+			counts["codex"]++
+		}
+	}
+	return counts
+}
+
+func (m *terminalManager) agentCounts(agentID string) (map[string]int, map[string]bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	active := map[string]int{}
+	logins := map[string]bool{}
+	for _, session := range m.sessions {
+		if session.agentID != agentID || session.accountID == "" {
+			continue
+		}
+		select {
+		case <-session.done:
+			continue
+		default:
+		}
+		if session.kind == "agent-login" {
+			logins[session.accountID] = true
+		} else {
+			active[session.accountID]++
+		}
+	}
+	return active, logins
+}
+
+func (m *terminalManager) existingAgentLogin(agentID, accountID string, login bool) (*terminalSession, error) {
+	if agentID == "" || accountID == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.sessions {
+		if session.agentID != agentID || session.accountID != accountID {
+			continue
+		}
+		select {
+		case <-session.done:
+			continue
+		default:
+		}
+		if session.kind == "agent-login" && login {
+			return session, nil
+		}
+		if login || session.kind == "agent-login" {
+			return nil, errors.New("请先结束此账号的登录或运行中的终端，再更改登录身份")
+		}
+	}
+	return nil, nil
+}
+
 func (m *terminalManager) remove(id string) {
 	m.mu.Lock()
 	session := m.sessions[id]
@@ -414,16 +493,29 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if !s.vmRunning() || s.busy() {
 		return nil, errTerminalNotReady
 	}
+	// Route Claude requests sent via the universal agent terminal API to Claude's native stack.
+	if (input.Kind == "agent" || input.Kind == "agent-login") && input.AgentID == "claude" {
+		if input.Kind == "agent-login" {
+			input.Kind = "claude-login"
+		} else {
+			input.Kind = "claude"
+		}
+		if input.AccountID != "" && input.ClaudeAccountID == "" {
+			input.ClaudeAccountID = input.AccountID
+		}
+		input.AgentID = ""
+	}
 	// Reject a full manager before opening project shares. start checks again
 	// atomically with process publication because shutdown can race this work.
-	if input.Kind != "claude-login" {
+	if input.Kind != "claude-login" && input.Kind != "agent-login" {
 		if err := s.terminals.canStart(); err != nil {
 			return nil, err
 		}
 	}
-	if input.Kind != "" && input.Kind != "shell" && input.Kind != "claude" && input.Kind != "claude-login" {
+	if input.Kind != "" && input.Kind != "shell" && input.Kind != "claude" && input.Kind != "claude-login" && input.Kind != "agent" && input.Kind != "agent-login" {
 		return nil, errors.New("终端类型无效")
 	}
+	isAgentKind := input.Kind == "agent" || input.Kind == "agent-login"
 	managed := input.Kind == "claude" || input.Kind == "claude-login"
 	if !managed && input.ClaudeAccountID != "" {
 		return nil, errors.New("普通终端不能指定 Claude 账号")
@@ -434,7 +526,7 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	var err error
 	var selection claudeSelection
 	selected := false // selection was made together with the project connection
-	if input.Kind != "claude-login" {
+	if input.Kind != "claude-login" && input.Kind != "agent-login" {
 		if s.macOSLegacyWorkspace(sharedRecord) != "" {
 			workspace, err = s.projectWorkspace(sharedRecord.Workspace)
 		} else if managed && (sharedRecord == nil || !sharedRecord.Terminal) {
@@ -467,11 +559,61 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	script := terminalScript(s.cliWorkspace(workspace), input.Kind, launchCommand)
 	if s.macosGuest != nil {
 		script = `cd -- "$HOME" && exec env TERM=xterm-256color COLORTERM=truecolor /bin/zsh -l`
-		if input.Kind != "claude-login" {
+		if input.Kind != "claude-login" && input.Kind != "agent-login" {
 			script = "exec /usr/local/libexec/cage-macos-terminal " + shellescape.Quote(macOSProjectPath(s.macosGuest.User, workspace))
 		}
 	}
+	var agentSel agentSelection
+	var agentSpecName string
+	var agentDomains []string
 	var finished func()
+	if isAgentKind {
+		spec, cfg, ok := s.lookupAgentSpec(input.AgentID)
+		if !ok {
+			return nil, errors.New("未找到指定的 Agent CLI，请在「设置 → Agent CLI」中确认")
+		}
+		agentSpecName = spec.ShortName
+		agentDomains = spec.Auth.OAuthDomains
+		login := input.Kind == "agent-login"
+		sel, _, selErr := s.selectAgentAccount(spec, input.AccountID, login, workspace)
+		if selErr != nil {
+			return nil, selErr
+		}
+		if sel.ID != "" {
+			if existing, conflict := s.terminals.existingAgentLogin(spec.ID, sel.ID, login); existing != nil || conflict != nil {
+				return existing, conflict
+			}
+		}
+		agentSel = sel
+		agentCmd := s.effectiveAgentLaunchCommand(spec, cfg)
+		if !login && spec.Terminal.AddDirFlag != "" {
+			if dirs, dirErr := s.projectAdditionalDirectories(workspace); dirErr == nil {
+				for _, directory := range dirs {
+					agentCmd += " " + spec.Terminal.AddDirFlag + " " + shellescape.Quote(directory)
+				}
+			}
+		}
+		if login && s.macosGuest != nil {
+			ctx, cancel := context.WithTimeout(s.lifetimeContext(), 20*time.Second)
+			_, browserErr := s.guestAPI(ctx, "", "GET", "/health", nil)
+			cancel()
+			if browserErr != nil {
+				return nil, errors.New("客机登录浏览器尚未就绪，请恢复浏览器连接后重试")
+			}
+		}
+		agentWorkspace := s.cliWorkspace(workspace)
+		if s.macosGuest != nil && !login {
+			agentWorkspace = macOSProjectPath(s.macosGuest.User, workspace)
+		}
+		script = managedAgentTerminalScript(agentWorkspace, spec, agentCmd, sel.GuestID, input.LoginMode, login, s.macosGuest != nil)
+		if login {
+			finished = func() {
+				ctx, cancel := context.WithTimeout(s.lifetimeContext(), 12*time.Second)
+				defer cancel()
+				_ = s.confirmAgentLogin(ctx, spec.ID, sel.ID)
+			}
+		}
+	}
 	if managed {
 		login := input.Kind == "claude-login"
 		if sharedRecord != nil && sharedRecord.Terminal {
@@ -531,9 +673,36 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			return nil, errMobileLocked
 		}
 	}
-	session, err := s.terminals.startSession(cmd, workspace, input.Kind, selection, finished)
+	var setup func(*terminalSession, int)
+	if isAgentKind {
+		setup = func(session *terminalSession, seq int) {
+			session.agentID = agentSel.AgentID
+			session.agentName = agentSpecName
+			session.accountID = agentSel.ID
+			session.accountLabel = agentSel.Label
+			session.accountAuthMode = agentSel.AuthMode
+			session.scheduleReason = agentSel.Reason
+			session.agentOAuthDomains = agentDomains
+			if input.Kind == "agent-login" {
+				session.title = agentSpecName + " 账号登录"
+				session.loginGuestID = agentSel.GuestID
+			} else {
+				session.title = fmt.Sprintf("%s %d", agentSpecName, seq)
+				if agentSel.ID != "" {
+					aid, accID := agentSel.AgentID, agentSel.ID
+					session.onRateLimit = func(kind string) {
+						s.onAgentRateLimit(aid, accID, kind)
+					}
+				}
+			}
+		}
+	}
+	session, err := s.terminals.startSessionWithSetup(cmd, workspace, input.Kind, selection, finished, func() (terminalPTY, error) { return startTerminal(cmd, 100, 30) }, setup)
 	if input.requestContext != nil {
 		s.account.mu.Unlock()
+	}
+	if err == nil && isAgentKind && input.Kind == "agent" && agentSel.ID != "" {
+		s.noteAgentSelection(agentSel.AgentID, agentSel.ID, workspace)
 	}
 	if err == nil && conversation != nil {
 		session.mu.Lock()

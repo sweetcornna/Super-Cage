@@ -21,11 +21,13 @@ import {
   Info,
   SquareTerminal,
   Blocks,
+  Bot,
 } from "lucide-react";
 import { api } from "./api";
 import "./settings.css";
 import { SafetyMessage } from "./safety-message";
 import { AppearanceSettings } from "./appearance-settings";
+import { AgentSettings } from "./agent-settings";
 import { ProxySettings } from "./proxy-settings";
 import { ExitPolicyFields } from "./exit-policy";
 import { canonicalExitPolicy } from "./safety-state.mjs";
@@ -55,6 +57,7 @@ const sections = [
   ["vault", "密码保险箱", KeyRound],
   ["archived-sessions", "已归档会话", Archive],
   ["keyboard", "通用", Settings],
+  ["agents", "Agent CLI", Bot],
   ["appearance", "外观", Palette],
   ["devices", "设备", MonitorSmartphone],
   ["local-terminal", "本机终端", SquareTerminal],
@@ -67,9 +70,14 @@ const sections = [
 export function SettingsPanel({
   current,
   status,
+  agents,
+  t3code,
   onClose,
   onSaved,
   onConfirm,
+  onOpenAgentAccounts,
+  onLaunchAgent,
+  onOpenT3Code,
   initialSection = "keyboard",
 }) {
   const [localKeyboard, setLocalKeyboard] = useState(() => clientKeyboard(current.keyboard));
@@ -95,6 +103,13 @@ export function SettingsPanel({
     [error, setError] = useState(""),
     [jobId, setJobId] = useState(""),
     [submitting, setSubmitting] = useState(false);
+  const prevClaudeCommand = useRef(current.claude_terminal_command);
+  useEffect(() => {
+    if (prevClaudeCommand.current !== current.claude_terminal_command) {
+      prevClaudeCommand.current = current.claude_terminal_command;
+      setDraft((previous) => ({ ...previous, claude_terminal_command: current.claude_terminal_command }));
+    }
+  }, [current.claude_terminal_command]);
   const changed =
     JSON.stringify({
       ...draft,
@@ -274,6 +289,28 @@ export function SettingsPanel({
       <div className="settings-main">
         <div className={(section === "archived-sessions" ? "settings-content settings-content--archives" : section === "devices" ? "settings-content settings-content--remote" : "settings-content") + (["keyboard", "appearance"].includes(section) ? "" : " settings-subpage")} data-section={section} ref={contentRef}>
           {section === "appearance" && <AppearanceSettings />}
+          {section === "agents" && agents && (
+            <AgentSettings
+              store={agents}
+              t3code={t3code}
+              status={status}
+              onConfirm={onConfirm}
+              onOpenAccounts={(id) => {
+                onClose();
+                onOpenAgentAccounts?.(id);
+              }}
+              onLaunchAgent={(id) => {
+                onClose();
+                onLaunchAgent?.(id);
+              }}
+              onOpenT3Code={async (forceMode) => {
+                const opened = await onOpenT3Code?.(forceMode);
+                if (opened?.mode === "workbench") onClose();
+                return opened;
+              }}
+              onSavedClaudeCommand={onSaved}
+            />
+          )}
           {section === "about" && <AboutSettings />}
           {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
             <LocalTerminalPage opener={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />
@@ -571,6 +608,15 @@ export function SettingsPanel({
                   选择“Codex 终端”后，在所选项目中运行此命令，例如 codex resume --last。
                   留空使用 codex；新终端使用自动分配的 Codex 账号，退出 Codex 后可继续使用 shell。仅 Linux 环境提供 Codex 终端。
                 </p>
+                {agents && (
+                  <div className="inline-info">
+                    <Bot size={16} />
+                    <span>需要安装 Gemini CLI、OpenCode、Copilot、Qwen Code，或注册自定义 Agent（如 Antigravity / Grok）与 T3 Code？</span>
+                    <button type="button" className="text-button" onClick={() => setSection("agents")}>
+                      管理 Agent CLI
+                    </button>
+                  </div>
+                )}
                 {typeof current.balanced_display === "boolean" && <label className="toggle-row">
                   <span>
                     <strong>优先流畅</strong>

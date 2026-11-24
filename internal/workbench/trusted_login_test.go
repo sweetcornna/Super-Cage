@@ -220,8 +220,7 @@ func TestTrustedLocalDesktopEntryAndWorkload(t *testing.T) {
 	workload.origin = "http://localhost:" + strconv.Itoa(port)
 	server.Start()
 	defer server.Close()
-	record := controlFile{Port: port, PID: os.Getpid(), Token: workload.token}
-	if err = writePrivate(filepath.Join(workload.profile, "control.json"), record); err != nil {
+	if err = writePrivate(filepath.Join(workload.profile, "control.json"), workload.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	c, err := openController(workload.profile)

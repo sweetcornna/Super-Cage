@@ -90,6 +90,8 @@ type Server struct {
 	shutdown                                         func()
 	claudeAccounts                                   claudeAccountManager
 	codexAccounts                                    codexAccountManager
+	agentCLIs                                        agentManager
+	t3code                                           t3CodeManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
 	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
@@ -432,6 +434,19 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/claude-accounts", s.mutateClaudeAccounts)
 	mux.HandleFunc("GET /api/codex-accounts", s.listCodexAccounts)
 	mux.HandleFunc("POST /api/codex-accounts", s.mutateCodexAccounts)
+	mux.HandleFunc("GET /api/agent-clis", s.listAgents)
+	mux.HandleFunc("POST /api/agent-clis/install", s.installAgentHTTP)
+	mux.HandleFunc("POST /api/agent-clis/uninstall", s.uninstallAgentHTTP)
+	mux.HandleFunc("POST /api/agent-clis/config", s.updateAgentConfigHTTP)
+	mux.HandleFunc("POST /api/agent-clis/custom", s.saveCustomAgentHTTP)
+	mux.HandleFunc("DELETE /api/agent-clis/custom/{id}", s.deleteCustomAgentHTTP)
+	mux.HandleFunc("GET /api/agent-clis/{id}/accounts", s.listAgentAccountsHTTP)
+	mux.HandleFunc("POST /api/agent-clis/{id}/accounts", s.mutateAgentAccountsHTTP)
+	mux.HandleFunc("GET /api/t3code", s.t3CodeStatusHTTP)
+	mux.HandleFunc("POST /api/t3code/config", s.t3CodeConfigHTTP)
+	mux.HandleFunc("POST /api/t3code/install", s.t3CodeInstallHTTP)
+	mux.HandleFunc("POST /api/t3code/open", s.t3CodeOpenHTTP)
+	mux.HandleFunc("POST /api/t3code/{action}", s.t3CodeActionHTTP)
 	mux.HandleFunc("GET /api/vault", s.vaultList)
 	mux.HandleFunc("POST /api/vault", s.vaultMutation)
 	mux.HandleFunc("POST /api/vault/browser", s.vaultBrowser)

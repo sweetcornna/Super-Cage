@@ -1,7 +1,6 @@
 import { shortcut } from "./platform.mjs";
 import React, { useEffect, useRef, useState } from "react";
 import {
-  Bot,
   CircleAlert,
   ExternalLink,
   FlaskConical,
@@ -19,6 +18,7 @@ import {
   Server,
   SquareTerminal,
   UsersRound,
+  Zap,
 } from "lucide-react";
 import { EnvironmentShield } from "./environment-shield";
 import { BrandMark } from "./brand";
@@ -32,6 +32,7 @@ import { useSSHNavigation } from "./remote-hosts";
 import { GuestSystemIcon } from "./guest-system-icon";
 import { getClientContext, isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
 import { VirtualMachines } from "./virtual-machines";
+import { AgentIcon } from "./agent-icon";
 
 const SESSION_PREVIEW_LIMIT = 5;
 
@@ -78,10 +79,14 @@ export function WorkspaceSidebar({
   onBrowser,
   onTailscale,
   tailscaleOpen,
-  onClaudeAccounts,
-  claudeAccountsOpen,
-  onCodexAccounts,
-  codexAccountsOpen,
+  onAccounts,
+  accountsOpen,
+  accountsReadyCount = 0,
+  agentsById = null,
+  t3code = null,
+  t3codeActive = false,
+  onOpenT3Code,
+  onInstallAgents,
   onClaudeWeb,
   onClaudeDesktop,
   desktopOpen,
@@ -134,7 +139,7 @@ export function WorkspaceSidebar({
             <Home size={17} />
             工作台
           </button>
-          <div className={`sidebar-browser-row ${!desktopOpen && !home && tabs.some((tab) => tab.id === active && tab.kind !== "terminal") ? "selected" : ""}`}>
+          <div className={`sidebar-browser-row ${!desktopOpen && !home && !t3codeActive && tabs.some((tab) => tab.id === active && tab.kind !== "terminal") ? "selected" : ""}`}>
             <button
               className="sidebar-link"
               onClick={onBrowser}
@@ -155,6 +160,40 @@ export function WorkspaceSidebar({
               <img src={claudeLogo} width="18" height="18" alt="" />
             </button>
           </div>
+          {t3code?.enabled && (() => {
+            const t3DirectAvailable =
+              t3code.direct_available !== false &&
+              t3code.data?.direct_available !== false &&
+              !isRemoteClient();
+            const t3UsesWorkbench = !t3DirectAvailable || t3code.open_mode !== "direct";
+            return (
+              <div className={`sidebar-browser-row sidebar-t3code-row ${t3codeActive ? "selected" : ""}`}>
+                <button
+                  className="sidebar-link"
+                  onClick={() => onOpenT3Code?.()}
+                  disabled={busy || (!running && t3code.mode === "managed") || (t3UsesWorkbench && (!ready || !browserAvailable))}
+                  aria-current={t3codeActive ? "page" : undefined}
+                  aria-label="打开 T3 Code"
+                  title={t3code.running ? "打开 T3 Code（运行中）" : "打开 T3 Code"}
+                >
+                  <AgentIcon agentId="t3code" size={17} />
+                  <span className="sidebar-t3code-label">T3 Code</span>
+                  {t3code.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
+                </button>
+                {t3DirectAvailable && (
+                  <button
+                    className="icon-button sidebar-claude-shortcut"
+                    onClick={() => onOpenT3Code?.("direct")}
+                    disabled={busy || (!running && t3code.mode === "managed")}
+                    aria-label="原生极速直连打开 T3 Code"
+                    title="原生极速直连窗口打开 T3 Code（0 VNC 延迟）"
+                  >
+                    <Zap size={14} />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
           <button className={`sidebar-link ${desktopOpen ? "selected" : ""}`} onClick={onClaudeDesktop} disabled={!running || busy} title="安装或打开 Claude Desktop"><Monitor size={17} />Claude Desktop</button>
           <button className={`sidebar-link ${claudeScienceOpen ? "selected" : ""}`} aria-current={claudeScienceOpen ? "page" : undefined} onClick={onClaudeScience} disabled={!running} title="安装或打开 Claude Science"><FlaskConical size={17} />Claude Science</button>
         </div>
@@ -168,14 +207,32 @@ export function WorkspaceSidebar({
           {!isRemoteClient() && !isCloudWorkbench() && <button className="sidebar-link" onClick={() => onSettings("local-terminal")}><SquareTerminal size={17} />本机终端</button>}
         </div>
         <div className="sidebar-nav-group">
-          <button className={`sidebar-link ${claudeAccountsOpen ? "selected" : ""}`} onClick={onClaudeAccounts}
-            aria-current={claudeAccountsOpen ? "page" : undefined}>
-            <UsersRound size={17} />Claude 账号管理
-          </button>
-          {onCodexAccounts && <button className={`sidebar-link ${codexAccountsOpen ? "selected" : ""}`} onClick={onCodexAccounts}
-            aria-current={codexAccountsOpen ? "page" : undefined}>
-            <Bot size={17} />Codex 账号管理
-          </button>}
+          <div className={`sidebar-browser-row ${accountsOpen ? "selected" : ""}`}>
+            <button
+              className="sidebar-link"
+              onClick={onAccounts}
+              aria-current={accountsOpen ? "page" : undefined}
+              title="统一管理 Claude、Codex 及所有主流/自定义 Agent 账号"
+            >
+              <UsersRound size={17} />
+              <span>账号管理</span>
+              {accountsReadyCount > 0 && (
+                <small className="sidebar-agent-count" title={`共 ${accountsReadyCount} 个就绪账号`}>
+                  {accountsReadyCount}
+                </small>
+              )}
+            </button>
+            {onInstallAgents && (
+              <button
+                className="icon-button sidebar-claude-shortcut"
+                onClick={onInstallAgents}
+                aria-label="安装和管理 Agent CLI"
+                title="安装或添加更多 Agent CLI（支持自定义如 Antigravity / Grok 等）"
+              >
+                <Plus size={15} />
+              </button>
+            )}
+          </div>
         </div>
       </nav>
       <div className="sidebar-scroll">
@@ -304,6 +361,7 @@ export function WorkspaceSidebar({
                     <WorkspaceTabs
                       tabs={visibleRows}
                       saved={rowMetadata}
+                      agentsById={agentsById}
                       openingSession={openingSession}
                       sessionOpenError={sessionOpenError}
                       active={home || desktopOpen ? "" : active}

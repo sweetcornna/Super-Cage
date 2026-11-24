@@ -35,7 +35,7 @@ func DesktopEntry(fullConfig string, opts DesktopOptions) (DesktopResult, error)
 	// Explicit legacy recovery opens its own already-authenticated UI so the
 	// user can save active work before switching backend versions.
 	if opts.UseExisting {
-		c, err := connectController(filepath.Dir(fullConfig))
+		c, err := connectProvenController(filepath.Dir(fullConfig))
 		if err == nil {
 			defer c.close()
 			want, err := currentController()
@@ -83,7 +83,7 @@ func DesktopEntry(fullConfig string, opts DesktopOptions) (DesktopResult, error)
 	if err != nil || owner == 0 || result.URL == "" {
 		return result, err
 	}
-	c, err := connectController(profile)
+	c, err := connectProvenController(profile)
 	if err != nil {
 		return DesktopResult{}, err
 	}
@@ -190,7 +190,7 @@ func PrepareDesktopUpdate(fullConfig string, stop bool) (DesktopResult, error) {
 		return result, err
 	}
 	profile := filepath.Dir(desktopConfigPath(fullConfig))
-	c, err := connectController(profile)
+	c, err := connectProvenController(profile)
 	if errors.Is(err, errControllerUnavailable) {
 		// Absence and an unresponsive but locked gateway are different.
 		return PrepareUpdate(desktopConfigPath(fullConfig), false)

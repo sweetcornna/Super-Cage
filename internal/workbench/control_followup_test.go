@@ -6,15 +6,12 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
+	"os"
 	"path/filepath"
-	"slices"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/sylvinus/agent-vm/internal/version"
 )
 
 // Follow-ups of the review of controller-dial-hardening (A1, A4).
@@ -45,14 +42,14 @@ func TestAgentStartServiceRefusesOlderController(t *testing.T) {
 	}
 }
 
-// A1: the grace for a controller without the proof has one list of the
-// functions that still use it, and ends in a named release.
+// A1: the pre-0.1.16 grace for controllers without the identity proof ended in
+// 0.1.19. Every workbench caller now requires proof, and openController refuses
+// any control.json record without auth.
 func TestOlderControllerGraceCallers(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found []string
 	fset := token.NewFileSet()
 	for _, name := range files {
 		if strings.HasSuffix(name, "_test.go") {
@@ -62,58 +59,27 @@ func TestOlderControllerGraceCallers(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			// connectControllerOrOlder chooses the grace and openControllerConn is
-			// the opener it hands to controlclient, which refuses a record
-			// without auth unless the grace was chosen.
-			if !ok || fn.Body == nil || fn.Name.Name == "connectControllerOrOlder" || fn.Name.Name == "openControllerConn" {
-				continue
-			}
-			caller := fn.Name.Name
-			if fn.Recv != nil && len(fn.Recv.List) == 1 {
-				receiver := fn.Recv.List[0].Type
-				if star, ok := receiver.(*ast.StarExpr); ok {
-					receiver = star.X
+		ast.Inspect(file, func(n ast.Node) bool {
+			switch node := n.(type) {
+			case *ast.Ident:
+				if node.Name == "connectController" || node.Name == "connectControllerOrOlder" {
+					t.Fatalf("%s: retired unproven controller helper %s must not return", name, node.Name)
 				}
-				if ident, ok := receiver.(*ast.Ident); ok {
-					caller = ident.Name + "." + caller
+			case *ast.SelectorExpr:
+				if pkg, ok := node.X.(*ast.Ident); ok && pkg.Name == "controlclient" && node.Sel.Name == "Connect" {
+					t.Fatalf("%s: use controlclient.ConnectProven instead of controlclient.Connect", name)
 				}
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				// A call or a function value: either uses the grace.
-				ident, ok := n.(*ast.Ident)
-				if !ok {
-					return true
-				}
-				if slices.Contains(olderControllerGraceEntries, ident.Name) && !slices.Contains(found, caller) {
-					found = append(found, caller)
-				}
-				return true
-			})
-		}
+			return true
+		})
 	}
-	slices.Sort(found)
-	listed := slices.Clone(olderControllerGraceCallers)
-	slices.Sort(listed)
-	if !slices.Equal(found, listed) {
-		t.Fatalf("callers of the grace:\n  found  %v\n  listed %v", found, listed)
+	profile := t.TempDir()
+	if err := writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: 17777, Token: strings.Repeat("a", 64), PID: os.Getpid()}); err != nil {
+		t.Fatal(err)
 	}
-	if !versionBelow(version.Version, olderControllerGraceEndsIn) {
-		t.Fatalf("release %s: the grace for older controllers ends in %s; remove it", version.Version, olderControllerGraceEndsIn)
+	if _, err := openController(profile); !errors.Is(err, errControllerOutdated) {
+		t.Fatalf("openController accepted a record without auth: %v", err)
 	}
-}
-
-func versionBelow(a, b string) bool {
-	parse := func(v string) []int {
-		var out []int
-		for _, part := range strings.Split(strings.TrimPrefix(v, "v"), ".") {
-			n, _ := strconv.Atoi(part)
-			out = append(out, n)
-		}
-		return out
-	}
-	return slices.Compare(parse(a), parse(b)) < 0
 }
 
 // failingListener stands for an IPv6 loopback listener whose Accept keeps

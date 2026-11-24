@@ -22,21 +22,16 @@ type Conn interface {
 
 // Connect proves the launcher token to the controller of profile. open reads
 // the record and prepares a connection, which proves the controller before it
-// carries anything when the record has a proof key; the caller keeps the
-// launch answer. A controller from before the proof is still reached: the
-// window saves and stops its environment to complete an update.
+// carries anything; the caller keeps the launch answer. A record without the
+// proof is refused with ErrControllerOutdated without contacting its server.
 func Connect(profile string, open func(string) (Conn, error)) (Conn, LaunchResponse, error) {
-	return connectController(profile, open, true)
+	return ConnectProven(profile, open)
 }
 
-// ConnectProven is Connect for clients that never talk to a controller that
-// cannot prove itself: a record from before the proof is refused with
-// ErrControllerOutdated, without contacting its controller.
+// ConnectProven proves the launcher token to the controller of profile and
+// refuses any record from before the proof with ErrControllerOutdated without
+// contacting its server.
 func ConnectProven(profile string, open func(string) (Conn, error)) (Conn, LaunchResponse, error) {
-	return connectController(profile, open, false)
-}
-
-func connectController(profile string, open func(string) (Conn, error), older bool) (Conn, LaunchResponse, error) {
 	var launch LaunchResponse
 	if LockFree(profile) {
 		return nil, launch, ErrUnavailable
@@ -49,7 +44,7 @@ func connectController(profile string, open func(string) (Conn, error), older bo
 		return nil, launch, err
 	}
 	record := c.Record()
-	if record.Auth == 0 && !older {
+	if record.Auth == 0 {
 		c.Close()
 		return nil, launch, ErrControllerOutdated
 	}

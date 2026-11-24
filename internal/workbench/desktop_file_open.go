@@ -169,7 +169,7 @@ func DesktopFileForConnection(configPath, connectionID, id string) (map[string]a
 	if !browserFileID.MatchString(id) {
 		return nil, errors.New("文件打开标识无效")
 	}
-	client, err := connectController(filepath.Dir(configPath))
+	client, err := connectProvenController(filepath.Dir(configPath))
 	if err != nil {
 		return nil, err
 	}

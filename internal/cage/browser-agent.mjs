@@ -42,12 +42,13 @@ try {
 } catch {}
 function rememberSelection() {
   const tab = targets.get(activeId);
-  if (tab && !tab.login && !tab.incognito)
-    try {
-      writeFileSync(selectionFile, JSON.stringify({ url: publicScienceURL(tab.url, sciencePort()) }), {
-        mode: 0o600,
-      });
-    } catch {}
+  if (!tab || tab.login || tab.incognito) return;
+  if (isLoopbackPairingURL(tab.url)) return;
+  try {
+    writeFileSync(selectionFile, JSON.stringify({ url: publicScienceURL(tab.url, sciencePort()) }), {
+      mode: 0o600,
+    });
+  } catch {}
 }
 const downloadPath = "/home/cage-browser/Downloads";
 mkdirSync(downloadPath, { recursive: true });
@@ -61,7 +62,41 @@ const splitURL = `chrome-extension://${extensionId}/control.html`;
 const settingsURL = `chrome-extension://${extensionId}/settings.html`;
 const extensionRepairURL = "chrome://extensions/?cage-browser-controller";
 const isSettingsTab = tab => tab.url === settingsURL || tab.url.startsWith(settingsURL + "#");
-const publicURL = tab => isSettingsTab(tab) ? "cage://settings" + new URL(tab.url).hash : publicScienceURL(tab.url, sciencePort());
+const t3codePort = Number.isInteger(config.t3codePort) && config.t3codePort >= 1024 && config.t3codePort <= 65535 ? config.t3codePort : 13773;
+const isLoopbackHost = host => {
+  const h = String(host || "").toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]" || h.endsWith(".localhost");
+};
+const isT3CodeTab = tab => {
+  if (typeof tab?.url !== "string") return false;
+  try {
+    const u = new URL(tab.url);
+    return u.protocol === "http:" && isLoopbackHost(u.hostname) && Number(u.port) === t3codePort;
+  } catch {
+    return false;
+  }
+};
+const isLoopbackPairingURL = raw => {
+  if (typeof raw !== "string") return false;
+  try {
+    const u = new URL(raw);
+    if (!["http:", "https:"].includes(u.protocol) || !isLoopbackHost(u.hostname)) return false;
+    const combined = `${u.pathname}${u.search}${u.hash}`;
+    if (/(?:^|\/)pair(?:[/?#]|$)/i.test(u.pathname) || /\/pair(?:[/?#&]|$)/i.test(u.search + u.hash)) return true;
+    if (u.searchParams.has("token") || /token=/i.test(combined)) return true;
+    return false;
+  } catch {
+    return /^https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?\/.*(?:(?:^|\/)pair(?:[/?#]|$)|token=)/i.test(raw);
+  }
+};
+if (isLoopbackPairingURL(restoreURL)) restoreURL = "";
+const publicURL = tab => {
+  if (isSettingsTab(tab)) return "cage://settings" + new URL(tab.url).hash;
+  if (isLoopbackPairingURL(tab.url)) {
+    try { return new URL(tab.url).origin + "/"; } catch { return "about:blank"; }
+  }
+  return publicScienceURL(tab.url, sciencePort());
+};
 let splitView = null, splitSession, splitTarget, splitOpening, resizeTimer;
 const favicons = new Map(), faviconRequests = new Map(), documents = new Map();
 
@@ -703,6 +738,10 @@ function displayTitle(tab) {
   if (isScienceTab(tab)) return scienceTitle;
   if (tab.url === "about:blank") return "新标签页";
   const title = tab.title;
+  if (isLoopbackPairingURL(tab.url) && (!title || /(?:token=|\/pair)/i.test(title))) {
+    if (isT3CodeTab(tab)) return "T3 Code";
+    try { return new URL(tab.url).hostname; } catch { return "新标签页"; }
+  }
   if (
     !title ||
     title === tab.url ||
@@ -732,7 +771,7 @@ function publicState() {
       url: publicURL(t),
       document: documents.get(t.targetId) || "",
       favicon: favicons.get(t.targetId) || "",
-      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : isScienceTab(t) ? "science" : "web",
+      kind: isSettingsTab(t) ? "browser-settings" : t.url.startsWith("http://127.0.0.1:18080/") ? "editor" : isScienceTab(t) ? "science" : isT3CodeTab(t) ? "t3code" : "web",
       workspace: t.url.startsWith("http://127.0.0.1:18080/") ? new URL(t.url).searchParams.get("folder") || config.workspace : undefined,
     })),
   };
@@ -1025,7 +1064,7 @@ const server = http.createServer(async (req, res) => {
           if (!targets.has(tab.targetId)) targets.set(tab.targetId, loginBrowser.tab(tab));
           await activate(tab.targetId, true);
           return session(tab.targetId);
-        });
+        }, input.allowed_hosts);
       }
       if (req.url === "/login-finish") {
         await loginBrowser.finish(input.login);

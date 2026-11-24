@@ -1,0 +1,114 @@
+/* Unified Accounts Hub — aligns with Super Cage design tokens (tokens.css). */
+
+.accounts-hub {
+  width: 100%;
+  max-width: var(--content-list, 880px);
+  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 0;
+  min-width: 0;
+  min-height: 0;
+  gap: 18px;
+}
+
+.accounts-hub-bar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.accounts-hub-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.accounts-hub-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill, 999px);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-secondary, 0.9286rem);
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur-fast, 120ms) var(--ease-out),
+    border-color var(--dur-fast, 120ms) var(--ease-out),
+    color var(--dur-fast, 120ms) var(--ease-out);
+}
+
+.accounts-hub-tab:hover {
+  background: var(--soft);
+  border-color: var(--line-strong);
+}
+
+.accounts-hub-tab.selected {
+  background: var(--clay-soft);
+  border-color: var(--clay);
+  color: var(--clay-ink);
+  font-weight: 600;
+}
+
+.accounts-hub-tab-label {
+  white-space: nowrap;
+}
+
+.accounts-hub-tab-count {
+  padding: 0 6px;
+  border-radius: var(--r-pill, 999px);
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+
+.accounts-hub-tab.selected .accounts-hub-tab-count {
+  background: color-mix(in srgb, var(--clay) 18%, transparent);
+  color: var(--clay-ink);
+}
+
+.accounts-hub-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 32px;
+  padding: 4px 11px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-pill, 999px);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--fs-caption, 0.8571rem);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background var(--dur-fast, 120ms) var(--ease-out),
+    color var(--dur-fast, 120ms) var(--ease-out),
+    border-color var(--dur-fast, 120ms) var(--ease-out);
+}
+
+.accounts-hub-add:hover {
+  background: var(--soft);
+  border-color: var(--clay);
+  color: var(--ink);
+}
+
+.accounts-hub-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 0 0;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}

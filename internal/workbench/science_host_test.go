@@ -47,7 +47,7 @@ func scienceWorkload(t *testing.T) *Server {
 	withScienceHostVerified(t, "windows")
 	withScienceHostArch(t, "amd64")
 	s := testServer(t)
-	if err := writePrivate(filepath.Join(s.profile, "control.json"), controlFile{Port: 17777, Token: s.token, PID: os.Getpid()}); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "control.json"), s.controlRecord(17777)); err != nil {
 		t.Fatal(err)
 	}
 	s.controlPublished = true
@@ -69,7 +69,7 @@ func scienceEntry(t *testing.T, workload *Server) *Server {
 	entry.remote = newDesktopGateway(entry.profile, nil)
 	entry.remote.desktop.localVMs = newLocalVMStore(workload.profile, "")
 	t.Cleanup(entry.remote.close)
-	if err := writePrivate(filepath.Join(entry.profile, "control.json"), controlFile{Port: 17778, Token: entry.token, PID: os.Getpid()}); err != nil {
+	if err := writePrivate(filepath.Join(entry.profile, "control.json"), entry.controlRecord(17778)); err != nil {
 		t.Fatal(err)
 	}
 	return entry
@@ -558,7 +558,7 @@ func TestScienceWindowGateThroughTheEntryHop(t *testing.T) {
 	workload.origin = "http://localhost:" + strconv.Itoa(port)
 	server.Start()
 	defer server.Close()
-	if err = writePrivate(filepath.Join(workload.profile, "control.json"), controlFile{Port: port, PID: os.Getpid(), Token: workload.token}); err != nil {
+	if err = writePrivate(filepath.Join(workload.profile, "control.json"), workload.controlRecord(port)); err != nil {
 		t.Fatal(err)
 	}
 	c, err := openController(workload.profile)

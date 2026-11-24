@@ -185,67 +185,56 @@ func legacyRecord(s *Server) func(int) controlFile {
 // [::1] twin of the port, which "localhost" resolves to first on macOS, gets
 // no connection and so no token, ticket or cookie.
 func TestControllerClientsSendNothingToIPv6Squatter(t *testing.T) {
-	for _, name := range []string{"proven", "legacy"} {
-		t.Run(name, func(t *testing.T) {
-			s := testServer(t)
-			s.proofKey = randomToken()
-			record := s.controlRecord
-			if name == "legacy" {
-				s.proofKey = ""
-				record = legacyRecord(s)
-			}
-			listener := ephemeralTwinPort(t)
-			port := listener.Addr().(*net.TCPAddr).Port
-			startTestController(t, s, listener, record)
-			q := newSquatter(t, port)
-			ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
-			defer cancel()
-			var failures []string
-			note := func(step string, err error) {
-				if err != nil {
-					failures = append(failures, step+": "+err.Error())
-				}
-			}
-			c, err := connectController(s.profile)
-			note("connectController", err)
+	s := testServer(t)
+	s.proofKey = randomToken()
+	listener := ephemeralTwinPort(t)
+	port := listener.Addr().(*net.TCPAddr).Port
+	startTestController(t, s, listener, s.controlRecord)
+	q := newSquatter(t, port)
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Second)
+	defer cancel()
+	var failures []string
+	note := func(step string, err error) {
+		if err != nil {
+			failures = append(failures, step+": "+err.Error())
+		}
+	}
+	c, err := connectProvenController(s.profile)
+	note("connectProvenController", err)
+	if err == nil {
+		c.close()
+	}
+	local := &desktopLocal{profile: s.profile}
+	if c, err = openController(s.profile); err == nil {
+		_, err = c.localControl(ctx, "status", desktopLocalRequest{})
+		note("localControl", err)
+		session, err := local.localSession(ctx, ctx, c, desktopLocalReply{Identity: s.identity, InstanceID: s.instanceID})
+		note("localSession", err)
+		if err == nil {
+			response, err := session.Client.Get(s.origin + "/api/settings")
+			note("local session request", err)
 			if err == nil {
-				c.close()
+				response.Body.Close()
 			}
-			local := &desktopLocal{profile: s.profile}
-			if c, err = openController(s.profile); err == nil {
-				_, err = c.localControl(ctx, "status", desktopLocalRequest{})
-				note("localControl", err)
-				session, err := local.localSession(ctx, ctx, c, desktopLocalReply{Identity: s.identity, InstanceID: s.instanceID})
-				note("localSession", err)
-				if err == nil {
-					response, err := session.Client.Get(s.origin + "/api/settings")
-					note("local session request", err)
-					if err == nil {
-						response.Body.Close()
-					}
-					session.Close()
-				}
-				c.close()
-			} else {
-				note("openController", err)
-			}
-			if name == "proven" {
-				_, err = AgentRequest(ctx, s.configPath, AgentTarget{}, "GET", "/api/settings", nil, "", "")
-				note("AgentRequest", err)
-				_ = AgentSocket(ctx, s.configPath, AgentTarget{}, "/api/terminals/none/stream", io.NopCloser(strings.NewReader("")), io.Discard)
-				// The local SSH entry's proxy (cage entry proxy): refused,
-				// the entry is off, but over the proven connection.
-				if ws, _, err := entryproxy.Dial(ctx, s.configPath, "none", agentSameBuild); err == nil {
-					ws.Close()
-				}
-			}
-			if conns, data := q.seen(); conns != 0 {
-				t.Fatalf("the squatter on [::1]:%d got %d connections; it read:\n%s", port, conns, data)
-			}
-			if len(failures) != 0 {
-				t.Fatalf("clients failed against the real controller:\n%s", strings.Join(failures, "\n"))
-			}
-		})
+			session.Close()
+		}
+		c.close()
+	} else {
+		note("openController", err)
+	}
+	_, err = AgentRequest(ctx, s.configPath, AgentTarget{}, "GET", "/api/settings", nil, "", "")
+	note("AgentRequest", err)
+	_ = AgentSocket(ctx, s.configPath, AgentTarget{}, "/api/terminals/none/stream", io.NopCloser(strings.NewReader("")), io.Discard)
+	// The local SSH entry's proxy (cage entry proxy): refused,
+	// the entry is off, but over the proven connection.
+	if ws, _, err := entryproxy.Dial(ctx, s.configPath, "none", agentSameBuild); err == nil {
+		ws.Close()
+	}
+	if conns, data := q.seen(); conns != 0 {
+		t.Fatalf("the squatter on [::1]:%d got %d connections; it read:\n%s", port, conns, data)
+	}
+	if len(failures) != 0 {
+		t.Fatalf("clients failed against the real controller:\n%s", strings.Join(failures, "\n"))
 	}
 }
 
@@ -283,7 +272,7 @@ func TestControllerProofKeepsTokenFromImpostor(t *testing.T) {
 	if err := writePrivate(filepath.Join(profile, "control.json"), record); err != nil {
 		t.Fatal(err)
 	}
-	_, connectErr := connectController(profile)
+	_, connectErr := connectProvenController(profile)
 	var localErr error
 	if c, err := openController(profile); err == nil {
 		_, localErr = c.localControl(t.Context(), "status", desktopLocalRequest{})
@@ -336,7 +325,7 @@ func TestControllerProofRejectsRelayedAnswer(t *testing.T) {
 	if err := writePrivate(filepath.Join(profile, "control.json"), record); err != nil {
 		t.Fatal(err)
 	}
-	_, err := connectController(profile)
+	_, err := connectProvenController(profile)
 	if seen := recording.log(); strings.Contains(seen, s.token) || strings.Contains(seen, "/api/launch ") {
 		t.Fatalf("the relay received the token:\n%s", seen)
 	}
@@ -383,11 +372,12 @@ func TestControllerVersionNegotiation(t *testing.T) {
 				t.Fatalf("%s: %v", name, err)
 			}
 		}
-		c, err := connectController(s.profile)
-		if err != nil {
-			t.Fatalf("the window's path to an older controller: %v", err)
+		if _, openErr := openController(s.profile); !errors.Is(openErr, errControllerOutdated) {
+			t.Fatalf("openController accepted an older controller: %v", openErr)
 		}
-		c.close()
+		if seen := recording.log(); strings.Contains(seen, s.token) || strings.Contains(seen, "/api/launch ") {
+			t.Fatalf("a client sent the token to an unproven controller:\n%s", seen)
+		}
 	})
 	t.Run("newer controller", func(t *testing.T) {
 		s := testServer(t)
@@ -537,35 +527,27 @@ func TestControllerProofInEveryMode(t *testing.T) {
 	}
 }
 
-// BenchmarkControllerDial measures what the proof adds to a new connection.
+// BenchmarkControllerDial measures the cost of a proven controller connection.
 func BenchmarkControllerDial(b *testing.B) {
-	for _, name := range []string{"proven", "unproven"} {
-		b.Run(name, func(b *testing.B) {
-			s := &Server{proofKey: randomToken(), token: randomToken(), session: randomToken()}
-			listener, err := net.Listen("tcp4", "127.0.0.1:0")
-			if err != nil {
-				b.Fatal(err)
-			}
-			port := listener.Addr().(*net.TCPAddr).Port
-			s.origin = "http://localhost:" + strconv.Itoa(port)
-			server := httptest.NewUnstartedServer(s.handler())
-			server.Listener.Close()
-			server.Listener = listener
-			server.Start()
-			defer server.Close()
-			record := s.controlRecord(port)
-			if name == "unproven" {
-				record = controlFile{Port: port}
-			}
-			dial := controllerDial(record)
-			b.ResetTimer()
-			for range b.N {
-				conn, err := dial(context.Background(), "tcp", "localhost:"+strconv.Itoa(port))
-				if err != nil {
-					b.Fatal(err)
-				}
-				conn.Close()
-			}
-		})
+	s := &Server{proofKey: randomToken(), token: randomToken(), session: randomToken()}
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	s.origin = "http://localhost:" + strconv.Itoa(port)
+	server := httptest.NewUnstartedServer(s.handler())
+	server.Listener.Close()
+	server.Listener = listener
+	server.Start()
+	defer server.Close()
+	dial := controllerDial(s.controlRecord(port))
+	b.ResetTimer()
+	for range b.N {
+		conn, err := dial(context.Background(), "tcp", "localhost:"+strconv.Itoa(port))
+		if err != nil {
+			b.Fatal(err)
+		}
+		conn.Close()
 	}
 }

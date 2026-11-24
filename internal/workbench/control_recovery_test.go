@@ -27,7 +27,7 @@ func TestDesktopRecoversStaleRecordOnReusedPort(t *testing.T) {
 			defer server.Close()
 			_, portText, _ := net.SplitHostPort(server.Listener.Addr().String())
 			port, _ := strconv.Atoi(portText)
-			if err := writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, PID: os.Getpid(), Token: strings.Repeat("a", 64)}); err != nil {
+			if err := writePrivate(filepath.Join(profile, "control.json"), controlFile{Port: port, PID: os.Getpid(), Token: strings.Repeat("a", 64), Auth: controlAuth, ProofKey: randomToken()}); err != nil {
 				t.Fatal(err)
 			}
 			lock, err := os.OpenFile(filepath.Join(profile, "control.lock"), os.O_CREATE|os.O_RDWR, 0600)
@@ -85,7 +85,7 @@ func TestControllerRestartAfterGracefulAndForcedExit(t *testing.T) {
 			waitReady := func() *controllerClient {
 				deadline := time.Now().Add(10 * time.Second)
 				for time.Now().Before(deadline) {
-					c, err := connectController(profile)
+					c, err := connectProvenController(profile)
 					if err == nil {
 						return c
 					}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -27,6 +28,17 @@ type terminalSession struct {
 	conversationEnded     bool
 	workspace             string
 	kind, claudeAccountID string
+	agentID, agentName    string
+	accountID             string
+	accountLabel          string
+	accountAuthMode       string
+	scheduleReason        string
+	agentOAuthDomains     []string
+	rateLimitAt           int64
+	rateLimitMessage      string
+	onRateLimit           func(kind string)
+	rateScanBuf           []byte
+	rateScanEsc           uint8
 	loginGuestID          string
 	loginLinkMu           sync.Mutex
 	loginLinkCleanup      sync.Once
@@ -123,6 +135,22 @@ func (t *terminalSession) summary() map[string]any {
 	// Claude startup veil and account header.
 	if t.kind == "codex" && t.sharedID != "" {
 		summary["cli_session_provider"] = codexProvider
+	}
+	if t.agentID != "" {
+		summary["agent_id"] = t.agentID
+		summary["agent_name"] = t.agentName
+		summary["account_id"] = t.accountID
+		summary["account_label"] = t.accountLabel
+		summary["account_auth_mode"] = t.accountAuthMode
+		summary["schedule_reason"] = t.scheduleReason
+		if len(t.agentOAuthDomains) > 0 {
+			summary["oauth_domains"] = t.agentOAuthDomains
+		}
+		if t.rateLimitAt > 0 && time.Now().Unix()-t.rateLimitAt <= 600 {
+			summary["rate_limit_detected"] = true
+			summary["rate_limit_message"] = t.rateLimitMessage
+			summary["rate_limit_at"] = t.rateLimitAt
+		}
 	}
 	if t.origin != "" {
 		summary["origin"] = map[string]any{"kind": t.origin, "device": t.originDevice, "kept": t.kept}
@@ -406,8 +434,8 @@ func (t *terminalSession) subscribeFrom(after *uint64) *terminalSubscription {
 	}
 	subscription := &terminalSubscription{CLIStartup: t.cliStartupDone, CLIStarting: t.cliStartupPendingLocked(), session: t, viewer: viewer}
 	switch {
-	case t.kind == "claude-login":
-		subscription.History, subscription.HistoryReset = []byte("请在 Super Cage 浏览器的临时登录页完成授权。若页面提供验证码，可返回此终端输入。\r\n"), true
+	case t.kind == "claude-login" || t.kind == "agent-login":
+		subscription.History, subscription.HistoryReset = []byte("请在 Super Cage 浏览器的临时登录页完成授权。若页面提供验证码或设备码，可返回此终端输入。\r\n"), true
 	case after != nil:
 		out := t.outputAfterLocked(*after, len(t.history))
 		subscription.History, subscription.HistoryOffset, subscription.HistoryReset = out.Data, out.Next-uint64(len(out.Data)), out.Reset
@@ -428,7 +456,7 @@ func (s *terminalSubscription) next(limit int) terminalBatch {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if viewer.lagged {
-		if t.kind == "claude-login" {
+		if t.kind == "claude-login" || t.kind == "agent-login" {
 			// Login output is never kept, so it cannot be resent.
 			return terminalBatch{Done: true}
 		}
@@ -488,13 +516,16 @@ func (t *terminalSession) run() {
 
 func (t *terminalSession) read() {
 	buffer := make([]byte, 16<<10)
+	var lastRateScan int64
 	for {
 		n, err := t.file.Read(buffer)
 		if n > 0 {
 			chunk := append([]byte(nil), buffer[:n]...)
+			var rateLimitKind string
+			var rateLimitCb func(string)
 			t.mu.Lock()
 			t.sizing.noteOutput(chunk)
-			if t.kind != "claude-login" {
+			if t.kind != "claude-login" && t.kind != "agent-login" {
 				t.history = append(t.history, chunk...)
 				t.written += uint64(len(chunk))
 				if over := len(t.history) - terminalHistoryLimit; over > 0 {
@@ -504,15 +535,140 @@ func (t *terminalSession) read() {
 				}
 				t.notifyLocked()
 			}
+			if t.kind == "agent" && t.agentID != "" {
+				// Scan the full PTY chunk in 512-byte strides through the rolling
+				// ANSI-stripped 1 KiB window so large bursts never discard prefix errors.
+				now := time.Now().Unix()
+				canTrigger := now-lastRateScan >= 15
+				for off := 0; off < len(chunk); off += 512 {
+					end := min(off+512, len(chunk))
+					t.appendRateScanBytes(chunk[off:end])
+					if canTrigger {
+						if kind, msg := detectAgentRateLimitNormalized(t.rateScanBuf); kind != "" {
+							lastRateScan = now
+							canTrigger = false
+							t.rateLimitAt = now
+							t.rateLimitMessage = msg
+							t.rateScanBuf = t.rateScanBuf[:0]
+							rateLimitKind = kind
+							rateLimitCb = t.onRateLimit
+						}
+					}
+				}
+			}
 			for viewer := range t.clients {
 				viewer.push(chunk)
 			}
 			t.mu.Unlock()
+			if rateLimitKind != "" && rateLimitCb != nil {
+				// Invoke directly (pure in-memory state update + async flush timer, <1us)
+				// so no detached goroutine can outlive terminal/server shutdown.
+				rateLimitCb(rateLimitKind)
+			}
 		}
 		if err != nil {
 			break
 		}
 	}
+}
+
+const rateScanWindowSize = 1024
+
+// appendRateScanBytes strips ANSI CSI/OSC escape sequences, lowercases ASCII,
+// and appends into a compact rolling 1024-byte window.
+func (t *terminalSession) appendRateScanBytes(chunk []byte) {
+	t.rateScanBuf, t.rateScanEsc = appendNormalizedRateBytes(t.rateScanBuf, t.rateScanEsc, chunk)
+}
+
+func appendNormalizedRateBytes(buf []byte, esc uint8, chunk []byte) ([]byte, uint8) {
+	const (
+		escNone = 0
+		escSeen = 1
+		escCSI  = 2
+		escOSC  = 3
+	)
+	for _, b := range chunk {
+		switch esc {
+		case escSeen:
+			if b == '[' {
+				esc = escCSI
+				continue
+			}
+			if b == ']' {
+				esc = escOSC
+				continue
+			}
+			esc = escNone
+			continue
+		case escCSI:
+			if b >= 0x40 && b <= 0x7e {
+				esc = escNone
+			}
+			continue
+		case escOSC:
+			if b == 0x07 || b == '\\' {
+				esc = escNone
+			}
+			continue
+		}
+		if b == 0x1b {
+			esc = escSeen
+			continue
+		}
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		if b >= 0x20 && b < 0x7f {
+			buf = append(buf, b)
+		} else if len(buf) == 0 || buf[len(buf)-1] != ' ' {
+			buf = append(buf, ' ')
+		}
+	}
+	if len(buf) > rateScanWindowSize {
+		copy(buf, buf[len(buf)-rateScanWindowSize:])
+		buf = buf[:rateScanWindowSize]
+	}
+	return buf, esc
+}
+
+// detectAgentRateLimitBytes runs a zero-regex bounded ANSI-stripped scan to
+// passively detect provider HTTP 429 / quota exhaustion hints without slowing output.
+func detectAgentRateLimitBytes(chunk []byte) (string, string) {
+	if len(chunk) < 8 {
+		return "", ""
+	}
+	buf, _ := appendNormalizedRateBytes(make([]byte, 0, min(len(chunk), rateScanWindowSize)), 0, chunk)
+	return detectAgentRateLimitNormalized(buf)
+}
+
+func detectAgentRateLimitNormalized(buf []byte) (string, string) {
+	if len(buf) < 8 {
+		return "", ""
+	}
+	s := string(buf)
+	switch {
+	case strings.Contains(s, "rate_limit_exceeded"),
+		strings.Contains(s, "rate limit exceeded"),
+		strings.Contains(s, "ratelimiterror"),
+		strings.Contains(s, "429 too many requests"),
+		strings.Contains(s, "too many requests"),
+		strings.Contains(s, "http 429"),
+		strings.Contains(s, "status 429"),
+		strings.Contains(s, "status code 429"),
+		strings.Contains(s, "error 429"),
+		strings.Contains(s, "error: 429"),
+		strings.Contains(s, "apierror: 429"),
+		strings.Contains(s, "usage limit reached"),
+		strings.Contains(s, "hit your usage limit"):
+		return "rate_limit", "检测到模型接口限流 (429)"
+	case strings.Contains(s, "insufficient_quota"),
+		strings.Contains(s, "resource_exhausted"),
+		strings.Contains(s, "quota exceeded"),
+		strings.Contains(s, "exceeded your current quota"),
+		strings.Contains(s, "billing hard limit"):
+		return "quota_exhausted", "检测到当前账号配额耗尽"
+	}
+	return "", ""
 }
 
 // notifyLocked wakes every phone reader waiting for output or the exit.

@@ -120,3 +120,52 @@
   background: color-mix(in srgb, var(--clay) 15%, transparent);
   border: 2px solid var(--clay); color: var(--clay); pointer-events: none;
 }
+.terminal-create-menu {
+  width: min(100%, 224px);
+}
+.terminal-menu-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+.terminal-menu-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--chrome-dark);
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+.terminal-menu-divider {
+  height: 1px;
+  margin: 4px 6px;
+  background: var(--line);
+}
+.terminal-menu-install {
+  color: var(--muted);
+}
+.sidebar-agent-count {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--chrome-dark);
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+.sidebar-t3code-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sidebar-t3code-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--success);
+  flex: none;
+  margin-left: auto;
+}

@@ -586,7 +586,7 @@ func ClipboardFilesForConnection(configPath, connectionID, operation string, arg
 		}
 		return cache.Control(request)
 	}
-	client, err := connectController(filepath.Dir(configPath))
+	client, err := connectProvenController(filepath.Dir(configPath))
 	if err != nil {
 		return nil, err
 	}
