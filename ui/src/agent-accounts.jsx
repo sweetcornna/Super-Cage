@@ -188,7 +188,7 @@ function AgentAccountCard({
     >
       <div className="claude-profile-heading">
         <span className="claude-profile-avatar" style={{ background: `color-mix(in srgb, ${spec.accent_color || "var(--accent)"} 13%, var(--paper))` }}>
-          <AgentIcon agentId={spec.id} glyph={String(index + 1)} accentColor={spec.accent_color} size={28} />
+          <AgentIcon agentId={spec.id} accountNumber={index + 1} accentColor={spec.accent_color} size={28} />
         </span>
         <div className="claude-profile-identity">
           {renaming ? (

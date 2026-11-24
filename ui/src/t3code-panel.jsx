@@ -213,7 +213,7 @@ export function T3CodeHeader({
   );
 }
 
-const BINDING_PRIORITY = ["claude", "codex", "opencode", "gemini"];
+const BINDING_PRIORITY = ["claude", "codex", "antigravity", "opencode"];
 
 export function T3CodeSettingsCard({
   store,

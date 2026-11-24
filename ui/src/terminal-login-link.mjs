@@ -21,6 +21,7 @@ export const BUILTIN_AGENT_LOGIN_HOSTS = [
   "platform.openai.com",
   "accounts.google.com",
   "oauth2.googleapis.com",
+  "antigravity.google",
   "aistudio.google.com",
   "opencode.ai",
   "openrouter.ai",

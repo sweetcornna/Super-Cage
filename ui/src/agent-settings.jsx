@@ -717,13 +717,21 @@ export function AgentSettings({
               />
             </label>
             <label>
-              图标字标（1-3 字符）
-              <input
-                maxLength={3}
-                value={customForm.glyph}
-                onChange={(e) => setCustomForm((p) => ({ ...p, glyph: e.target.value }))}
-                placeholder="例如 MA"
-              />
+              图标配色（#RRGGBB）
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+                <AgentIcon
+                  agentId={customForm.id.trim().toLowerCase() || "custom-preview"}
+                  accentColor={/^#[0-9a-fA-F]{6}$/.test(customForm.accent_color) ? customForm.accent_color : "#4f46e5"}
+                  size={22}
+                />
+                <input
+                  maxLength={7}
+                  value={customForm.accent_color}
+                  onChange={(e) => setCustomForm((p) => ({ ...p, accent_color: e.target.value }))}
+                  placeholder="#4f46e5"
+                  spellCheck="false"
+                />
+              </span>
             </label>
             <label>
               安装渠道类型
@@ -909,7 +917,7 @@ export function AgentSettings({
           className="agent-catalog-search"
           type="search"
           aria-label="搜索 Agent CLI"
-          placeholder="搜索 Codex、Gemini、OpenCode、Copilot、Qwen、Aider…"
+          placeholder="搜索 Codex、Antigravity、OpenCode、Copilot、Qwen、Aider…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
