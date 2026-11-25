@@ -120,7 +120,6 @@ const (
 func (d *cliDiscovery) reset() {
 	d.mu.Lock()
 	d.retryAt = time.Time{}
-	d.installed = false
 	d.viewKeys = nil
 	d.titles = nil
 	d.results = nil

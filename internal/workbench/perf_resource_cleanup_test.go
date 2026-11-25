@@ -78,9 +78,9 @@ func TestStopEnvironmentClosesBrowserControlAndClearsGuestCaches(t *testing.T) {
 	s.agentCLIs.mu.Unlock()
 
 	s.cliDiscovery.mu.Lock()
-	if len(s.cliDiscovery.viewKeys) != 0 || len(s.cliDiscovery.titles) != 0 || len(s.cliDiscovery.results) != 0 || s.cliDiscovery.lastInput != nil || s.cliDiscovery.lastHash != "" || s.cliDiscovery.installed {
-		t.Fatalf("cliDiscovery caches survived stopEnvironment: views=%d titles=%d results=%d hash=%q installed=%v",
-			len(s.cliDiscovery.viewKeys), len(s.cliDiscovery.titles), len(s.cliDiscovery.results), s.cliDiscovery.lastHash, s.cliDiscovery.installed)
+	if len(s.cliDiscovery.viewKeys) != 0 || len(s.cliDiscovery.titles) != 0 || len(s.cliDiscovery.results) != 0 || s.cliDiscovery.lastInput != nil || s.cliDiscovery.lastHash != "" {
+		t.Fatalf("cliDiscovery caches survived stopEnvironment: views=%d titles=%d results=%d hash=%q",
+			len(s.cliDiscovery.viewKeys), len(s.cliDiscovery.titles), len(s.cliDiscovery.results), s.cliDiscovery.lastHash)
 	}
 	s.cliDiscovery.mu.Unlock()
 

@@ -57,11 +57,11 @@ func TestGuestScriptEnsureCacheRecoveryAndZeroSteadyStateBytes(t *testing.T) {
 	if err != nil || string(gotSource) != cage.AgentRuntimeHelper {
 		t.Fatalf("installed agent-runtime.py content mismatch (len=%d want=%d err=%v)", len(gotSource), len(cage.AgentRuntimeHelper), err)
 	}
-	if got := sshExecs.Load(); got != 2 {
-		t.Fatalf("cold call ssh execs = %d, want 2 (1 ensure + 1 run)", got)
+	if got := sshExecs.Load(); got != 1 {
+		t.Fatalf("cold call ssh execs = %d, want 1 (shared guestSession carries ensure + run)", got)
 	}
 
-	// 2. Steady-state call: cached in memory -> 1 SSH exec, ZERO runtime bytes transferred!
+	// 2. Steady-state call: cached in memory & multiplexed over shared guestSession -> 0 new SSH execs!
 	sshExecs.Store(0)
 	execMu.Lock()
 	execCommands = nil
@@ -69,18 +69,12 @@ func TestGuestScriptEnsureCacheRecoveryAndZeroSteadyStateBytes(t *testing.T) {
 	if err := s.runAgentRuntime(ctx, "probe-all", map[string]any{"specs": []any{}, "force": true}, &snap); err != nil {
 		t.Fatalf("steady-state runAgentRuntime failed: %v", err)
 	}
-	if got := sshExecs.Load(); got != 1 {
-		t.Fatalf("steady-state call ssh execs = %d, want 1 (zero ensure calls)", got)
-	}
-	execMu.Lock()
-	steadyCmd := execCommands[0]
-	execMu.Unlock()
-	if len(steadyCmd) >= 512 {
-		t.Fatalf("steady-state remote command unexpectedly large: %d bytes (%s)", len(steadyCmd), steadyCmd)
+	if got := sshExecs.Load(); got != 0 {
+		t.Fatalf("steady-state call ssh execs = %d, want 0 (reuses shared guestSession)", got)
 	}
 
 	// 3. Out-of-band file deletion on guest: exit 86 triggers automatic cache
-	// invalidation, re-install, and retry without caller failure.
+	// invalidation, re-install, and retry over the same shared guestSession (0 new SSH execs).
 	if err := os.Remove(installedPath); err != nil {
 		t.Fatal(err)
 	}
@@ -91,11 +85,12 @@ func TestGuestScriptEnsureCacheRecoveryAndZeroSteadyStateBytes(t *testing.T) {
 	if _, err := os.Stat(installedPath); err != nil {
 		t.Fatalf("agent-runtime.py was not reinstalled after deletion: %v", err)
 	}
-	if got := sshExecs.Load(); got != 3 {
-		t.Fatalf("recovery ssh execs = %d, want 3 (1 miss/86 + 1 re-ensure + 1 retry)", got)
+	if got := sshExecs.Load(); got != 0 {
+		t.Fatalf("recovery ssh execs = %d, want 0 (miss/86 + re-ensure + retry share open guestSession)", got)
 	}
 
-	// 4. Guest lifecycle reset clears cache so next boot re-ensures.
+	// 4. Guest lifecycle reset closes shared session and clears cache; 4 concurrent calls
+	// coalesce onto 1 shared guestSession SSH connection.
 	s.closeGuestSessions()
 	sshExecs.Store(0)
 	var wg sync.WaitGroup
@@ -114,9 +109,70 @@ func TestGuestScriptEnsureCacheRecoveryAndZeroSteadyStateBytes(t *testing.T) {
 			t.Fatalf("concurrent post-reset call %d failed: %v", i, callErr)
 		}
 	}
-	// 4 concurrent calls after reset must coalesce into 1 ensure + 4 runs = 5 SSH execs!
+	if got := sshExecs.Load(); got != 1 {
+		t.Fatalf("4 concurrent post-reset calls used %d ssh execs, want 1 (shared guestSession)", got)
+	}
+
+	// 5. Dedicated-SSH fallback path (when shared guestSession is backing off):
+	// verifies cold=2, steady=1 (<512 B remote command), exit-86 recovery=3, and 4 concurrent=5.
+	s.closeGuestSessions()
+	s.controlSession.mu.Lock()
+	s.controlSession.retryAt = time.Now().Add(time.Minute)
+	s.controlSession.mu.Unlock()
+	if err := os.Remove(installedPath); err != nil {
+		t.Fatal(err)
+	}
+	sshExecs.Store(0)
+	if err := s.runAgentRuntime(ctx, "probe-all", map[string]any{"specs": []any{}, "force": true}, &snap); err != nil {
+		t.Fatalf("fallback cold runAgentRuntime failed: %v", err)
+	}
+	if got := sshExecs.Load(); got != 2 {
+		t.Fatalf("fallback cold call ssh execs = %d, want 2 (1 ensure + 1 run)", got)
+	}
+	sshExecs.Store(0)
+	execMu.Lock()
+	execCommands = nil
+	execMu.Unlock()
+	if err := s.runAgentRuntime(ctx, "probe-all", map[string]any{"specs": []any{}, "force": true}, &snap); err != nil {
+		t.Fatalf("fallback steady-state runAgentRuntime failed: %v", err)
+	}
+	if got := sshExecs.Load(); got != 1 {
+		t.Fatalf("fallback steady-state call ssh execs = %d, want 1", got)
+	}
+	execMu.Lock()
+	steadyCmd := execCommands[0]
+	execMu.Unlock()
+	if len(steadyCmd) >= 512 {
+		t.Fatalf("fallback steady-state remote command unexpectedly large: %d bytes (%s)", len(steadyCmd), steadyCmd)
+	}
+	if err := os.Remove(installedPath); err != nil {
+		t.Fatal(err)
+	}
+	sshExecs.Store(0)
+	if err := s.runAgentRuntime(ctx, "probe-all", map[string]any{"specs": []any{}, "force": true}, &snap); err != nil {
+		t.Fatalf("fallback recovery failed: %v", err)
+	}
+	if got := sshExecs.Load(); got != 3 {
+		t.Fatalf("fallback recovery ssh execs = %d, want 3 (1 miss/86 + 1 re-ensure + 1 retry)", got)
+	}
+	s.guestScripts.reset()
+	sshExecs.Store(0)
+	for i := range errs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var local agentProbeSnapshot
+			errs[i] = s.runAgentRuntime(ctx, "probe-all", map[string]any{"specs": []any{}, "force": true}, &local)
+		}()
+	}
+	wg.Wait()
+	for i, callErr := range errs {
+		if callErr != nil {
+			t.Fatalf("fallback concurrent call %d failed: %v", i, callErr)
+		}
+	}
 	if got := sshExecs.Load(); got != 5 {
-		t.Fatalf("4 concurrent post-reset calls used %d ssh execs, want 5 (1 coalesced ensure + 4 runs)", got)
+		t.Fatalf("fallback 4 concurrent calls used %d ssh execs, want 5 (1 coalesced ensure + 4 runs)", got)
 	}
 }
 

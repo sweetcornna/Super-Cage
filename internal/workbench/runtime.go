@@ -272,9 +272,12 @@ func (s *Server) monitor(ctx context.Context) {
 	timer.Stop()
 	defer timer.Stop()
 	var state environmentMonitor
+	macStartupChecked := false
 	for ctx.Err() == nil {
 		wake := s.monitorWakeCh()
-		if s.environmentMonitorIdle() {
+		// macOS runs network supervision inside monitorEnvironmentRound; run
+		// one startup check before entering stopped-VM idle sleep.
+		if s.environmentMonitorIdle() && (s.macosGuest == nil || macStartupChecked) {
 			state.failures, state.skipped = 0, 0
 			select {
 			case <-ctx.Done():
@@ -284,6 +287,9 @@ func (s *Server) monitor(ctx context.Context) {
 			}
 		}
 		s.monitorEnvironmentRound(&state)
+		if s.macosGuest != nil {
+			macStartupChecked = true
+		}
 		if !waitMonitor(ctx, s.monitorWakeCh(), timer, 5*time.Second) {
 			return
 		}
