@@ -61,6 +61,22 @@ sudo tee /usr/local/lib/cage-claude-bin/claude >/dev/null <<'CAGE_CLAUDE_SHIM'
 exec /usr/local/bin/cage-claude-account run "$CAGE_CLAUDE_ACCOUNT_ID" "$@"
 CAGE_CLAUDE_SHIM
 sudo chmod 0755 /usr/local/lib/cage-claude-bin/claude
+sudo tee /etc/profile.d/cage-claude.sh >/dev/null <<'CAGE_CLAUDE_FUNCTION'
+# A plain claude typed in any guest shell (Herdr included) starts on the
+# account Super Cage schedules for new sessions; see cage-claude-account auto.
+claude() {
+  if [ -z "${CAGE_CLAUDE_ACCOUNT_ID:-}" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -r "$HOME/.local/share/cage/claude-accounts/launch.json" ] && [ -x /usr/local/bin/cage-claude-account ]; then
+    /usr/local/bin/cage-claude-account auto "$@"
+  else
+    command claude "$@"
+  fi
+}
+CAGE_CLAUDE_FUNCTION
+for rc in /etc/zsh/zshenv /etc/bash.bashrc; do
+  if [ -f "$rc" ] && ! grep -qs '/etc/profile.d/cage-claude.sh' "$rc"; then
+    echo '[ -r /etc/profile.d/cage-claude.sh ] && . /etc/profile.d/cage-claude.sh' | sudo tee -a "$rc" >/dev/null
+  fi
+done
 `
 }
 

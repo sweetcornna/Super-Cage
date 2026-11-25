@@ -38,6 +38,14 @@ SHIM = "/usr/local/lib/cage-claude-bin"
 OPEN = "/usr/local/libexec/cage-cli/bin/cage-open" if sys.platform == "darwin" else "/usr/local/bin/cage-open"
 HELPER = "/usr/local/bin/cage-claude-account"
 DEFAULT = "default"
+# Settings that choose another provider or carry a credential. A private
+# profile never inherits them, and a shell that sets one keeps its own setup.
+PROVIDER_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                      "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+                      "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_GATEWAY")
+# Subcommands that manage the CLI itself or a login run exactly as typed.
+UNSCHEDULED = {"auth", "setup-token", "update", "upgrade", "install", "migrate-installer", "doctor",
+               "mcp", "plugin", "plugins", "config", "-v", "--version", "-h", "--help"}
 
 
 def shared_root():
@@ -80,9 +88,7 @@ def cli_environment(base):
         # signed-in default subscription, even if a previous login exists.
         return _runtime["environment"](env)
     env["CLAUDE_CONFIG_DIR"] = str(config_directory(base))
-    for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-                 "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
-                 "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_GATEWAY"):
+    for name in PROVIDER_VARIABLES:
         env.pop(name, None)
     return _runtime["environment"](env)
 
@@ -846,7 +852,86 @@ def macos_open(args):
             return 0 if reply.read(4) == b"OK" else 1
 
 
+def launch_headroom(quota, expected, now):
+    """The controller's headroom rule on the guest's own reading: None while a
+    window is used up, else the least known remaining percent (-1: unknown)."""
+    if not quota or quota.get("identity") != expected:
+        return -1
+    least = -1
+    for key in ("five_hour", "seven_day"):
+        window = quota.get(key)
+        if not window:
+            continue
+        fresh = now - window["observed_at"] <= 15 * 60
+        if window["used_percentage"] >= 100 and (window["resets_at"] > now or fresh):
+            return None
+        if fresh and (least < 0 or 100 - window["used_percentage"] < least):
+            least = 100 - window["used_percentage"]
+    return least
+
+
+def launch_account(now=None):
+    """The account a plain `claude` starts on. The controller publishes its
+    scheduling order (preferred account first); a used-up account is skipped."""
+    now = int(time.time()) if now is None else now
+    schedule = json_file(profile(DEFAULT).parent / "launch.json")
+    if not isinstance(schedule, dict) or not isinstance(schedule.get("accounts"), list):
+        return None
+    best = None
+    for item in schedule["accounts"][:64]:
+        if not isinstance(item, dict):
+            continue
+        account, expected = item.get("id"), item.get("subject")
+        if not isinstance(account, str) or not re.fullmatch("[0-9a-f]{24}", account) or \
+                not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
+            continue
+        room = launch_headroom(read_quota(profile(account)), expected, now)
+        if room is None:
+            continue
+        if item.get("preferred") is True or schedule.get("mode") == "sequential":
+            return account, expected
+        if best is None or room > best[2]:
+            best = (account, expected, room)
+    return best[:2] if best else None
+
+
+def auto(args):
+    """`claude` typed in a guest shell. It starts on the scheduled account like a
+    Claude terminal does; anything that does not fit runs the CLI unchanged."""
+    picked = None
+    explicit = any(os.environ.get(name) for name in ("CAGE_CLAUDE_ACCOUNT_ID", "CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
+    if not explicit and not (args and args[0] in UNSCHEDULED):
+        try:
+            picked = launch_account()
+        except Exception:
+            picked = None
+    if picked:
+        account, expected = picked
+        mask = os.umask(0)
+        os.umask(mask)
+        # The status line command carries the subject; CLAUDE_CONFIG_DIR keeps
+        # later `claude` calls in this session on the same account.
+        _controller_context["CAGE_CLAUDE_SUBJECT"] = expected
+        try:
+            main(["run", account, *args])  # replaces this process once the account is verified
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            pass
+        os.umask(mask)
+        _controller_context.pop("CAGE_CLAUDE_SUBJECT", None)
+        print("Super Cage 调度的 Claude 账号暂不可用，本次用默认登录启动。", file=sys.stderr)
+    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if p and p != SHIM)
+    binary = shutil.which("claude", path=path)
+    if not binary:
+        print("未找到 claude 命令。", file=sys.stderr)
+        return 127
+    os.execv(binary, [binary, *args])
+
+
 def entrypoint(args):
+    if args[:1] == ["auto"] and os.name != "nt":
+        return auto(args[1:])
     try:
         return macos_open(args) if sys.platform == "darwin" and Path(sys.argv[0]).name == "cage-open" else main(args)
     except KeyboardInterrupt:
