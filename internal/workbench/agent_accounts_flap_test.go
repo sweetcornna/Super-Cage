@@ -352,3 +352,203 @@ func TestConfirmAgentLoginDoesNotClearPendingWhileLoginTerminalActive(t *testing
 		t.Fatalf("unexpected notice after close: %q", gotNotice)
 	}
 }
+
+// F7: GET /api/agent-clis/<id>/accounts must never block on s.op (which
+// long-running jobs hold for minutes), either via inline PendingLogin recovery
+// or by joining an in-flight confirmAgentLogin waiting on s.op.
+func TestListAgentAccountsDoesNotBlockOnOpLock(t *testing.T) {
+	setupPending := func(t *testing.T, idChar string) (*Server, string) {
+		t.Helper()
+		s := runningAgentTestServer(t)
+		pendingID := strings.Repeat(idChar, 24)
+		s.agentCLIs.mu.Lock()
+		pools, err := s.loadAgentPoolsLocked()
+		if err != nil {
+			s.agentCLIs.mu.Unlock()
+			t.Fatal(err)
+		}
+		pool := s.ensureAgentPoolLocked(pools, "antigravity")
+		pool.PendingLogin = pendingID
+		if err := s.saveAgentPoolsLocked(pools); err != nil {
+			s.agentCLIs.mu.Unlock()
+			t.Fatal(err)
+		}
+		s.agentCLIs.mu.Unlock()
+		return s, pendingID
+	}
+
+	loggedInHook := func(pendingID string) func(context.Context, string, any, any) error {
+		return func(_ context.Context, subcmd string, input any, output any) error {
+			if subcmd == "snapshot" {
+				m, _ := input.(map[string]any)
+				if m["account_id"] == pendingID {
+					data, _ := json.Marshal(agentGuestSnapshot{
+						LoggedIn: true,
+						AuthMode: "oauth",
+						Email:    "pending@example.com",
+						Plan:     "Google OAuth",
+					})
+					return json.Unmarshal(data, output)
+				}
+				data, _ := json.Marshal(agentGuestSnapshot{LoggedIn: false})
+				return json.Unmarshal(data, output)
+			}
+			return nil
+		}
+	}
+
+	t.Run("job_holding_op_does_not_block_get", func(t *testing.T) {
+		s, pendingID := setupPending(t, "e")
+		s.agentCLIs.runtimeHook = loggedInHook(pendingID)
+
+		s.setJobForTest(Job{ID: "install-1", Kind: "install", Running: true})
+		s.op.Lock()
+		opLocked := true
+		defer func() {
+			if opLocked {
+				s.op.Unlock()
+			}
+		}()
+
+		done := make(chan agentAccountsHTTPResponse, 1)
+		go func() {
+			w := request(s, "GET", "/api/agent-clis/antigravity/accounts?refresh=1", "", "", true)
+			done <- decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("GET /api/agent-clis/antigravity/accounts hung while a job held s.op")
+		}
+
+		// Once the job ends and releases s.op, PendingLogin is still recoverable.
+		s.op.Unlock()
+		opLocked = false
+		s.setJobForTest(Job{ID: "install-1", Kind: "install", Running: false})
+		w := request(s, "GET", "/api/agent-clis/antigravity/accounts?refresh=1", "", "", true)
+		resp := decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
+		if len(resp.Accounts) != 1 || resp.Accounts[0].Email != "pending@example.com" {
+			t.Fatalf("expected PendingLogin recovery after job finished, got accounts=%+v", resp.Accounts)
+		}
+	})
+
+	t.Run("non_job_holding_op_does_not_block_get", func(t *testing.T) {
+		s, pendingID := setupPending(t, "f")
+		s.agentCLIs.runtimeHook = loggedInHook(pendingID)
+
+		s.op.Lock()
+		defer s.op.Unlock()
+
+		done := make(chan struct{})
+		go func() {
+			w := request(s, "GET", "/api/agent-clis/antigravity/accounts?refresh=1", "", "", true)
+			_ = decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Fatal("GET /api/agent-clis/antigravity/accounts hung while s.op was held")
+		}
+	})
+
+	t.Run("inflight_confirm_blocked_on_op_does_not_hang_joiner_get", func(t *testing.T) {
+		s, pendingID := setupPending(t, "1")
+		probed := make(chan struct{})
+		s.agentCLIs.runtimeHook = func(ctx context.Context, subcmd string, input any, output any) error {
+			if subcmd == "snapshot" {
+				m, _ := input.(map[string]any)
+				if m["account_id"] == pendingID {
+					select {
+					case <-probed:
+					default:
+						close(probed)
+					}
+				}
+			}
+			return loggedInHook(pendingID)(ctx, subcmd, input, output)
+		}
+
+		s.setJobForTest(Job{ID: "install-2", Kind: "install", Running: true})
+		s.op.Lock()
+		opLocked := true
+		confirmDone := make(chan error, 1)
+		defer func() {
+			if opLocked {
+				s.op.Unlock()
+			}
+			<-confirmDone
+		}()
+
+		go func() {
+			confirmDone <- s.confirmAgentLogin(context.Background(), "antigravity", pendingID)
+		}()
+		select {
+		case <-probed:
+		case <-time.After(2 * time.Second):
+			t.Fatal("background confirmAgentLogin did not probe")
+		}
+		time.Sleep(20 * time.Millisecond) // allow confirmAgentLogin to reach s.op.Lock()
+
+		getDone := make(chan struct{})
+		go func() {
+			w := request(s, "GET", "/api/agent-clis/antigravity/accounts", "", "", true)
+			_ = decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
+			close(getDone)
+		}()
+
+		select {
+		case <-getDone:
+		case <-time.After(1 * time.Second):
+			t.Fatal("GET joiner hung waiting on an in-flight confirmAgentLogin blocked on s.op")
+		}
+		s.op.Unlock()
+		opLocked = false
+	})
+
+	t.Run("inflight_confirm_slow_probe_joiner_is_bounded", func(t *testing.T) {
+		s, pendingID := setupPending(t, "2")
+		oldTimeout := agentConfirmJoinTimeout
+		agentConfirmJoinTimeout = 120 * time.Millisecond
+		t.Cleanup(func() { agentConfirmJoinTimeout = oldTimeout })
+
+		started := make(chan struct{})
+		release := make(chan struct{})
+		s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
+			if subcmd == "snapshot" {
+				m, _ := input.(map[string]any)
+				if m["account_id"] == pendingID {
+					close(started)
+					<-release
+				}
+				data, _ := json.Marshal(agentGuestSnapshot{LoggedIn: false})
+				return json.Unmarshal(data, output)
+			}
+			return nil
+		}
+
+		confirmDone := make(chan error, 1)
+		defer func() {
+			close(release)
+			<-confirmDone
+		}()
+		go func() {
+			confirmDone <- s.confirmAgentLogin(context.Background(), "antigravity", pendingID)
+		}()
+		<-started
+
+		getDone := make(chan struct{})
+		go func() {
+			w := request(s, "GET", "/api/agent-clis/antigravity/accounts", "", "", true)
+			_ = decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
+			close(getDone)
+		}()
+		select {
+		case <-getDone:
+		case <-time.After(1 * time.Second):
+			t.Fatal("GET joiner did not respect bounded wait for slow in-flight confirmAgentLogin")
+		}
+	})
+}

@@ -147,6 +147,26 @@ func (s *Server) agentRuntimeSSHCommand(ctx context.Context, subcommand string) 
 	return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
 }
 
+var (
+	statusProbeTimeout          = 6 * time.Second
+	coldEnsureTimeout           = 15 * time.Second
+	errEnsureAgentRuntimeNeeded = errors.New("agent runtime ensure needed")
+)
+
+func (s *Server) agentRuntimeInstalled() bool {
+	if s.agentCLIs.runtimeHook != nil || s.windowsGuest != nil {
+		return true
+	}
+	return s.guestScripts.has(agentRuntimeSpec.cacheKey())
+}
+
+func (s *Server) statusProbeWaitTimeout() time.Duration {
+	if s.agentRuntimeInstalled() {
+		return statusProbeTimeout
+	}
+	return coldEnsureTimeout + statusProbeTimeout
+}
+
 func (s *Server) ensureAgentRuntime(ctx context.Context) error {
 	if s.agentCLIs.runtimeHook != nil || s.windowsGuest != nil {
 		return nil
@@ -274,7 +294,7 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 
 func agentRuntimeUsesSharedSession(subcommand string) bool {
 	switch subcommand {
-	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "prepare-home":
+	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list":
 		return true
 	default:
 		return false
@@ -314,7 +334,7 @@ func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input a
 						return 0, nil
 					}
 					// Oversized reply (> 64 KiB): fall through to dedicated SSH below.
-				} else if ctx.Err() != nil || subcommand == "prepare-home" {
+				} else if ctx.Err() != nil {
 					return -1, sharedErr
 				}
 			} else if ctx.Err() != nil {
@@ -442,8 +462,6 @@ func (m *agentManager) resetGuestCaches() {
 	m.defaultCache = nil
 	m.pendingAttempted = nil
 	m.loginNotice = nil
-	m.lastPick = nil
-	m.recent = nil
 	m.mu.Unlock()
 }
 

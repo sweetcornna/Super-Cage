@@ -467,16 +467,32 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		s.agentCLIs.mu.Unlock()
 
 		if inflight != nil {
-			select {
-			case <-r.Context().Done():
-			case <-inflight.done:
+			// Never block a GET waiting on a confirm blocked behind a job or
+			// long operation holding s.op, and always bound joiner waits.
+			if !s.busy() && s.op.TryLock() {
+				s.op.Unlock()
+				joinTimer := time.NewTimer(agentConfirmJoinTimeout)
+				select {
+				case <-r.Context().Done():
+				case <-inflight.done:
+				case <-joinTimer.C:
+				}
+				if !joinTimer.Stop() {
+					select {
+					case <-joinTimer.C:
+					default:
+					}
+				}
 			}
-		} else if pendingID != "" {
-			_, logins := s.activeAgentTerminals(spec.ID)
-			if !logins[pendingID] && (forceRefresh || attempted.IsZero() || time.Since(attempted) >= agentDefaultProbeTTL) {
-				ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-				_ = s.confirmAgentLogin(ctx, spec.ID, pendingID)
-				cancel()
+		} else if pendingID != "" && !s.busy() {
+			if s.op.TryLock() {
+				s.op.Unlock()
+				_, logins := s.activeAgentTerminals(spec.ID)
+				if !logins[pendingID] && (forceRefresh || attempted.IsZero() || time.Since(attempted) >= agentDefaultProbeTTL) {
+					ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+					_ = s.confirmAgentLoginWithLockMode(ctx, spec.ID, pendingID, true)
+					cancel()
+				}
 			}
 		}
 	}
@@ -1307,7 +1323,16 @@ func (s *Server) noteAgentSelection(agentID, accountID, workspace string) {
 	}
 }
 
-func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID string) (retErr error) {
+var (
+	agentConfirmJoinTimeout = 4 * time.Second
+	errAgentConfirmOpBusy   = errors.New("operation lock busy")
+)
+
+func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID string) error {
+	return s.confirmAgentLoginWithLockMode(ctx, agentID, accountID, false)
+}
+
+func (s *Server) confirmAgentLoginWithLockMode(ctx context.Context, agentID, accountID string, tryOp bool) (retErr error) {
 	if _, unlocked := s.account.access(); !unlocked {
 		return errors.New("Cage 已锁定")
 	}
@@ -1318,31 +1343,37 @@ func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID strin
 
 	m := &s.agentCLIs
 	key := spec.ID + ":" + accountID
-	m.mu.Lock()
-	if call := m.confirmInflight[key]; call != nil {
-		m.mu.Unlock()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-call.done:
-			return call.err
-		}
-	}
-	if m.confirmInflight == nil {
-		m.confirmInflight = map[string]*agentConfirmCall{}
-	}
-	call := &agentConfirmCall{done: make(chan struct{})}
-	m.confirmInflight[key] = call
-	m.mu.Unlock()
-	defer func() {
+	for {
 		m.mu.Lock()
-		if m.confirmInflight[key] == call {
-			delete(m.confirmInflight, key)
+		if call := m.confirmInflight[key]; call != nil {
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-call.done:
+				if !tryOp && errors.Is(call.err, errAgentConfirmOpBusy) {
+					continue
+				}
+				return call.err
+			}
 		}
-		call.err = retErr
-		close(call.done)
+		if m.confirmInflight == nil {
+			m.confirmInflight = map[string]*agentConfirmCall{}
+		}
+		call := &agentConfirmCall{done: make(chan struct{})}
+		m.confirmInflight[key] = call
 		m.mu.Unlock()
-	}()
+		defer func() {
+			m.mu.Lock()
+			if m.confirmInflight[key] == call {
+				delete(m.confirmInflight, key)
+			}
+			call.err = retErr
+			close(call.done)
+			m.mu.Unlock()
+		}()
+		break
+	}
 
 	snap, err := s.probeAgentProfile(ctx, spec, accountID)
 	if err != nil {
@@ -1370,7 +1401,13 @@ func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID strin
 		m.mu.Unlock()
 		return err
 	}
-	s.op.Lock()
+	if tryOp {
+		if s.busy() || !s.op.TryLock() {
+			return errAgentConfirmOpBusy
+		}
+	} else {
+		s.op.Lock()
+	}
 	defer s.op.Unlock()
 	if _, unlocked := s.account.access(); !unlocked {
 		return errors.New("Cage 已锁定")

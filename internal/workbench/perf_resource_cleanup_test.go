@@ -71,9 +71,13 @@ func TestStopEnvironmentClosesBrowserControlAndClearsGuestCaches(t *testing.T) {
 	}
 
 	s.agentCLIs.mu.Lock()
-	if len(s.agentCLIs.defaultCache) != 0 || len(s.agentCLIs.pendingAttempted) != 0 || len(s.agentCLIs.loginNotice) != 0 || len(s.agentCLIs.recent) != 0 || len(s.agentCLIs.lastPick) != 0 {
-		t.Fatalf("agentCLIs caches survived stopEnvironment: default=%d pending=%d notice=%d recent=%d lastPick=%d",
-			len(s.agentCLIs.defaultCache), len(s.agentCLIs.pendingAttempted), len(s.agentCLIs.loginNotice), len(s.agentCLIs.recent), len(s.agentCLIs.lastPick))
+	if len(s.agentCLIs.defaultCache) != 0 || len(s.agentCLIs.pendingAttempted) != 0 || len(s.agentCLIs.loginNotice) != 0 {
+		t.Fatalf("agentCLIs guest caches survived stopEnvironment: default=%d pending=%d notice=%d",
+			len(s.agentCLIs.defaultCache), len(s.agentCLIs.pendingAttempted), len(s.agentCLIs.loginNotice))
+	}
+	if s.agentCLIs.lastPick["antigravity"] != "acct-1" || s.agentCLIs.recent["antigravity"]["/proj"].id != "acct-1" {
+		t.Fatalf("agentCLIs host scheduling memory was cleared by stopEnvironment: lastPick=%v recent=%v",
+			s.agentCLIs.lastPick, s.agentCLIs.recent)
 	}
 	s.agentCLIs.mu.Unlock()
 
@@ -182,5 +186,39 @@ func TestCloseServiceWaitsForBackgroundAgentProbeAndReturnsGoroutinesToBaseline(
 	after := runtime.NumGoroutine()
 	if after > before+1 {
 		t.Fatalf("goroutines leaked after start/close cycle: before=%d after=%d", before, after)
+	}
+}
+
+// F8: resetGuestCaches clears guest-scoped caches on VM stop/start/close, but
+// must preserve host-side scheduling memory (lastPick, recent) just like
+// Claude and Codex do.
+func TestResetGuestCachesPreservesSchedulingMemory(t *testing.T) {
+	s := testServer(t)
+	now := time.Now()
+	s.agentCLIs.mu.Lock()
+	s.agentCLIs.defaultCache = map[string]*agentDefaultProbeEntry{
+		"antigravity": {checkedAt: now},
+	}
+	s.agentCLIs.pendingAttempted = map[string]time.Time{"antigravity": now}
+	s.agentCLIs.loginNotice = map[string]string{"antigravity": "notice"}
+	s.agentCLIs.lastPick = map[string]string{"antigravity": "acct-1"}
+	s.agentCLIs.recent = map[string]map[string]claudeProjectPick{
+		"antigravity": {"/proj": {id: "acct-1", at: now}},
+	}
+	s.agentCLIs.mu.Unlock()
+
+	s.agentCLIs.resetGuestCaches()
+
+	s.agentCLIs.mu.Lock()
+	defer s.agentCLIs.mu.Unlock()
+	if len(s.agentCLIs.defaultCache) != 0 || len(s.agentCLIs.pendingAttempted) != 0 || len(s.agentCLIs.loginNotice) != 0 {
+		t.Fatalf("guest caches were not cleared: default=%d pending=%d notice=%d",
+			len(s.agentCLIs.defaultCache), len(s.agentCLIs.pendingAttempted), len(s.agentCLIs.loginNotice))
+	}
+	if s.agentCLIs.lastPick["antigravity"] != "acct-1" {
+		t.Fatalf("lastPick was cleared by resetGuestCaches: got %q, want %q", s.agentCLIs.lastPick["antigravity"], "acct-1")
+	}
+	if s.agentCLIs.recent["antigravity"]["/proj"].id != "acct-1" {
+		t.Fatalf("recent affinity was cleared by resetGuestCaches: got %+v", s.agentCLIs.recent)
 	}
 }
