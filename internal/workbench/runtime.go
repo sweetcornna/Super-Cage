@@ -241,6 +241,9 @@ func (s *Server) attach() error {
 		s.wakeMonitorsLocked()
 	}
 	s.mu.Unlock()
+	if newlyReady {
+		s.kickClaudeLaunchSchedule()
+	}
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
 	// A browser controller that restarted since (a crash, or a reset the host

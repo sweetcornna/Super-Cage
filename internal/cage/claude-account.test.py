@@ -56,6 +56,83 @@ printf '%s\\n' "$@"
                               cwd=cwd or self.home, input=json.dumps(data) if data else None, text=True,
                               capture_output=True, check=check)
 
+    def write_launch(self, accounts, mode="balanced"):
+        root = self.home / ".local/share/cage/claude-accounts"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "launch.json").write_text(json.dumps({"mode": mode, "accounts": accounts}))
+
+    def write_quota(self, account, used, subject=None):
+        base = self.home / ".local/share/cage/claude-accounts" / account
+        base.mkdir(parents=True, exist_ok=True)
+        now = int(time.time())
+        window = {"used_percentage": used, "resets_at": now + 3600, "observed_at": now}
+        (base / "quota.json").write_text(json.dumps({"identity": subject or self.subject, "observed_at": now, "seven_day": window}))
+
+    def plain_shell_env(self, **extra):
+        env = {key: value for key, value in self.env.items() if key != "CAGE_CLAUDE_SUBJECT"}
+        return {**env, "PATH": str(self.home / ".local/bin") + os.pathsep + os.defpath, **extra}
+
+    def test_launch_account_follows_the_published_order_and_skips_used_up_accounts(self):
+        with patch.object(Path, "home", return_value=self.home):
+            self.assertIsNone(helper.launch_account())
+            self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}, {"id": SECOND, "subject": self.subject}])
+            self.assertEqual(helper.launch_account(), (FIRST, self.subject))  # preferred, quota unknown
+            self.write_quota(FIRST, 100)
+            self.write_quota(SECOND, 40)
+            self.assertEqual(helper.launch_account(), (SECOND, self.subject))
+            self.write_quota(SECOND, 100)
+            self.assertIsNone(helper.launch_account())
+            # Balanced: the most remaining; sequential: the first that can start.
+            third = "3" * 24
+            self.write_launch([{"id": FIRST, "subject": self.subject}, {"id": SECOND, "subject": self.subject}, {"id": third, "subject": self.subject}])
+            self.write_quota(FIRST, 90)
+            self.write_quota(third, 20)
+            self.assertEqual(helper.launch_account(), (third, self.subject))
+            self.write_launch([{"id": FIRST, "subject": self.subject}, {"id": third, "subject": self.subject}], mode="sequential")
+            self.assertEqual(helper.launch_account(), (FIRST, self.subject))
+            # A reading of another login says nothing about this one.
+            self.write_quota(FIRST, 100, subject="f" * 64)
+            self.assertEqual(helper.launch_account(), (FIRST, self.subject))
+            (self.home / ".local/share/cage/claude-accounts/launch.json").write_text("{not json")
+            with self.assertRaises(ValueError):
+                helper.launch_account()
+
+    def test_plain_claude_starts_on_the_scheduled_account(self):
+        capture = self.home / "env.txt"
+        self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}])
+        result = self.run_helper("auto", "hello", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture)))
+        self.assertIn("hello", result.stdout.splitlines())
+        env = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+        self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).resolve(), (self.home / ".local/share/cage/claude-accounts" / FIRST / "config").resolve())
+        # The status line keeps this account's quota reading current.
+        lines = result.stdout.splitlines()
+        settings = json.loads(Path(lines[lines.index("--settings") + 1]).read_text())
+        launcher = shlex.split(settings["statusLine"]["command"])[2]
+        self.assertIn(self.subject, Path(launcher).read_text())
+
+    def test_plain_claude_runs_unchanged_when_it_does_not_fit_the_schedule(self):
+        capture = self.home / "env.txt"
+        def plain(*args, **extra):
+            result = self.run_helper("auto", *args, env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture), **extra))
+            env = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+            return result, env
+        result, env = plain("hello")  # nothing published
+        self.assertEqual(result.stdout.splitlines(), ["hello"])
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+        self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}])
+        for args, extra in ((("hello",), {"CLAUDE_CONFIG_DIR": str(self.home / "own")}),
+                            (("hello",), {"ANTHROPIC_API_KEY": "fixture"}),
+                            (("auth", "login"), {}), (("--version",), {})):
+            result, env = plain(*args, **extra)
+            self.assertEqual(result.stdout.splitlines()[-len(args):], list(args))
+            self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), extra.get("CLAUDE_CONFIG_DIR"))
+        # A profile that no longer answers as the published login falls back.
+        self.write_launch([{"id": FIRST, "subject": "e" * 64, "preferred": True}])
+        result, env = plain("hello")
+        self.assertEqual(result.stdout.splitlines(), ["hello"])
+        self.assertIn("默认登录", result.stderr)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+
     def test_isolated_cli_snapshot_and_subject_bound_quota(self):
         reset = int(time.time()) + 3600
         window = {"used_percentage": 73.4, "resets_at": reset}

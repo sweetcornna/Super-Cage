@@ -117,6 +117,11 @@ type claudeAccountManager struct {
 	recent         map[string]claudeProjectPick
 	refreshing     map[string]*claudeRefresh
 	attempted      map[string]time.Time
+	// launchPublished is the candidate list the guest holds (claude_launch.go).
+	launchPublished string
+	launchMu        sync.Mutex
+	launchRunning   bool
+	launchAgain     bool
 	// now is the handoff clock; tests set it.
 	now func() time.Time
 }
@@ -174,6 +179,7 @@ func (s *Server) saveClaudeAccounts(list claudeAccountList) error {
 	if err := writePrivate(filepath.Join(s.profile, "claude-accounts.json"), list); err != nil {
 		return errors.New("Claude 账号设置未保存，请检查配置目录权限和磁盘空间")
 	}
+	s.kickClaudeLaunchSchedule()
 	return nil
 }
 

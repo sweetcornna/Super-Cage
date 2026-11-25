@@ -296,6 +296,7 @@ func (m *claudeAccountManager) resetGuestCaches() {
 	m.defaultError = nil
 	m.attempted = nil
 	m.loginNotice = ""
+	m.launchPublished = "" // a restarted guest gets the list again once ready
 	m.mu.Unlock()
 }
 
