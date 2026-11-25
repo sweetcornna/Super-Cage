@@ -549,10 +549,11 @@ func (s *Server) closeGuestSessions() {
 	s.controlSession.close()
 	s.guestScripts.reset()
 	s.nativeControl.close()
-	s.cliDiscovery.mu.Lock()
-	s.cliDiscovery.retryAt = time.Time{}
-	s.cliDiscovery.mu.Unlock()
+	s.cliDiscovery.reset()
 	s.cliDiscovery.resident.close()
+	s.agentCLIs.resetGuestCaches()
+	s.claudeAccounts.resetGuestCaches()
+	s.codexAccounts.resetGuestCaches()
 	s.scienceLast.set(nil)
 }
 
@@ -792,6 +793,8 @@ func (s *Server) stopEnvironment() (returned error) {
 		}
 	}
 	s.mu.Lock()
+	browser := s.browserControl
+	s.browserControl = nil
 	s.ready = false
 	s.credentials = guestCredentials{}
 	s.guestManifest = nil
@@ -800,6 +803,9 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.guestUpdateError = ""
 	s.safety.Error = ""
 	s.mu.Unlock()
+	if browser != nil {
+		browser.close()
+	}
 	s.entryEnvironmentStopped()
 	s.terminals.closeAll()
 	s.mobileCLI.stopAll()

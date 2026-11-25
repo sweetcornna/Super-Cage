@@ -313,6 +313,16 @@ func (s *Server) codexLoginActive(id string) bool {
 	return false
 }
 
+func (m *codexAccountManager) resetGuestCaches() {
+	m.mu.Lock()
+	m.defaultChecked = time.Time{}
+	m.defaultReading = codexGuestSnapshot{}
+	m.defaultError = nil
+	m.attempted = nil
+	m.loginNotice = ""
+	m.mu.Unlock()
+}
+
 func (m *codexAccountManager) claim(id string) *claudeRefresh {
 	if m.refreshing == nil {
 		m.refreshing = make(map[string]*claudeRefresh)
@@ -320,7 +330,11 @@ func (m *codexAccountManager) claim(id string) *claudeRefresh {
 	if m.attempted == nil {
 		m.attempted = make(map[string]time.Time)
 	}
-	m.attempted[id] = time.Now()
+	now := time.Now()
+	if _, exists := m.attempted[id]; !exists {
+		pruneAttemptedMap(m.attempted, now)
+	}
+	m.attempted[id] = now
 	call := &claudeRefresh{done: make(chan struct{})}
 	m.refreshing[id] = call
 	return call

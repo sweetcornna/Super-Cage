@@ -437,8 +437,19 @@ func (s *Server) invalidateAgentProbeCache() {
 	s.agentCLIs.mu.Unlock()
 }
 
+func (m *agentManager) resetGuestCaches() {
+	m.mu.Lock()
+	m.defaultCache = nil
+	m.pendingAttempted = nil
+	m.loginNotice = nil
+	m.lastPick = nil
+	m.recent = nil
+	m.mu.Unlock()
+}
+
 // triggerBackgroundAgentProbe spawns at most one async probe refresh so
-// stale-while-revalidate callers never pile up goroutines.
+// stale-while-revalidate callers never pile up goroutines. It registers as a
+// server activity so closeService waits for it before returning.
 func (s *Server) triggerBackgroundAgentProbe(specs []agentcatalog.AgentSpec) {
 	m := &s.agentCLIs
 	m.mu.Lock()
@@ -449,14 +460,23 @@ func (s *Server) triggerBackgroundAgentProbe(specs []agentcatalog.AgentSpec) {
 	m.bgProbing = true
 	m.mu.Unlock()
 
+	actCtx, finish, err := s.beginActivity(s.lifetimeContext())
+	if err != nil {
+		m.mu.Lock()
+		m.bgProbing = false
+		m.mu.Unlock()
+		return
+	}
+
 	specsCopy := slices.Clone(specs)
 	go func() {
+		defer finish()
 		defer func() {
 			m.mu.Lock()
 			m.bgProbing = false
 			m.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(actCtx, 15*time.Second)
 		defer cancel()
 		_, _ = s.probeAllAgents(ctx, specsCopy, false)
 	}()
@@ -888,6 +908,10 @@ func (s *Server) deleteCustomAgentHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(store.Configs, id)
 		delete(store.LastProbe, id)
+		delete(s.agentCLIs.defaultCache, id)
+		delete(s.agentCLIs.recent, id)
+		delete(s.agentCLIs.lastPick, id)
+		delete(s.agentCLIs.loginNotice, id)
 		saveErr = s.saveAgentStoreLocked(store)
 	}()
 	if saveErr != nil {

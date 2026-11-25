@@ -110,7 +110,38 @@ type discoveryFlight struct {
 	err     error
 }
 
-const discoveryTimeout = 20 * time.Second
+const (
+	discoveryTimeout     = 20 * time.Second
+	maxDiscoveryViewKeys = 256
+	maxDiscoveryTitles   = 512
+	maxDiscoveryResults  = 128
+)
+
+func (d *cliDiscovery) reset() {
+	d.mu.Lock()
+	d.retryAt = time.Time{}
+	d.installed = false
+	d.viewKeys = nil
+	d.titles = nil
+	d.results = nil
+	d.lastInput = nil
+	d.lastHash = ""
+	d.mu.Unlock()
+}
+
+func trimMapSize[K comparable, V any](m map[K]V, limit int) {
+	if len(m) < limit {
+		return
+	}
+	drop := len(m) - limit + 1
+	for k := range m {
+		delete(m, k)
+		drop--
+		if drop <= 0 {
+			break
+		}
+	}
+}
 
 // share runs discover, or waits for a run with the same key that started at
 // or after arrival. A run that started earlier may have missed a change the
@@ -138,6 +169,9 @@ func (d *cliDiscovery) share(ctx context.Context, key string, arrival time.Time,
 				}
 				if d.results == nil {
 					d.results = map[string]error{}
+				}
+				if _, exists := d.results[key]; !exists {
+					trimMapSize(d.results, maxDiscoveryResults)
 				}
 				d.results[key] = flight.err
 				d.mu.Unlock()
@@ -321,6 +355,9 @@ func (d *cliDiscovery) noteView(id string, input map[string]any, key string) {
 	}
 	if d.viewKeys == nil {
 		d.viewKeys = map[string]residentView{}
+	}
+	if _, exists := d.viewKeys[id]; !exists {
+		trimMapSize(d.viewKeys, maxDiscoveryViewKeys)
 	}
 	d.viewKeys[id] = residentView{input: input, key: key}
 }
@@ -531,6 +568,9 @@ func (d *cliDiscovery) named(id, title string) {
 	defer d.mu.Unlock()
 	if d.titles == nil {
 		d.titles = map[string]string{}
+	}
+	if _, exists := d.titles[id]; !exists {
+		trimMapSize(d.titles, maxDiscoveryTitles)
 	}
 	d.titles[id] = title
 }

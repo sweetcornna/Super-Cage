@@ -263,12 +263,54 @@ func (s *Server) pollClaudeAccounts(list claudeAccountList) {
 	}()
 }
 
+const maxAccountAttempted = 128
+
+func pruneAttemptedMap(attempted map[string]time.Time, now time.Time) {
+	if len(attempted) < maxAccountAttempted {
+		return
+	}
+	for k, at := range attempted {
+		if now.Sub(at) >= time.Minute {
+			delete(attempted, k)
+		}
+	}
+	for len(attempted) >= maxAccountAttempted {
+		oldestKey := ""
+		var oldestAt time.Time
+		for k, at := range attempted {
+			if oldestKey == "" || at.Before(oldestAt) {
+				oldestKey, oldestAt = k, at
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(attempted, oldestKey)
+	}
+}
+
+func (m *claudeAccountManager) resetGuestCaches() {
+	m.mu.Lock()
+	m.defaultChecked = time.Time{}
+	m.defaultReading = claudeGuestSnapshot{}
+	m.defaultError = nil
+	m.attempted = nil
+	m.loginNotice = ""
+	m.mu.Unlock()
+}
+
 func (m *claudeAccountManager) claim(id string) *claudeRefresh {
 	if m.refreshing == nil {
 		m.refreshing = make(map[string]*claudeRefresh)
+	}
+	if m.attempted == nil {
 		m.attempted = make(map[string]time.Time)
 	}
-	m.attempted[id] = time.Now()
+	now := time.Now()
+	if _, exists := m.attempted[id]; !exists {
+		pruneAttemptedMap(m.attempted, now)
+	}
+	m.attempted[id] = now
 	call := &claudeRefresh{done: make(chan struct{})}
 	m.refreshing[id] = call
 	return call
