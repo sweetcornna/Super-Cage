@@ -234,8 +234,12 @@ func (s *Server) attach() error {
 		}
 	}
 	s.mu.Lock()
+	newlyReady := !s.ready
 	s.credentials = credentials
 	s.ready = true
+	if newlyReady {
+		s.wakeMonitorsLocked()
+	}
 	s.mu.Unlock()
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
@@ -258,13 +262,34 @@ type environmentMonitor struct {
 	job, token string
 }
 
+func (s *Server) proxySubscriptionRefreshDue() bool {
+	p, err := managedproxy.Load(s.profile)
+	if err != nil {
+		return false
+	}
+	for _, src := range p.Sources {
+		if src.URL != "" && src.Interval > 0 && time.Since(src.Updated) >= time.Duration(src.Interval)*time.Hour && time.Since(src.Attempted) > 15*time.Minute {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) environmentMonitorIdle() bool {
 	// Call vmRunning before s.mu.Lock to avoid nested lock on Windows guests.
 	running := s.vmRunning()
 	s.mu.Lock()
 	ready := s.ready
 	s.mu.Unlock()
-	return !ready && !running && !s.busy()
+	if ready || running || s.busy() {
+		return false
+	}
+	// macOS runs network supervision (including proxy subscription refreshes)
+	// inside monitorEnvironmentRound.
+	if s.macosGuest != nil && s.proxySubscriptionRefreshDue() {
+		return false
+	}
+	return true
 }
 
 func (s *Server) monitor(ctx context.Context) {
@@ -272,12 +297,13 @@ func (s *Server) monitor(ctx context.Context) {
 	timer.Stop()
 	defer timer.Stop()
 	var state environmentMonitor
-	macStartupChecked := false
+	// macOS runs network supervision inside monitorEnvironmentRound, and
+	// Windows caches vmRunning() in memory from attach; both run one startup
+	// check before entering stopped-VM idle sleep.
+	startupChecked := s.macosGuest == nil && s.windowsGuest == nil
 	for ctx.Err() == nil {
 		wake := s.monitorWakeCh()
-		// macOS runs network supervision inside monitorEnvironmentRound; run
-		// one startup check before entering stopped-VM idle sleep.
-		if s.environmentMonitorIdle() && (s.macosGuest == nil || macStartupChecked) {
+		if s.environmentMonitorIdle() && startupChecked {
 			state.failures, state.skipped = 0, 0
 			select {
 			case <-ctx.Done():
@@ -287,8 +313,8 @@ func (s *Server) monitor(ctx context.Context) {
 			}
 		}
 		s.monitorEnvironmentRound(&state)
-		if s.macosGuest != nil {
-			macStartupChecked = true
+		if !startupChecked && !s.busy() && state.skipped == 0 {
+			startupChecked = true
 		}
 		if !waitMonitor(ctx, s.monitorWakeCh(), timer, 5*time.Second) {
 			return
@@ -984,7 +1010,7 @@ func (s *Server) networkMonitorIdle() bool {
 	s.mu.Lock()
 	ready, lost, recovering, storageErr := s.ready, s.proxyNetworkLost, s.recovery.RunID != "", s.storageRecoveryError != ""
 	s.mu.Unlock()
-	if ready || running || lost || recovering || storageErr || s.busy() || s.storageRecoveryStatus().Required || s.macSetupPending() {
+	if ready || running || lost || recovering || storageErr || s.busy() || s.storageRecoveryStatus().Required || s.macSetupPending() || s.proxySubscriptionRefreshDue() {
 		return false
 	}
 	return true

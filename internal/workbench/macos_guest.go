@@ -302,6 +302,9 @@ func (s *Server) attachMacOSGuest() error {
 	newlyReady := !s.ready && err == nil
 	checkAfterReconnect := newlyReady && !s.closing && !s.networkPaused && !s.jobs.snapshot().Running
 	s.ready = err == nil
+	if newlyReady {
+		s.wakeMonitorsLocked()
+	}
 	s.guestUpdateError = ""
 	if err != nil {
 		s.guestUpdateError = err.Error()

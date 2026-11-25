@@ -77,17 +77,18 @@ func (s *Server) safetyMonitorWait(ranOnce bool) (delay time.Duration, waitWakeO
 		return 0, true
 	}
 	now := time.Now()
+	var remaining time.Duration
 	if !last.IsZero() {
-		if remaining := last.Add(30 * time.Second).Sub(now); remaining > 5*time.Second {
-			return remaining, false
+		if d := last.Add(30 * time.Second).Sub(now); d > remaining {
+			remaining = d
 		}
 	}
 	if retry.After(now) {
-		if remaining := retry.Sub(now); remaining > 5*time.Second {
-			return remaining, false
+		if d := retry.Sub(now); d > remaining {
+			remaining = d
 		}
 	}
-	return 5 * time.Second, false
+	return remaining, false
 }
 
 func waitMonitor(ctx context.Context, wake <-chan struct{}, timer *time.Timer, delay time.Duration) bool {

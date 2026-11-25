@@ -1021,7 +1021,11 @@ func (s *Server) reattachBrowser(ctx context.Context, token string) error {
 		return errors.New("浏览器已重新启动，但暂时连不上，稍后会自动重新连接")
 	}
 	s.mu.Lock()
+	newlyReady := !s.ready
 	s.ready = true
+	if newlyReady {
+		s.wakeMonitorsLocked()
+	}
 	s.mu.Unlock()
 	s.browserViews.reset()
 	s.browserViews.background(s.changeBrowserVisibility)

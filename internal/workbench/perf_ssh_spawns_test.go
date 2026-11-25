@@ -278,3 +278,65 @@ func TestLinuxAgentRuntimeReusesSharedGuestSession(t *testing.T) {
 		t.Fatalf("6 agent-runtime/ensure calls on Linux spawned %d SSH processes, want 1 shared guestSession", got)
 	}
 }
+
+// F2 (Linux attach): automatic reattach outside any job sets s.ready = true
+// and must wake the parked safety monitor immediately.
+func TestLinuxAttachOutsideJobWakesParkedSafetyMonitor(t *testing.T) {
+	s := transferMountServer(t, false, "current")
+	home := t.TempDir()
+	_ = startCountingSSHServer(t, s, home)
+	t.Cleanup(func() { _ = s.closeService() })
+
+	// Stub guestConnectionSnapshot so attach() reads valid credentials and manifest
+	// over the test SSH server without touching real /etc/claude-cage.
+	payload := makeValidGuestConnectionPayload(t)
+	payloadFile := filepath.Join(home, "conn.txt")
+	if err := os.WriteFile(payloadFile, []byte(payload), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldSnap := guestConnectionSnapshot
+	guestConnectionSnapshot = `cat "$HOME/conn.txt"`
+	t.Cleanup(func() { guestConnectionSnapshot = oldSnap })
+
+	s.browserControl = browserClientForTest(t, s, browserTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": {"application/json"}},
+			Body:       http.NoBody,
+			Request:    r,
+		}, nil
+	}))
+	s.safety.VerifiedAt = time.Now().Add(-time.Minute)
+
+	// Start with VM stopped (no cage-running.json) so safety monitor parks.
+	runningMarker := filepath.Join(s.instanceDir(), "cage-running.json")
+	_ = os.Remove(runningMarker)
+	s.startMonitors()
+	time.Sleep(100 * time.Millisecond)
+
+	// Now VM is running again and attach() runs outside any job.
+	if err := writePrivate(runningMarker, map[string]int{"pid": os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	wake := s.monitorWakeCh()
+	if err := s.attach(); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	select {
+	case <-wake:
+	default:
+		t.Fatal("attach() set s.ready = true without waking parked monitors")
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		s.mu.Lock()
+		ran := s.safety.Error != ""
+		s.mu.Unlock()
+		if ran {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("parked safety monitor did not wake and run monitorSafety after attach()")
+}
