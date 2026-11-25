@@ -98,6 +98,7 @@ func (s *Server) scheduleNetworkRecovery(state cage.GateStatus) {
 	}
 	s.recovery = networkRecovery{RunID: state.RunID, Configuration: state.Configuration, Epoch: state.Epoch, PauseVersion: s.safety.pauseVersion, Next: time.Now().Add(15 * time.Second)}
 	s.refreshNetworkExplanationLocked(time.Now())
+	s.wakeMonitorsLocked()
 	diagnostics.Log("warn", "network", "temporary monitoring failure; full recheck scheduled: "+state.Reason)
 }
 

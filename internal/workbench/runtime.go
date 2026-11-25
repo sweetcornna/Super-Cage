@@ -258,16 +258,34 @@ type environmentMonitor struct {
 	job, token string
 }
 
+func (s *Server) environmentMonitorIdle() bool {
+	// Call vmRunning before s.mu.Lock to avoid nested lock on Windows guests.
+	running := s.vmRunning()
+	s.mu.Lock()
+	ready := s.ready
+	s.mu.Unlock()
+	return !ready && !running && !s.busy()
+}
+
 func (s *Server) monitor(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	var state environmentMonitor
 	for ctx.Err() == nil {
+		wake := s.monitorWakeCh()
+		if s.environmentMonitorIdle() {
+			state.failures, state.skipped = 0, 0
+			select {
+			case <-ctx.Done():
+				return
+			case <-wake:
+				continue
+			}
+		}
 		s.monitorEnvironmentRound(&state)
-		select {
-		case <-ctx.Done():
+		if !waitMonitor(ctx, s.monitorWakeCh(), timer, 5*time.Second) {
 			return
-		case <-ticker.C:
 		}
 	}
 }
@@ -948,20 +966,45 @@ func (s *Server) runNetworkMonitor(ctx context.Context, tick func()) {
 	s.runNetworkMonitorWith(ctx, nil, tick)
 }
 
-// runNetworkMonitorWith runs a round every 5 s. wanted, when set, first
-// reads the round's inputs without the operation lock and reports whether
-// the locked tick could act; a steady round then leaves the lock to user
-// actions, which are refused while it is held.
+func (s *Server) networkMonitorIdle() bool {
+	// Call vmRunning before s.mu.Lock to avoid nested lock on Windows guests.
+	running := s.vmRunning()
+	s.mu.Lock()
+	ready, lost, recovering, storageErr := s.ready, s.proxyNetworkLost, s.recovery.RunID != "", s.storageRecoveryError != ""
+	s.mu.Unlock()
+	if ready || running || lost || recovering || storageErr || s.busy() || s.storageRecoveryStatus().Required || s.macSetupPending() {
+		return false
+	}
+	return true
+}
+
+// runNetworkMonitorWith runs a round every 5 s while the VM or network recovery
+// is active. When the VM is stopped and no network work is pending (wanted set),
+// it sleeps on monitorWake instead of spawning external interface probes every
+// 5 s. wanted, when set, first reads the round's inputs without the operation
+// lock and reports whether the locked tick could act; a steady round then leaves
+// the lock to user actions, which are refused while it is held.
 func (s *Server) runNetworkMonitorWith(ctx context.Context, wanted func(*monitorTiming) bool, tick func()) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	timer := time.NewTimer(time.Hour)
+	timer.Stop()
+	defer timer.Stop()
 	skipped := 0
 	for ctx.Err() == nil {
+		if wanted != nil {
+			wake := s.monitorWakeCh()
+			if s.networkMonitorIdle() {
+				skipped = 0
+				select {
+				case <-ctx.Done():
+					return
+				case <-wake:
+					continue
+				}
+			}
+		}
 		s.networkMonitorRound(&skipped, wanted, tick)
-		select {
-		case <-ctx.Done():
+		if !waitMonitor(ctx, s.monitorWakeCh(), timer, 5*time.Second) {
 			return
-		case <-ticker.C:
 		}
 	}
 }

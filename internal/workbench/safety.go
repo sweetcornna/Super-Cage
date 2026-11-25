@@ -198,6 +198,7 @@ func (s *Server) publishGate(state cage.GateStatus) {
 		}
 	}
 	s.refreshNetworkExplanationLocked(time.Now())
+	s.wakeMonitorsLocked()
 }
 
 // A gate grant resolves a monitoring failure. Independent diagnostics, such

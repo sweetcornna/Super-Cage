@@ -35,11 +35,45 @@ func (t *monitorTiming) stage(name string) {
 	t.checkpoint = now
 }
 
+const (
+	monitorQuietSlowThreshold = 500 * time.Millisecond
+	monitorQuietHeartbeat     = 5 * time.Minute
+)
+
+func quietMonitorResult(result string) bool {
+	switch result {
+	case "steady", "completed", "not_due", "environment_not_ready", "network_paused":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) recordMonitorTiming(kind string, timing *monitorTiming) {
 	if s.profile == "" {
 		return
 	}
 	finished := time.Now()
+	duration := finished.Sub(timing.started)
+	// Suppress repeated identical steady-state records to avoid locking and
+	// scanning events.jsonl every 5 s while healthy. State transitions,
+	// failures, lock skips, slow rounds, and a 5-minute heartbeat are always kept.
+	s.mu.Lock()
+	if s.monitorLastResult == nil {
+		s.monitorLastResult = map[string]string{}
+		s.monitorLastLogged = map[string]time.Time{}
+	}
+	if quietMonitorResult(timing.result) &&
+		duration < monitorQuietSlowThreshold &&
+		s.monitorLastResult[kind] == timing.result &&
+		!s.monitorLastLogged[kind].IsZero() &&
+		finished.Sub(s.monitorLastLogged[kind]) < monitorQuietHeartbeat {
+		s.mu.Unlock()
+		return
+	}
+	s.monitorLastResult[kind] = timing.result
+	s.monitorLastLogged[kind] = finished
+	s.mu.Unlock()
 	age, remainingStart, remainingEnd := int64(-1), int64(-1), int64(-1)
 	if !timing.verified.IsZero() {
 		age = timing.started.Sub(timing.verified).Milliseconds()
@@ -50,6 +84,6 @@ func (s *Server) recordMonitorTiming(kind string, timing *monitorTiming) {
 	}
 	_ = diagnostics.New(s.profile).Record("info", "network-monitor", fmt.Sprintf(
 		"monitor=%s started=%s duration_ms=%d result=%s verified_age_ms=%d lease_known=%t lease_remaining_start_ms=%d lease_remaining_end_ms=%d %s",
-		kind, timing.started.UTC().Format(time.RFC3339Nano), finished.Sub(timing.started).Milliseconds(),
+		kind, timing.started.UTC().Format(time.RFC3339Nano), duration.Milliseconds(),
 		timing.result, age, !timing.until.IsZero(), remainingStart, remainingEnd, strings.Join(timing.stages, " ")))
 }

@@ -47,7 +47,13 @@ func (s *Server) submitJobLocked(kind string, run func() error) (job Job, intent
 			s.monitorCancel()
 		}
 		return nil
-	}, afterSuccess, run)
+	}, afterSuccess, func() error {
+		defer s.wakeMonitors()
+		return run()
+	})
+	if err == nil {
+		s.wakeMonitorsLocked()
+	}
 	return job, intentFailed, err
 }
 
