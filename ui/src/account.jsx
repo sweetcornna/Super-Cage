@@ -21,6 +21,8 @@ import { api, native, nativeAvailable, writeClipboard } from "./api";
 import { getClientContext, isCloudWorkbench } from "./client-context.mjs";
 import { BrandMark } from "./brand";
 import { Drawing } from "./drawings";
+import { accountPollDelay } from "./idle-poll.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./account.css";
 
 const AccountContext = createContext(null);
@@ -90,16 +92,37 @@ export function AccountProvider({ children }) {
       setDeviceCheck(null);
     }
   };
+  const windowVisible = useWindowVisibility();
+  const windowVisibleRef = useRef(windowVisible);
+  windowVisibleRef.current = windowVisible;
+  const wakePoll = useRef(null);
+  const pausePoll = useRef(null);
   useEffect(() => {
     let live = true,
-      timer;
+      timer,
+      started = false,
+      polling = false;
     const poll = async () => {
+      if (!live || polling) return;
+      polling = true;
+      clearTimeout(timer);
       try {
         await refresh();
       } catch {
         /* Keep the last state while disconnected. */
+      } finally {
+        polling = false;
       }
-      if (live) timer = setTimeout(poll, document.hidden ? 10000 : 2500);
+      const delay = accountPollDelay({ windowVisible: windowVisibleRef.current });
+      if (live && delay !== null) timer = setTimeout(poll, delay);
+    };
+    wakePoll.current = () => {
+      if (!live || !started || polling || !windowVisibleRef.current) return;
+      clearTimeout(timer);
+      void poll();
+    };
+    pausePoll.current = () => {
+      clearTimeout(timer);
     };
     const start = async () => {
       try {
@@ -108,6 +131,7 @@ export function AccountProvider({ children }) {
           history.replaceState(null, "", location.pathname);
         }
         window.dispatchEvent(new Event("cage-session-ready"));
+        started = true;
         if (live) await poll();
       } catch (e) {
         if (live) setError(e.message);
@@ -126,11 +150,17 @@ export function AccountProvider({ children }) {
     window.addEventListener("cage-account-locked", locked);
     return () => {
       live = false;
+      wakePoll.current = null;
+      pausePoll.current = null;
       sequence.current++;
       clearTimeout(timer);
       window.removeEventListener("cage-account-locked", locked);
     };
   }, []);
+  useEffect(() => {
+    if (windowVisible) wakePoll.current?.();
+    else pausePoll.current?.();
+  }, [windowVisible]);
   return (
     <AccountContext.Provider value={{ account, error, refresh, act, deviceSupport, deviceAction, deviceNotice, setDeviceNotice, recovery: recovery?.binding === account?.device_binding ? recovery : null, dismissRecovery: () => setRecovery(null), recheckDevices: () => setDeviceCheck(null) }}>
       {children}
