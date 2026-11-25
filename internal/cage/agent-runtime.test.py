@@ -1396,6 +1396,94 @@ class AgentRuntimeTests(unittest.TestCase):
         rt._herdr_install_linux(str(bin_dir / "herdr-core"), "0.1.23", path_str, env)
         self.assertEqual(len(curl_log.read_text().splitlines()), 1)
 
+    def test_antigravity_oauth_snapshot_default_and_xdg_subdirs(self):
+        antigravity_spec = {
+            "id": "antigravity",
+            "name": "Antigravity CLI",
+            "binary": "agy",
+            "isolation": {
+                "mode": "xdg",
+                "default_config_paths": ["~/.gemini/antigravity-cli", "~/.gemini/config"],
+            },
+            "auth": {
+                "credential_files": [
+                    "oauth_creds.json",
+                    "google_accounts.json",
+                    "jetski_state.pbtxt",
+                    "credentials.json",
+                ],
+            },
+        }
+        exp_ms = int((time.time() + 3600) * 1000)
+
+        # 1. Isolated XDG account with oauth_creds.json inside config/antigravity-cli/
+        acc1 = "e" * 24
+        acc1_dir = self.home / ".local/share/cage/agent-accounts/antigravity" / acc1 / "config/antigravity-cli"
+        acc1_dir.mkdir(parents=True)
+        (acc1_dir / "oauth_creds.json").write_text(json.dumps({
+            "access_token": "ya29.super-secret-token-1",
+            "refresh_token": "1//super-secret-refresh-1",
+            "id_token": make_jwt({"email": "alice@example.com"}),
+            "expiry_date": exp_ms,
+        }))
+        (acc1_dir / "google_accounts.json").write_text(json.dumps({"active": "alice@example.com", "old": []}))
+
+        snap1 = json.loads(self.run_rt("snapshot", {"spec": antigravity_spec, "account_id": acc1}).stdout)
+        self.assertTrue(snap1["logged_in"], f"XDG antigravity-cli oauth_creds not detected: {snap1}")
+        self.assertEqual(snap1["auth_mode"], "oauth")
+        self.assertEqual(snap1["email"], "alice@example.com")
+        self.assertEqual(snap1["plan"], "Google OAuth")
+        self.assertEqual(snap1["expires_at"], int(exp_ms / 1000))
+        self.assertNotIn("ya29.super-secret-token-1", json.dumps(snap1))
+        self.assertNotIn("super-secret-refresh-1", json.dumps(snap1))
+
+        # 2. Isolated XDG account with jetski_state.pbtxt under data/antigravity-cli/
+        acc2 = "f" * 24
+        acc2_dir = self.home / ".local/share/cage/agent-accounts/antigravity" / acc2 / "data/antigravity-cli"
+        acc2_dir.mkdir(parents=True)
+        (acc2_dir / "jetski_state.pbtxt").write_text('user_email: "bob@example.com"\naccount_id: "12345"\n')
+        snap2 = json.loads(self.run_rt("snapshot", {"spec": antigravity_spec, "account_id": acc2}).stdout)
+        self.assertTrue(snap2["logged_in"], f"XDG jetski_state.pbtxt not detected: {snap2}")
+        self.assertEqual(snap2["email"], "bob@example.com")
+
+        # 3. Default ~/.gemini/antigravity-cli directory extracts email from google_accounts.json / id_token.
+        def_dir = self.home / ".gemini/antigravity-cli"
+        def_dir.mkdir(parents=True)
+        (def_dir / "oauth_creds.json").write_text(json.dumps({
+            "access_token": "ya29.default-secret",
+            "id_token": make_jwt({"email": "default@example.com"}),
+            "expiry_date": exp_ms,
+        }))
+        snap_def = json.loads(self.run_rt("snapshot", {"spec": antigravity_spec, "account_id": "default"}).stdout)
+        self.assertTrue(snap_def["logged_in"])
+        self.assertEqual(snap_def["email"], "default@example.com")
+        self.assertEqual(snap_def["plan"], "Google OAuth")
+        self.assertNotIn("ya29.default-secret", json.dumps(snap_def))
+
+        # 4. google_accounts.json alone without tokens must NOT report logged_in.
+        acc3 = "1" * 24
+        acc3_dir = self.home / ".local/share/cage/agent-accounts/antigravity" / acc3 / "config/antigravity-cli"
+        acc3_dir.mkdir(parents=True)
+        (acc3_dir / "google_accounts.json").write_text(json.dumps({"active": "stale@example.com", "old": []}))
+        snap3 = json.loads(self.run_rt("snapshot", {"spec": antigravity_spec, "account_id": acc3}).stdout)
+        self.assertFalse(snap3["logged_in"])
+
+        # 5. Generic XDG agent stores credentials under config/<app_name>/.
+        custom_xdg = {
+            "id": "demo-xdg",
+            "name": "Demo XDG",
+            "binary": "demo-xdg",
+            "isolation": {"mode": "xdg", "default_config_paths": ["~/.config/demo-app"]},
+            "auth": {"credential_files": ["auth.json"]},
+        }
+        acc4 = "2" * 24
+        acc4_dir = self.home / ".local/share/cage/agent-accounts/demo-xdg" / acc4 / "config/demo-app"
+        acc4_dir.mkdir(parents=True)
+        (acc4_dir / "auth.json").write_text(json.dumps({"access_token": "tok_demo_123", "email": "demo@example.com"}))
+        snap4 = json.loads(self.run_rt("snapshot", {"spec": custom_xdg, "account_id": acc4}).stdout)
+        self.assertTrue(snap4["logged_in"], f"Generic XDG subdir credential not detected: {snap4}")
+        self.assertEqual(snap4["email"], "demo@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

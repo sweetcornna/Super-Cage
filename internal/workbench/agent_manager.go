@@ -84,27 +84,34 @@ type agentDefaultProbeCall struct {
 	err  error
 }
 
+type agentConfirmCall struct {
+	done chan struct{}
+	err  error
+}
+
 type agentManager struct {
-	mu             sync.Mutex
-	flushMu        sync.Mutex
-	storeLoaded    bool
-	store          agentStoreData
-	poolsLoaded    bool
-	pools          map[string]*agentAccountPool
-	poolsDirty     bool
-	poolsGen       uint64
-	lastWrittenGen uint64
-	closed         bool
-	flushTimer     *time.Timer
-	probeCache     agentProbeSnapshot
-	probeAt        time.Time
-	probeGen       uint64
-	probeInflight  *agentProbeCall
-	bgProbing      bool
-	defaultCache   map[string]*agentDefaultProbeEntry
-	lastPick       map[string]string
-	recent         map[string]map[string]claudeProjectPick
-	loginNotice    map[string]string
+	mu               sync.Mutex
+	flushMu          sync.Mutex
+	storeLoaded      bool
+	store            agentStoreData
+	poolsLoaded      bool
+	pools            map[string]*agentAccountPool
+	poolsDirty       bool
+	poolsGen         uint64
+	lastWrittenGen   uint64
+	closed           bool
+	flushTimer       *time.Timer
+	probeCache       agentProbeSnapshot
+	probeAt          time.Time
+	probeGen         uint64
+	probeInflight    *agentProbeCall
+	bgProbing        bool
+	defaultCache     map[string]*agentDefaultProbeEntry
+	confirmInflight  map[string]*agentConfirmCall
+	pendingAttempted map[string]time.Time
+	lastPick         map[string]string
+	recent           map[string]map[string]claudeProjectPick
+	loginNotice      map[string]string
 	// Test hooks allow deterministic unit tests without an SSH VM.
 	probeHook   func(context.Context, []agentcatalog.AgentSpec, bool) (agentProbeSnapshot, error)
 	runtimeHook func(context.Context, string, any, any) error

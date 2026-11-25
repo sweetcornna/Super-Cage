@@ -449,6 +449,38 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !skipDetect && ready && running && s.windowsGuest == nil {
+		// Join any in-flight login confirmation (closing the terminal close -> GET race),
+		// or recover an unconfirmed PendingLogin (e.g. after runtime recovery or restart)
+		// without any background polling timers.
+		s.agentCLIs.mu.Lock()
+		var pendingID string
+		var inflight *agentConfirmCall
+		var attempted time.Time
+		if pools, loadErr := s.loadAgentPoolsLocked(); loadErr == nil {
+			if pool := pools[spec.ID]; pool != nil && pool.PendingLogin != "" {
+				pendingID = pool.PendingLogin
+				inflight = s.agentCLIs.confirmInflight[spec.ID+":"+pendingID]
+				attempted = s.agentCLIs.pendingAttempted[spec.ID]
+			}
+		}
+		s.agentCLIs.mu.Unlock()
+
+		if inflight != nil {
+			select {
+			case <-r.Context().Done():
+			case <-inflight.done:
+			}
+		} else if pendingID != "" {
+			_, logins := s.activeAgentTerminals(spec.ID)
+			if !logins[pendingID] && (forceRefresh || attempted.IsZero() || time.Since(attempted) >= agentDefaultProbeTTL) {
+				ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+				_ = s.confirmAgentLogin(ctx, spec.ID, pendingID)
+				cancel()
+			}
+		}
+	}
+
 	s.agentCLIs.mu.Lock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err != nil {
@@ -1148,8 +1180,11 @@ func (s *Server) selectAgentAccount(spec agentcatalog.AgentSpec, requestedID str
 		if requestedID == "" {
 			if pool.PendingLogin == "" {
 				pool.PendingLogin = randomToken()[:24]
-				s.setAgentNoticeLocked(spec.ID, "")
 				err = s.saveAgentPoolsLocked(pools)
+			}
+			if err == nil {
+				s.setAgentNoticeLocked(spec.ID, "")
+				delete(s.agentCLIs.pendingAttempted, spec.ID)
 			}
 			requestedID = pool.PendingLogin
 		} else if a := pool.find(requestedID); a == nil || a.Source == "default" {
@@ -1272,7 +1307,7 @@ func (s *Server) noteAgentSelection(agentID, accountID, workspace string) {
 	}
 }
 
-func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID string) error {
+func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID string) (retErr error) {
 	if _, unlocked := s.account.access(); !unlocked {
 		return errors.New("Cage 已锁定")
 	}
@@ -1280,8 +1315,59 @@ func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID strin
 	if !ok {
 		return errors.New("unknown agent")
 	}
+
+	m := &s.agentCLIs
+	key := spec.ID + ":" + accountID
+	m.mu.Lock()
+	if call := m.confirmInflight[key]; call != nil {
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-call.done:
+			return call.err
+		}
+	}
+	if m.confirmInflight == nil {
+		m.confirmInflight = map[string]*agentConfirmCall{}
+	}
+	call := &agentConfirmCall{done: make(chan struct{})}
+	m.confirmInflight[key] = call
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		if m.confirmInflight[key] == call {
+			delete(m.confirmInflight, key)
+		}
+		call.err = retErr
+		close(call.done)
+		m.mu.Unlock()
+	}()
+
 	snap, err := s.probeAgentProfile(ctx, spec, accountID)
 	if err != nil {
+		// Surface the runtime/snapshot failure explicitly and keep PendingLogin
+		// intact so a subsequent refresh or retry can still pick up the credentials.
+		m.mu.Lock()
+		if _, unlocked := s.account.access(); unlocked {
+			if pools, loadErr := s.loadAgentPoolsLocked(); loadErr == nil {
+				pool := s.ensureAgentPoolLocked(pools, spec.ID)
+				if accountID == pool.PendingLogin || pool.find(accountID) != nil {
+					reason := strings.TrimSpace(err.Error())
+					if reason == "" {
+						reason = "运行环境通信失败"
+					}
+					s.setAgentNoticeLocked(spec.ID, "无法读取登录凭据："+reason)
+					if accountID == pool.PendingLogin {
+						if m.pendingAttempted == nil {
+							m.pendingAttempted = map[string]time.Time{}
+						}
+						m.pendingAttempted[spec.ID] = time.Now()
+					}
+				}
+			}
+		}
+		m.mu.Unlock()
 		return err
 	}
 	s.op.Lock()
@@ -1349,9 +1435,15 @@ func (s *Server) confirmAgentLogin(ctx context.Context, agentID, accountID strin
 				s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("已将「%s」加入 %s 智能调度池", acc.displayName(), spec.Name))
 			}
 			pool.PendingLogin = ""
+			delete(m.pendingAttempted, spec.ID)
 		} else {
+			_, logins := s.activeAgentTerminals(spec.ID)
+			if logins[accountID] {
+				return nil
+			}
 			s.setAgentNoticeLocked(spec.ID, "登录终端已关闭，未检测到新登录凭据")
 			pool.PendingLogin = ""
+			delete(m.pendingAttempted, spec.ID)
 		}
 	} else if a := pool.find(accountID); a != nil {
 		applySnapshotToAccount(a, snap, time.Now())
