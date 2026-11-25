@@ -50,11 +50,26 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     finally { if (current === revision.current) inflight.current = false; }
   };
   useEffect(() => {
-    if (!ready || !windowVisible) return;
     mounted.current = true;
+    return () => {
+      mounted.current = false;
+      revision.current++;
+      inflight.current = false;
+      loginRequested.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!ready) {
+      revision.current++;
+      inflight.current = false;
+      loginRequested.current = false;
+    }
+  }, [ready]);
+  useEffect(() => {
+    if (!ready || !windowVisible) return;
     void refresh();
     const timer = setInterval(() => void refresh(), 3000);
-    return () => { mounted.current = false; revision.current++; inflight.current = false; loginRequested.current = false; clearInterval(timer); };
+    return () => { clearInterval(timer); };
   }, [ready, windowVisible]);
   const act = async (action, body = {}) => {
     if (busy) return;
@@ -96,7 +111,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         {ready && state && <div className="tailscale-actions">
           {!state.installed ? <button className="primary-button" disabled={busy} onClick={async () => {
             setBusy(true); setError("");
-            try { await onInstall(); } catch (e) { setError(e.message); }
+            try { await onInstall(); } catch (e) { if (mounted.current) setError(e.message); }
             finally { if (mounted.current) setBusy(false); }
           }}>{["macos", "windows-11"].includes(status.guest_system) ? "更新环境组件以安装" : "安装 Tailscale"}</button> : <>
             {!connected && !["NeedsMachineAuth", "Starting"].includes(state.backend) && <button className="primary-button" disabled={busy} onClick={login}>{busy ? <LoaderCircle size={15} className="spin" /> : <ExternalLink size={15} />}{state.enabled ? "重新发起登录" : "连接并登录"}</button>}

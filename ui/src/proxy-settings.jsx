@@ -100,15 +100,21 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     return value;
   };
   useEffect(() => {
-    if (!windowVisible) return;
     alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!windowVisible) return;
+    let cancelled = false;
     const tick = async () => {
       if (loading.current) return;
       loading.current = true;
       try {
         await reload();
       } catch (e) {
-        if (alive.current) setError(e.message);
+        if (!cancelled && alive.current) setError(e.message);
       } finally {
         loading.current = false;
       }
@@ -116,7 +122,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     tick();
     const timer = setInterval(tick, 4000);
     return () => {
-      alive.current = false;
+      cancelled = true;
       clearInterval(timer);
     };
   }, [windowVisible]);

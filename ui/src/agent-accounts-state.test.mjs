@@ -89,4 +89,17 @@ test("agent-accounts.jsx sequences mutate() with load() and preserves workspace"
   const pending = seq.begin();
   seq.invalidate();
   assert.equal(seq.isCurrent(pending), false);
+
+  // Mutation counter tracks in-flight mutations independently of superseding loads.
+  const m1 = seq.beginMutation();
+  const supersededByLoad = seq.begin();
+  assert.equal(seq.isCurrent(m1), false);
+  assert.equal(seq.isCurrent(supersededByLoad), true);
+  assert.equal(seq.endMutation(), false, "ending the only in-flight mutation must clear submitting even when superseded by load");
+
+  // Overlapping mutations keep submitting true until the last one completes.
+  seq.beginMutation();
+  seq.beginMutation();
+  assert.equal(seq.endMutation(), true);
+  assert.equal(seq.endMutation(), false);
 });

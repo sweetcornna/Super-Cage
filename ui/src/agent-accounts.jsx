@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   ArrowDown,
@@ -466,6 +466,11 @@ export function AgentAccountsPanel({
   const [keyGroup, setKeyGroup] = useState("");
 
   const [sequencer] = useState(() => createAgentAccountsSequencer());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const load = useCallback(async (forceRefresh = false) => {
     const req = sequencer.begin();
@@ -503,7 +508,7 @@ export function AgentAccountsPanel({
   }, [hasCooldown, hasQuotaCountdown, windowVisible]);
 
   const mutate = async (body) => {
-    const req = sequencer.begin();
+    const req = sequencer.beginMutation();
     setLoading(false);
     setSubmitting(true);
     setError("");
@@ -518,7 +523,8 @@ export function AgentAccountsPanel({
       if (sequencer.isCurrent(req)) setError(e.message);
       throw e;
     } finally {
-      if (sequencer.isCurrent(req)) setSubmitting(false);
+      const stillSubmitting = sequencer.endMutation();
+      if (mounted.current) setSubmitting(stillSubmitting);
     }
   };
 

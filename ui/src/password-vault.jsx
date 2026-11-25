@@ -13,10 +13,9 @@ export function usePasswordVault(ready, tab, browserVisible = true) {
   const [state, setState] = useState(emptyBrowser);
   const refresh = useRef(null), mutation = useRef(0);
   useEffect(() => {
-    if (!ready || !tab) {
-      setState(emptyBrowser);
-      return;
-    }
+    setState(emptyBrowser);
+  }, [ready, tab]);
+  useEffect(() => {
     if (!active) return;
     let cancelled = false, timer, running = false;
     const poll = async () => {

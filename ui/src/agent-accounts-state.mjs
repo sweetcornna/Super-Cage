@@ -10,10 +10,20 @@ export function agentAccountsPath(agentId, { workspace = "", forceRefresh = fals
 // in-flight GET can never overwrite a newer POST mutation response.
 export function createAgentAccountsSequencer() {
   let current = 0;
+  let activeMutations = 0;
   return {
     begin() {
       current += 1;
       return current;
+    },
+    beginMutation() {
+      current += 1;
+      activeMutations += 1;
+      return current;
+    },
+    endMutation() {
+      activeMutations = Math.max(0, activeMutations - 1);
+      return activeMutations > 0;
     },
     isCurrent(ticket) {
       return ticket === current;
