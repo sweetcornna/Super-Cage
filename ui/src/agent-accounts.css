@@ -407,12 +407,14 @@
   flex: 1;
 }
 .agent-accounts-page .claude-participation {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 0.82rem;
   color: var(--muted);
   margin: 0;
+  cursor: pointer;
 }
 .agent-accounts-page .claude-profile-actions {
   display: flex;
