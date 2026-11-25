@@ -89,11 +89,8 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 		}
 	}
 	if herdrID != "" {
-		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
-		ensureErr := s.ensureAgentRuntime(ensureCtx)
-		ensureCancel()
-		if ensureErr != nil {
-			return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+		if !s.agentRuntimeInstalled() {
+			return nil, errEnsureAgentRuntimeNeeded
 		}
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)

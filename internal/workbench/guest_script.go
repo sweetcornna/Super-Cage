@@ -244,6 +244,13 @@ func (c *guestScriptCache) reset() {
 	c.mu.Unlock()
 }
 
+func (c *guestScriptCache) has(key string) bool {
+	c.mu.Lock()
+	ok := c.installed[key]
+	c.mu.Unlock()
+	return ok
+}
+
 func (c *guestScriptCache) invalidate(key string) {
 	c.mu.Lock()
 	delete(c.installed, key)
@@ -413,15 +420,23 @@ func (spec *guestScriptSpec) guardedSharedScript(pythonBin string, input []byte,
 	return cmd
 }
 
+// Linux caps any single execve argv element at MAX_ARG_STRLEN (128 KiB).
+// guest-session.py runs each shared script as one `/bin/bash -c <script>`
+// argument, so keep the encoded shared install script below 120 KiB and fall
+// through directly to dedicated stdin SSH upload for larger bundles.
+const maxSharedScriptArgLen = 120 << 10
+
 func (s *Server) ensureGuestScript(ctx context.Context, spec *guestScriptSpec, pythonBin string) error {
 	return s.guestScripts.ensure(ctx, spec.cacheKey(), func(ctx context.Context) error {
-		if s.windowsGuest == nil && s.macosGuest == nil && len(spec.installPayload()) <= 256<<10 {
-			reply, ok, err := s.guestShared(ctx, spec.sharedInstallScript(pythonBin))
-			if ok && err == nil && reply.code == 0 {
-				return nil
-			}
-			if ctx.Err() != nil {
-				return &guestScriptEnsureError{err: ctx.Err()}
+		if s.windowsGuest == nil && s.macosGuest == nil && base64.StdEncoding.EncodedLen(len(spec.installPayload())) < maxSharedScriptArgLen {
+			if script := spec.sharedInstallScript(pythonBin); len(script) <= maxSharedScriptArgLen {
+				reply, ok, err := s.guestShared(ctx, script)
+				if ok && err == nil && reply.code == 0 {
+					return nil
+				}
+				if ctx.Err() != nil {
+					return &guestScriptEnsureError{err: ctx.Err()}
+				}
 			}
 		}
 		cmd := s.guestScriptInstallSSHCommand(ctx, spec, pythonBin)

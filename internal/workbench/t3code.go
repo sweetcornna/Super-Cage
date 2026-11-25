@@ -193,10 +193,15 @@ func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t
 		m.probeInflight = call
 		m.mu.Unlock()
 
-		probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), 6*time.Second)
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		err := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
 		var st t3CodeGuestStatus
-		err := s.runAgentRuntime(probeCtx, "t3code-status", map[string]any{"port": port}, &st)
-		cancel()
+		if err == nil {
+			probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), statusProbeTimeout)
+			err = s.runAgentRuntime(probeCtx, "t3code-status", map[string]any{"port": port}, &st)
+			cancel()
+		}
 		if err == nil && st.Port == 0 {
 			st.Port = port
 		}
@@ -359,7 +364,7 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 	probeErr := ""
 	// Disabled by default (zero guest overhead until opted in or explicitly forced).
 	if (cfg.Enabled || force) && cfg.Mode == "managed" && ready && runningVM && supportsManaged {
-		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		pCtx, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 		st, err = s.probeT3CodeStatus(pCtx, cfg.Port, force)
 		cancel()
 		if err != nil {

@@ -144,10 +144,15 @@ func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestSt
 		m.probeInflight = call
 		m.mu.Unlock()
 
-		probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), 6*time.Second)
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		err := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
 		var st herdrGuestStatus
-		err := s.runAgentRuntime(probeCtx, "herdr-status", map[string]any{}, &st)
-		cancel()
+		if err == nil {
+			probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), statusProbeTimeout)
+			err = s.runAgentRuntime(probeCtx, "herdr-status", map[string]any{}, &st)
+			cancel()
+		}
 		if err == nil {
 			st.BinaryPath = herdrText(st.BinaryPath, 512)
 			st.Version = herdrText(st.Version, 32)
@@ -194,7 +199,7 @@ func (s *Server) herdrStatusPayload(r *http.Request, force bool) (map[string]any
 	probeErr := ""
 	// Disabled means no guest call at all.
 	if cfg.Enabled && ready && runningVM && supportsManaged {
-		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		pCtx, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 		st, err = s.probeHerdrStatus(pCtx, force)
 		cancel()
 		if err != nil {

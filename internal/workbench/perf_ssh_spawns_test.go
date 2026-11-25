@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -22,9 +23,15 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/sylvinus/agent-vm/internal/cage"
 )
 
 func startCountingSSHServer(t *testing.T, s *Server, home string) *atomic.Int64 {
+	return startInterceptingSSHServer(t, s, home, nil)
+}
+
+func startInterceptingSSHServer(t *testing.T, s *Server, home string, onExec func(command string)) *atomic.Int64 {
 	t.Helper()
 	var spawns atomic.Int64
 	public, private, err := ed25519.GenerateKey(rand.Reader)
@@ -121,6 +128,9 @@ func startCountingSSHServer(t *testing.T, s *Server, home string) *atomic.Int64 
 							}
 							_ = req.Reply(true, nil)
 							spawns.Add(1)
+							if onExec != nil {
+								onExec(in.Command)
+							}
 							rewritten := strings.ReplaceAll(in.Command, "/usr/bin/python3", pythonPath)
 							cmd := exec.Command("/bin/sh", "-c", rewritten)
 							cmd.Dir, cmd.Env = home, env
@@ -339,4 +349,249 @@ func TestLinuxAttachOutsideJobWakesParkedSafetyMonitor(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("parked safety monitor did not wake and run monitorSafety after attach()")
+}
+
+// F9: ensureAgentRuntime during terminal creation (terminal_service.go,
+// codex_terminal.go) and Herdr viewer attach (herdr_terminals.go) must not
+// hold s.op across the cold guest install.
+func TestTerminalEnsureAgentRuntimeLeavesOpLockFree(t *testing.T) {
+	runCase := func(t *testing.T, name string, invoke func(s *Server)) {
+		t.Helper()
+		t.Run(name, func(t *testing.T) {
+			s := testServer(t)
+			s.ready = true
+			ws, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := writePrivate(filepath.Join(s.profile, "environment.json"), cage.EnvironmentRecord{Directory: ws}); err != nil {
+				t.Fatal(err)
+			}
+			shareDone := make(chan struct{})
+			s.mu.Lock()
+			s.preferences.Workspace = ws
+			s.projectShares = map[string]*projectShare{ws: {done: shareDone}}
+			s.mu.Unlock()
+			home := t.TempDir()
+			ensureStarted := make(chan struct{})
+			releaseEnsure := make(chan struct{})
+			var startedOnce sync.Once
+			// Block the shared control session open (the first SSH call inside
+			// ensureAgentRuntime on a cold Linux guest) while we probe s.op.TryLock().
+			_ = startInterceptingSSHServer(t, s, home, func(command string) {
+				if strings.Contains(command, "CAGE-GUEST-SESSION") || strings.Contains(command, "NamedTemporaryFile") {
+					startedOnce.Do(func() { close(ensureStarted) })
+					select {
+					case <-releaseEnsure:
+					case <-time.After(3 * time.Second):
+					}
+				}
+			})
+			t.Cleanup(func() {
+				select {
+				case <-releaseEnsure:
+				default:
+					close(releaseEnsure)
+				}
+				close(shareDone)
+				_ = s.closeService()
+			})
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				invoke(s)
+			}()
+
+			select {
+			case <-ensureStarted:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("%s: ensureAgentRuntime never started over SSH", name)
+			}
+
+			free := s.op.TryLock()
+			if free {
+				s.op.Unlock()
+			}
+			close(releaseEnsure)
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatalf("%s: call did not finish", name)
+			}
+			if !free {
+				t.Fatalf("%s: s.op was held while ensureAgentRuntime ran", name)
+			}
+		})
+	}
+
+	runCase(t, "createTerminal_herdr", func(s *Server) {
+		_, _ = s.createTerminal(terminalRequest{Kind: "herdr"})
+	})
+
+	runCase(t, "createTerminal_agent_login", func(s *Server) {
+		_, _ = s.createTerminal(terminalRequest{Kind: "agent-login", AgentID: "codex"})
+	})
+
+	runCase(t, "createCodexTerminal_herdr_takeover", func(s *Server) {
+		s.herdr.mu.Lock()
+		cfg := defaultHerdrConfig()
+		cfg.Enabled = true
+		cfg.TakeoverTerminals = true
+		cfg.InstalledHint = true
+		_ = s.saveHerdrConfigLocked(cfg)
+		s.herdr.mu.Unlock()
+		_, _ = s.createTerminal(terminalRequest{Kind: "codex"})
+	})
+
+	runCase(t, "openHerdrViewer", func(s *Server) {
+		s.herdr.mu.Lock()
+		cfg := defaultHerdrConfig()
+		cfg.Enabled = true
+		cfg.InstalledHint = true
+		_ = s.saveHerdrConfigLocked(cfg)
+		s.herdr.mu.Unlock()
+		id := herdrImportedID("t1")
+		s.herdr.listMu.Lock()
+		s.herdr.list = herdrList{
+			Running: true,
+			Terminals: []herdrEntry{{
+				Address: "t1",
+				Name:    "t1",
+			}},
+		}
+		s.herdr.listAt = time.Now()
+		s.herdr.listMu.Unlock()
+		_, _ = s.openHerdrViewer(context.Background(), id)
+	})
+}
+
+// F10: Cold ensureAgentRuntime after guest boot must have its own timeout
+// budget separate from the 6 s status probe timeout in herdr, t3code, and magpie.
+func TestStatusProbesGiveColdEnsureOwnBudget(t *testing.T) {
+	const coldDelay = 6200 * time.Millisecond
+	cases := []struct {
+		name      string
+		path      string
+		enable    func(*Server)
+		installed func(t *testing.T, body []byte) (bool, string)
+	}{
+		{
+			name: "herdr",
+			path: "/api/herdr",
+			enable: func(s *Server) {
+				s.herdr.mu.Lock()
+				cfg := defaultHerdrConfig()
+				cfg.Enabled = true
+				_ = s.saveHerdrConfigLocked(cfg)
+				s.herdr.mu.Unlock()
+			},
+		},
+		{
+			name: "t3code",
+			path: "/api/t3code",
+			enable: func(s *Server) {
+				s.t3code.mu.Lock()
+				cfg := defaultT3CodeConfig()
+				cfg.Enabled = true
+				_ = s.saveT3CodeConfigLocked(cfg)
+				s.t3code.mu.Unlock()
+			},
+		},
+		{
+			name: "magpie",
+			path: "/api/magpie",
+			enable: func(s *Server) {
+				s.magpie.mu.Lock()
+				cfg := defaultMagpieConfig()
+				cfg.Enabled = true
+				_ = s.saveMagpieConfigLocked(cfg)
+				s.magpie.mu.Unlock()
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := testServer(t)
+			s.ready = true
+			tc.enable(s)
+			home := t.TempDir()
+			// Delay dedicated SSH install (shared session times out/fails opening
+			// or falls back to dedicated SSH) by > 6 s so cold ensure exceeds the
+			// 6 s probe timeout if they share one budget.
+			s.controlSession.mu.Lock()
+			s.controlSession.retryAt = time.Now().Add(time.Minute)
+			s.controlSession.openErr = errors.New("shared session unavailable in cold fallback test")
+			s.controlSession.mu.Unlock()
+
+			_ = startInterceptingSSHServer(t, s, home, func(command string) {
+				if strings.Contains(command, "NamedTemporaryFile") {
+					time.Sleep(coldDelay)
+				}
+			})
+			t.Cleanup(func() { _ = s.closeService() })
+
+			w := request(s, "GET", tc.path, "", "", true)
+			if w.Code != http.StatusOK {
+				t.Fatalf("GET %s: HTTP %d %s", tc.path, w.Code, w.Body.String())
+			}
+			var payload map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode %s: %v", tc.path, err)
+			}
+			if probeErr, _ := payload["error"].(string); probeErr != "" {
+				t.Fatalf("GET %s failed under cold ensure (%v): error=%q", tc.path, coldDelay, probeErr)
+			}
+		})
+	}
+}
+
+// F12: ensureGuestScript must cap the encoded shared-session script below
+// Linux's 128 KiB MAX_ARG_STRLEN so oversized bundles go straight to dedicated
+// SSH upload without wasting a shared-session E2BIG round trip, and the dead
+// "prepare-home" entry must not be listed in agentRuntimeUsesSharedSession.
+func TestEnsureGuestScriptCapsSharedSessionArgLenAndRemovesDeadPrepareHome(t *testing.T) {
+	if agentRuntimeUsesSharedSession("prepare-home") {
+		t.Error(`agentRuntimeUsesSharedSession("prepare-home") = true, want false (dead subcommand)`)
+	}
+
+	// Build an incompressible ~110 KiB payload: its gzipped size is ~110 KiB
+	// (below the old 256 KiB guard), but its base64-encoded sharedInstallScript
+	// is ~147 KiB, exceeding Linux's 128 KiB MAX_ARG_STRLEN.
+	raw := make([]byte, 110<<10)
+	if _, err := rand.Read(raw); err != nil {
+		t.Fatal(err)
+	}
+	spec := newGuestScriptBundle(".local/share/cage/test-big", strings.Repeat("a", 64), 0o700, ".bin", []guestScriptFile{
+		{suffix: ".bin", content: raw},
+	})
+	if encoded := len(spec.sharedInstallScript("python3")); encoded <= 128<<10 {
+		t.Fatalf("fixture sharedInstallScript len = %d, want > 128 KiB", encoded)
+	}
+
+	s := testServer(t)
+	s.ready = true
+	home := t.TempDir()
+	var sharedOpens atomic.Int64
+	spawns := startInterceptingSSHServer(t, s, home, func(command string) {
+		if strings.Contains(command, "CAGE-GUEST-SESSION") {
+			sharedOpens.Add(1)
+		}
+	})
+	t.Cleanup(func() { _ = s.closeService() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.ensureGuestScript(ctx, spec, "python3"); err != nil {
+		t.Fatalf("ensureGuestScript: %v", err)
+	}
+	if sharedOpens.Load() != 0 {
+		t.Fatalf("ensureGuestScript attempted shared guestSession %d times for >128 KiB encoded script, want 0 (go straight to dedicated SSH)", sharedOpens.Load())
+	}
+	if spawns.Load() != 1 {
+		t.Fatalf("ensureGuestScript spawned %d SSH processes, want 1 dedicated upload", spawns.Load())
+	}
 }

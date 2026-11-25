@@ -223,13 +223,18 @@ func (s *Server) probeMagpieStatus(ctx context.Context, port int, force bool) (m
 		m.probeInflight = call
 		m.mu.Unlock()
 
-		probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), 6*time.Second)
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		err := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
 		var st magpieGuestStatus
-		err := s.runAgentRuntime(probeCtx, "magpie-status", map[string]any{
-			"port":         port,
-			"gateway_port": defaultMagpieGatewayPort,
-		}, &st)
-		cancel()
+		if err == nil {
+			probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), statusProbeTimeout)
+			err = s.runAgentRuntime(probeCtx, "magpie-status", map[string]any{
+				"port":         port,
+				"gateway_port": defaultMagpieGatewayPort,
+			}, &st)
+			cancel()
+		}
 		if err == nil {
 			if st.Port == 0 {
 				st.Port = port
@@ -279,7 +284,7 @@ func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]an
 	probeErr := ""
 	// Disabled by default (zero guest overhead until opted in or explicitly forced).
 	if (cfg.Enabled || force) && cfg.Mode == "managed" && ready && runningVM && supportsManaged {
-		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		pCtx, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 		st, err = s.probeMagpieStatus(pCtx, cfg.Port, force)
 		cancel()
 		if err != nil {
