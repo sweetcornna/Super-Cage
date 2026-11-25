@@ -8,6 +8,7 @@ import {
   joinedText, limitText, NAME_LIMIT, readCodeInput, readJoinName, requestHintParts, requestTitle,
 } from "./devices-state.mjs";
 import { openComputer } from "./devices-open.mjs";
+import { useWindowVisibility } from "./window-visibility";
 
 // A held read: the host (or the gateway) answers when something changes or after 25 s, so nothing ticks here.
 const heldRead = (path) => (wait, signal) => {
@@ -24,6 +25,7 @@ const lastRead = (status) => status === 404 || status === 410;
 
 // 添加设备: this computer shows a code and a QR; another device enters or scans it; this computer approves.
 export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
+  const windowVisible = useWindowVisibility();
   const [view, dispatch] = useReducer(inviteReducer, initialInvite);
   const [note, setNote] = useState("");
   const [now, setNow] = useState(() => Date.now());
@@ -72,18 +74,18 @@ export function AddDeviceDialog({ savedRelay, customRelay, admin, onClose }) {
     return () => controller.abort();
   }, [code]);
 
-  // The countdown runs only while a code is on show.
+  // The countdown runs only while a code is on show and the window is visible.
   useEffect(() => {
-    if (view.phase !== "code") return undefined;
-    const timer = setInterval(() => {
-      if (document.hidden) return;
+    if (view.phase !== "code" || !windowVisible) return undefined;
+    const tick = () => {
       const time = Date.now();
       setNow(time);
       dispatch({ type: "tick", now: time });
-    }, 1000);
-    setNow(Date.now());
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
     return () => clearInterval(timer);
-  }, [view.phase, view.manual]);
+  }, [view.phase, view.manual, windowVisible]);
 
   async function decide(kind) {
     dispatch({ type: "deciding" });

@@ -22,6 +22,7 @@ import { SafetyMessage } from "./safety-message";
 import { ProxyYAMLInput } from "./proxy-yaml-input";
 import { NetworkExplanation } from "./network-explanation";
 import { networkState } from "./safety-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./proxy.css";
 
 const bytes = (v) => {
@@ -84,6 +85,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
   const [hostRefresh, setHostRefresh] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [readingFile, setReadingFile] = useState(false);
+  const windowVisible = useWindowVisibility();
   const alive = useRef(true),
     loading = useRef(false),
     latest = useRef(null),
@@ -98,6 +100,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     return value;
   };
   useEffect(() => {
+    if (!windowVisible) return;
     alive.current = true;
     const tick = async () => {
       if (loading.current) return;
@@ -116,9 +119,9 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
       alive.current = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [windowVisible]);
   useEffect(() => {
-    if (tab !== "connections" && tab !== "diagnostics") return;
+    if (!windowVisible || (tab !== "connections" && tab !== "diagnostics")) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -158,7 +161,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
       clearInterval(timer);
       latest.current = null;
     };
-  }, [tab]);
+  }, [tab, windowVisible]);
   const busy = Boolean(pending) || Boolean(status.job?.running);
   const mutate = async (action, input = {}) => {
     setError("");

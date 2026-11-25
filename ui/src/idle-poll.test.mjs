@@ -54,3 +54,24 @@ test("global always-mounted pollers stop when window is hidden or feature view i
   const latency = readSrc("network-latency.jsx");
   assert.match(latency, /useWindowVisibility/, "network-latency.jsx must stop external latency probes when hidden");
 });
+
+test("panel and dialog timers stop when hidden or when VM is stopped", () => {
+  for (const file of [
+    "claude-accounts.jsx",
+    "codex-accounts.jsx",
+    "tailscale.jsx",
+    "proxy-settings.jsx",
+    "resources.jsx",
+    "agent-accounts.jsx",
+    "session-account.jsx",
+    "cli-sessions.jsx",
+    "devices-dialogs.jsx",
+    "app-updates.jsx",
+  ]) {
+    const text = readSrc(file);
+    assert.match(text, /useWindowVisibility/, `${file} must gate timers on useWindowVisibility`);
+  }
+  assert.match(readSrc("claude-accounts.jsx"), /if\s*\(\s*!windowVisible\s*\|\|\s*!running\s*\)\s*return/, "claude-accounts.jsx must stop polling when hidden or VM stopped");
+  assert.match(readSrc("codex-accounts.jsx"), /if\s*\(\s*!windowVisible\s*\|\|\s*!running/, "codex-accounts.jsx must stop polling when hidden or VM stopped");
+  assert.match(readSrc("tailscale.jsx"), /if\s*\(\s*!ready\s*\|\|\s*!windowVisible\s*\)\s*return/, "tailscale.jsx must stop timer when hidden or VM not ready");
+});

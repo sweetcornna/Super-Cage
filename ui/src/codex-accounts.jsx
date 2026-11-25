@@ -6,6 +6,7 @@ import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import { QuotaClock, QuotaWindow, UsageNote, useUsageCheck } from "./claude-accounts";
 import { codexAccountName, codexActiveCounts, codexQuotaView, codexWindowLabel } from "./codex-accounts-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./claude-accounts.css";
 
 // Ordinary reads never start an upstream usage query. enabled is false where
@@ -141,6 +142,7 @@ function CodexProfileCard({ profile, environment, usageEnvironment, busy, active
 }
 
 export function CodexAccountsPanel({ store, running, environmentBusy, tabs, login, onConfirm }) {
+  const windowVisible = useWindowVisibility();
   const { accounts, detected, detectionStatus, detectionError, loginNotice, loginPending, usageRunning, usageUnavailable, guestSupported, load, error } = store;
   const [busy, setBusy] = useState(false);
   const [requestingUsage, setRequestingUsage] = useState(false);
@@ -168,9 +170,10 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
     return () => { mounted = false; document.removeEventListener("visibilitychange", openPanel); };
   }, [load, running, guestSupported]);
   useEffect(() => {
-    const timer = setInterval(() => { if (!document.hidden) load(undefined, true); }, checking || loginPending ? 2000 : 12000);
+    if (!windowVisible || !running || !guestSupported) return;
+    const timer = setInterval(() => load(undefined, true), checking || loginPending ? 2000 : 12000);
     return () => clearInterval(timer);
-  }, [load, checking, loginPending]);
+  }, [load, checking, loginPending, running, guestSupported, windowVisible]);
   const perform = async (operation) => {
     if (busy) return;
     setBusy(true);

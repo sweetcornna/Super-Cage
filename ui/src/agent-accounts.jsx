@@ -25,6 +25,7 @@ import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
 import { agentAccountsPath, createAgentAccountsSequencer } from "./agent-accounts-state.mjs";
 import { projectName } from "./workspace-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./agent-accounts.css";
 
 const STRATEGY_LABELS = {
@@ -446,6 +447,7 @@ export function AgentAccountsPanel({
   onOpenSettings,
   onChanged,
 }) {
+  const windowVisible = useWindowVisibility();
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -493,11 +495,12 @@ export function AgentAccountsPanel({
     (a.quota?.five_hour?.resets_at || 0) > now || (a.quota?.seven_day?.resets_at || 0) > now,
   ));
   useEffect(() => {
-    if (!hasCooldown && !hasQuotaCountdown) return;
+    if (!windowVisible || (!hasCooldown && !hasQuotaCountdown)) return;
+    setNow(Math.floor(Date.now() / 1000));
     const intervalMs = hasCooldown ? 1000 : 30000;
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), intervalMs);
     return () => clearInterval(timer);
-  }, [hasCooldown, hasQuotaCountdown]);
+  }, [hasCooldown, hasQuotaCountdown, windowVisible]);
 
   const mutate = async (body) => {
     const req = sequencer.begin();
