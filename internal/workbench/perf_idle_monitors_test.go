@@ -416,6 +416,240 @@ func TestStoppedVMHourlyTickRefreshesDueProxySubscriptions(t *testing.T) {
 	})
 }
 
+// E2: The 15-minute subscription refresh back-off must hold even when a failed
+// refresh cannot stamp sources.json (applyProxy rollback, loadConfig error),
+// and macOS setup-pending must not keep stopped-VM monitors awake every 5 s.
+func TestStoppedVMProxyRefreshBackoff(t *testing.T) {
+	makeSourceDue := func(t *testing.T, s *Server) {
+		t.Helper()
+		p, err := managedproxy.Load(s.profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p.Sources[0].URL = "https://example.invalid/sub.yaml"
+		p.Sources[0].Interval = 1
+		p.Sources[0].Updated = time.Now().Add(-2 * time.Hour)
+		p.Sources[0].Attempted = time.Now().Add(-2 * time.Hour)
+		if err := p.Save(s.profile); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("apply_failure_rollback_stopped_vm", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var s *Server
+			var fetchCalls, startCalls atomic.Int64
+			oldFetch, oldValidate, oldStart := fetchProxySource, validateProxyCore, startProxyCore
+			fetchProxySource = func(_ context.Context, _ *http.Client, _ string) ([]byte, string, error) {
+				fetchCalls.Add(1)
+				return []byte(`proxies: [{name: qa, type: socks5, server: 127.0.0.1, port: 1, password: refreshed}]`), "", nil
+			}
+			validateProxyCore = func(_ context.Context, profile string, candidate managedproxy.Store) error {
+				_, err := candidate.Runtime(profile)
+				return err
+			}
+			startProxyCore = func(context.Context, string, managedproxy.Store) error {
+				if startCalls.Add(1) >= 20 && s != nil {
+					s.beginClose()
+				}
+				return errors.New("Super Cage 代理端口已被占用，请更换独立端口")
+			}
+			t.Cleanup(func() {
+				fetchProxySource, validateProxyCore, startProxyCore = oldFetch, oldValidate, oldStart
+			})
+
+			s = steadyNetworkServer(t, onEn0)
+			makeSourceDue(t, s)
+
+			s.startMonitors()
+			time.Sleep(30 * time.Minute)
+			s.wakeMonitors()
+			time.Sleep(5 * time.Minute)
+			s.closeBackground()
+
+			if got := fetchCalls.Load(); got > 2 {
+				t.Fatalf("stopped VM with failing applyProxy fetched subscription %d times in 30m, want <= 2", got)
+			}
+			if got := startCalls.Load(); got > 2 {
+				t.Fatalf("stopped VM with failing applyProxy called startProxyCore %d times in 30m, want <= 2", got)
+			}
+		})
+	})
+
+	t.Run("apply_failure_rollback_running_then_stopped_vm", func(t *testing.T) {
+		s, _ := interfaceMonitorServer(t)
+		oldPhys := physicalProxyInterface
+		physicalProxyInterface = onEn0
+		t.Cleanup(func() { physicalProxyInterface = oldPhys })
+
+		oldCoreRunning := proxyCoreRunning
+		proxyCoreRunning = func(context.Context, string, managedproxy.Store) bool { return true }
+		t.Cleanup(func() { proxyCoreRunning = oldCoreRunning })
+
+		var cancel context.CancelFunc
+		var fetchCalls, startCalls atomic.Int64
+		oldFetch, oldValidate, oldStart := fetchProxySource, validateProxyCore, startProxyCore
+		fetchProxySource = func(_ context.Context, _ *http.Client, _ string) ([]byte, string, error) {
+			fetchCalls.Add(1)
+			return []byte(`proxies: [{name: qa, type: socks5, server: 127.0.0.1, port: 1, password: refreshed}]`), "", nil
+		}
+		validateProxyCore = func(_ context.Context, profile string, candidate managedproxy.Store) error {
+			_, err := candidate.Runtime(profile)
+			return err
+		}
+		startProxyCore = func(context.Context, string, managedproxy.Store) error {
+			if startCalls.Add(1) >= 20 && cancel != nil {
+				cancel()
+			}
+			return errors.New("Super Cage 代理端口已被占用，请更换独立端口")
+		}
+		t.Cleanup(func() {
+			fetchProxySource, validateProxyCore, startProxyCore = oldFetch, oldValidate, oldStart
+		})
+
+		synctest.Test(t, func(t *testing.T) {
+			makeSourceDue(t, s)
+			var ctx context.Context
+			ctx, cancel = context.WithCancel(context.Background())
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				s.monitorNetwork(ctx)
+			}()
+			time.Sleep(30 * time.Minute)
+			runningFetches := fetchCalls.Load()
+			runningStarts := startCalls.Load()
+
+			// Stop the VM right after an applyProxy rollback: the stopped-VM
+			// monitor must park instead of retrying every 5 s.
+			marker := filepath.Join(s.profile, "state", "lima", cage.InstanceName(s.profile, s.environmentDir()), "cage-running.json")
+			if err := os.Remove(marker); err != nil {
+				cancel()
+				<-done
+				s.jobs.close()
+				t.Fatal(err)
+			}
+			fetchesAtStop := fetchCalls.Load()
+			time.Sleep(10 * time.Minute)
+			fetchesAfterStop := fetchCalls.Load()
+
+			cancel()
+			<-done
+			s.jobs.close()
+
+			if runningStarts == 0 || runningFetches == 0 {
+				t.Fatalf("expected applyProxy rollback path to run at least once: fetches=%d starts=%d", runningFetches, runningStarts)
+			}
+			if runningFetches > 2 || runningStarts > 2 {
+				t.Fatalf("applyProxy rollback retried every 5s: fetches=%d starts=%d in 30m, want <= 2", runningFetches, runningStarts)
+			}
+			if fetchesAfterStop != fetchesAtStop {
+				t.Fatalf("stopped VM after applyProxy rollback kept retrying: fetches %d -> %d", fetchesAtStop, fetchesAfterStop)
+			}
+		})
+	})
+
+	t.Run("load_config_failure_stopped_vm", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var s *Server
+			var loadCalls atomic.Int64
+			oldLoad := loadConfig
+			loadConfig = func(string) (cage.Config, error) {
+				if loadCalls.Add(1) >= 50 && s != nil {
+					s.beginClose()
+				}
+				return cage.Config{}, errors.New("synthetic config read failure")
+			}
+			t.Cleanup(func() { loadConfig = oldLoad })
+
+			s = steadyNetworkServer(t, onEn0)
+			makeSourceDue(t, s)
+
+			s.startMonitors()
+			time.Sleep(1 * time.Minute)
+			if !s.networkMonitorIdle() {
+				s.closeBackground()
+				t.Fatal("networkMonitorIdle() = false within 15m backoff after loadConfig failure, want true")
+			}
+			callsAfterFirst := loadCalls.Load()
+			// Even an explicit wake inside the 15-minute backoff must not retry.
+			time.Sleep(9 * time.Minute)
+			s.wakeMonitors()
+			time.Sleep(20 * time.Minute)
+			s.closeBackground()
+
+			// One round invokes loadConfig a handful of times (networkRoundWanted,
+			// monitorProxyInterface, checkProxyHealth, changeProxy); a spin loop
+			// over 30 min invokes it repeatedly.
+			if got := loadCalls.Load(); got > 10 || got != callsAfterFirst {
+				t.Fatalf("stopped VM with failing loadConfig called loadConfig %d times in 30m (after 1m: %d), want <= 10 and no retry while backed off/parked", got, callsAfterFirst)
+			}
+		})
+	})
+
+	t.Run("macos_setup_pending_stopped_vm", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var fetchCalls atomic.Int64
+			oldFetch := fetchProxySource
+			fetchProxySource = func(_ context.Context, _ *http.Client, _ string) ([]byte, string, error) {
+				fetchCalls.Add(1)
+				return nil, "", errors.New("unexpected fetch during macOS setup")
+			}
+			t.Cleanup(func() { fetchProxySource = oldFetch })
+
+			s := steadyNetworkServer(t, onEn0)
+			s.macosGuest = &guestos.MacOSProfile{User: "cage", Instance: "mac", SetupID: "pending-setup"}
+			makeSourceDue(t, s)
+
+			s.startMonitors()
+			time.Sleep(30 * time.Minute)
+			s.wakeMonitors()
+			time.Sleep(5 * time.Minute)
+			s.closeBackground()
+
+			// Under synctest fake time (year 2000) vs real file mtimes, each
+			// diagnostics write rotates events.jsonl, so count across all files.
+			networkTicks := countAllMonitorTimingRecords(t, s, "network")
+			if networkTicks > 2 {
+				t.Fatalf("stopped macOS VM with setup pending ran %d network monitor ticks in 30m, want <= 2", networkTicks)
+			}
+			if fetchCalls.Load() != 0 {
+				t.Fatalf("macOS setup pending unexpectedly fetched subscription %d times", fetchCalls.Load())
+			}
+			if s.proxySubscriptionRefreshDue() {
+				t.Fatal("proxySubscriptionRefreshDue() = true while macSetupPending(), want false")
+			}
+			if !s.environmentMonitorIdle() || !s.networkMonitorIdle() {
+				t.Fatalf("idle checks with macSetupPending() = (env=%v, net=%v), want (true, true)", s.environmentMonitorIdle(), s.networkMonitorIdle())
+			}
+		})
+	})
+}
+
+func countAllMonitorTimingRecords(t *testing.T, s *Server, kind string) int {
+	t.Helper()
+	files, err := filepath.Glob(filepath.Join(s.profile, "logs", "events*.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, path := range files {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.TrimSpace(line) == "" {
+				continue
+			}
+			if strings.Contains(line, `"source":"network-monitor"`) && strings.Contains(line, "monitor="+kind+" ") {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 func makeValidGuestConnectionPayload(t *testing.T) string {
 	t.Helper()
 	creds, err := json.Marshal(guestCredentials{Token: "guest-token", DisplayScale: 1})

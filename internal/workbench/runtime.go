@@ -263,16 +263,15 @@ type environmentMonitor struct {
 }
 
 func (s *Server) proxySubscriptionRefreshDue() bool {
+	if s.macSetupPending() || s.storageRecoveryStatus().Required {
+		return false
+	}
 	p, err := managedproxy.Load(s.profile)
 	if err != nil {
 		return false
 	}
-	for _, src := range p.Sources {
-		if src.URL != "" && src.Interval > 0 && time.Since(src.Updated) >= time.Duration(src.Interval)*time.Hour && time.Since(src.Attempted) > 15*time.Minute {
-			return true
-		}
-	}
-	return false
+	_, due := s.proxyDueSource(p)
+	return due
 }
 
 func (s *Server) environmentMonitorIdle() bool {
@@ -1010,7 +1009,7 @@ func (s *Server) networkMonitorIdle() bool {
 	s.mu.Lock()
 	ready, lost, recovering, storageErr := s.ready, s.proxyNetworkLost, s.recovery.RunID != "", s.storageRecoveryError != ""
 	s.mu.Unlock()
-	if ready || running || lost || recovering || storageErr || s.busy() || s.storageRecoveryStatus().Required || s.macSetupPending() || s.proxySubscriptionRefreshDue() {
+	if ready || running || lost || recovering || storageErr || s.busy() || s.storageRecoveryStatus().Required || s.proxySubscriptionRefreshDue() {
 		return false
 	}
 	return true
@@ -1134,10 +1133,8 @@ func (s *Server) networkRoundWanted(timing *monitorTiming) bool {
 		}
 	}
 	// The condition refreshProxySubscriptions submits an update for.
-	for _, src := range p.Sources {
-		if src.URL != "" && src.Interval > 0 && time.Since(src.Updated) >= time.Duration(src.Interval)*time.Hour && time.Since(src.Attempted) > 15*time.Minute {
-			return true
-		}
+	if _, due := s.proxyDueSource(p); due {
+		return true
 	}
 	timing.result = "steady"
 	return false
