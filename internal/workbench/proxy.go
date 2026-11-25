@@ -28,6 +28,7 @@ type proxyInput struct {
 	NodeID       string   `json:"node_id"`
 	NodeIDs      []string `json:"node_ids"`
 	Port         int      `json:"port"`
+	scheduled    bool
 }
 
 func (s *Server) proxyStatus(w http.ResponseWriter, r *http.Request) {
@@ -324,6 +325,9 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 			}
 			return p.Save(s.profile)
 		}
+		if action == "refresh" && in.scheduled && !s.vmRunning() {
+			return p.Save(s.profile)
+		}
 		return s.applyProxy(p, cfg, resumeVersion, false)
 	}
 	return p.Save(s.profile)
@@ -593,7 +597,7 @@ func (s *Server) refreshProxySubscriptions() {
 	// Automatic refresh never opts into a host-network fallback.
 	if _, err := s.submitJob("proxy-update", func() error {
 		s.recordProxyRefreshAttempt(src.ID)
-		return s.changeProxy("refresh", proxyInput{ID: src.ID}, nil)
+		return s.changeProxy("refresh", proxyInput{ID: src.ID, scheduled: true}, nil)
 	}); err == nil {
 		s.recordProxyRefreshAttempt(src.ID)
 	}

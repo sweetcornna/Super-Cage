@@ -416,6 +416,83 @@ func TestStoppedVMHourlyTickRefreshesDueProxySubscriptions(t *testing.T) {
 	})
 }
 
+// E1: While the VM is stopped, an hourly scheduled refresh that succeeds must
+// update the stored subscription without starting the managed proxy core; the
+// next environment start applies the refreshed store.
+func TestStoppedVMScheduledProxyRefreshUpdatesStoreWithoutStartingCore(t *testing.T) {
+	for _, guest := range []string{"linux", "macos"} {
+		t.Run(guest+"_stopped_vm", func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var fetchCalls, startCalls atomic.Int64
+				oldFetch, oldValidate, oldStart := fetchProxySource, validateProxyCore, startProxyCore
+				fetchProxySource = func(_ context.Context, _ *http.Client, _ string) ([]byte, string, error) {
+					fetchCalls.Add(1)
+					return []byte(`proxies: [{name: qa, type: socks5, server: 127.0.0.1, port: 2080, password: fresh-after-stop}]`), "", nil
+				}
+				validateProxyCore = func(_ context.Context, profile string, candidate managedproxy.Store) error {
+					_, err := candidate.Runtime(profile)
+					return err
+				}
+				startProxyCore = func(context.Context, string, managedproxy.Store) error {
+					startCalls.Add(1)
+					return nil
+				}
+				t.Cleanup(func() {
+					fetchProxySource, validateProxyCore, startProxyCore = oldFetch, oldValidate, oldStart
+				})
+
+				s := steadyNetworkServer(t, onEn0)
+				if guest == "macos" {
+					s.macosGuest = &guestos.MacOSProfile{User: "cage"}
+				}
+				p, err := managedproxy.Load(s.profile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				beforeUpdated := time.Now().Add(-30 * time.Minute)
+				p.Sources[0].URL = "https://example.invalid/sub.yaml"
+				p.Sources[0].Interval = 1
+				p.Sources[0].Updated = beforeUpdated
+				p.Sources[0].Attempted = beforeUpdated
+				if err := p.Save(s.profile); err != nil {
+					t.Fatal(err)
+				}
+
+				s.startMonitors()
+				// Advance past the 1 h hourly tick so the due subscription refreshes,
+				// then confirm monitors stay parked afterward.
+				time.Sleep(65 * time.Minute)
+				time.Sleep(5 * time.Minute)
+				s.closeBackground()
+
+				if got := fetchCalls.Load(); got != 1 {
+					t.Fatalf("stopped %s VM refreshed due subscription %d times, want 1", guest, got)
+				}
+				if got := startCalls.Load(); got != 0 {
+					t.Fatalf("stopped %s VM scheduled refresh started proxy core %d times, want 0", guest, got)
+				}
+				after, err := managedproxy.Load(s.profile)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := after.Sources[0].Nodes[0].Config["password"]; got != "fresh-after-stop" {
+					t.Fatalf("store was not updated with fresh subscription nodes: password=%v", got)
+				}
+				if !after.Sources[0].Updated.After(beforeUpdated) || after.Sources[0].Error != "" {
+					t.Fatalf("refreshed source metadata not updated: updated=%v error=%q", after.Sources[0].Updated, after.Sources[0].Error)
+				}
+				cfg, err := loadConfig(s.configPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := managedproxy.Applied(s.profile, cfg.ProxyURL, cfg.ProxyRevision); err != nil {
+					t.Fatalf("refreshed store must remain applied for next environment start: %v", err)
+				}
+			})
+		})
+	}
+}
+
 // E2: The 15-minute subscription refresh back-off must hold even when a failed
 // refresh cannot stamp sources.json (applyProxy rollback, loadConfig error),
 // and macOS setup-pending must not keep stopped-VM monitors awake every 5 s.
