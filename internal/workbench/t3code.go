@@ -99,6 +99,14 @@ type t3CodeGuestStatus struct {
 	HasPairURL bool   `json:"has_pair_url,omitempty"`
 }
 
+type t3CodeProbeCall struct {
+	done   chan struct{}
+	port   int
+	forced bool
+	status t3CodeGuestStatus
+	err    error
+}
+
 type t3CodeManager struct {
 	opMu           sync.Mutex // serializes config transitions and managed guest lifecycle actions
 	mu             sync.Mutex
@@ -106,6 +114,7 @@ type t3CodeManager struct {
 	config         t3CodeConfig
 	statusCache    t3CodeGuestStatus
 	statusAt       time.Time
+	probeInflight  *t3CodeProbeCall
 	activeBindings map[string]string
 	proxy          *t3CodeProxy
 }
@@ -154,27 +163,56 @@ func (s *Server) invalidateT3CodeStatus() {
 }
 
 func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t3CodeGuestStatus, error) {
-	s.t3code.mu.Lock()
-	if !force && !s.t3code.statusAt.IsZero() && time.Since(s.t3code.statusAt) < t3CodeStatusTTL && s.t3code.statusCache.Port == port {
-		cached := s.t3code.statusCache
-		s.t3code.mu.Unlock()
-		return cached, nil
-	}
-	s.t3code.mu.Unlock()
+	m := &s.t3code
+	for {
+		m.mu.Lock()
+		if !force && !m.statusAt.IsZero() && time.Since(m.statusAt) < t3CodeStatusTTL && m.statusCache.Port == port {
+			cached := m.statusCache
+			m.mu.Unlock()
+			return cached, nil
+		}
+		if call := m.probeInflight; call != nil && call.port == port {
+			if !force || call.forced {
+				m.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return t3CodeGuestStatus{}, ctx.Err()
+				case <-call.done:
+					return call.status, call.err
+				}
+			}
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return t3CodeGuestStatus{}, ctx.Err()
+			case <-call.done:
+				continue
+			}
+		}
+		call := &t3CodeProbeCall{done: make(chan struct{}), port: port, forced: force}
+		m.probeInflight = call
+		m.mu.Unlock()
 
-	var st t3CodeGuestStatus
-	err := s.runAgentRuntime(ctx, "t3code-status", map[string]any{"port": port}, &st)
-	if err != nil {
+		probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), 6*time.Second)
+		var st t3CodeGuestStatus
+		err := s.runAgentRuntime(probeCtx, "t3code-status", map[string]any{"port": port}, &st)
+		cancel()
+		if err == nil && st.Port == 0 {
+			st.Port = port
+		}
+		m.mu.Lock()
+		if err == nil {
+			m.statusCache = st
+			m.statusAt = time.Now()
+		}
+		call.status, call.err = st, err
+		if m.probeInflight == call {
+			m.probeInflight = nil
+		}
+		close(call.done)
+		m.mu.Unlock()
 		return st, err
 	}
-	if st.Port == 0 {
-		st.Port = port
-	}
-	s.t3code.mu.Lock()
-	s.t3code.statusCache = st
-	s.t3code.statusAt = time.Now()
-	s.t3code.mu.Unlock()
-	return st, nil
 }
 
 // t3CodeDirectAvailable reports whether the calling browser can open and reach
@@ -319,7 +357,8 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 
 	var st t3CodeGuestStatus
 	probeErr := ""
-	if cfg.Mode == "managed" && ready && runningVM && supportsManaged {
+	// Disabled by default (zero guest overhead until opted in or explicitly forced).
+	if (cfg.Enabled || force) && cfg.Mode == "managed" && ready && runningVM && supportsManaged {
 		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
 		st, err = s.probeT3CodeStatus(pCtx, cfg.Port, force)
 		cancel()

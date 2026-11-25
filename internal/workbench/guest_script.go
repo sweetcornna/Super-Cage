@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -332,8 +333,97 @@ func (e *guestScriptEnsureError) Error() string {
 
 func (e *guestScriptEnsureError) Unwrap() error { return e.err }
 
+// guestScriptSharedInstaller decodes a base64+gzip bundle from stdin so
+// ensureGuestScript can install hash-pinned scripts over the shared Linux
+// guestSession without spawning an extra SSH handshake.
+const guestScriptSharedInstaller = `import base64,gzip,os,pathlib,sys,tempfile
+d=pathlib.Path.home()/sys.argv[1]
+d.mkdir(parents=True,exist_ok=True,mode=0o700)
+n,m=sys.argv[2],int(sys.argv[3],8)
+raw=gzip.decompress(base64.b64decode(sys.stdin.read()))
+i=0
+while i<len(raw):
+ j=raw.index(10,i)
+ s,k=raw[i:j].decode().split(" ",1)
+ k=int(k)
+ i=j+1
+ v=raw[i:i+k]
+ if len(v)!=k:sys.exit(2)
+ i+=k
+ p=d/(n+s)
+ if not p.exists():
+  t=None
+  try:
+   with tempfile.NamedTemporaryFile(dir=d,delete=False) as f:
+    t=f.name
+    f.write(v)
+   os.chmod(t,m)
+   os.replace(t,p)
+  except Exception:
+   if t:
+    try:os.unlink(t)
+    except OSError:pass
+   raise
+`
+
+const guestScriptSharedRunner = `import base64,io,runpy,sys
+raw=base64.b64decode(sys.argv[1])
+p=sys.argv[2]
+sys.argv=[p]+sys.argv[3:]
+sys.stdin=io.TextIOWrapper(io.BytesIO(raw),encoding="utf-8")
+runpy.run_path(p,run_name="__main__")`
+
+func (spec *guestScriptSpec) sharedInstallScript(pythonBin string) string {
+	if pythonBin == "" {
+		pythonBin = "python3"
+	}
+	cmd := shellescape.QuoteCommand([]string{
+		pythonBin, "-I", "-c", guestScriptSharedInstaller,
+		spec.relDir, spec.hash, fmt.Sprintf("%o", spec.mode),
+	})
+	return "exec " + cmd + " <<'__CAGE_GUEST_SCRIPT__'\n" +
+		base64.StdEncoding.EncodeToString(spec.installPayload()) +
+		"\n__CAGE_GUEST_SCRIPT__\n"
+}
+
+// guardedSharedScript builds a bash body for guestShared that checks every file
+// of spec (exiting 86 if missing) and runs the entry script with input on stdin
+// in one Python process, avoiding a dedicated cold SSH handshake.
+func (spec *guestScriptSpec) guardedSharedScript(pythonBin string, input []byte, args ...string) string {
+	if pythonBin == "" {
+		pythonBin = "python3"
+	}
+	b64 := base64.StdEncoding.EncodeToString(input)
+	var check, entryRef string
+	if len(spec.files) == 1 {
+		check = `p="$HOME/` + spec.entryRelPath() + `"; [ -f "$p" ] || exit 86; `
+		entryRef = `"$p"`
+	} else {
+		var checks []string
+		for _, f := range spec.files {
+			checks = append(checks, `[ -f "$d/`+spec.hash+f.suffix+`" ]`)
+		}
+		check = `d="$HOME/` + spec.relDir + `"; ` + strings.Join(checks, " && ") + ` || exit 86; `
+		entryRef = `"$d/` + spec.hash + spec.entry + `"`
+	}
+	cmd := check + "exec " + shellescape.QuoteCommand([]string{pythonBin, "-I", "-c", guestScriptSharedRunner, b64}) + " " + entryRef
+	if len(args) > 0 {
+		cmd += " " + shellescape.QuoteCommand(args)
+	}
+	return cmd
+}
+
 func (s *Server) ensureGuestScript(ctx context.Context, spec *guestScriptSpec, pythonBin string) error {
 	return s.guestScripts.ensure(ctx, spec.cacheKey(), func(ctx context.Context) error {
+		if s.windowsGuest == nil && s.macosGuest == nil && len(spec.installPayload()) <= 256<<10 {
+			reply, ok, err := s.guestShared(ctx, spec.sharedInstallScript(pythonBin))
+			if ok && err == nil && reply.code == 0 {
+				return nil
+			}
+			if ctx.Err() != nil {
+				return &guestScriptEnsureError{err: ctx.Err()}
+			}
+		}
 		cmd := s.guestScriptInstallSSHCommand(ctx, spec, pythonBin)
 		var stderr fileControlStderr
 		cmd.Stderr = &stderr

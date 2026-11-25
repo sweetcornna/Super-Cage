@@ -272,6 +272,15 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 	return cmd
 }
 
+func agentRuntimeUsesSharedSession(subcommand string) bool {
+	switch subcommand {
+	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "prepare-home":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input any, output any) error {
 	if hook := s.agentCLIs.runtimeHook; hook != nil {
 		return hook(ctx, subcommand, input, output)
@@ -285,8 +294,33 @@ func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input a
 	}
 	var out []byte
 	var stderr fileControlStderr
+	useShared := s.macosGuest == nil && agentRuntimeUsesSharedSession(subcommand) && len(data) <= 48<<10
 	err = s.runWithGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary(), func() (int, error) {
 		stderr.data = stderr.data[:0]
+		if useShared {
+			script := agentRuntimeSpec.guardedSharedScript(s.guestPythonBinary(), data, subcommand)
+			reply, ok, sharedErr := s.guestShared(ctx, script)
+			if ok {
+				if sharedErr == nil {
+					if reply.code == guestScriptMissingExitCode {
+						return guestScriptMissingExitCode, fmt.Errorf("exit status %d", reply.code)
+					}
+					if len(reply.stdout) <= 64<<10 {
+						out = reply.stdout
+						_, _ = stderr.Write(reply.stderr)
+						if reply.code != 0 {
+							return reply.code, fmt.Errorf("exit status %d", reply.code)
+						}
+						return 0, nil
+					}
+					// Oversized reply (> 64 KiB): fall through to dedicated SSH below.
+				} else if ctx.Err() != nil || subcommand == "prepare-home" {
+					return -1, sharedErr
+				}
+			} else if ctx.Err() != nil {
+				return -1, ctx.Err()
+			}
+		}
 		cmd := s.agentRuntimeSSHCommand(ctx, subcommand)
 		cmd.Stdin = bytes.NewReader(data)
 		cmd.Stderr = &stderr

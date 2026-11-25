@@ -47,13 +47,21 @@ type herdrGuestStatus struct {
 	LegacyInstalled bool  `json:"legacy_installed,omitempty"`
 }
 
+type herdrProbeCall struct {
+	done   chan struct{}
+	forced bool
+	status herdrGuestStatus
+	err    error
+}
+
 type herdrManager struct {
-	opMu         sync.Mutex
-	mu           sync.Mutex
-	configLoaded bool
-	config       herdrConfig
-	statusCache  herdrGuestStatus
-	statusAt     time.Time
+	opMu          sync.Mutex
+	mu            sync.Mutex
+	configLoaded  bool
+	config        herdrConfig
+	statusCache   herdrGuestStatus
+	statusAt      time.Time
+	probeInflight *herdrProbeCall
 	// The hc terminal list and Cage's own records (herdr_terminals.go):
 	// fetchMu lets one list read run at a time, listMu guards the rest.
 	fetchMu   sync.Mutex
@@ -106,30 +114,61 @@ func (s *Server) invalidateHerdrStatus() {
 }
 
 func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestStatus, error) {
-	s.herdr.mu.Lock()
-	if !force && !s.herdr.statusAt.IsZero() && time.Since(s.herdr.statusAt) < herdrStatusTTL {
-		cached := s.herdr.statusCache
-		s.herdr.mu.Unlock()
-		return cached, nil
-	}
-	s.herdr.mu.Unlock()
+	m := &s.herdr
+	for {
+		m.mu.Lock()
+		if !force && !m.statusAt.IsZero() && time.Since(m.statusAt) < herdrStatusTTL {
+			cached := m.statusCache
+			m.mu.Unlock()
+			return cached, nil
+		}
+		if call := m.probeInflight; call != nil {
+			if !force || call.forced {
+				m.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return herdrGuestStatus{}, ctx.Err()
+				case <-call.done:
+					return call.status, call.err
+				}
+			}
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return herdrGuestStatus{}, ctx.Err()
+			case <-call.done:
+				continue
+			}
+		}
+		call := &herdrProbeCall{done: make(chan struct{}), forced: force}
+		m.probeInflight = call
+		m.mu.Unlock()
 
-	var st herdrGuestStatus
-	err := s.runAgentRuntime(ctx, "herdr-status", map[string]any{}, &st)
-	if err != nil {
+		probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), 6*time.Second)
+		var st herdrGuestStatus
+		err := s.runAgentRuntime(probeCtx, "herdr-status", map[string]any{}, &st)
+		cancel()
+		if err == nil {
+			st.BinaryPath = herdrText(st.BinaryPath, 512)
+			st.Version = herdrText(st.Version, 32)
+		}
+		m.mu.Lock()
+		if err == nil {
+			m.statusCache = st
+			m.statusAt = time.Now()
+			if cfg, loadErr := s.loadHerdrConfigLocked(); loadErr == nil && cfg.InstalledHint != st.Installed {
+				cfg.InstalledHint = st.Installed
+				_ = s.saveHerdrConfigLocked(cfg)
+			}
+		}
+		call.status, call.err = st, err
+		if m.probeInflight == call {
+			m.probeInflight = nil
+		}
+		close(call.done)
+		m.mu.Unlock()
 		return st, err
 	}
-	st.BinaryPath = herdrText(st.BinaryPath, 512)
-	st.Version = herdrText(st.Version, 32)
-	s.herdr.mu.Lock()
-	s.herdr.statusCache = st
-	s.herdr.statusAt = time.Now()
-	if cfg, loadErr := s.loadHerdrConfigLocked(); loadErr == nil && cfg.InstalledHint != st.Installed {
-		cfg.InstalledHint = st.Installed
-		_ = s.saveHerdrConfigLocked(cfg)
-	}
-	s.herdr.mu.Unlock()
-	return st, nil
 }
 
 func (s *Server) herdrStatusPayload(r *http.Request, force bool) (map[string]any, error) {

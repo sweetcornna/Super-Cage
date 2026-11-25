@@ -211,19 +211,22 @@ func (s *Server) claudePanelView(ctx context.Context) (claudePanel, claudeAccoun
 	m := &s.claudeAccounts
 	m.mu.Lock()
 	list, err := s.loadClaudeAccounts()
-	m.mu.Unlock()
 	if err != nil {
+		m.mu.Unlock()
 		return view, list, err
 	}
 	if ready && !update && list.PendingLogin != "" && !s.claudeLoginActive(list.PendingLogin) {
-		_ = s.recoverClaudePending(ctx, list.PendingLogin, false)
+		pending := list.PendingLogin
+		m.mu.Unlock()
+		_ = s.recoverClaudePending(ctx, pending, false)
+		m.mu.Lock()
+		list, err = s.loadClaudeAccounts()
+		if err != nil {
+			m.mu.Unlock()
+			return view, list, err
+		}
 	}
-	m.mu.Lock()
 	defer m.mu.Unlock()
-	list, err = s.loadClaudeAccounts()
-	if err != nil {
-		return view, list, err
-	}
 	view.Accounts, view.LoginNotice = list.Accounts, m.loginNotice
 	view.Scheduling, view.HandoffAPI = list.Scheduling, 2
 	view.Scheduling.SwitchAnswered = list.Scheduling.answered()
