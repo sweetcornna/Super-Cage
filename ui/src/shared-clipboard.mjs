@@ -21,8 +21,10 @@ const carriesPairCode = content => typeof content.text === "string" && PAIR_CODE
 
 // One connection owns clipboard synchronization for the workbench window,
 // including while its remote canvas is hidden or the window is unfocused.
-export function shareClipboard({ connect, native, onStatus, setActive, interval = 300, schedule = setTimeout }) {
-  let socket, timer, retry, disposed = false, revision, generation = 0, guestReady = false, guestSession, failures = 0;
+// Host clipboard polling pauses while the window itself is hidden and resumes
+// immediately on visibility change (guest-to-host WebSocket pushes stay live).
+export function shareClipboard({ connect, native, onStatus, setActive, interval = 300, schedule = setTimeout, visible = true }) {
+  let socket, timer, retry, disposed = false, pageVisible = Boolean(visible), revision, generation = 0, guestReady = false, guestSession, failures = 0;
   let polling, writes = Promise.resolve(), lastPayload = "", serial = 0, errorShown = false, acknowledgedRevision;
   let sessionGeneration = 0;
   let sessionController = new AbortController();
@@ -152,6 +154,13 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
       if (session === sessionGeneration) warn();
     }).finally(releaseFiles);
   };
+  const stopTimer = () => { clearInterval(timer); timer = undefined; };
+  const startTimer = () => {
+    stopTimer();
+    if (!disposed && pageVisible && socket?.readyState === 1) {
+      timer = setInterval(() => void poll().catch(warn), interval);
+    }
+  };
   const open = () => {
     if (disposed) return;
     revision = undefined; lastPayload = ""; guestReady = false;
@@ -159,7 +168,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
     const connection = socket;
     socket.onopen = () => {
       if (disposed || socket !== connection) return;
-      timer = setInterval(() => void poll().catch(warn), interval);
+      startTimer();
     };
     socket.onmessage = event => {
       if (disposed || socket !== connection) return;
@@ -167,13 +176,22 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
     };
     socket.onclose = () => {
       if (disposed || socket !== connection) return;
-      invalidateSession(); clearInterval(timer);
+      invalidateSession(); stopTimer();
       retry = schedule(open, clipboardReconnectDelay(failures++));
     };
     socket.onerror = () => { /* onclose owns reconnects. */ };
   };
   open();
-  return { poll, async sync() {
+  return { poll, setVisible(next) {
+    const nextVisible = Boolean(next);
+    if (nextVisible === pageVisible) return;
+    pageVisible = nextVisible;
+    if (!pageVisible) { stopTimer(); return; }
+    if (!disposed && socket?.readyState === 1) {
+      startTimer();
+      void poll().catch(warn);
+    }
+  }, async sync() {
     const signal = sessionController.signal;
     requireSession(signal);
     for (;;) {
@@ -187,7 +205,7 @@ export function shareClipboard({ connect, native, onStatus, setActive, interval 
       if (current === acknowledgedRevision && sequence === generation && pendingWrites === writes) return;
     }
   }, dispose() {
-    disposed = true; invalidateSession(); clearInterval(timer); clearTimeout(retry);
+    disposed = true; invalidateSession(); stopTimer(); clearTimeout(retry);
     socket?.close();
   } };
 }

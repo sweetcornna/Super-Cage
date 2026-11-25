@@ -463,16 +463,22 @@ function App() {
     }
   };
   const clipboardConnection = getClientContext().connection_id;
+  const clipboardRef = useRef(null);
   useEffect(() => {
     if (!status?.ready || !clipboardAvailable || !nativeAvailable()) return;
     const clipboard = shareClipboard({
       connect: () => new WebSocket(runtimeSocketURL("/clipboard")), native,
+      visible: windowVisibleRef.current,
       onStatus: setToast,
       setActive: active => { window.cageSharedClipboardActive = active; },
     });
+    clipboardRef.current = clipboard;
     window.cageSyncClipboard = () => clipboard.sync();
-    return () => { clipboard.dispose(); delete window.cageSyncClipboard; };
+    return () => { clipboardRef.current = null; clipboard.dispose(); delete window.cageSyncClipboard; };
   }, [status?.ready, clipboardAvailable, clipboardConnection]);
+  useEffect(() => {
+    clipboardRef.current?.setVisible?.(windowVisible);
+  }, [windowVisible]);
   const desktopFiles = useDesktopFiles(Boolean(status?.ready && desktopAvailable), notify, desktopOpen && !settingsOpen && !managementPage && !storageRecovery && windowVisible, windowVisible);
   const downloads = [...(browser.downloads || []), ...desktopFiles.downloads];
   useDownloadNotifications(downloads, notify, Boolean(browser.uploads?.length || desktopFiles.uploads.length));

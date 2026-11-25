@@ -84,3 +84,10 @@ test("a page names itself once per terminal, across reconnects", () => {
   assert.notEqual(terminalViewer("fedcba9876543210"), first);
   assert.ok(terminalStreamPath("0123456789abcdef", 5, first).endsWith("?after=5&viewer=" + first));
 });
+
+test("terminalViewer map stays bounded across many closed terminals", () => {
+  const old = terminalViewer("stale-terminal-0");
+  for (let i = 1; i <= 200; i++) terminalViewer(`ephemeral-terminal-${i}`);
+  // After 200 distinct terminals, the evicted earliest terminal receives a fresh viewer ID.
+  assert.notEqual(terminalViewer("stale-terminal-0"), old, "terminalViewers map must evict old entries instead of growing unboundedly");
+});

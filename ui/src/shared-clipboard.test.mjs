@@ -367,3 +367,53 @@ test("a long pairing code on the host clipboard is never sent to the environment
     assert.deepEqual(f.sent.at(-1), { text: "after the code" });
   } finally { f.controller.dispose(); }
 });
+
+test("hiding the window pauses clipboard polling while still receiving guest copies, and showing resumes immediately", async () => {
+  let revision = 1, revCalls = 0, content = { text: "initial" };
+  const sent = [], writes = [];
+  const socket = {
+    readyState: 1,
+    send: text => {
+      const value = JSON.parse(text);
+      sent.push(value);
+      queueMicrotask(() => socket.onmessage({ data: JSON.stringify({ ack: value.serial }) }));
+    },
+    close() { this.readyState = 3; this.onclose?.(); },
+  };
+  const controller = shareClipboard({
+    connect: () => socket,
+    interval: 15,
+    visible: false,
+    onStatus: () => {},
+    setActive: () => {},
+    native: async (action, value) => {
+      if (action === "clipboardRevision") { revCalls++; return revision; }
+      if (action === "clipboardSyncRead") return { ...content, revision };
+      if (action === "clipboardSyncWrite") { writes.push(value.text); return { revision: ++revision }; }
+    },
+  });
+  try {
+    socket.onopen();
+    socket.onmessage({ data: JSON.stringify({ hello: { version: 1, os: "linux", session: "s1", formats: ["text", "png", "files"], available: true } }) });
+    await settle();
+    const afterSeed = revCalls;
+    await new Promise(resolve => setTimeout(resolve, 65));
+    assert.equal(revCalls, afterSeed, "hidden window must not run interval clipboardRevision polls");
+    // Guest-to-host push still works while hidden.
+    socket.onmessage({ data: JSON.stringify({ text: "from guest while hidden" }) });
+    await settle();
+    assert.deepEqual(writes, ["from guest while hidden"]);
+    // Showing the window resumes polling and immediately picks up a host copy.
+    content = { text: "copied while hidden" };
+    revision++;
+    controller.setVisible(true);
+    await new Promise(resolve => setTimeout(resolve, 45));
+    assert.ok(revCalls > afterSeed + 1, "visible window must resume polling");
+    assert.ok(sent.some(item => item.text === "copied while hidden"), "showing window must sync host copy immediately");
+    // Hiding again stops polling again.
+    controller.setVisible(false);
+    const afterHide = revCalls;
+    await new Promise(resolve => setTimeout(resolve, 65));
+    assert.equal(revCalls, afterHide, "re-hiding window must stop polling again");
+  } finally { controller.dispose(); }
+});
