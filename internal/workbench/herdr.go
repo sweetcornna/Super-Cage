@@ -1,7 +1,6 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -280,13 +279,7 @@ func (s *Server) herdrInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.herdr.opMu.Lock()
 		defer s.herdr.opMu.Unlock()
 		s.setMessage("正在通过官方发布渠道安装 Herdr（herdr-core）…")
-		payload, _ := json.Marshal(map[string]any{"update": in.Update})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "herdr-install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "herdr-install", map[string]any{"update": in.Update}); err != nil {
 			return errors.New("安装 Herdr 失败，请查看操作详情排查网络或运行环境")
 		}
 		s.herdr.mu.Lock()
@@ -326,13 +319,7 @@ func (s *Server) herdrUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.herdr.opMu.Lock()
 		defer s.herdr.opMu.Unlock()
 		s.setMessage("正在卸载 Herdr（保留终端记录与设置）…")
-		payload, _ := json.Marshal(map[string]any{"force": in.Force})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "herdr-uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "herdr-uninstall", map[string]any{"force": in.Force}); err != nil {
 			return errors.New("卸载 Herdr 失败，请查看操作详情")
 		}
 		s.herdr.mu.Lock()

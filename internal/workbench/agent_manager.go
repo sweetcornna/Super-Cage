@@ -3,21 +3,19 @@ package workbench
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"al.essio.dev/pkg/shellescape"
-	"github.com/klauspost/compress/gzip"
 	"github.com/sylvinus/agent-vm/internal/agentcatalog"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
@@ -117,15 +115,9 @@ type agentManager struct {
 	runtimeHook func(context.Context, string, any, any) error
 }
 
-var agentRuntimeEncoded = func() string {
-	var compressed bytes.Buffer
-	writer, _ := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
-	_, _ = writer.Write([]byte(cage.AgentRuntimeHelper))
-	_ = writer.Close()
-	return cliTransport85(compressed.Bytes())
-}()
+var agentRuntimeSpec = newGuestScriptSpec(".local/share/cage/agent-runtime", 0o700, cage.AgentRuntimeHelper)
 
-var agentRuntimeHash = fmt.Sprintf("%x", sha256.Sum256([]byte(cage.AgentRuntimeHelper)))
+var agentRuntimeHash = agentRuntimeSpec.hash
 
 func (s *Server) guestPythonBinary() string {
 	if s.macosGuest != nil {
@@ -135,37 +127,46 @@ func (s *Server) guestPythonBinary() string {
 }
 
 func (s *Server) guestShellWrapper(script string) string {
-	if s.macosGuest != nil {
-		return "exec /bin/zsh -c " + shellescape.Quote("exec "+script)
-	}
-	return "exec /bin/bash --noprofile --norc -c " + shellescape.Quote("exec "+script)
+	return s.guestShellScript("exec " + script)
 }
 
-// agentRuntimeCommand executes cage-agent-runtime, transparently bootstrapping
-// the exact SHA-256-matched version into ~/.local/share/cage/agent-runtime when
-// an older running guest hasn't re-synced /usr/local/bin/cage-agent-runtime yet.
+// agentRuntimeCommand returns a constant-size command that runs the
+// SHA-256-pinned cage-agent-runtime installed under
+// ~/.local/share/cage/agent-runtime/<hash>.py. Callers must ensure the script
+// is installed on the guest via ensureAgentRuntime / runWithGuestScript.
 func agentRuntimeCommand(subcommand string) string {
 	return agentRuntimeCommandWithPython("python3", subcommand)
 }
 
 func agentRuntimeCommandWithPython(pythonBin, subcommand string) string {
-	if pythonBin == "" {
-		pythonBin = "python3"
+	return agentRuntimeSpec.shellCommand(pythonBin, subcommand)
+}
+
+func (s *Server) agentRuntimeSSHCommand(ctx context.Context, subcommand string) *exec.Cmd {
+	command := s.guestShellScript(agentRuntimeSpec.guardedShellBody(s.guestPythonBinary(), subcommand))
+	return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
+}
+
+func (s *Server) ensureAgentRuntime(ctx context.Context) error {
+	if s.agentCLIs.runtimeHook != nil || s.windowsGuest != nil {
+		return nil
 	}
-	bootstrap := fmt.Sprintf(`import base64,gzip,os,pathlib,sys,tempfile
-d=pathlib.Path.home()/".local/share/cage/agent-runtime"
-d.mkdir(parents=True,exist_ok=True,mode=0o700)
-p=d/("%s.py")
-if not p.exists():
- data=gzip.decompress(base64.b85decode("%s"))
- with tempfile.NamedTemporaryFile(dir=d,delete=False) as f:
-  f.write(data)
-  t=f.name
- os.chmod(t,0o700)
- os.replace(t,p)
-os.execv(sys.executable,[sys.executable,"-I",str(p),*sys.argv[1:]])
-`, agentRuntimeHash, agentRuntimeEncoded)
-	return shellescape.QuoteCommand([]string{pythonBin, "-I", "-c", bootstrap, subcommand})
+	return s.ensureGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary())
+}
+
+func (s *Server) runAgentRuntimeJob(ctx context.Context, subcommand string, input any) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	return s.runWithGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary(), func() (int, error) {
+		cmd := s.agentRuntimeSSHCommand(ctx, subcommand)
+		cmd.Stdin = bytes.NewReader(payload)
+		cmd.Stdout = s.jobs.execution()
+		cmd.Stderr = s.jobs.execution()
+		err := cmd.Run()
+		return exitCodeOf(err), err
+	})
 }
 
 func cloneAgentStore(store agentStoreData) agentStoreData {
@@ -282,13 +283,18 @@ func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input a
 	if err != nil {
 		return err
 	}
-	command := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), subcommand))
-	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
-	cmd.Stdin = bytes.NewReader(data)
+	var out []byte
 	var stderr fileControlStderr
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.Output()
+	err = s.runWithGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary(), func() (int, error) {
+		stderr.data = stderr.data[:0]
+		cmd := s.agentRuntimeSSHCommand(ctx, subcommand)
+		cmd.Stdin = bytes.NewReader(data)
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = 2 * time.Second
+		var runErr error
+		out, runErr = cmd.Output()
+		return exitCodeOf(runErr), runErr
+	})
 	if err != nil {
 		msg := strings.TrimSpace(diagnostics.Redact(string(stderr.data)))
 		if msg != "" && len(msg) <= 240 {
@@ -615,13 +621,7 @@ func (s *Server) installAgentHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.launch(w, "agent-install", func() error {
 		s.setMessage(fmt.Sprintf("正在通过官方渠道安装 %s…", spec.Name))
-		payload, _ := json.Marshal(map[string]any{"spec": spec, "channel": ch})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "install", map[string]any{"spec": spec, "channel": ch}); err != nil {
 			return fmt.Errorf("安装 %s 失败，请查看操作详情排查网络或依赖问题", spec.Name)
 		}
 		s.invalidateAgentProbeCache()
@@ -671,13 +671,7 @@ func (s *Server) uninstallAgentHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.launch(w, "agent-uninstall", func() error {
 		s.setMessage(fmt.Sprintf("正在卸载 %s（保留账号与项目数据）…", spec.Name))
-		payload, _ := json.Marshal(map[string]any{"spec": spec, "channel": ch})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "uninstall", map[string]any{"spec": spec, "channel": ch}); err != nil {
 			return fmt.Errorf("卸载 %s 失败，请查看操作详情", spec.Name)
 		}
 		s.invalidateAgentProbeCache()

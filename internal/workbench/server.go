@@ -103,6 +103,7 @@ type Server struct {
 	tickets                                          map[string]time.Time
 	browserControl                                   *browserClient
 	controlSession                                   guestSession
+	guestScripts                                     guestScriptCache
 	nativeControl                                    nativeControl
 	nativeBrowserUsed                                atomic.Int64
 	windowsBrowserControl                            *windowsBrowserClient

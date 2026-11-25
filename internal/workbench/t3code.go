@@ -1,7 +1,6 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -526,13 +525,7 @@ func (s *Server) t3CodeInstallHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.launch(w, "t3code-install", func() error {
 		s.setMessage("正在通过官方渠道安装原版 T3 Code…")
-		payload, _ := json.Marshal(map[string]any{"channel": channel})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "t3code-install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "t3code-install", map[string]any{"channel": channel}); err != nil {
 			return errors.New("安装 T3 Code 失败，请查看操作详情排查网络或 Node.js 环境")
 		}
 		// Automatically enable managed T3 Code after a successful install.

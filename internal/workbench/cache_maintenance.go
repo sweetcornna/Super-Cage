@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -172,21 +173,50 @@ func (s *Server) cacheMaintenanceAction(care *cacheMaintenance, action string, w
 	jsonReply(w, json.RawMessage(data))
 }
 
+func (s *Server) cacheMaintenanceSSHCommand(ctx context.Context, input []byte) (*exec.Cmd, error) {
+	script := cacheMaintenanceScript
+	python := []string{macCLIInstall + "/bin/python3", "-I", "-c", stdinPythonBootstrap, "cache_maintenance.py"}
+	if s.macosGuest == nil {
+		var err error
+		script, err = s.linuxTemplate(cacheMaintenanceScript)
+		if err != nil {
+			return nil, err
+		}
+		python = []string{"sudo", "-n", "/usr/bin/python3", "-I", "-c", stdinPythonBootstrap, "cache_maintenance.py"}
+	}
+	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", s.guestShellWrapper(shellescape.QuoteCommand(python)))
+	cmd.Stdin = bytes.NewReader(stdinPythonPayload(script, input))
+	cmd.WaitDelay = 2 * time.Second
+	return cmd, nil
+}
+
 func (s *Server) runCacheMaintenance(ctx context.Context, request map[string]any) ([]byte, error) {
 	if s.windowsGuest == nil {
 		input, err := json.Marshal(request)
 		if err != nil {
 			return nil, err
 		}
-		script, err := s.linuxTemplate(cacheMaintenanceScript)
+		cmd, err := s.cacheMaintenanceSSHCommand(ctx, input)
 		if err != nil {
 			return nil, err
 		}
-		python := []string{"sudo", "-n", "/usr/bin/python3", "-I", "-c", script}
-		if s.macosGuest != nil {
-			python = []string{macCLIInstall + "/bin/python3", "-I", "-c", cacheMaintenanceScript}
+		pipe, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, err
 		}
-		return s.guest(ctx, "exec "+shellescape.QuoteCommand(python)+" <<'MAINTENANCE_INPUT'\n"+string(input)+"\nMAINTENANCE_INPUT\n")
+		if err = cmd.Start(); err != nil {
+			return nil, err
+		}
+		data, readErr := io.ReadAll(io.LimitReader(pipe, (64<<10)+1))
+		if readErr != nil || len(data) > 64<<10 {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+			return nil, errors.New("guest control response exceeded its limit")
+		}
+		if err = cmd.Wait(); err != nil {
+			return nil, err
+		}
+		return data, nil
 	}
 	request["profile"] = windowsCLIProfileID(s.profile)
 	data, err := json.Marshal(request)
