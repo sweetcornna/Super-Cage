@@ -148,10 +148,16 @@ func (s *Server) runCLIChannel(ctx context.Context, mode string, input any, outp
 	return nil
 }
 
+// guestLoginScript runs body from the guest's login shell with the login
+// shell's own output sent to stderr.
+func guestLoginScript(body string) string {
+	return "exec /bin/bash -c " + shellescape.Quote("exec 3>&1 1>&2; exec /bin/bash -lc "+shellescape.Quote("exec 1>&3 3>&-; "+body))
+}
+
 // guestLoginCommand runs helper from the guest's login shell with the login
 // shell's own output sent to stderr.
 func guestLoginCommand(helper string) string {
-	return "exec /bin/bash -c " + shellescape.Quote("exec 3>&1 1>&2; exec /bin/bash -lc "+shellescape.Quote("exec 1>&3 3>&-; exec "+helper))
+	return guestLoginScript("exec " + helper)
 }
 
 // runGuestHelper writes input as JSON to a helper started from the guest's
@@ -164,16 +170,28 @@ func (s *Server) runGuestHelper(ctx context.Context, started time.Time, source, 
 	if source == "codex-sessions" && mode == "discover" && s.residentCodexDiscover(ctx, input, output) {
 		return nil
 	}
+	_, err := s.runGuestHelperLoginScript(ctx, started, source, mode, guestLoginCommand(helper), input, output)
+	return err
+}
+
+func (s *Server) runGuestHelperLoginScript(ctx context.Context, started time.Time, source, mode, loginScript string, input any, output any) (int, error) {
+	if holdExpired(ctx) {
+		return -1, context.Cause(ctx) // an abandoned look of a held read starts no login
+	}
 	data, err := json.Marshal(input)
 	if err != nil {
-		return err
+		return -1, err
 	}
-	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", guestLoginCommand(helper))
+	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", loginScript)
 	cmd.Stdin = strings.NewReader(string(data))
 	var stderr fileControlStderr
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = 2 * time.Second
 	result, err := cmd.Output()
+	exit := -1
+	if cmd.ProcessState != nil {
+		exit = cmd.ProcessState.ExitCode()
+	}
 	if err != nil || len(result) > 4<<20 || json.Unmarshal(result, output) != nil {
 		failure := "guest_response"
 		message := "电脑未能读取会话状态，聊天记录已保留。"
@@ -181,20 +199,16 @@ func (s *Server) runGuestHelper(ctx context.Context, started time.Time, source, 
 			failure, message = "timeout", "电脑读取运行环境超时，暂时无法获取会话状态。"
 		} else if err != nil {
 			failure = "guest_command"
-			if cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 255 {
+			if exit == 255 {
 				failure, message = "ssh_connection", "电脑暂时无法连接运行环境，聊天记录已保留。"
 			}
-		}
-		exit := -1
-		if cmd.ProcessState != nil {
-			exit = cmd.ProcessState.ExitCode()
 		}
 		// Record transport and protocol evidence without terminal output,
 		// prompts, account paths or raw SSH/Python error messages.
 		_ = diagnostics.New(s.profile).Record("warn", source, fmt.Sprintf("operation=%s failure=%s exit=%d elapsed_ms=%d context=%v output_bytes=%d stderr_bytes=%d", mode, failure, exit, time.Since(started).Milliseconds(), ctx.Err(), len(result), len(stderr.data)))
-		return errors.New(message)
+		return exit, errors.New(message)
 	}
-	return nil
+	return 0, nil
 }
 
 func (s *Server) discoverTerminalConversations(ctx context.Context, paths []string) error {

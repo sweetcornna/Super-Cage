@@ -88,6 +88,14 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 			session.id, session.herdrName = herdrID, herdrTerminalName(herdrID)
 		}
 	}
+	if herdrID != "" {
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+		ensureErr := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		if ensureErr != nil {
+			return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+		}
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {
 		s.account.mu.Lock()
@@ -230,6 +238,12 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 	lease := uuid.NewString()
 	payload, _ := json.Marshal(map[string]any{"connection": record.Connection, "lease": lease, "thread": thread, "account": record.codexGuestAccount(),
 		"subject": selection.Subject, "cwd": directory, "additional_directories": directories})
+	ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+	ensureErr := s.ensureCodexSessions(ensureCtx)
+	ensureCancel()
+	if ensureErr != nil {
+		return nil, errors.New("无法在运行环境中准备 Codex 会话辅助程序，请确认环境已启动")
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", codexSessionTerminalScript(directory, string(payload)))
 	if input.requestContext != nil {
 		s.account.mu.Lock()

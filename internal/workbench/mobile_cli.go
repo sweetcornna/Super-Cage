@@ -56,6 +56,21 @@ func sharedCLILauncher(launcher string) bool {
 	return err == nil
 }
 
+func (s *Server) mobileRunnerSSHCommand(ctx context.Context, workspace string, prefix, args []string) *exec.Cmd {
+	// The login shell supplies the guest's PATH and Claude provider configuration.
+	// Shell startup output goes to stderr so stdout contains only CLI JSON.
+	login := `exec 3>&1 1>&2; exec /bin/bash -lc ` + shellescape.Quote(`exec 1>&3 3>&-; cd -- "$1" && shift && exec "$@"`) + ` "$0" "$@"`
+	supExpr := `"$HOME/` + mobileCLIGuestScripts.relPath("-supervisor.py") + `"`
+	idExpr := `"$HOME/` + mobileCLIGuestScripts.relPath("-identity.py") + `"`
+	gw := shellescape.Quote(guestPath(workspace))
+	command := strings.Join([]string{
+		"exec", "/usr/bin/python3", "-I", supExpr,
+		gw, "/bin/bash", "-c", shellescape.Quote(login), "cage-mobile-cli", gw,
+		mobileIdentityShellCommand(idExpr, prefix, args),
+	}, " ")
+	return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
+}
+
 func (s *Server) mobileRunner(prefix []string) cliconversation.Runner {
 	return cliconversation.Runner{SupervisedStdin: true, Command: func(ctx context.Context, workspace string, args []string) (*exec.Cmd, error) {
 		directories, err := s.projectAdditionalDirectories(workspace)
@@ -66,14 +81,10 @@ func (s *Server) mobileRunner(prefix []string) cliconversation.Runner {
 		for _, directory := range directories {
 			args = append(args, "--add-dir", directory)
 		}
-		// The login shell supplies the guest's PATH and Claude provider configuration.
-		// Shell startup output goes to stderr so stdout contains only CLI JSON.
-		login := `exec 3>&1 1>&2; exec /bin/bash -lc ` + shellescape.Quote(`exec 1>&3 3>&-; cd -- "$1" && shift && exec "$@"`) + ` "$0" "$@"`
-		argv := []string{"/usr/bin/python3", "-I", "-c", mobileSupervisor, guestPath(workspace), "/bin/bash", "-c",
-			login, "cage-mobile-cli", guestPath(workspace)}
-		argv = append(argv, mobileIdentityCommand(prefix, args)...)
-		command := "exec " + shellescape.QuoteCommand(argv)
-		return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command), nil
+		if err := s.ensureGuestScript(ctx, mobileCLIGuestScripts, "/usr/bin/python3"); err != nil {
+			return nil, err
+		}
+		return s.mobileRunnerSSHCommand(ctx, workspace, prefix, args), nil
 	}}
 }
 

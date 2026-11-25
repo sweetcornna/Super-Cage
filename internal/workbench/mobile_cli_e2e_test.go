@@ -157,6 +157,10 @@ func mobileTestSSHRewrite(t *testing.T, s *Server, home string, env []string, re
 							status := uint32(0)
 							if err := cmd.Run(); err != nil {
 								status = 1
+								var exitErr *exec.ExitError
+								if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
+									status = uint32(exitErr.ExitCode())
+								}
 							}
 							_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{status}))
 							return

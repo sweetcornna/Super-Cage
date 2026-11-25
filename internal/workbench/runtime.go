@@ -529,6 +529,7 @@ func bootMemoryFailure(log string) string {
 // (30 s), and requests on it time out and back the helper off for a minute.
 func (s *Server) closeGuestSessions() {
 	s.controlSession.close()
+	s.guestScripts.reset()
 	s.nativeControl.close()
 	s.cliDiscovery.mu.Lock()
 	s.cliDiscovery.retryAt = time.Time{}

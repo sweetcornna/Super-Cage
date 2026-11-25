@@ -463,6 +463,12 @@ func (s *Server) openHerdrViewer(ctx context.Context, id string) (*terminalSessi
 	guestWorkspace := s.cliWorkspace(workspace)
 	script := s.herdrAttachScript(herdrAttach{Mode: "attach", Target: view.Target, Workspace: guestWorkspace,
 		Project: herdrProjectLabel(workspace), Title: view.Title, Kind: view.Kind})
+	ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+	ensureErr := s.ensureAgentRuntime(ensureCtx)
+	ensureCancel()
+	if ensureErr != nil {
+		return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	return s.terminals.startHerdrViewer(cmd, workspace, view.Kind, view.Imported, func(session *terminalSession, _ int) {
 		session.id = id

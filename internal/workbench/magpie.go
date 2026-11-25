@@ -1,7 +1,6 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -455,13 +454,7 @@ func (s *Server) magpieInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		if channel != "" {
 			payloadMap["channel"] = channel
 		}
-		payload, _ := json.Marshal(payloadMap)
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "magpie-install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "magpie-install", payloadMap); err != nil {
 			return errors.New("安装 Magpie 失败，请查看操作详情排查网络或运行环境")
 		}
 		// Automatically enable managed Magpie after a successful install.
@@ -506,13 +499,7 @@ func (s *Server) magpieUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.magpie.mu.Lock()
 		cfg, _ := s.loadMagpieConfigLocked()
 		s.magpie.mu.Unlock()
-		payload, _ := json.Marshal(map[string]any{"port": cfg.Port})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "magpie-uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "magpie-uninstall", map[string]any{"port": cfg.Port}); err != nil {
 			return errors.New("卸载 Magpie 失败，请查看操作详情")
 		}
 		s.closeMagpieProxy()

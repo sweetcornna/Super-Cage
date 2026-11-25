@@ -759,6 +759,14 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			Project: projectLabel, Title: herdrTitle, Kind: herdrKind, Inner: script})
 		herdrBacked = true
 	}
+	if herdrBacked || (isAgentKind && (input.Kind == "agent-login" || (agentSel.GuestID != "" && agentSel.GuestID != "default"))) {
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+		ensureErr := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		if ensureErr != nil {
+			return nil, errors.New("无法在运行环境中准备 Agent 辅助程序，请确认环境已启动")
+		}
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {
 		s.account.mu.Lock()
