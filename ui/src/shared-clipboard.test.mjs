@@ -417,3 +417,78 @@ test("hiding the window pauses clipboard polling while still receiving guest cop
     assert.equal(revCalls, afterHide, "re-hiding window must stop polling again");
   } finally { controller.dispose(); }
 });
+
+// F6: when host polling is paused while hidden, a host copy advances the native
+// revision without updating the cached revision. A later guest copy must win
+// and be written to the host instead of being dropped and overwritten by the
+// older host clipboard.
+test("F6: host copy while hidden, then guest copy -> guest copy wins and is written to host", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    assert.deepEqual(f.sent, [{ text: "host initial" }]);
+
+    // Hide window: host polling stops.
+    f.controller.setVisible(false);
+
+    // Host copies something while hidden (advances host revision without polling).
+    f.host({ text: "older host copy while hidden" });
+
+    // Guest subsequently copies newer content and pushes it over WebSocket.
+    f.guest({ text: "newer guest copy" });
+    await settle();
+
+    assert.deepEqual(f.writes, [{ text: "newer guest copy" }], "guest copy must win and be written to host");
+    assert.equal(
+      f.sent.some(value => value.text === "older host copy while hidden"),
+      false,
+      "older host copy must not overwrite the newer guest copy",
+    );
+  } finally { f.controller.dispose(); }
+});
+
+test("F6: guest copy arriving right after becoming visible still wins over an older hidden-period host copy", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    f.controller.setVisible(false);
+    f.host({ text: "older host copy while hidden" });
+
+    // Pause the immediate poll triggered by setVisible(true) so the guest push
+    // arrives while cached revision is still stale from the hidden period.
+    let releaseRead;
+    f.readDelay(new Promise(resolve => { releaseRead = resolve; }));
+    f.controller.setVisible(true);
+    await settle();
+
+    f.guest({ text: "guest copy during visibility resume" });
+    await settle();
+    releaseRead();
+    await settle();
+
+    assert.deepEqual(f.writes, [{ text: "guest copy during visibility resume" }]);
+    assert.equal(f.sent.some(value => value.text === "older host copy while hidden"), false);
+  } finally { f.controller.dispose(); }
+});
+
+test("F6: a concurrent host copy during a hidden-period guest write still supersedes it", async () => {
+  const f = fixture();
+  try {
+    await settle();
+    f.controller.setVisible(false);
+    f.host({ text: "older host copy while hidden" });
+
+    let releaseWrite;
+    f.writeDelay(new Promise(resolve => { releaseWrite = resolve; }));
+    f.guest({ text: "guest copy" });
+    await settle();
+
+    // A genuinely newer host copy occurs while the guest write is in flight.
+    f.host({ text: "brand new host copy" });
+    releaseWrite();
+    await settle(); await settle();
+
+    assert.deepEqual(f.writes, []);
+    assert.deepEqual(f.sent.at(-1), { text: "brand new host copy" });
+  } finally { f.controller.dispose(); }
+});

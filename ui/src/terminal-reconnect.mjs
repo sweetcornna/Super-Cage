@@ -55,10 +55,24 @@ export function terminalStreamPath(id, offset, viewer) {
 
 // terminalViewer is this page's identity for one terminal, the same on every
 // reconnect: the server keeps the size and answer rules for this view. Two
-// pages (two windows) are two viewers. Bounded in LRU order so closed
-// terminals do not accumulate over long sessions.
+// pages (two windows) are two viewers. Open terminals are pinned via
+// retainTerminalViewer/releaseTerminalViewer so they are never evicted, while
+// closed terminals are bounded in LRU order so they do not accumulate.
 const maxTerminalViewers = 64;
 const terminalViewers = new Map();
+const activeTerminalViewers = new Map();
+
+function pruneClosedTerminalViewers() {
+  let closed = terminalViewers.size - activeTerminalViewers.size;
+  if (closed <= maxTerminalViewers) return;
+  for (const id of terminalViewers.keys()) {
+    if (activeTerminalViewers.has(id)) continue;
+    terminalViewers.delete(id);
+    closed -= 1;
+    if (closed <= maxTerminalViewers) break;
+  }
+}
+
 export function terminalViewer(id) {
   if (terminalViewers.has(id)) {
     const existing = terminalViewers.get(id);
@@ -66,14 +80,26 @@ export function terminalViewer(id) {
     terminalViewers.set(id, existing);
     return existing;
   }
-  if (terminalViewers.size >= maxTerminalViewers) {
-    const oldest = terminalViewers.keys().next().value;
-    if (oldest !== undefined) terminalViewers.delete(oldest);
-  }
   const bytes = crypto.getRandomValues(new Uint8Array(12));
   const created = "web-" + Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
   terminalViewers.set(id, created);
+  pruneClosedTerminalViewers();
   return created;
+}
+
+export function retainTerminalViewer(id) {
+  activeTerminalViewers.set(id, (activeTerminalViewers.get(id) || 0) + 1);
+  return terminalViewer(id);
+}
+
+export function releaseTerminalViewer(id) {
+  const remaining = (activeTerminalViewers.get(id) || 0) - 1;
+  if (remaining > 0) {
+    activeTerminalViewers.set(id, remaining);
+    return;
+  }
+  activeTerminalViewers.delete(id);
+  pruneClosedTerminalViewers();
 }
 
 // terminalHistoryPlan reads a history marker. The bytes that follow it are
