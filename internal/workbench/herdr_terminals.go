@@ -438,14 +438,28 @@ func (s *Server) openHerdrViewer(ctx context.Context, id string) (*terminalSessi
 	if !ok {
 		return old, nil
 	}
-	if !s.op.TryLock() {
-		return nil, errTerminalBusy
+	for attempt := 0; attempt < 2; attempt++ {
+		if !s.op.TryLock() {
+			return nil, errTerminalBusy
+		}
+		session, err := s.openHerdrViewerLocked(id, view)
+		s.op.Unlock()
+		if !errors.Is(err, errEnsureAgentRuntimeNeeded) {
+			return session, err
+		}
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		ensureErr := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		if ensureErr != nil {
+			return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+		}
 	}
-	defer s.op.Unlock()
+	return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+}
+
+func (s *Server) openHerdrViewerLocked(id string, view herdrView) (*terminalSession, error) {
 	if current := s.terminals.get(id); current != nil && !current.finished() {
 		return current, nil
-	} else if current != nil {
-		s.terminals.remove(id)
 	}
 	s.mu.Lock()
 	closing, ready := s.closing, s.ready
@@ -455,6 +469,12 @@ func (s *Server) openHerdrViewer(ctx context.Context, id string) (*terminalSessi
 	}
 	if !ready || !s.vmRunning() || s.busy() {
 		return nil, errTerminalNotReady
+	}
+	if !s.agentRuntimeInstalled() {
+		return nil, errEnsureAgentRuntimeNeeded
+	}
+	if current := s.terminals.get(id); current != nil {
+		s.terminals.remove(id)
 	}
 	workspace := view.Workspace
 	if workspace == "" {

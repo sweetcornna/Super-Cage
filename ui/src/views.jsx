@@ -21,6 +21,7 @@ import { readClipboardContent, transferFiles, hasFiles, imagePayload, prepareCli
 import { terminalClipboardText } from "./terminal-clipboard.mjs";
 import {
   terminalConnectTimeoutMs, terminalHistoryPlan, terminalKeepaliveMessage, terminalKeepaliveMs, terminalLiveness,
+  releaseTerminalViewer, retainTerminalViewer,
   terminalNoticeDelayMs, terminalProbeMs, terminalReconnectPlan, terminalStreamPath, terminalSuspendMs, terminalViewer, terminalWatchdogMs,
 } from "./terminal-reconnect.mjs";
 import { sendFiles, shellFilePaths } from "./file-transfer";
@@ -841,10 +842,12 @@ export function TerminalView({
     });
     const observer = new ResizeObserver(resize);
     observer.observe(box.current);
+    retainTerminalViewer(session.id);
     resize();
     connect();
     return () => {
       disposed = true;
+      releaseTerminalViewer(session.id);
       clearTimeout(startupTimer);
       clearTimeout(suspendTimer);
       streamVisibility.current = null;

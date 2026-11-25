@@ -23,7 +23,9 @@ import {
 import { api } from "./api";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
+import { agentAccountsPath, createAgentAccountsSequencer } from "./agent-accounts-state.mjs";
 import { projectName } from "./workspace-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./agent-accounts.css";
 
 const STRATEGY_LABELS = {
@@ -445,6 +447,7 @@ export function AgentAccountsPanel({
   onOpenSettings,
   onChanged,
 }) {
+  const windowVisible = useWindowVisibility();
   const [state, setState] = useState(null);
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
@@ -462,33 +465,34 @@ export function AgentAccountsPanel({
   const [keyMaxConc, setKeyMaxConc] = useState("0");
   const [keyGroup, setKeyGroup] = useState("");
 
-  const generation = useRef(0);
+  const [sequencer] = useState(() => createAgentAccountsSequencer());
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const load = useCallback(async (forceRefresh = false) => {
-    const req = ++generation.current;
+    const req = sequencer.begin();
     setLoading(true);
     try {
-      const params = new URLSearchParams();
-      if (workspace) params.set("workspace", workspace);
-      if (forceRefresh) params.set("refresh", "1");
-      const qs = params.toString() ? `?${params.toString()}` : "";
-      const result = await api(`/agent-clis/${encodeURIComponent(agentId)}/accounts${qs}`);
-      if (generation.current === req) {
+      const result = await api(agentAccountsPath(agentId, { workspace, forceRefresh }));
+      if (sequencer.isCurrent(req)) {
         setState(result);
         setError("");
         setKeyEnvVar((prev) => prev || result.agent?.auth?.api_key_env_vars?.[0] || "");
       }
     } catch (e) {
-      if (generation.current === req) setError(e.message);
+      if (sequencer.isCurrent(req)) setError(e.message);
     } finally {
-      if (generation.current === req) setLoading(false);
+      if (sequencer.isCurrent(req)) setLoading(false);
     }
-  }, [agentId, workspace]);
+  }, [agentId, workspace, sequencer]);
 
   useEffect(() => {
     void load(false);
-    return () => { generation.current++; };
-  }, [load]);
+    return () => { sequencer.invalidate(); };
+  }, [load, sequencer]);
 
   // Lightweight clock ONLY while at least one account is cooling down or has a live quota reset countdown.
   const hasCooldown = Boolean(state?.accounts?.some((a) => (a.cooldown_until || 0) > now));
@@ -496,25 +500,31 @@ export function AgentAccountsPanel({
     (a.quota?.five_hour?.resets_at || 0) > now || (a.quota?.seven_day?.resets_at || 0) > now,
   ));
   useEffect(() => {
-    if (!hasCooldown && !hasQuotaCountdown) return;
+    if (!windowVisible || (!hasCooldown && !hasQuotaCountdown)) return;
+    setNow(Math.floor(Date.now() / 1000));
     const intervalMs = hasCooldown ? 1000 : 30000;
     const timer = setInterval(() => setNow(Math.floor(Date.now() / 1000)), intervalMs);
     return () => clearInterval(timer);
-  }, [hasCooldown, hasQuotaCountdown]);
+  }, [hasCooldown, hasQuotaCountdown, windowVisible]);
 
   const mutate = async (body) => {
+    const req = sequencer.beginMutation();
+    setLoading(false);
     setSubmitting(true);
     setError("");
     try {
-      const result = await api(`/agent-clis/${encodeURIComponent(agentId)}/accounts`, body);
-      setState(result);
+      const result = await api(agentAccountsPath(agentId, { workspace }), body);
+      if (sequencer.isCurrent(req)) {
+        setState(result);
+      }
       onChanged?.();
       return result;
     } catch (e) {
-      setError(e.message);
+      if (sequencer.isCurrent(req)) setError(e.message);
       throw e;
     } finally {
-      setSubmitting(false);
+      const stillSubmitting = sequencer.endMutation();
+      if (mounted.current) setSubmitting(stillSubmitting);
     }
   };
 

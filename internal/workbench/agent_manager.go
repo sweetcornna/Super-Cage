@@ -3,21 +3,19 @@ package workbench
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 	"time"
 
-	"al.essio.dev/pkg/shellescape"
-	"github.com/klauspost/compress/gzip"
 	"github.com/sylvinus/agent-vm/internal/agentcatalog"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
@@ -84,41 +82,42 @@ type agentDefaultProbeCall struct {
 	err  error
 }
 
+type agentConfirmCall struct {
+	done chan struct{}
+	err  error
+}
+
 type agentManager struct {
-	mu             sync.Mutex
-	flushMu        sync.Mutex
-	storeLoaded    bool
-	store          agentStoreData
-	poolsLoaded    bool
-	pools          map[string]*agentAccountPool
-	poolsDirty     bool
-	poolsGen       uint64
-	lastWrittenGen uint64
-	closed         bool
-	flushTimer     *time.Timer
-	probeCache     agentProbeSnapshot
-	probeAt        time.Time
-	probeGen       uint64
-	probeInflight  *agentProbeCall
-	bgProbing      bool
-	defaultCache   map[string]*agentDefaultProbeEntry
-	lastPick       map[string]string
-	recent         map[string]map[string]claudeProjectPick
-	loginNotice    map[string]string
+	mu               sync.Mutex
+	flushMu          sync.Mutex
+	storeLoaded      bool
+	store            agentStoreData
+	poolsLoaded      bool
+	pools            map[string]*agentAccountPool
+	poolsDirty       bool
+	poolsGen         uint64
+	lastWrittenGen   uint64
+	closed           bool
+	flushTimer       *time.Timer
+	probeCache       agentProbeSnapshot
+	probeAt          time.Time
+	probeGen         uint64
+	probeInflight    *agentProbeCall
+	bgProbing        bool
+	defaultCache     map[string]*agentDefaultProbeEntry
+	confirmInflight  map[string]*agentConfirmCall
+	pendingAttempted map[string]time.Time
+	lastPick         map[string]string
+	recent           map[string]map[string]claudeProjectPick
+	loginNotice      map[string]string
 	// Test hooks allow deterministic unit tests without an SSH VM.
 	probeHook   func(context.Context, []agentcatalog.AgentSpec, bool) (agentProbeSnapshot, error)
 	runtimeHook func(context.Context, string, any, any) error
 }
 
-var agentRuntimeEncoded = func() string {
-	var compressed bytes.Buffer
-	writer, _ := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
-	_, _ = writer.Write([]byte(cage.AgentRuntimeHelper))
-	_ = writer.Close()
-	return cliTransport85(compressed.Bytes())
-}()
+var agentRuntimeSpec = newGuestScriptSpec(".local/share/cage/agent-runtime", 0o700, cage.AgentRuntimeHelper)
 
-var agentRuntimeHash = fmt.Sprintf("%x", sha256.Sum256([]byte(cage.AgentRuntimeHelper)))
+var agentRuntimeHash = agentRuntimeSpec.hash
 
 func (s *Server) guestPythonBinary() string {
 	if s.macosGuest != nil {
@@ -128,37 +127,66 @@ func (s *Server) guestPythonBinary() string {
 }
 
 func (s *Server) guestShellWrapper(script string) string {
-	if s.macosGuest != nil {
-		return "exec /bin/zsh -c " + shellescape.Quote("exec "+script)
-	}
-	return "exec /bin/bash --noprofile --norc -c " + shellescape.Quote("exec "+script)
+	return s.guestShellScript("exec " + script)
 }
 
-// agentRuntimeCommand executes cage-agent-runtime, transparently bootstrapping
-// the exact SHA-256-matched version into ~/.local/share/cage/agent-runtime when
-// an older running guest hasn't re-synced /usr/local/bin/cage-agent-runtime yet.
+// agentRuntimeCommand returns a constant-size command that runs the
+// SHA-256-pinned cage-agent-runtime installed under
+// ~/.local/share/cage/agent-runtime/<hash>.py. Callers must ensure the script
+// is installed on the guest via ensureAgentRuntime / runWithGuestScript.
 func agentRuntimeCommand(subcommand string) string {
 	return agentRuntimeCommandWithPython("python3", subcommand)
 }
 
 func agentRuntimeCommandWithPython(pythonBin, subcommand string) string {
-	if pythonBin == "" {
-		pythonBin = "python3"
+	return agentRuntimeSpec.shellCommand(pythonBin, subcommand)
+}
+
+func (s *Server) agentRuntimeSSHCommand(ctx context.Context, subcommand string) *exec.Cmd {
+	command := s.guestShellScript(agentRuntimeSpec.guardedShellBody(s.guestPythonBinary(), subcommand))
+	return s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
+}
+
+var (
+	statusProbeTimeout          = 6 * time.Second
+	coldEnsureTimeout           = 15 * time.Second
+	errEnsureAgentRuntimeNeeded = errors.New("agent runtime ensure needed")
+)
+
+func (s *Server) agentRuntimeInstalled() bool {
+	if s.agentCLIs.runtimeHook != nil || s.windowsGuest != nil {
+		return true
 	}
-	bootstrap := fmt.Sprintf(`import base64,gzip,os,pathlib,sys,tempfile
-d=pathlib.Path.home()/".local/share/cage/agent-runtime"
-d.mkdir(parents=True,exist_ok=True,mode=0o700)
-p=d/("%s.py")
-if not p.exists():
- data=gzip.decompress(base64.b85decode("%s"))
- with tempfile.NamedTemporaryFile(dir=d,delete=False) as f:
-  f.write(data)
-  t=f.name
- os.chmod(t,0o700)
- os.replace(t,p)
-os.execv(sys.executable,[sys.executable,"-I",str(p),*sys.argv[1:]])
-`, agentRuntimeHash, agentRuntimeEncoded)
-	return shellescape.QuoteCommand([]string{pythonBin, "-I", "-c", bootstrap, subcommand})
+	return s.guestScripts.has(agentRuntimeSpec.cacheKey())
+}
+
+func (s *Server) statusProbeWaitTimeout() time.Duration {
+	if s.agentRuntimeInstalled() {
+		return statusProbeTimeout
+	}
+	return coldEnsureTimeout + statusProbeTimeout
+}
+
+func (s *Server) ensureAgentRuntime(ctx context.Context) error {
+	if s.agentCLIs.runtimeHook != nil || s.windowsGuest != nil {
+		return nil
+	}
+	return s.ensureGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary())
+}
+
+func (s *Server) runAgentRuntimeJob(ctx context.Context, subcommand string, input any) error {
+	payload, err := json.Marshal(input)
+	if err != nil {
+		return err
+	}
+	return s.runWithGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary(), func() (int, error) {
+		cmd := s.agentRuntimeSSHCommand(ctx, subcommand)
+		cmd.Stdin = bytes.NewReader(payload)
+		cmd.Stdout = s.jobs.execution()
+		cmd.Stderr = s.jobs.execution()
+		err := cmd.Run()
+		return exitCodeOf(err), err
+	})
 }
 
 func cloneAgentStore(store agentStoreData) agentStoreData {
@@ -264,6 +292,15 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 	return cmd
 }
 
+func agentRuntimeUsesSharedSession(subcommand string) bool {
+	switch subcommand {
+	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list":
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input any, output any) error {
 	if hook := s.agentCLIs.runtimeHook; hook != nil {
 		return hook(ctx, subcommand, input, output)
@@ -275,13 +312,43 @@ func (s *Server) runAgentRuntime(ctx context.Context, subcommand string, input a
 	if err != nil {
 		return err
 	}
-	command := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), subcommand))
-	cmd := s.sshCommand(ctx, "-T", s.sshTarget(), "--", command)
-	cmd.Stdin = bytes.NewReader(data)
+	var out []byte
 	var stderr fileControlStderr
-	cmd.Stderr = &stderr
-	cmd.WaitDelay = 2 * time.Second
-	out, err := cmd.Output()
+	useShared := s.macosGuest == nil && agentRuntimeUsesSharedSession(subcommand) && len(data) <= 48<<10
+	err = s.runWithGuestScript(ctx, agentRuntimeSpec, s.guestPythonBinary(), func() (int, error) {
+		stderr.data = stderr.data[:0]
+		if useShared {
+			script := agentRuntimeSpec.guardedSharedScript(s.guestPythonBinary(), data, subcommand)
+			reply, ok, sharedErr := s.guestShared(ctx, script)
+			if ok {
+				if sharedErr == nil {
+					if reply.code == guestScriptMissingExitCode {
+						return guestScriptMissingExitCode, fmt.Errorf("exit status %d", reply.code)
+					}
+					if len(reply.stdout) <= 64<<10 {
+						out = reply.stdout
+						_, _ = stderr.Write(reply.stderr)
+						if reply.code != 0 {
+							return reply.code, fmt.Errorf("exit status %d", reply.code)
+						}
+						return 0, nil
+					}
+					// Oversized reply (> 64 KiB): fall through to dedicated SSH below.
+				} else if ctx.Err() != nil {
+					return -1, sharedErr
+				}
+			} else if ctx.Err() != nil {
+				return -1, ctx.Err()
+			}
+		}
+		cmd := s.agentRuntimeSSHCommand(ctx, subcommand)
+		cmd.Stdin = bytes.NewReader(data)
+		cmd.Stderr = &stderr
+		cmd.WaitDelay = 2 * time.Second
+		var runErr error
+		out, runErr = cmd.Output()
+		return exitCodeOf(runErr), runErr
+	})
 	if err != nil {
 		msg := strings.TrimSpace(diagnostics.Redact(string(stderr.data)))
 		if msg != "" && len(msg) <= 240 {
@@ -390,8 +457,17 @@ func (s *Server) invalidateAgentProbeCache() {
 	s.agentCLIs.mu.Unlock()
 }
 
+func (m *agentManager) resetGuestCaches() {
+	m.mu.Lock()
+	m.defaultCache = nil
+	m.pendingAttempted = nil
+	m.loginNotice = nil
+	m.mu.Unlock()
+}
+
 // triggerBackgroundAgentProbe spawns at most one async probe refresh so
-// stale-while-revalidate callers never pile up goroutines.
+// stale-while-revalidate callers never pile up goroutines. It registers as a
+// server activity so closeService waits for it before returning.
 func (s *Server) triggerBackgroundAgentProbe(specs []agentcatalog.AgentSpec) {
 	m := &s.agentCLIs
 	m.mu.Lock()
@@ -402,14 +478,23 @@ func (s *Server) triggerBackgroundAgentProbe(specs []agentcatalog.AgentSpec) {
 	m.bgProbing = true
 	m.mu.Unlock()
 
+	actCtx, finish, err := s.beginActivity(s.lifetimeContext())
+	if err != nil {
+		m.mu.Lock()
+		m.bgProbing = false
+		m.mu.Unlock()
+		return
+	}
+
 	specsCopy := slices.Clone(specs)
 	go func() {
+		defer finish()
 		defer func() {
 			m.mu.Lock()
 			m.bgProbing = false
 			m.mu.Unlock()
 		}()
-		ctx, cancel := context.WithTimeout(s.lifetimeContext(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(actCtx, 15*time.Second)
 		defer cancel()
 		_, _ = s.probeAllAgents(ctx, specsCopy, false)
 	}()
@@ -608,13 +693,7 @@ func (s *Server) installAgentHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.launch(w, "agent-install", func() error {
 		s.setMessage(fmt.Sprintf("正在通过官方渠道安装 %s…", spec.Name))
-		payload, _ := json.Marshal(map[string]any{"spec": spec, "channel": ch})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "install", map[string]any{"spec": spec, "channel": ch}); err != nil {
 			return fmt.Errorf("安装 %s 失败，请查看操作详情排查网络或依赖问题", spec.Name)
 		}
 		s.invalidateAgentProbeCache()
@@ -664,13 +743,7 @@ func (s *Server) uninstallAgentHTTP(w http.ResponseWriter, r *http.Request) {
 
 	s.launch(w, "agent-uninstall", func() error {
 		s.setMessage(fmt.Sprintf("正在卸载 %s（保留账号与项目数据）…", spec.Name))
-		payload, _ := json.Marshal(map[string]any{"spec": spec, "channel": ch})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "uninstall", map[string]any{"spec": spec, "channel": ch}); err != nil {
 			return fmt.Errorf("卸载 %s 失败，请查看操作详情", spec.Name)
 		}
 		s.invalidateAgentProbeCache()
@@ -853,6 +926,10 @@ func (s *Server) deleteCustomAgentHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		delete(store.Configs, id)
 		delete(store.LastProbe, id)
+		delete(s.agentCLIs.defaultCache, id)
+		delete(s.agentCLIs.recent, id)
+		delete(s.agentCLIs.lastPick, id)
+		delete(s.agentCLIs.loginNotice, id)
 		saveErr = s.saveAgentStoreLocked(store)
 	}()
 	if saveErr != nil {

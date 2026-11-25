@@ -302,6 +302,9 @@ func (s *Server) attachMacOSGuest() error {
 	newlyReady := !s.ready && err == nil
 	checkAfterReconnect := newlyReady && !s.closing && !s.networkPaused && !s.jobs.snapshot().Running
 	s.ready = err == nil
+	if newlyReady {
+		s.wakeMonitorsLocked()
+	}
 	s.guestUpdateError = ""
 	if err != nil {
 		s.guestUpdateError = err.Error()
@@ -383,12 +386,17 @@ func (s *Server) syncMacOSRegion(ctx context.Context, cfg cage.Config) error {
 
 func (s *Server) stopMacOSGuest() error {
 	s.mu.Lock()
+	browser := s.browserControl
+	s.browserControl = nil
 	s.ready = false
 	s.macSetupProjectsChecked = time.Time{}
 	s.macSetupSharingConfirmed = false
 	s.macSetupSharingAttempt = time.Time{}
 	s.macSetupSharingStatus = macOSScreenSharingStatus{}
 	s.mu.Unlock()
+	if browser != nil {
+		browser.close()
+	}
 	s.closeMacOSScreenSharing()
 	s.closeWindowsBrowser()
 	s.terminals.closeAll()

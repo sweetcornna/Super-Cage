@@ -263,7 +263,11 @@ func (s *Server) attachWindowsGuestContext(parent context.Context) error {
 		if s.storageRecoveryError != "" {
 			return errors.New(s.storageRecoveryError)
 		}
+		newlyActive := (!s.ready && err == nil) || (!s.windowsState.Running && state.Running)
 		s.windowsState, s.ready = state, err == nil
+		if newlyActive {
+			s.wakeMonitorsLocked()
+		}
 		s.guestUpdateError = ""
 		if err != nil {
 			s.guestUpdateError = err.Error()
@@ -300,9 +304,13 @@ func (s *Server) attachWindowsGuestContext(parent context.Context) error {
 		s.mu.Unlock()
 		return err
 	}
+	wasRunning := s.windowsState.Running
 	s.windowsState = state
 	newlyReady := !s.ready && err == nil
 	s.ready = err == nil
+	if newlyReady || (!wasRunning && state.Running) {
+		s.wakeMonitorsLocked()
+	}
 	s.guestUpdateError = ""
 	if err != nil {
 		s.guestUpdateError = err.Error()

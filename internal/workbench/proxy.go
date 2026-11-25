@@ -28,6 +28,7 @@ type proxyInput struct {
 	NodeID       string   `json:"node_id"`
 	NodeIDs      []string `json:"node_ids"`
 	Port         int      `json:"port"`
+	scheduled    bool
 }
 
 func (s *Server) proxyStatus(w http.ResponseWriter, r *http.Request) {
@@ -176,6 +177,9 @@ func (s *Server) subscriptionClient(host bool) (*http.Client, error) {
 	}}, nil
 }
 func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64) error {
+	if action == "refresh" {
+		s.recordProxyRefreshAttempt(in.ID)
+	}
 	p, err := managedproxy.Load(s.profile)
 	if err != nil {
 		return err
@@ -319,6 +323,9 @@ func (s *Server) changeProxy(action string, in proxyInput, resumeVersion *uint64
 			if err = managedproxy.Stop(s.profile); err != nil {
 				return err
 			}
+			return p.Save(s.profile)
+		}
+		if action == "refresh" && in.scheduled && !s.vmRunning() {
 			return p.Save(s.profile)
 		}
 		return s.applyProxy(p, cfg, resumeVersion, false)
@@ -536,6 +543,45 @@ func (s *Server) proxyLogs(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	jsonReply(w, map[string]any{"lines": lines})
 }
+const proxySubscriptionRetryInterval = 15 * time.Minute
+
+func (s *Server) recordProxyRefreshAttempt(id string) {
+	if id == "" {
+		return
+	}
+	now := time.Now()
+	s.mu.Lock()
+	if s.proxyRefreshAttempted == nil {
+		s.proxyRefreshAttempted = map[string]time.Time{}
+	}
+	for key, at := range s.proxyRefreshAttempted {
+		if now.Sub(at) > proxySubscriptionRetryInterval {
+			delete(s.proxyRefreshAttempted, key)
+		}
+	}
+	s.proxyRefreshAttempted[id] = now
+	s.mu.Unlock()
+}
+
+func (s *Server) proxyDueSource(p managedproxy.Store) (managedproxy.Source, bool) {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, src := range p.Sources {
+		if src.URL == "" || src.Interval <= 0 || now.Sub(src.Updated) < time.Duration(src.Interval)*time.Hour {
+			continue
+		}
+		attempted := src.Attempted
+		if at := s.proxyRefreshAttempted[src.ID]; at.After(attempted) {
+			attempted = at
+		}
+		if now.Sub(attempted) > proxySubscriptionRetryInterval {
+			return src, true
+		}
+	}
+	return managedproxy.Source{}, false
+}
+
 func (s *Server) refreshProxySubscriptions() {
 	if s.busy() {
 		return
@@ -544,12 +590,16 @@ func (s *Server) refreshProxySubscriptions() {
 	if err != nil {
 		return
 	}
-	for _, src := range p.Sources {
-		if src.URL != "" && src.Interval > 0 && time.Since(src.Updated) >= time.Duration(src.Interval)*time.Hour && time.Since(src.Attempted) > 15*time.Minute {
-			// Automatic refresh never opts into a host-network fallback.
-			_, _ = s.submitJob("proxy-update", func() error { return s.changeProxy("refresh", proxyInput{ID: src.ID}, nil) })
-			return
-		}
+	src, due := s.proxyDueSource(p)
+	if !due {
+		return
+	}
+	// Automatic refresh never opts into a host-network fallback.
+	if _, err := s.submitJob("proxy-update", func() error {
+		s.recordProxyRefreshAttempt(src.ID)
+		return s.changeProxy("refresh", proxyInput{ID: src.ID, scheduled: true}, nil)
+	}); err == nil {
+		s.recordProxyRefreshAttempt(src.ID)
 	}
 }
 

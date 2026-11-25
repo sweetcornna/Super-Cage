@@ -5,6 +5,7 @@ import { InlineSelect } from "./inline-select";
 import { ProviderMark } from "./provider-mark";
 import { createSessionList } from "./session-list.mjs";
 import { isCodexSession, purgeCopy, selectionProvider, sessionListPath } from "./session-provider.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./cli-sessions.css";
 
 export const desktopSessionRequest = (path, options = {}) => api("/cli" + path, options.body);
@@ -79,8 +80,10 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
   const [selected, setSelected] = useState(new Set());
   const [bulkConfirm, setBulkConfirm] = useState(null);
   const [resultMessage, setResultMessage] = useState("");
+  const windowVisible = useWindowVisibility();
   const [progress, setProgress] = useState(null);
   useEffect(() => {
+    if (busy || !windowVisible) return;
     let live = true, timer;
     const load = async () => {
       try {
@@ -96,9 +99,9 @@ export function ArchivedSessions({ request = desktopSessionRequest, ready, onRes
       } catch (error) { if (live) setReadError(error.message); }
       if (live) timer = setTimeout(load, 5000);
     };
-    if (!busy) void load();
+    void load();
     return () => { live = false; clearTimeout(timer); };
-  }, [request, revision, busy]);
+  }, [request, revision, busy, windowVisible]);
   const change = async (items, operation) => {
     if (busy) return;
     setBusy(true); setError(""); setResultMessage("");

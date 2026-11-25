@@ -5,6 +5,7 @@ import { InlineSelect } from "./inline-select";
 import { EmptyState } from "./drawings";
 import crabIcon from "./claude-account-crab.svg";
 import { GROUP_SENTENCE, MANUAL_SENTENCE, OFFER_TEXT, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer, UNGROUPED_LABEL, ungroupedChange } from "./claude-scheduling-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./claude-accounts.css";
 
 // Ordinary reads never start an upstream usage query.
@@ -67,12 +68,13 @@ const QuotaTime = createContext(0);
 // All rows share a clock. Only quota readings subscribe; a tick doesn't render
 // the account forms or fetch data. Sleep until the next visible unit changes.
 export function QuotaClock({ accounts, children }) {
+  const windowVisible = useWindowVisibility();
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
+    if (!windowVisible) return;
     let timer;
     const update = () => {
       clearTimeout(timer);
-      if (document.hidden) return;
       const millis = Date.now();
       const seconds = Math.floor(millis / 1000);
       setNow(seconds);
@@ -94,9 +96,8 @@ export function QuotaClock({ accounts, children }) {
       if (Number.isFinite(delay)) timer = setTimeout(update, delay * 1000 - millis % 1000);
     };
     update();
-    document.addEventListener("visibilitychange", update);
-    return () => { clearTimeout(timer); document.removeEventListener("visibilitychange", update); };
-  }, [accounts]);
+    return () => { clearTimeout(timer); };
+  }, [accounts, windowVisible]);
   return <QuotaTime.Provider value={now}>{children}</QuotaTime.Provider>;
 }
 
@@ -298,6 +299,7 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
 }
 
 export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, login, onConfirm }) {
+  const windowVisible = useWindowVisibility();
   const { accounts, detected, detectionStatus, detectionError, loginNotice, usageRunning, usageUnavailable, load, error } = store;
   const [busy, setBusy] = useState(false);
   const [requestingUsage, setRequestingUsage] = useState(false);
@@ -335,9 +337,10 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
     return () => { mounted = false; document.removeEventListener("visibilitychange", openPanel); };
   }, [load, running]);
   useEffect(() => {
-    const timer = setInterval(() => { if (!document.hidden) load(undefined, true); }, checking ? 2000 : 12000);
+    if (!windowVisible || !running) return;
+    const timer = setInterval(() => load(undefined, true), checking ? 2000 : 12000);
     return () => clearInterval(timer);
-  }, [load, checking]);
+  }, [load, checking, running, windowVisible]);
   const perform = async (operation) => {
     if (busy) return;
     setBusy(true);

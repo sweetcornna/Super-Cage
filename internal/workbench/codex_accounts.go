@@ -88,6 +88,7 @@ type codexAccountManager struct {
 	defaultChecked time.Time
 	defaultReading codexGuestSnapshot
 	defaultError   error
+	defaultGate    chan struct{}
 	// unrecorded is a pending login directory last seen holding a sign-in
 	// that cannot become an account, such as an API key login.
 	unrecorded string

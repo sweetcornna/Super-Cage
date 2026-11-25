@@ -2,11 +2,13 @@ import React, { useEffect, useState } from "react";
 import { api } from "./api";
 import { SafetyMessage } from "./safety-message";
 import { automaticApply, resourceAllocationView } from "./resource-allocation.mjs";
+import { useWindowVisibility } from "./window-visibility";
 
 const gib = (bytes) => `${(bytes / 1073741824).toFixed(1)} GiB`;
 const allocationFrom = (data) => ({ automatic: data.automatic, memory_gib: data.memory_gib, cpus: data.cpus });
 
 export function ResourceSettings({ status, onConfirm, onDirtyChange }) {
+  const windowVisible = useWindowVisibility();
   const [data, setData] = useState(null);
   const [error, setError] = useState("");
   const [readError, setReadError] = useState("");
@@ -30,7 +32,9 @@ export function ResourceSettings({ status, onConfirm, onDirtyChange }) {
     } catch (e) { setError(e.message); }
     finally { setStarting(false); }
   };
+  const pollActive = Boolean(status.vm_running || status.job?.running);
   useEffect(() => {
+    if (!windowVisible) return;
     let live = true;
     let timer;
     const refresh = async () => {
@@ -38,11 +42,11 @@ export function ResourceSettings({ status, onConfirm, onDirtyChange }) {
         const next = await api("/environment/resources");
         if (live) { setData(next); setReadError(""); }
       } catch (e) { if (live) setReadError(e.message); }
-      if (live) timer = setTimeout(refresh, 4000);
+      if (live && pollActive) timer = setTimeout(refresh, 4000);
     };
     refresh();
     return () => { live = false; clearTimeout(timer); };
-  }, [status.vm_running, status.job?.running]);
+  }, [pollActive, windowVisible]);
   const apply = async () => {
     if (!(await onConfirm({
       title: "重启并应用已保存的资源配置？",

@@ -103,6 +103,7 @@ type Server struct {
 	tickets                                          map[string]time.Time
 	browserControl                                   *browserClient
 	controlSession                                   guestSession
+	guestScripts                                     guestScriptCache
 	nativeControl                                    nativeControl
 	nativeBrowserUsed                                atomic.Int64
 	windowsBrowserControl                            *windowsBrowserClient
@@ -139,12 +140,16 @@ type Server struct {
 	recovery                                         networkRecovery
 	locations                                        map[string]Location
 	monitorCancel                                    context.CancelFunc
+	monitorWake                                      chan struct{}
+	monitorLastResult                                map[string]string
+	monitorLastLogged                                map[string]time.Time
 	networkMonitorDone                               chan struct{}
 	projectOperationWaiters                          int
 	monitorSafetyOp                                  sync.Mutex
 	safetyOp                                         sync.Mutex
 	networkPaused                                    bool
 	proxyNetworkLost                                 bool
+	proxyRefreshAttempted                            map[string]time.Time
 	checkCancel                                      context.CancelFunc
 	lifeContext                                      context.Context
 	lifeCancel                                       context.CancelFunc
@@ -805,6 +810,9 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	terminals := s.terminalsRevision()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.ready && running {
+		s.wakeMonitorsLocked()
+	}
 	_, e := os.Stat(filepath.Join(s.profile, "previous-profile.json"))
 	projectError := ""
 	if len(s.projectErrors) > 0 {

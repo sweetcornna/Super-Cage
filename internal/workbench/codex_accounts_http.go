@@ -175,20 +175,23 @@ func (s *Server) codexPanelView(ctx context.Context) (codexPanel, codexAccountLi
 	m := &s.codexAccounts
 	m.mu.Lock()
 	list, err := s.loadCodexAccounts()
-	m.mu.Unlock()
 	if err != nil {
+		m.mu.Unlock()
 		return view, list, err
 	}
 	if supported && ready && !update && list.PendingLogin != "" && !s.codexLoginActive(list.PendingLogin) {
+		pending := list.PendingLogin
+		m.mu.Unlock()
 		// Restore a login that completed before a controller restart.
-		_ = s.recoverCodexPending(ctx, list.PendingLogin, false)
+		_ = s.recoverCodexPending(ctx, pending, false)
+		m.mu.Lock()
+		list, err = s.loadCodexAccounts()
+		if err != nil {
+			m.mu.Unlock()
+			return view, list, err
+		}
 	}
-	m.mu.Lock()
 	defer m.mu.Unlock()
-	list, err = s.loadCodexAccounts()
-	if err != nil {
-		return view, list, err
-	}
 	view.Accounts, view.LoginNotice, view.Scheduling = list.Accounts, m.loginNotice, list.Scheduling
 	view.UsagePanelRunning = m.panelRunning
 	view.LoginPending = list.PendingLogin != "" && s.codexLoginActive(list.PendingLogin)
@@ -202,12 +205,16 @@ func (s *Server) codexPanelView(ctx context.Context) (codexPanel, codexAccountLi
 	return view, list, nil
 }
 
-// Panel reads coalesce for 20 seconds.
+// Panel reads coalesce for 20 seconds, serializing concurrent cold probes so
+// simultaneous requests do not spawn duplicate guest reads.
 func (s *Server) inspectCodexDefault(parent context.Context) (codexGuestSnapshot, time.Time, error) {
 	epoch, unlocked := s.account.access()
 	if !unlocked {
 		return codexGuestSnapshot{}, time.Time{}, errClaudeAccessLost
 	}
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	stop := context.AfterFunc(epoch, cancel)
+	defer func() { stop(); cancel() }()
 	m := &s.codexAccounts
 	m.mu.Lock()
 	if time.Since(m.defaultChecked) < 20*time.Second {
@@ -215,10 +222,24 @@ func (s *Server) inspectCodexDefault(parent context.Context) (codexGuestSnapshot
 		m.mu.Unlock()
 		return reading, checked, err
 	}
+	if m.defaultGate == nil {
+		m.defaultGate = make(chan struct{}, 1)
+	}
+	gate := m.defaultGate
 	m.mu.Unlock()
-	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
-	stop := context.AfterFunc(epoch, cancel)
-	defer func() { stop(); cancel() }()
+	select {
+	case gate <- struct{}{}:
+		defer func() { <-gate }()
+	case <-ctx.Done():
+		return codexGuestSnapshot{}, time.Time{}, errors.New("暂时无法读取环境的 Codex 登录，请确认 Codex CLI 和环境组件可用后重试")
+	}
+	m.mu.Lock()
+	if time.Since(m.defaultChecked) < 20*time.Second {
+		reading, checked, err := m.defaultReading, m.defaultChecked, m.defaultError
+		m.mu.Unlock()
+		return reading, checked, err
+	}
+	m.mu.Unlock()
 	reading, err := s.probeCodex(ctx, "default")
 	now := time.Now()
 	if err != nil || ctx.Err() != nil {
@@ -292,6 +313,16 @@ func (s *Server) codexLoginActive(id string) bool {
 	return false
 }
 
+func (m *codexAccountManager) resetGuestCaches() {
+	m.mu.Lock()
+	m.defaultChecked = time.Time{}
+	m.defaultReading = codexGuestSnapshot{}
+	m.defaultError = nil
+	m.attempted = nil
+	m.loginNotice = ""
+	m.mu.Unlock()
+}
+
 func (m *codexAccountManager) claim(id string) *claudeRefresh {
 	if m.refreshing == nil {
 		m.refreshing = make(map[string]*claudeRefresh)
@@ -299,7 +330,11 @@ func (m *codexAccountManager) claim(id string) *claudeRefresh {
 	if m.attempted == nil {
 		m.attempted = make(map[string]time.Time)
 	}
-	m.attempted[id] = time.Now()
+	now := time.Now()
+	if _, exists := m.attempted[id]; !exists {
+		pruneAttemptedMap(m.attempted, now)
+	}
+	m.attempted[id] = now
 	call := &claudeRefresh{done: make(chan struct{})}
 	m.refreshing[id] = call
 	return call

@@ -1,12 +1,14 @@
 import React, { useEffect, useState } from "react";
 import { Activity } from "lucide-react";
 import { api } from "./api";
+import { useWindowVisibility } from "./window-visibility";
 
 export function NetworkLatency({ enabled, revision, selected }) {
+  const windowVisible = useWindowVisibility();
   const [sample, setSample] = useState(null),
     [retry, setRetry] = useState(0);
   useEffect(() => {
-    if (!enabled) return;
+    if (!enabled || !windowVisible) return;
     let cancelled = false,
       timer;
     const measure = async () => {
@@ -55,7 +57,7 @@ export function NetworkLatency({ enabled, revision, selected }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [enabled, revision, selected, retry]);
+  }, [enabled, windowVisible, revision, selected, retry]);
   return (
     <button
       className="status-latency"

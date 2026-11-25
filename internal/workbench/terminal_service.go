@@ -471,11 +471,26 @@ func (m *terminalManager) close() {
 }
 
 func (s *Server) createTerminal(input terminalRequest) (*terminalSession, error) {
-	if !s.op.TryLock() {
-		return nil, errTerminalBusy
+	for attempt := 0; attempt < 2; attempt++ {
+		if !s.op.TryLock() {
+			return nil, errTerminalBusy
+		}
+		session, err := s.createTerminalLocked(input)
+		s.op.Unlock()
+		if !errors.Is(err, errEnsureAgentRuntimeNeeded) {
+			return session, err
+		}
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		ensureErr := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		if ensureErr != nil {
+			if input.Kind == "codex" || input.Kind == "codex-login" {
+				return nil, errors.New("无法在运行环境中准备 Herdr 辅助程序，请确认环境已启动")
+			}
+			return nil, errors.New("无法在运行环境中准备 Agent 辅助程序，请确认环境已启动")
+		}
 	}
-	defer s.op.Unlock()
-	return s.createTerminalLocked(input)
+	return nil, errors.New("无法在运行环境中准备 Agent 辅助程序，请确认环境已启动")
 }
 
 // Caller holds the environment operation lock through PTY publication.
@@ -758,6 +773,11 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		script = s.herdrAttachScript(herdrAttach{Mode: "create", Name: herdrTerminalName(herdrID), Workspace: guestWorkspace,
 			Project: projectLabel, Title: herdrTitle, Kind: herdrKind, Inner: script})
 		herdrBacked = true
+	}
+	if herdrBacked || (isAgentKind && (input.Kind == "agent-login" || (agentSel.GuestID != "" && agentSel.GuestID != "default"))) {
+		if !s.agentRuntimeInstalled() {
+			return nil, errEnsureAgentRuntimeNeeded
+		}
 	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {

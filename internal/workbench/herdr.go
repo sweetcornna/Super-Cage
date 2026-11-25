@@ -1,7 +1,6 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,13 +47,21 @@ type herdrGuestStatus struct {
 	LegacyInstalled bool  `json:"legacy_installed,omitempty"`
 }
 
+type herdrProbeCall struct {
+	done   chan struct{}
+	forced bool
+	status herdrGuestStatus
+	err    error
+}
+
 type herdrManager struct {
-	opMu         sync.Mutex
-	mu           sync.Mutex
-	configLoaded bool
-	config       herdrConfig
-	statusCache  herdrGuestStatus
-	statusAt     time.Time
+	opMu          sync.Mutex
+	mu            sync.Mutex
+	configLoaded  bool
+	config        herdrConfig
+	statusCache   herdrGuestStatus
+	statusAt      time.Time
+	probeInflight *herdrProbeCall
 	// The hc terminal list and Cage's own records (herdr_terminals.go):
 	// fetchMu lets one list read run at a time, listMu guards the rest.
 	fetchMu   sync.Mutex
@@ -107,30 +114,66 @@ func (s *Server) invalidateHerdrStatus() {
 }
 
 func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestStatus, error) {
-	s.herdr.mu.Lock()
-	if !force && !s.herdr.statusAt.IsZero() && time.Since(s.herdr.statusAt) < herdrStatusTTL {
-		cached := s.herdr.statusCache
-		s.herdr.mu.Unlock()
-		return cached, nil
-	}
-	s.herdr.mu.Unlock()
+	m := &s.herdr
+	for {
+		m.mu.Lock()
+		if !force && !m.statusAt.IsZero() && time.Since(m.statusAt) < herdrStatusTTL {
+			cached := m.statusCache
+			m.mu.Unlock()
+			return cached, nil
+		}
+		if call := m.probeInflight; call != nil {
+			if !force || call.forced {
+				m.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return herdrGuestStatus{}, ctx.Err()
+				case <-call.done:
+					return call.status, call.err
+				}
+			}
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return herdrGuestStatus{}, ctx.Err()
+			case <-call.done:
+				continue
+			}
+		}
+		call := &herdrProbeCall{done: make(chan struct{}), forced: force}
+		m.probeInflight = call
+		m.mu.Unlock()
 
-	var st herdrGuestStatus
-	err := s.runAgentRuntime(ctx, "herdr-status", map[string]any{}, &st)
-	if err != nil {
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		err := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		var st herdrGuestStatus
+		if err == nil {
+			probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), statusProbeTimeout)
+			err = s.runAgentRuntime(probeCtx, "herdr-status", map[string]any{}, &st)
+			cancel()
+		}
+		if err == nil {
+			st.BinaryPath = herdrText(st.BinaryPath, 512)
+			st.Version = herdrText(st.Version, 32)
+		}
+		m.mu.Lock()
+		if err == nil {
+			m.statusCache = st
+			m.statusAt = time.Now()
+			if cfg, loadErr := s.loadHerdrConfigLocked(); loadErr == nil && cfg.InstalledHint != st.Installed {
+				cfg.InstalledHint = st.Installed
+				_ = s.saveHerdrConfigLocked(cfg)
+			}
+		}
+		call.status, call.err = st, err
+		if m.probeInflight == call {
+			m.probeInflight = nil
+		}
+		close(call.done)
+		m.mu.Unlock()
 		return st, err
 	}
-	st.BinaryPath = herdrText(st.BinaryPath, 512)
-	st.Version = herdrText(st.Version, 32)
-	s.herdr.mu.Lock()
-	s.herdr.statusCache = st
-	s.herdr.statusAt = time.Now()
-	if cfg, loadErr := s.loadHerdrConfigLocked(); loadErr == nil && cfg.InstalledHint != st.Installed {
-		cfg.InstalledHint = st.Installed
-		_ = s.saveHerdrConfigLocked(cfg)
-	}
-	s.herdr.mu.Unlock()
-	return st, nil
 }
 
 func (s *Server) herdrStatusPayload(r *http.Request, force bool) (map[string]any, error) {
@@ -156,7 +199,7 @@ func (s *Server) herdrStatusPayload(r *http.Request, force bool) (map[string]any
 	probeErr := ""
 	// Disabled means no guest call at all.
 	if cfg.Enabled && ready && runningVM && supportsManaged {
-		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+		pCtx, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 		st, err = s.probeHerdrStatus(pCtx, force)
 		cancel()
 		if err != nil {
@@ -280,13 +323,7 @@ func (s *Server) herdrInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.herdr.opMu.Lock()
 		defer s.herdr.opMu.Unlock()
 		s.setMessage("正在通过官方发布渠道安装 Herdr（herdr-core）…")
-		payload, _ := json.Marshal(map[string]any{"update": in.Update})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "herdr-install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "herdr-install", map[string]any{"update": in.Update}); err != nil {
 			return errors.New("安装 Herdr 失败，请查看操作详情排查网络或运行环境")
 		}
 		s.herdr.mu.Lock()
@@ -326,13 +363,7 @@ func (s *Server) herdrUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.herdr.opMu.Lock()
 		defer s.herdr.opMu.Unlock()
 		s.setMessage("正在卸载 Herdr（保留终端记录与设置）…")
-		payload, _ := json.Marshal(map[string]any{"force": in.Force})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "herdr-uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "herdr-uninstall", map[string]any{"force": in.Force}); err != nil {
 			return errors.New("卸载 Herdr 失败，请查看操作详情")
 		}
 		s.herdr.mu.Lock()

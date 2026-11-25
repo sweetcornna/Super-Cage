@@ -1,7 +1,6 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,14 +122,23 @@ type magpieGuestStatus struct {
 	GatewayOnly    bool   `json:"gateway_only,omitempty"`
 }
 
+type magpieProbeCall struct {
+	done   chan struct{}
+	port   int
+	forced bool
+	status magpieGuestStatus
+	err    error
+}
+
 type magpieManager struct {
-	opMu         sync.Mutex
-	mu           sync.Mutex
-	configLoaded bool
-	config       magpieConfig
-	statusCache  magpieGuestStatus
-	statusAt     time.Time
-	proxy        *t3CodeProxy
+	opMu          sync.Mutex
+	mu            sync.Mutex
+	configLoaded  bool
+	config        magpieConfig
+	statusCache   magpieGuestStatus
+	statusAt      time.Time
+	probeInflight *magpieProbeCall
+	proxy         *t3CodeProxy
 }
 
 func (s *Server) loadMagpieConfigLocked() (magpieConfig, error) {
@@ -185,33 +193,69 @@ func (s *Server) ensureMagpieProxy(ctx context.Context, cfg magpieConfig) (*t3Co
 }
 
 func (s *Server) probeMagpieStatus(ctx context.Context, port int, force bool) (magpieGuestStatus, error) {
-	s.magpie.mu.Lock()
-	if !force && !s.magpie.statusAt.IsZero() && time.Since(s.magpie.statusAt) < magpieStatusTTL && s.magpie.statusCache.Port == port {
-		cached := s.magpie.statusCache
-		s.magpie.mu.Unlock()
-		return cached, nil
-	}
-	s.magpie.mu.Unlock()
+	m := &s.magpie
+	for {
+		m.mu.Lock()
+		if !force && !m.statusAt.IsZero() && time.Since(m.statusAt) < magpieStatusTTL && m.statusCache.Port == port {
+			cached := m.statusCache
+			m.mu.Unlock()
+			return cached, nil
+		}
+		if call := m.probeInflight; call != nil && call.port == port {
+			if !force || call.forced {
+				m.mu.Unlock()
+				select {
+				case <-ctx.Done():
+					return magpieGuestStatus{}, ctx.Err()
+				case <-call.done:
+					return call.status, call.err
+				}
+			}
+			m.mu.Unlock()
+			select {
+			case <-ctx.Done():
+				return magpieGuestStatus{}, ctx.Err()
+			case <-call.done:
+				continue
+			}
+		}
+		call := &magpieProbeCall{done: make(chan struct{}), port: port, forced: force}
+		m.probeInflight = call
+		m.mu.Unlock()
 
-	var st magpieGuestStatus
-	err := s.runAgentRuntime(ctx, "magpie-status", map[string]any{
-		"port":         port,
-		"gateway_port": defaultMagpieGatewayPort,
-	}, &st)
-	if err != nil {
+		ensureCtx, ensureCancel := context.WithTimeout(s.lifetimeContext(), coldEnsureTimeout)
+		err := s.ensureAgentRuntime(ensureCtx)
+		ensureCancel()
+		var st magpieGuestStatus
+		if err == nil {
+			probeCtx, cancel := context.WithTimeout(s.lifetimeContext(), statusProbeTimeout)
+			err = s.runAgentRuntime(probeCtx, "magpie-status", map[string]any{
+				"port":         port,
+				"gateway_port": defaultMagpieGatewayPort,
+			}, &st)
+			cancel()
+		}
+		if err == nil {
+			if st.Port == 0 {
+				st.Port = port
+			}
+			if st.GatewayPort == 0 {
+				st.GatewayPort = defaultMagpieGatewayPort
+			}
+		}
+		m.mu.Lock()
+		if err == nil {
+			m.statusCache = st
+			m.statusAt = time.Now()
+		}
+		call.status, call.err = st, err
+		if m.probeInflight == call {
+			m.probeInflight = nil
+		}
+		close(call.done)
+		m.mu.Unlock()
 		return st, err
 	}
-	if st.Port == 0 {
-		st.Port = port
-	}
-	if st.GatewayPort == 0 {
-		st.GatewayPort = defaultMagpieGatewayPort
-	}
-	s.magpie.mu.Lock()
-	s.magpie.statusCache = st
-	s.magpie.statusAt = time.Now()
-	s.magpie.mu.Unlock()
-	return st, nil
 }
 
 func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]any, error) {
@@ -238,8 +282,9 @@ func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]an
 
 	var st magpieGuestStatus
 	probeErr := ""
-	if cfg.Mode == "managed" && ready && runningVM && supportsManaged {
-		pCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	// Disabled by default (zero guest overhead until opted in or explicitly forced).
+	if (cfg.Enabled || force) && cfg.Mode == "managed" && ready && runningVM && supportsManaged {
+		pCtx, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 		st, err = s.probeMagpieStatus(pCtx, cfg.Port, force)
 		cancel()
 		if err != nil {
@@ -455,13 +500,7 @@ func (s *Server) magpieInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		if channel != "" {
 			payloadMap["channel"] = channel
 		}
-		payload, _ := json.Marshal(payloadMap)
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "magpie-install"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "magpie-install", payloadMap); err != nil {
 			return errors.New("安装 Magpie 失败，请查看操作详情排查网络或运行环境")
 		}
 		// Automatically enable managed Magpie after a successful install.
@@ -506,13 +545,7 @@ func (s *Server) magpieUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.magpie.mu.Lock()
 		cfg, _ := s.loadMagpieConfigLocked()
 		s.magpie.mu.Unlock()
-		payload, _ := json.Marshal(map[string]any{"port": cfg.Port})
-		script := s.guestShellWrapper(agentRuntimeCommandWithPython(s.guestPythonBinary(), "magpie-uninstall"))
-		cmd := s.sshCommand(s.operationContext(), "-T", s.sshTarget(), "--", script)
-		cmd.Stdin = bytes.NewReader(payload)
-		cmd.Stdout = s.jobs.execution()
-		cmd.Stderr = s.jobs.execution()
-		if err := cmd.Run(); err != nil {
+		if err := s.runAgentRuntimeJob(s.operationContext(), "magpie-uninstall", map[string]any{"port": cfg.Port}); err != nil {
 			return errors.New("卸载 Magpie 失败，请查看操作详情")
 		}
 		s.closeMagpieProxy()

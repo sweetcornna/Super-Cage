@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown, Copy, ExternalLink, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Smartphone, Terminal, Trash2 } from "lucide-react";
 import { api, writeClipboard } from "./api";
 import { EmptyState } from "./drawings";
+import { useWindowVisibility } from "./window-visibility";
 import "./tailscale.css";
 
 const labels = { Running: "已连接", NeedsLogin: "等待登录", NeedsMachineAuth: "等待管理员批准", Starting: "正在连接", Stopped: "已断开", NotInstalled: "尚未安装" };
@@ -15,6 +16,7 @@ const deviceName = peer => peer.hostname || peer.name?.split(".")[0] || peer.ip;
 function DeviceIcon({ os }) { return ["android", "iOS"].includes(os) ? <Smartphone size={20} /> : <Monitor size={20} />; }
 
 export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, onConfirm }) {
+  const windowVisible = useWindowVisibility();
   const [state, setState] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
   const [loginError, setLoginError] = useState("");
   const [key, setKey] = useState(""), [notice, setNotice] = useState(""), [query, setQuery] = useState("");
@@ -49,10 +51,26 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   };
   useEffect(() => {
     mounted.current = true;
+    return () => {
+      mounted.current = false;
+      revision.current++;
+      inflight.current = false;
+      loginRequested.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!ready) {
+      revision.current++;
+      inflight.current = false;
+      loginRequested.current = false;
+    }
+  }, [ready]);
+  useEffect(() => {
+    if (!ready || !windowVisible) return;
     void refresh();
     const timer = setInterval(() => void refresh(), 3000);
-    return () => { mounted.current = false; revision.current++; inflight.current = false; loginRequested.current = false; clearInterval(timer); };
-  }, [ready]);
+    return () => { clearInterval(timer); };
+  }, [ready, windowVisible]);
   const act = async (action, body = {}) => {
     if (busy) return;
     setBusy(true); setError(""); setLoginError(""); setNotice(""); revision.current++;
@@ -93,7 +111,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         {ready && state && <div className="tailscale-actions">
           {!state.installed ? <button className="primary-button" disabled={busy} onClick={async () => {
             setBusy(true); setError("");
-            try { await onInstall(); } catch (e) { setError(e.message); }
+            try { await onInstall(); } catch (e) { if (mounted.current) setError(e.message); }
             finally { if (mounted.current) setBusy(false); }
           }}>{["macos", "windows-11"].includes(status.guest_system) ? "更新环境组件以安装" : "安装 Tailscale"}</button> : <>
             {!connected && !["NeedsMachineAuth", "Starting"].includes(state.backend) && <button className="primary-button" disabled={busy} onClick={login}>{busy ? <LoaderCircle size={15} className="spin" /> : <ExternalLink size={15} />}{state.enabled ? "重新发起登录" : "连接并登录"}</button>}

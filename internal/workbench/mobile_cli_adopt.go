@@ -5,11 +5,20 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os/exec"
 	"strings"
 	"time"
 
 	"al.essio.dev/pkg/shellescape"
 )
+
+func (s *Server) promoteMobileVerifyCommand(ctx context.Context, workspace string, prefix []string, cliID string) *exec.Cmd {
+	idExpr := `"$HOME/` + mobileCLIGuestScripts.relPath("-identity.py") + `"`
+	verify := mobileIdentityShellCommand(idExpr, prefix, []string{"--cage-verify", "--setting-sources", "user", "--resume", cliID})
+	// Match the login environment and project of the original mobile turn.
+	body := `p=` + idExpr + `; [ -f "$p" ] || exit 86; cd -- ` + shellescape.Quote(guestPath(workspace)) + ` && exec ` + verify
+	return s.sshCommand(ctx, "-T", s.sshTarget(), "--", guestLoginScript(body))
+}
 
 // Older phones created headless sessions. Reuse their CLI UUID only after the
 // original provider binding has been checked, without sending a model request.
@@ -45,16 +54,17 @@ func (s *Server) promoteMobileConversation(ctx context.Context, id string) error
 		if err != nil {
 			return err
 		}
-		args := mobileIdentityCommand(prefix, []string{"--cage-verify", "--setting-sources", "user", "--resume", record.CLIID})
-		// Match the login environment and project of the original mobile turn.
-		body := "exec 1>&3 3>&-; cd -- " + shellescape.Quote(guestPath(record.Workspace)) + " && exec " + shellescape.QuoteCommand(args)
-		command := "exec /bin/bash -c " + shellescape.Quote("exec 3>&1 1>&2; exec /bin/bash -lc "+shellescape.Quote(body))
 		check, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		cmd := s.sshCommand(check, "-T", s.sshTarget(), "--", command)
-		cmd.Stderr = io.Discard
-		cmd.WaitDelay = 2 * time.Second
-		out, err := cmd.Output()
+		var out []byte
+		err = s.runWithGuestScript(check, mobileCLIGuestScripts, "/usr/bin/python3", func() (int, error) {
+			cmd := s.promoteMobileVerifyCommand(check, record.Workspace, prefix, record.CLIID)
+			cmd.Stderr = io.Discard
+			cmd.WaitDelay = 2 * time.Second
+			var runErr error
+			out, runErr = cmd.Output()
+			return exitCodeOf(runErr), runErr
+		})
 		var result struct {
 			Config string `json:"config"`
 		}

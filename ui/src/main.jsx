@@ -61,6 +61,7 @@ import { WorkbenchHome } from "./workbench-home";
 import { BrandMark } from "./brand";
 import { Drawing } from "./drawings";
 import { useWindowVisibility } from "./window-visibility";
+import { statusPollDelay } from "./idle-poll.mjs";
 import { AppUpdateButton, useAppUpdates } from "./app-updates";
 import "./appearance.css";
 import { stopAndExit } from "./quit";
@@ -316,7 +317,8 @@ function App() {
   const panes = !split ? [current].filter(Boolean)
     : layout.side === "left" ? [current, other] : [other, current];
   const webPanes = panes.filter(tab => tab.kind !== "terminal");
-  const passwordVault = usePasswordVault(Boolean(status?.ready && !macGuest && browserAvailable), browser.active);
+  const browserShown = !managementPage && !settingsOpen && !storageRecovery && !desktopOpen && !showHome && webPanes.length > 0;
+  const passwordVault = usePasswordVault(Boolean(status?.ready && !macGuest && browserAvailable), browser.active, browserShown);
   const dualBrowser = split && webPanes.length === 2;
   const leftId = dualBrowser ? panes[0].id : "";
   const rightId = dualBrowser ? panes[1].id : "";
@@ -463,16 +465,22 @@ function App() {
     }
   };
   const clipboardConnection = getClientContext().connection_id;
+  const clipboardRef = useRef(null);
   useEffect(() => {
     if (!status?.ready || !clipboardAvailable || !nativeAvailable()) return;
     const clipboard = shareClipboard({
       connect: () => new WebSocket(runtimeSocketURL("/clipboard")), native,
+      visible: windowVisibleRef.current,
       onStatus: setToast,
       setActive: active => { window.cageSharedClipboardActive = active; },
     });
+    clipboardRef.current = clipboard;
     window.cageSyncClipboard = () => clipboard.sync();
-    return () => { clipboard.dispose(); delete window.cageSyncClipboard; };
+    return () => { clipboardRef.current = null; clipboard.dispose(); delete window.cageSyncClipboard; };
   }, [status?.ready, clipboardAvailable, clipboardConnection]);
+  useEffect(() => {
+    clipboardRef.current?.setVisible?.(windowVisible);
+  }, [windowVisible]);
   const desktopFiles = useDesktopFiles(Boolean(status?.ready && desktopAvailable), notify, desktopOpen && !settingsOpen && !managementPage && !storageRecovery && windowVisible, windowVisible);
   const downloads = [...(browser.downloads || []), ...desktopFiles.downloads];
   useDownloadNotifications(downloads, notify, Boolean(browser.uploads?.length || desktopFiles.uploads.length));
@@ -1349,14 +1357,15 @@ function App() {
       } catch (e) {
         if (live) setConnectionError(e.message);
       } finally {
-        if (live)
-          timer = setTimeout(
-            poll,
-            // While a job runs (start, stop, checks) the page follows it closely:
-            // the status handler reads local state only (container state and
-            // Windows components are cached server-side), audit LC-1.
-            jobRunning ? 400 : windowVisibleRef.current ? 5000 : 15000,
-          );
+        if (live) {
+          // While a job runs (start, stop, checks) the page follows it closely:
+          // the status handler reads local state only (container state and
+          // Windows components are cached server-side), audit LC-1.
+          // When idle and hidden, stop scheduling timers; the visibility effect
+          // triggers an immediate refresh as soon as the window is shown again.
+          const nextDelay = statusPollDelay({ jobRunning, windowVisible: windowVisibleRef.current });
+          if (nextDelay !== null) timer = setTimeout(poll, nextDelay);
+        }
       }
     };
     // Timer polls join one in flight. A requested refresh (after an action

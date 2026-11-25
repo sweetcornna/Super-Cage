@@ -2,18 +2,21 @@ import React, { useEffect, useRef, useState } from "react";
 import { InlineSelect } from "./inline-select";
 import { answerBody, chipState, confirmText, handoffLine, handoffQuestion, needsConfirm, refusalNeedsConfirm, SESSION_RULES, sessionRule,
   switchBody, switchTargets, targetNote, targetSelectable, undoBody, waitingLine } from "./session-account-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./session-account.css";
 
 const failures = {rate_limit:"请求受到限流，尚未确认额度用完：可以等待，或在下方直接选择另一个账号。",authentication_failed:"账号登录失效：在账号管理中重新登录，或在下方选择另一个账号。",account_on_hold:"账号受限：在下方选择另一个账号继续。",overloaded:"服务暂时过载，保留原账号：稍后重试即可。",server_error:"服务暂时异常，保留原账号：稍后重试即可。"};
 
 // Desktop and mobile use the same session operation and durable request ID.
 export function SessionAccount({ id, request, onChanged, compact = false }) {
+  const windowVisible = useWindowVisibility();
   const [open,setOpen]=useState(false), [view,setView]=useState(null), [busy,setBusy]=useState(false), [error,setError]=useState("");
   const [confirming,setConfirming]=useState(null);
   const pending=useRef(null), current=useRef({request,onChanged}); current.current={request,onChanged};
   const terminalID=useRef(null);
   const path="/sessions/"+id+"/account";
   useEffect(() => {
+    if (!windowVisible) return;
     let live=true,timer;
     const load=async()=>{
       try {
@@ -28,7 +31,7 @@ export function SessionAccount({ id, request, onChanged, compact = false }) {
       if(live) timer=setTimeout(load,open?2000:10000);
     };
     void load(); return()=>{live=false;clearTimeout(timer);};
-  },[id,path,open]);
+  },[id,path,open,windowVisible]);
   // One durable request per decision: a retry after a lost reply repeats it.
   const send=async(key,make,after)=>{
     if(busy)return; setBusy(true);setError("");

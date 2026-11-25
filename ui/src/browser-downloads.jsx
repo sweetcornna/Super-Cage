@@ -20,6 +20,7 @@ import {
   isRemoteClient,
   runtimeURL,
 } from "./client-context.mjs";
+import { desktopFilesPollDelay } from "./idle-poll.mjs";
 
 export function useDownloadNotifications(
   downloads = [],
@@ -75,24 +76,23 @@ export function useDownloadNotifications(
   }, [downloads, uploading]);
 }
 
-// With the Cage window hidden nobody can answer a file request, and every poll
-// makes the guest inspect its application windows. Downloads still arrive.
-function desktopFilesPollDelay(failures, windowVisible) {
-  return Math.min((windowVisible ? 1500 : 4500) * 2 ** Math.min(failures, 4), 15000);
-}
-
+// With the Cage window hidden nobody can answer a file request, and polling
+// prevents the guest control SSH session from closing while idle. Pause while
+// hidden and poll slowly when Claude Desktop is closed, waking on show/open.
 export function useDesktopFiles(ready, onStatus, desktopVisible, windowVisible = true) {
   const connection = getClientContext().connection_id;
   const windowShown = useRef(windowVisible);
   windowShown.current = windowVisible;
-  const wake = useRef(null);
-  useEffect(() => {
-    // A request raised while hidden should not wait out the slow interval.
-    if (windowVisible) wake.current?.();
-  }, [windowVisible]);
-  const [files, setFiles] = useState({ uploads: [], downloads: [] });
   const viewVisible = useRef(desktopVisible);
   viewVisible.current = desktopVisible;
+  const wake = useRef(null);
+  const pause = useRef(null);
+  useEffect(() => {
+    // A request raised while hidden or when opening Claude Desktop wakes at once.
+    if (windowVisible) wake.current?.();
+    else pause.current?.();
+  }, [windowVisible, desktopVisible]);
+  const [files, setFiles] = useState({ uploads: [], downloads: [] });
   const status = useRef(onStatus);
   status.current = onStatus;
   useEffect(() => {
@@ -106,6 +106,7 @@ export function useDesktopFiles(ready, onStatus, desktopVisible, windowVisible =
     const handled = new Set();
     let polling = false;
     const poll = async () => {
+      if (disposed || !windowShown.current) return;
       polling = true;
       try {
         const value = await api("/input/files/desktop/requests");
@@ -167,17 +168,26 @@ export function useDesktopFiles(ready, onStatus, desktopVisible, windowVisible =
         }
       }
       polling = false;
-      if (!disposed) timer = setTimeout(poll, desktopFilesPollDelay(failures, windowShown.current));
+      const delay = desktopFilesPollDelay({
+        failures,
+        windowVisible: windowShown.current,
+        desktopVisible: viewVisible.current,
+      });
+      if (!disposed && delay !== null) timer = setTimeout(poll, delay);
     };
     wake.current = () => {
-      if (disposed || polling) return;
+      if (disposed || polling || !windowShown.current) return;
       clearTimeout(timer);
       void poll();
     };
-    void poll();
+    pause.current = () => {
+      clearTimeout(timer);
+    };
+    if (windowShown.current) void poll();
     return () => {
       disposed = true;
       wake.current = null;
+      pause.current = null;
       clearTimeout(timer);
     };
   }, [ready, connection]);

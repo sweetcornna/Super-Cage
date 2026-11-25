@@ -2,6 +2,7 @@ import React, { Suspense, lazy, useCallback, useEffect, useRef, useState } from 
 import { ArrowDownToLine, RefreshCw } from "lucide-react";
 import { api, native, nativeAvailable } from "./api";
 import { activeShellPhases, appUpdateButton, statusNeedsWatch } from "./app-update-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./app-updates.css";
 
 const checkInterval = 6 * 60 * 60 * 1000;
@@ -26,6 +27,7 @@ const environmentActions = {
 const checkable = state => ["idle", "current", "failed", "waiting", "available"].includes(state.phase) || (state.phase === "manual" && Boolean(state.latestVersion));
 
 export function useAppUpdates() {
+  const windowVisible = useWindowVisibility();
   const [state, setState] = useState({ phase: "idle", message: "" });
   const [status, setStatus] = useState(null);
   const [statusError, setStatusError] = useState(null);
@@ -86,7 +88,14 @@ export function useAppUpdates() {
         ? Date.parse(current.current.retryAt) : lastCheck.current + interval;
       if (checkable(current.current) && Date.now() >= deadline) void run("check");
     };
+    let checkTimer = null;
+    const syncCheckTimer = () => {
+      clearInterval(checkTimer);
+      checkTimer = null;
+      if (live && visible()) checkTimer = setInterval(check, 60 * 1000);
+    };
     const look = () => {
+      syncCheckTimer();
       if (!visible()) return;
       check();
       void refreshStatus();
@@ -107,7 +116,7 @@ export function useAppUpdates() {
       }
       if (live) void refreshStatus();
     })();
-    const checkTimer = setInterval(check, 60 * 1000);
+    syncCheckTimer();
     return () => {
       live = false;
       clearInterval(checkTimer);
@@ -119,12 +128,12 @@ export function useAppUpdates() {
   }, [available, run, refreshStatus]);
   const watch = statusNeedsWatch(status);
   useEffect(() => {
-    if (!available || !watch) return;
+    if (!available || !watch || !windowVisible) return;
     const timer = setInterval(() => {
-      if (document.visibilityState !== "hidden" && window.cageWindowVisible !== false) void refreshStatus();
+      void refreshStatus();
     }, statusInterval);
     return () => clearInterval(timer);
-  }, [available, watch, refreshStatus]);
+  }, [available, watch, windowVisible, refreshStatus]);
   useEffect(() => {
     if (!startupFailure) return;
     const timer = setTimeout(() => setStartupFailure(""), 8000);

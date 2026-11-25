@@ -616,6 +616,57 @@ def _env_file_has_value(path):
     return False
 
 
+def _candidate_oauth_roots(spec, dirs):
+    """Return deduplicated candidate directories for OAuth credential inspection."""
+    roots = []
+    seen = set()
+
+    def add(p):
+        if p is None:
+            return
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            roots.append(p)
+
+    cfg = dirs.get("config")
+    data_dir = dirs.get("data")
+    state_dir = dirs.get("state")
+    add(cfg)
+    add(data_dir)
+    add(state_dir)
+
+    iso = spec.get("isolation") or {}
+    if iso.get("mode", "xdg") == "xdg":
+        subdirs = []
+        if iso.get("config_subdir"):
+            subdirs.append(iso["config_subdir"])
+        for raw in iso.get("default_config_paths") or []:
+            name = Path(os.path.expanduser(raw)).name
+            if name:
+                subdirs.append(name)
+        agent_id = spec.get("id", "")
+        binary = spec.get("binary", "")
+        if agent_id:
+            subdirs.append(agent_id)
+        if binary:
+            subdirs.append(binary)
+        if agent_id == "antigravity":
+            subdirs.extend([
+                "antigravity-cli",
+                "antigravity",
+                "gemini/antigravity-cli",
+                "gemini",
+            ])
+        for sub in subdirs:
+            if not isinstance(sub, str) or not sub or sub.startswith("/") or ".." in Path(sub).parts:
+                continue
+            for base_dir in (cfg, data_dir, state_dir):
+                if base_dir is not None:
+                    add(base_dir / sub)
+    return roots
+
+
 def inspect_oauth_files(spec, dirs):
     """Extract ONLY non-secret public identity from an agent's config/data directory."""
     agent_id = spec.get("id", "")
@@ -652,26 +703,68 @@ def inspect_oauth_files(spec, dirs):
                 return out
         return {"logged_in": False}
 
-    if agent_id == "gemini":
-        accounts = read_json(cfg / "google_accounts.json")
-        oauth = read_json(cfg / "oauth_creds.json")
+    if agent_id in ("gemini", "antigravity"):
+        roots = _candidate_oauth_roots(spec, dirs)
         email = ""
-        if isinstance(accounts, dict):
-            active = accounts.get("active")
-            if isinstance(active, str):
-                email = active
-            elif isinstance(active, dict):
-                email = active.get("email") or ""
-        has_token = isinstance(oauth, dict) and any(
-            isinstance(oauth.get(k), str) and oauth.get(k).strip()
-            for k in ("access_token", "refresh_token", "id_token")
-        )
-        if has_token:
-            claims = decode_jwt_claims(oauth.get("id_token") or "")
-            email = email or claims.get("email") or ""
-            exp_ms = oauth.get("expiry_date") or 0
-            exp = int(exp_ms / 1000) if isinstance(exp_ms, (int, float)) and exp_ms > 1e12 else int(exp_ms or 0)
-            return {"logged_in": True, "auth_mode": "oauth", "email": str(email), "plan": "Google OAuth", "expires_at": exp}
+        for root in roots:
+            accounts = read_json(root / "google_accounts.json")
+            if isinstance(accounts, dict):
+                active = accounts.get("active")
+                if isinstance(active, str) and active.strip():
+                    email = active.strip()
+                    break
+                if isinstance(active, dict) and isinstance(active.get("email"), str) and active["email"].strip():
+                    email = active["email"].strip()
+                    break
+        for root in roots:
+            oauth = read_json(root / "oauth_creds.json")
+            has_token = isinstance(oauth, dict) and any(
+                isinstance(oauth.get(k), str) and oauth.get(k).strip()
+                for k in ("access_token", "refresh_token", "id_token")
+            )
+            if has_token:
+                claims = decode_jwt_claims(oauth.get("id_token") or "")
+                found_email = email or claims.get("email") or ""
+                exp_ms = oauth.get("expiry_date") or 0
+                exp = int(exp_ms / 1000) if isinstance(exp_ms, (int, float)) and exp_ms > 1e12 else int(exp_ms or 0)
+                return {
+                    "logged_in": True,
+                    "auth_mode": "oauth",
+                    "email": str(found_email),
+                    "plan": "Google OAuth",
+                    "expires_at": exp,
+                }
+        if agent_id == "antigravity":
+            for root in roots:
+                pbtxt = root / "jetski_state.pbtxt"
+                if pbtxt.is_file():
+                    try:
+                        if pbtxt.stat().st_size > 2:
+                            text = pbtxt.read_text(encoding="utf-8", errors="ignore").strip()
+                            if text:
+                                found_email = email
+                                if not found_email:
+                                    m = re.search(r'(?i)\b(?:user_)?email\s*:\s*"([^"\s@]+@[^"\s@]+)"', text)
+                                    if m:
+                                        found_email = m.group(1)
+                                return {
+                                    "logged_in": True,
+                                    "auth_mode": "oauth",
+                                    "email": str(found_email),
+                                    "plan": "Google OAuth",
+                                }
+                    except OSError:
+                        pass
+                creds = read_json(root / "credentials.json")
+                if isinstance(creds, dict) and _json_has_auth_field(creds):
+                    claims = decode_jwt_claims(creds.get("id_token") or "")
+                    found_email = email or claims.get("email") or creds.get("email") or ""
+                    return {
+                        "logged_in": True,
+                        "auth_mode": "oauth",
+                        "email": str(found_email),
+                        "plan": "Google OAuth",
+                    }
         return {"logged_in": False}
 
     if agent_id == "opencode":
@@ -733,8 +826,9 @@ def inspect_oauth_files(spec, dirs):
         return {"logged_in": False}
 
     # Generic fallback for amp, cline, cursor, vibe, kimi, droid, pi, custom agents.
+    candidate_roots = _candidate_oauth_roots(spec, dirs)
     for rel in auth_spec.get("credential_files") or []:
-        for root in (cfg, data_dir):
+        for root in candidate_roots:
             target = root / rel
             if not target.is_file():
                 continue

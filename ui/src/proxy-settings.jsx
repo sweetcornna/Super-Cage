@@ -22,6 +22,7 @@ import { SafetyMessage } from "./safety-message";
 import { ProxyYAMLInput } from "./proxy-yaml-input";
 import { NetworkExplanation } from "./network-explanation";
 import { networkState } from "./safety-state.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./proxy.css";
 
 const bytes = (v) => {
@@ -84,6 +85,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
   const [hostRefresh, setHostRefresh] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
   const [readingFile, setReadingFile] = useState(false);
+  const windowVisible = useWindowVisibility();
   const alive = useRef(true),
     loading = useRef(false),
     latest = useRef(null),
@@ -99,13 +101,20 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
   };
   useEffect(() => {
     alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!windowVisible) return;
+    let cancelled = false;
     const tick = async () => {
       if (loading.current) return;
       loading.current = true;
       try {
         await reload();
       } catch (e) {
-        if (alive.current) setError(e.message);
+        if (!cancelled && alive.current) setError(e.message);
       } finally {
         loading.current = false;
       }
@@ -113,12 +122,12 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
     tick();
     const timer = setInterval(tick, 4000);
     return () => {
-      alive.current = false;
+      cancelled = true;
       clearInterval(timer);
     };
-  }, []);
+  }, [windowVisible]);
   useEffect(() => {
-    if (tab !== "connections" && tab !== "diagnostics") return;
+    if (!windowVisible || (tab !== "connections" && tab !== "diagnostics")) return;
     let cancelled = false;
     const tick = async () => {
       try {
@@ -158,7 +167,7 @@ export function ProxySettings({ status, onApplied, onConfirm, onDirty, initializ
       clearInterval(timer);
       latest.current = null;
     };
-  }, [tab]);
+  }, [tab, windowVisible]);
   const busy = Boolean(pending) || Boolean(status.job?.running);
   const mutate = async (action, input = {}) => {
     setError("");

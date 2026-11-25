@@ -1,9 +1,7 @@
 package workbench
 
 import (
-	"bytes"
 	"context"
-	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -15,9 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"al.essio.dev/pkg/shellescape"
 	"github.com/google/uuid"
-	"github.com/klauspost/compress/gzip"
+	"github.com/sylvinus/agent-vm/internal/diagnostics"
 )
 
 // Codex CLI sessions reuse the phone's shared-session records. The guest
@@ -29,34 +26,22 @@ var codexSessionsHelper string
 
 const codexProvider = "codex"
 
-var codexSessionsEncoded = func() string {
-	var compressed bytes.Buffer
-	writer, _ := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
-	_, _ = writer.Write([]byte(codexSessionsHelper))
-	_ = writer.Close()
-	return cliTransport85(compressed.Bytes())
-}()
+var codexSessionsSpec = newGuestScriptSpec(".local/share/cage/codex-session-code", 0o600, codexSessionsHelper)
 
-// Codex runs only in Linux guests, so this command is bounded by Linux's
-// 128 KiB argument limit rather than the Claude channel's Windows limit. The
-// helper file is versioned, so a running exec turn keeps its own copy.
+// codexSessionsCommand returns a small, constant-size command targeting the
+// SHA-256-pinned helper in ~/.local/share/cage/codex-session-code/<hash>.py so
+// SSH argv stays well under Windows CreateProcessW's 32,767 UTF-16 limit.
+// The helper file is versioned, so a running exec turn keeps its own copy.
 func codexSessionsCommand(mode string) string { return codexSessionsInvocation(mode, "-") }
 
 // codexSessionsInvocation passes the request as an argument instead of on
 // stdin, which a terminal's Codex needs for itself.
 func codexSessionsInvocation(mode, argument string) string {
-	bootstrap := fmt.Sprintf(`import base64,gzip,os,pathlib,sys,tempfile
-d=pathlib.Path.home()/".local/share/cage/codex-session-code"
-d.mkdir(parents=True,exist_ok=True,mode=0o700)
-p=d/"%x.py"
-if not p.exists():
- with tempfile.NamedTemporaryFile(dir=d,delete=False) as f:
-  f.write(gzip.decompress(base64.b85decode("%s")))
-  t=f.name
- os.replace(t,p)
-os.execv(sys.executable,[sys.executable,"-I",str(p),*sys.argv[1:]])
-`, sha256.Sum256([]byte(codexSessionsHelper)), codexSessionsEncoded)
-	return shellescape.QuoteCommand([]string{"python3", "-I", "-c", bootstrap, mode, argument})
+	return codexSessionsSpec.shellCommand("python3", mode, argument)
+}
+
+func (s *Server) ensureCodexSessions(ctx context.Context) error {
+	return s.ensureGuestScript(ctx, codexSessionsSpec, "python3")
 }
 
 type codexConversation struct {
@@ -265,7 +250,28 @@ func (s *Server) runCodexSessions(ctx context.Context, mode string, input any, o
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	stop := context.AfterFunc(epoch, cancel)
 	defer func() { stop(); cancel() }()
-	return s.runGuestHelper(ctx, started, "codex-sessions", mode, codexSessionsCommand(mode), input, output)
+	if holdExpired(ctx) {
+		return context.Cause(ctx)
+	}
+	if mode == "discover" && s.residentCodexDiscover(ctx, input, output) {
+		return nil
+	}
+	loginScript := guestLoginScript(codexSessionsSpec.guardedShellBody("python3", mode, "-"))
+	err := s.runWithGuestScript(ctx, codexSessionsSpec, "python3", func() (int, error) {
+		return s.runGuestHelperLoginScript(ctx, started, "codex-sessions", mode, loginScript, input, output)
+	})
+	var ensureErr *guestScriptEnsureError
+	if errors.As(err, &ensureErr) {
+		failure, message := "guest_command", "电脑未能读取会话状态，聊天记录已保留。"
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			failure, message = "timeout", "电脑读取运行环境超时，暂时无法获取会话状态。"
+		} else if exitCodeOf(err) == 255 {
+			failure, message = "ssh_connection", "电脑暂时无法连接运行环境，聊天记录已保留。"
+		}
+		_ = diagnostics.New(s.profile).Record("warn", "codex-sessions", fmt.Sprintf("operation=%s failure=%s exit=%d elapsed_ms=%d context=%v", mode, failure, exitCodeOf(err), time.Since(started).Milliseconds(), ctx.Err()))
+		return errors.New(message)
+	}
+	return err
 }
 
 func (s *Server) discoverCodexConversations(ctx context.Context, paths []string) error {

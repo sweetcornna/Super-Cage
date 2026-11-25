@@ -2,7 +2,7 @@
 export const BUILTIN_LOGIN_HOSTS = new Set([
   "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com",
   "auth.openai.com", "chatgpt.com", "platform.openai.com",
-  "accounts.google.com", "oauth2.googleapis.com", "aistudio.google.com",
+  "accounts.google.com", "oauth2.googleapis.com", "antigravity.google", "aistudio.google.com",
   "github.com", "auth.githubcopilot.com",
   "opencode.ai", "openrouter.ai",
   "chat.qwen.ai", "qwen.ai", "account.aliyun.com", "dashscope.console.aliyun.com",

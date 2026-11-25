@@ -2,17 +2,24 @@ import React, { useEffect, useRef, useState } from "react";
 import { KeyRound, Plus, Search, ShieldCheck } from "lucide-react";
 import { api, writeClipboard } from "./api";
 import { EmptyState } from "./drawings";
+import { vaultPollActive } from "./idle-poll.mjs";
+import { useWindowVisibility } from "./window-visibility";
 import "./password-vault.css";
 
 const emptyBrowser = { available: false, entries: [], candidates: [] };
-export function usePasswordVault(ready, tab) {
+export function usePasswordVault(ready, tab, browserVisible = true) {
+  const windowVisible = useWindowVisibility();
+  const active = vaultPollActive({ ready, tab, browserVisible, windowVisible });
   const [state, setState] = useState(emptyBrowser);
   const refresh = useRef(null), mutation = useRef(0);
   useEffect(() => {
-    let cancelled = false, timer, running = false;
     setState(emptyBrowser);
+  }, [ready, tab]);
+  useEffect(() => {
+    if (!active) return;
+    let cancelled = false, timer, running = false;
     const poll = async () => {
-      if (running || cancelled || !ready) return;
+      if (running || cancelled || !active) return;
       running = true;
       const revision = mutation.current;
       clearTimeout(timer);
@@ -23,13 +30,13 @@ export function usePasswordVault(ready, tab) {
         if (!cancelled) setState({ ...emptyBrowser, message: error.message });
       } finally {
         running = false;
-        if (!cancelled && ready) timer = setTimeout(poll, 2000);
+        if (!cancelled && active) timer = setTimeout(poll, 2000);
       }
     };
     refresh.current = poll;
     void poll();
     return () => { cancelled = true; clearTimeout(timer); refresh.current = null; };
-  }, [ready, tab]);
+  }, [ready, tab, active]);
   const act = async input => {
     await api("/vault/browser", input);
     mutation.current++;
