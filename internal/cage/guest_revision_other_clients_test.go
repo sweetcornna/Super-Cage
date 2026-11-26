@@ -15,14 +15,13 @@ import (
 // and, through them, every script the start script embeds (guest.go).
 
 // guestRevisionAtOtherClientsBase is guestRevision() at the last intentional
-// guest component update (updated for Magpie takeover handoff disabling Cage
-// account scheduling across shells/shims/Orca/T3 Code in agent-runtime.py,
-// claude-account.py, codex-account.py, and guest.go, which ship via 更新环境组件).
+// guest component update (resource-governor.py now detects cgroup v2 recursive
+// protection and reads the nested browser slice, shipped via 更新环境组件).
 // If this fails you changed a hashed input: either undo it, or, if the change
 // is a product decision that is meant to ship with 更新环境组件, set the new
 // value here in the same commit and say so in the message. Work on 其他客户端
 // never does.
-const guestRevisionAtOtherClientsBase = "79c2ae0a181fa2873397dc9bb6e3057d4002edfcfce10c5d5e07eb007365eb99"
+const guestRevisionAtOtherClientsBase = "966d810e724fe504a0cdd82d9189ba3b5a104632ca1396d754e4dc8de6146d88"
 
 func TestGuestRevisionIsPinnedForOtherClients(t *testing.T) {
 	if got := guestRevision(); got != guestRevisionAtOtherClientsBase {

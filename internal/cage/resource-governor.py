@@ -1,11 +1,11 @@
 #!/usr/bin/python3
 """Claude Cage memory priorities inside the guest.
 
-resource-allocation.md, level C. Three classes, each a top-level cgroup:
+resource-allocation.md, level C. Three classes:
 the control plane (system.slice: sshd, the guest agent, the display, the
 editor, this governor), the sessions (user.slice: terminals, claude, codex,
 and also the host agent's SSH probes, which arrive as sessions of the same
-user) and the browser (cage-browser.slice). The control plane and the
+user) and the browser (cage.slice/cage-browser.slice). The control plane and the
 sessions are protected (memory.low); the browser has a soft limit
 (memory.high: reclaimed into zram and throttled above it) and a hard one a
 little higher (memory.max: one browser process, the largest, is killed
@@ -45,11 +45,13 @@ CGROUP = '/sys/fs/cgroup'
 RUN = '/run/cage-resources'
 MEMINFO = '/proc/meminfo'
 UPTIME = '/proc/uptime'
-MOUNTS = '/proc/mounts'
+# /proc/mounts is a symlink. read() rejects a symlink at the final component.
+MOUNTS = '/proc/self/mounts'
 SYSTEMCTL = ['/usr/bin/systemctl']
 # Where systemctl set-property --runtime keeps what it sets.
 CONTROL = '/run/systemd/system.control'
-CLASSES = (('control', 'system.slice'), ('sessions', 'user.slice'), ('browser', 'cage-browser.slice'))
+# systemd nests dash-separated slices under their parent in cgroupfs.
+CLASSES = (('control', 'system.slice'), ('sessions', 'user.slice'), ('browser', 'cage.slice/cage-browser.slice'))
 # The unit's variables naming the sessions' user and the browser's: on Ubuntu
 # guests snap Chromium runs in a scope of the browser user's own slice under
 # user.slice, so that slice belongs to the browser class, not to the sessions.

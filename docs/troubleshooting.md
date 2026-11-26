@@ -10,6 +10,17 @@
 
 重任务可能让客机或浏览器无法及时响应联网检查，触发 Super Cage 收回内部外网授权。恢复任务会自动进行完整复检，检查全部通过才恢复；手动暂停不会自动解除。网络仍未恢复时，查看具体失败项、所选代理和出口规则，不要仅凭断网现象判断主机网络故障。资源指标与平台范围见[维护与资源](guide/maintenance.md)。
 
+## Orca Server 里的多个终端同时退出
+
+如果在 Linux 客机里自行用 systemd 用户服务启动 Orca Server，先用 `journalctl --user -u orca-serve` 查看该服务的日志。`A process of this unit has been killed by the OOM killer` 紧接 `Failed with result 'oom-kill'` 和 `Scheduled restart job`，表示内存耗尽时，systemd 因该服务中的一个进程被杀而重启了整个服务。用客机的 `sudo journalctl -k -b` 可以确认直接被内核杀掉的进程。
+
+对这种自行配置的 `orca-serve.service`，在用户服务的 drop-in 中设定 `OOMPolicy=continue`，再执行 `systemctl --user daemon-reload`。这样，某个子进程被 OOM killer 终止时，同组其余进程可以继续运行。服务的主进程退出时，原有的 `Restart=` 策略仍然生效。
+
+```ini
+[Service]
+OOMPolicy=continue
+```
+
 ## 下载或安装受阻
 
 **GitHub 显示 404，或看不到安装包。** 仓库与公开发布的附件无需仓库授权。从[项目主页](https://claude-cage.com/#download)点击“下载应用”并选择平台，检查网络与链接是否完整。macOS 使用 `.dmg`，Windows 使用 `.exe` 安装器，Debian/Ubuntu Linux 使用 `.deb`。Release 中的源码压缩包用于开发，不能当作安装包使用；尚无公开安装包的平台会提供安装与构建说明。
