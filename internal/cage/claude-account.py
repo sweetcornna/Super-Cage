@@ -36,8 +36,22 @@ else:
 
 SHIM = "/usr/local/lib/cage-claude-bin"
 OPEN = "/usr/local/libexec/cage-cli/bin/cage-open" if sys.platform == "darwin" else "/usr/local/bin/cage-open"
-HELPER = "/usr/local/bin/cage-claude-account"
+HELPER = "/usr/local/libexec/cage-cli/bin/cage-claude-account" if sys.platform == "darwin" and Path("/usr/local/libexec/cage-cli/bin/cage-claude-account").is_file() else "/usr/local/bin/cage-claude-account"
 DEFAULT = "default"
+
+
+def _is_cage_shim_dir(entry):
+    if not entry:
+        return True
+    if entry in (SHIM, "/usr/local/lib/cage-codex-bin"):
+        return True
+    auto_shims = str(Path.home() / ".local/share/cage/auto-shims")
+    agent_shims = str(Path.home() / ".local/share/cage/agent-shims")
+    orca_shims = str(Path.home() / ".local/share/cage/orca/shims")
+    t3_shims = str(Path.home() / ".local/share/cage/t3code/shims")
+    if entry in (auto_shims, orca_shims, t3_shims) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
+        return True
+    return False
 # Settings that choose another provider or carry a credential. A private
 # profile never inherits them, and a shell that sets one keeps its own setup.
 PROVIDER_VARIABLES = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
@@ -77,8 +91,8 @@ def config_directory(base):
 
 def cli_environment(base):
     env = os.environ.copy()
-    # Executing the real binary must never recurse into the terminal's claude shim.
-    path = [p for p in env.get("PATH", os.defpath).split(os.pathsep) if p and p != SHIM]
+    # Executing the real binary must never recurse into any Cage claude shim.
+    path = [p for p in env.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p)]
     env["PATH"] = os.pathsep.join([str(Path.home() / ".local/bin"), *path])
     if sys.platform == "darwin" and Path("/usr/local/libexec/cage-cli/bin/claude").is_file():
         env["PATH"] = "/usr/local/libexec/cage-cli/bin:/usr/local/bin:" + env["PATH"]
@@ -896,10 +910,12 @@ def launch_account(now=None):
 
 
 def auto(args):
-    """`claude` typed in a guest shell. It starts on the scheduled account like a
-    Claude terminal does; anything that does not fit runs the CLI unchanged."""
+    """`claude` typed in a guest shell or spawned via auto-shims (Orca, T3 Code,
+    Herdr, scripts). Starts on the scheduled account like a Claude terminal
+    does; anything that does not fit runs the CLI unchanged."""
     picked = None
-    explicit = any(os.environ.get(name) for name in ("CAGE_CLAUDE_ACCOUNT_ID", "CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    explicit = disabled or any(os.environ.get(name) for name in ("CAGE_CLAUDE_ACCOUNT_ID", "CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
     if not explicit and not (args and args[0] in UNSCHEDULED):
         try:
             picked = launch_account()
@@ -921,7 +937,7 @@ def auto(args):
         os.umask(mask)
         _controller_context.pop("CAGE_CLAUDE_SUBJECT", None)
         print("Super Cage 调度的 Claude 账号暂不可用，本次用默认登录启动。", file=sys.stderr)
-    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if p and p != SHIM)
+    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))
     binary = shutil.which("claude", path=path)
     if not binary:
         print("未找到 claude 命令。", file=sys.stderr)

@@ -15,13 +15,14 @@ import (
 // and, through them, every script the start script embeds (guest.go).
 
 // guestRevisionAtOtherClientsBase is guestRevision() at the last intentional
-// guest component update (updated for Antigravity OAuth snapshot/login-host
-// fixes in agent-runtime.py and browser-login.mjs, which ship via 更新环境组件).
+// guest component update (updated for universal CLI account scheduling across
+// shells/Orca/T3 Code and Orca Server guest runtime in agent-runtime.py,
+// claude-account.py, codex-account.py, and guest.go, which ship via 更新环境组件).
 // If this fails you changed a hashed input: either undo it, or, if the change
 // is a product decision that is meant to ship with 更新环境组件, set the new
 // value here in the same commit and say so in the message. Work on 其他客户端
 // never does.
-const guestRevisionAtOtherClientsBase = "e3b3a6c5ebd492d62dc8a6d26d9ff91789ea22681d323ef07c226a05a62c6c8d"
+const guestRevisionAtOtherClientsBase = "04e48db3ada8c837f4b1cf27df7fe7451ac81c221cad097656dfc6960f3423c3"
 
 func TestGuestRevisionIsPinnedForOtherClients(t *testing.T) {
 	if got := guestRevision(); got != guestRevisionAtOtherClientsBase {

@@ -96,6 +96,11 @@ type codexAccountManager struct {
 	// described: lists poll every 250 ms.
 	labels     map[string]string
 	labelsFile os.FileInfo
+	// launchPublished is the candidate list the guest holds (agent_launch.go).
+	launchPublished string
+	launchMu        sync.Mutex
+	launchRunning   bool
+	launchAgain     bool
 }
 
 func (s *Server) loadCodexAccounts() (codexAccountList, error) {
@@ -128,6 +133,7 @@ func (s *Server) saveCodexAccounts(list codexAccountList) error {
 	if err := writePrivate(filepath.Join(s.profile, "codex-accounts.json"), list); err != nil {
 		return errors.New("Codex 账号设置未保存，请检查配置目录权限和磁盘空间")
 	}
+	s.kickCodexLaunchSchedule()
 	return nil
 }
 

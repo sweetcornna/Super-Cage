@@ -91,6 +91,38 @@ sudo tee /usr/local/lib/cage-codex-bin/codex >/dev/null <<'CAGE_CODEX_SHIM'
 exec /usr/local/bin/cage-codex-account run "$CAGE_CODEX_ACCOUNT_ID" "$@"
 CAGE_CODEX_SHIM
 sudo chmod 0755 /usr/local/lib/cage-codex-bin/codex
+sudo tee /etc/profile.d/cage-codex.sh >/dev/null <<'CAGE_CODEX_FUNCTION'
+# A plain codex typed in any guest shell (Herdr/Orca included) starts on the
+# account Super Cage schedules for new sessions; see cage-codex-account auto.
+codex() {
+  if [ -z "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ -z "${CODEX_HOME:-}" ] && [ -r "$HOME/.local/share/cage/codex-accounts/launch.json" ] && [ -x /usr/local/bin/cage-codex-account ]; then
+    /usr/local/bin/cage-codex-account auto "$@"
+  else
+    command codex "$@"
+  fi
+}
+CAGE_CODEX_FUNCTION
+sudo tee /etc/profile.d/cage-auto-shims.sh >/dev/null <<'CAGE_AUTO_SHIMS'
+# Keep Super Cage's universal CLI auto-scheduling shims (and any Orca explicit
+# override shims) ahead of standard PATH across bash, zsh, Herdr, SSH and Orca.
+if [ -d "$HOME/.local/share/cage/auto-shims" ]; then
+  case ":$PATH:" in
+    *":$HOME/.local/share/cage/auto-shims:"*) ;;
+    *) export PATH="$HOME/.local/share/cage/auto-shims:$PATH" ;;
+  esac
+fi
+if [ -n "${CAGE_ORCA_SHIM_DIR:-}" ] && [ -d "$CAGE_ORCA_SHIM_DIR" ]; then
+  export PATH="$CAGE_ORCA_SHIM_DIR:$PATH"
+fi
+CAGE_AUTO_SHIMS
+for rc in /etc/zsh/zshenv /etc/bash.bashrc; do
+  if [ -f "$rc" ] && ! grep -qs '/etc/profile.d/cage-codex.sh' "$rc"; then
+    echo '[ -r /etc/profile.d/cage-codex.sh ] && . /etc/profile.d/cage-codex.sh' | sudo tee -a "$rc" >/dev/null
+  fi
+  if [ -f "$rc" ] && ! grep -qs '/etc/profile.d/cage-auto-shims.sh' "$rc"; then
+    echo '[ -r /etc/profile.d/cage-auto-shims.sh ] && . /etc/profile.d/cage-auto-shims.sh' | sudo tee -a "$rc" >/dev/null
+  fi
+done
 `
 }
 

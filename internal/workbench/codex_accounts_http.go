@@ -320,6 +320,7 @@ func (m *codexAccountManager) resetGuestCaches() {
 	m.defaultError = nil
 	m.attempted = nil
 	m.loginNotice = ""
+	m.launchPublished = ""
 	m.mu.Unlock()
 }
 

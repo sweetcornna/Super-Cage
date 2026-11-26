@@ -36,6 +36,7 @@ const BUILTIN_ACCENT = {
   t3code: "var(--strong, #1f1e1d)",
   magpie: "var(--strong, #1f1e1d)",
   herdr: "var(--strong, #1f1e1d)",
+  orca: "var(--strong, #1f1e1d)",
 };
 
 const BUILTIN_LABEL = {
@@ -58,6 +59,7 @@ const BUILTIN_LABEL = {
   t3code: "T3 Code",
   magpie: "Magpie",
   herdr: "Herdr",
+  orca: "Orca",
 };
 
 function renderBrandMark(id, color, clipId) {
@@ -334,6 +336,23 @@ function renderBrandMark(id, color, clipId) {
         </>
       );
 
+    case "orca":
+      // Sleek geometric Orca whale silhouette with signature dorsal fin and eye patch.
+      return (
+        <>
+          <path
+            d="M3.2 15.8c.6-4.2 3.8-7.4 8.2-8.2.5-1.8 1.5-3.4 2.7-4.5.3-.3.8-.1.7.4-.3 1.4-.2 2.8.4 3.9 2.9.6 5.1 2.4 5.8 5.2.4 1.5-.3 3.1-1.7 3.7-1.7.7-3.8.5-5.6-.2-1.8-.7-3.7-1-5.5-.4-1.3.4-2.5 1.3-3.4 2.3-.4.4-1.1.1-1.1-.5-.1-.6-.6-1-.5-1.7Z"
+            fill={color}
+          />
+          <ellipse cx="16.2" cy="11.4" rx="1.65" ry="1.05" transform="rotate(-16 16.2 11.4)" fill="var(--paper, #ffffff)" />
+          <path
+            d="M11.6 14.3c1.6.3 3.1.8 4.4 1.6-1.4.4-3 .3-4.6-.3-.6-.2-.5-1.4.2-1.3Z"
+            fill="var(--paper, #ffffff)"
+            fillOpacity="0.88"
+          />
+        </>
+      );
+
     default:
       // Generic custom Agent CLI vector icon: terminal prompt + AI sparkle.
       return (
@@ -415,7 +434,7 @@ export function AgentIcon({ accountNumber, agentId = "", accentColor = "", size 
 
   const accent = accentColor || BUILTIN_ACCENT[id] || "var(--accent, #cd745b)";
   const displayName = BUILTIN_LABEL[id] || agentId;
-  const label = id === "t3code" || id === "magpie" || id === "herdr"
+  const label = id === "t3code" || id === "magpie" || id === "herdr" || id === "orca"
     ? displayName
     : number ? `${displayName} · 账号 ${number}` : displayName;
 

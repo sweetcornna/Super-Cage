@@ -299,9 +299,22 @@ export function T3CodeSettingsCard({
     const ids = bindableKey.split(",");
     Promise.allSettled(
       ids.map(async (id) => {
-        const res = id === "claude"
-          ? await api("/claude-accounts")
-          : await api(`/agent-clis/${encodeURIComponent(id)}/accounts?skip_detect=1`);
+        if (id === "claude") {
+          const res = await api("/claude-accounts");
+          return [id, res?.accounts || []];
+        }
+        if (id === "codex") {
+          const [nativeRes, agentRes] = await Promise.allSettled([
+            api("/codex-accounts"),
+            api("/agent-clis/codex/accounts?skip_detect=1"),
+          ]);
+          const nativeAccts = nativeRes.status === "fulfilled" && nativeRes.value?.guest_supported
+            ? (nativeRes.value?.accounts || [])
+            : [];
+          const agentAccts = agentRes.status === "fulfilled" ? (agentRes.value?.accounts || []) : [];
+          return [id, nativeAccts.length > 0 ? nativeAccts : agentAccts];
+        }
+        const res = await api(`/agent-clis/${encodeURIComponent(id)}/accounts?skip_detect=1`);
         return [id, res?.accounts || []];
       }),
     ).then((results) => {

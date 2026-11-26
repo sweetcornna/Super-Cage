@@ -106,6 +106,10 @@ var agentWindowRoutes = []agentWindowRoute{
 	// trusts this one), and an open link is driven only by the window.
 	{"/api/client/devices", "Joining and opening other computers is done by the person in the desktop window.", "open_desktop"},
 	{"/api/client/devices/", "Joining and opening other computers is done by the person in the desktop window.", "open_desktop"},
+	// Orca Desktop pairing & launching acts on this computer's local Orca app
+	// and mints pairing secrets; both stay window only.
+	{"POST /api/orca/open", "Pairing with and opening the local Orca Desktop app on this computer is done in the desktop window.", "open_desktop"},
+	{"POST /api/orca/pair", "Minting an Orca Server pairing link or QR code grants remote access to the guest; codes are shown only in the desktop window.", "open_desktop"},
 }
 
 // agentBodyRule refuses a request to an otherwise open route by a value in
@@ -197,6 +201,7 @@ var agentRoutes = []string{
 	"POST /api/t3code/config", "POST /api/t3code/install", "POST /api/t3code/open", "POST /api/t3code/{action}",
 	"POST /api/magpie/config", "POST /api/magpie/install", "POST /api/magpie/uninstall", "POST /api/magpie/open", "POST /api/magpie/{action}",
 	"POST /api/herdr/config", "POST /api/herdr/install", "POST /api/herdr/uninstall", "POST /api/herdr/{action}", "POST /api/herdr/legacy/uninstall",
+	"POST /api/orca/config", "POST /api/orca/install", "POST /api/orca/uninstall", "POST /api/orca/sync-projects", "POST /api/orca/{action}",
 	"POST /api/proxy/{action}", "POST /api/proxy/delay", "POST /api/safety/check", "POST /api/safety/close", "POST /api/tailscale/{action}",
 	"DELETE /api/mobile-pair", "DELETE /api/devices/invite", "DELETE /api/devices/{id}",
 	"POST /api/mobile/browser/open", "POST /api/mobile/browser/favorites", "POST /api/mobile/browser/{id}/action", "POST /api/mobile/browser/{id}/close",

@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -38,11 +39,16 @@ import threading
 import time
 import unicodedata
 from urllib.parse import urlparse
+import uuid
 
 HOME = Path.home()
 ACCOUNTS_ROOT = HOME / ".local/share/cage/agent-accounts"
 SHIMS_ROOT = HOME / ".local/share/cage/agent-shims"
+AUTO_SHIMS_DIR = HOME / ".local/share/cage/auto-shims"
 SHARED_ROOT = HOME / ".local/share/cage/agent-shared"
+AGENT_LAUNCH_FILE = ACCOUNTS_ROOT / "launch.json"
+CLAUDE_LAUNCH_FILE = HOME / ".local/share/cage/claude-accounts/launch.json"
+CODEX_LAUNCH_FILE = HOME / ".local/share/cage/codex-accounts/launch.json"
 T3CODE_DIR = HOME / ".local/share/cage/t3code"
 T3CODE_ROOT = T3CODE_DIR
 T3CODE_STATE_DIR = T3CODE_ROOT / "state"
@@ -62,6 +68,32 @@ MAGPIE_LOG_MAX_BYTES = 65536
 MAGPIE_KEY_RE = re.compile(r"^[A-Za-z0-9._~-]{16,}$")
 HERDR_ROOT = HOME / ".local/share/cage/herdr"
 HERDR_LOCK_FILE = HERDR_ROOT / "lifecycle.lock"
+ORCA_ROOT = HOME / ".local/share/cage/orca"
+ORCA_RELEASES_DIR = ORCA_ROOT / "releases"
+ORCA_CURRENT_LINK = ORCA_ROOT / "current"
+ORCA_PREVIOUS_LINK = ORCA_ROOT / "previous"
+ORCA_DATA_DIR = ORCA_ROOT / "data"
+ORCA_SHIMS_DIR = ORCA_ROOT / "shims"
+ORCA_STATE_FILE = ORCA_ROOT / "runtime.json"
+ORCA_LOG_FILE = ORCA_ROOT / "server.log"
+ORCA_LOCK_FILE = ORCA_ROOT / "lifecycle.lock"
+ORCA_INSTANCE_ID_FILE = ORCA_ROOT / "instance-id"
+ORCA_BROWSER_WRAPPER = ORCA_ROOT / "open-browser.sh"
+ORCA_DEFAULT_PORT = 16768
+ORCA_LOG_MAX_BYTES = 65536
+ORCA_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+ORCA_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+ORCA_MEM_LIMIT_RE = re.compile(r"^\d+[KMGT]$")
+ORCA_RELEASES_API = "https://api.github.com/repos/stablyai/orca/releases/latest"
+ORCA_RELEASE_DL_BASE = "https://github.com/stablyai/orca/releases/download"
+AUTO_UNSCHEDULED_ARGS = frozenset({
+    "auth", "login", "logout", "setup-token", "update", "upgrade", "install",
+    "uninstall", "migrate-installer", "doctor", "mcp", "plugin", "plugins",
+    "config", "completion", "features", "debug", "cloud", "version", "help",
+    "-v", "-V", "--version", "-h", "--help",
+})
+SHELL_SHIMS_MARKER_START = "# >>> super-cage-auto-shims >>>"
+SHELL_SHIMS_MARKER_END = "# <<< super-cage-auto-shims <<<"
 CACHE_DIR = HOME / ".cache/cage"
 PROBE_CACHE_FILE = CACHE_DIR / "agent-probe-cache.json"
 OPEN_BIN = "/usr/local/libexec/cage-cli/bin/cage-open" if sys.platform == "darwin" else "/usr/local/bin/cage-open"
@@ -79,8 +111,9 @@ T3_QR_GLYPHS = frozenset("█▀▄▌▐░▒▓")
 T3_SENSITIVE_LINE_RE = re.compile(
     r"(?i)(?:token="
     r"|['\"]?(?:access_?token|refresh_?token|id_?token|auth_?token|session_?token"
+    r"|device_?token|invite_?token|relay_?token|public_?key_?b64|pairing_?url"
     r"|token|api[_-]?key|secret|client_?secret|authorization|cookie|set-cookie)['\"]?\s*[:=]\s*\S+"
-    r"|pair#|/pair[/?#]|t3://|t3code://|bearer\s+\S+"
+    r"|pair#|/pair[/?#]|t3://|t3code://|orca://pair[^\s\"'<>]*|bearer\s+\S+"
     r"|[?&]k=[A-Za-z0-9._~-]{8,}|MAGPIE_WEB_KEY\s*[:=]\s*\S+|magpie_web_[A-Za-z0-9_]+\s*=\s*\S+)"
     r"|sk-|eyJ|AIza[0-9A-Za-z_-]{20,}|gh[pousr]_[0-9A-Za-z_]{20,}"
     r"|github_pat_[0-9A-Za-z_]{20,}|gsk_[0-9A-Za-z]{20,}|xai-[0-9A-Za-z]{20,}"
@@ -166,8 +199,14 @@ def enriched_path(exclude_dir=None):
             except OSError:
                 if item == str(exclude_dir):
                     continue
-        # Never pick our own agent shims when resolving real binaries.
-        if item.startswith(str(SHIMS_ROOT)) or item == "/usr/local/lib/cage-claude-bin":
+        # Never pick our own agent/auto/tool shims when resolving real binaries.
+        if (
+            item.startswith(str(SHIMS_ROOT))
+            or item == str(AUTO_SHIMS_DIR)
+            or item == str(ORCA_SHIMS_DIR)
+            or item == str(T3CODE_ROOT / "shims")
+            or item in ("/usr/local/lib/cage-claude-bin", "/usr/local/lib/cage-codex-bin")
+        ):
             continue
         if item not in seen:
             seen.add(item)
@@ -1556,6 +1595,8 @@ def ensure_shim(spec):
         q_spec = shlex.quote(str(spec_file))
         q_accts = shlex.quote(accounts_agent_dir)
         q_shims = shlex.quote(shims_root_str)
+        q_auto = shlex.quote(str(AUTO_SHIMS_DIR))
+        q_orca_shims = shlex.quote(str(ORCA_SHIMS_DIR))
         q_name = shlex.quote(name)
 
         exec_lines = []
@@ -1598,7 +1639,7 @@ def ensure_shim(spec):
             'for _d in $_search; do\n'
             '  [ -n "$_d" ] || continue\n'
             '  case "$_d" in\n'
-            f'    {q_shims}|{q_shims}/*|/usr/local/lib/cage-claude-bin) continue ;;\n'
+            f'    {q_shims}|{q_shims}/*|{q_auto}|{q_orca_shims}|/usr/local/lib/cage-claude-bin|/usr/local/lib/cage-codex-bin) continue ;;\n'
             '  esac\n'
             f'  if [ -f "$_d"/{q_name} ] && [ -x "$_d"/{q_name} ]; then\n'
             f'    _bin="$_d"/{q_name}\n'
@@ -1726,6 +1767,515 @@ def prepare_session(payload):
         "prepared_stamp": str(stamp_path),
         "prep_hash": prep_hash,
     }
+
+
+# ---------------------------------------------------------------------------
+# Universal CLI Auto-Scheduling Shims (shells, Herdr, SSH, T3 Code, Orca)
+# ---------------------------------------------------------------------------
+
+def _claude_account_helper():
+    if sys.platform == "darwin" and Path("/usr/local/libexec/cage-cli/bin/cage-claude-account").is_file():
+        return "/usr/local/libexec/cage-cli/bin/cage-claude-account"
+    return "/usr/local/bin/cage-claude-account"
+
+
+def _codex_account_helper():
+    return "/usr/local/bin/cage-codex-account"
+
+
+def _ensure_shell_shims_hook():
+    """Idempotently add a zero-fork POSIX PATH guard to user shell rc files so
+    universal auto-shims and Orca explicit override shims survive login-shell
+    PATH resets (including Orca's `$SHELL -ilc 'env -0'`)."""
+    block = (
+        f"{SHELL_SHIMS_MARKER_START}\n"
+        'if [ -d "$HOME/.local/share/cage/auto-shims" ]; then\n'
+        '  case ":$PATH:" in\n'
+        '    *":$HOME/.local/share/cage/auto-shims:"*) ;;\n'
+        '    *) export PATH="$HOME/.local/share/cage/auto-shims:$PATH" ;;\n'
+        '  esac\n'
+        'fi\n'
+        'if [ -n "${CAGE_ORCA_SHIM_DIR:-}" ] && [ -d "$CAGE_ORCA_SHIM_DIR" ]; then\n'
+        '  export PATH="$CAGE_ORCA_SHIM_DIR:$PATH"\n'
+        'fi\n'
+        f"{SHELL_SHIMS_MARKER_END}\n"
+    )
+    targets = [HOME / ".bashrc", HOME / ".profile", HOME / ".zshenv", HOME / ".zshrc"]
+    has_zsh = bool(shutil.which("zsh"))
+    for rc in targets:
+        try:
+            exists = rc.exists()
+            if rc.is_symlink():
+                continue
+            if not exists and rc.name in (".zshenv", ".zshrc") and not has_zsh:
+                continue
+            existing = rc.read_text(encoding="utf-8", errors="ignore") if exists else ""
+            if SHELL_SHIMS_MARKER_START in existing and SHELL_SHIMS_MARKER_END in existing:
+                start_idx = existing.index(SHELL_SHIMS_MARKER_START)
+                end_idx = existing.index(SHELL_SHIMS_MARKER_END) + len(SHELL_SHIMS_MARKER_END)
+                if end_idx < len(existing) and existing[end_idx] == "\n":
+                    end_idx += 1
+                updated = existing[:start_idx] + block + existing[end_idx:]
+                if updated == existing:
+                    continue
+            else:
+                sep = "" if (not existing or existing.endswith("\n")) else "\n"
+                updated = existing + sep + block
+            mode = (rc.stat().st_mode & 0o777) if exists else 0o644
+            atomic_write_text(rc, updated, mode=mode)
+        except OSError:
+            continue
+
+
+def _posix_strip_and_exec(binary_name):
+    """Return a POSIX sh snippet that strips all Cage shim dirs from PATH and execs real binary."""
+    q_shims = shlex.quote(str(SHIMS_ROOT))
+    q_auto = shlex.quote(str(AUTO_SHIMS_DIR))
+    q_orca = shlex.quote(str(ORCA_SHIMS_DIR))
+    q_t3 = shlex.quote(str(T3CODE_ROOT / "shims"))
+    q_name = shlex.quote(binary_name)
+    search_prefixes = [
+        "$HOME/.local/bin",
+        "$HOME/.local/share/mise/shims",
+        "$HOME/.cargo/bin",
+        "$HOME/.cursor/bin",
+        "$HOME/.opencode/bin",
+        "$HOME/.amp/bin",
+        "$HOME/.kimi/bin",
+        "$HOME/.factory/bin",
+        "$HOME/.npm-global/bin",
+    ]
+    if sys.platform == "darwin":
+        search_prefixes.extend([
+            "/usr/local/libexec/cage-cli/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ])
+    search_expr = ":".join(search_prefixes) + ":${PATH:-/usr/bin:/bin}"
+    return (
+        '_clean_path=""\n'
+        '_old_ifs="$IFS"\n'
+        'IFS=:\n'
+        'set -f\n'
+        'for _d in ${PATH:-/usr/bin:/bin}; do\n'
+        '  [ -n "$_d" ] || continue\n'
+        '  case "$_d" in\n'
+        f'    {q_shims}|{q_shims}/*|{q_auto}|{q_orca}|{q_t3}|/usr/local/lib/cage-claude-bin|/usr/local/lib/cage-codex-bin) continue ;;\n'
+        '  esac\n'
+        '  _clean_path="${_clean_path:+$_clean_path:}$_d"\n'
+        'done\n'
+        'export PATH="${_clean_path:-/usr/bin:/bin}"\n'
+        '_bin=""\n'
+        f'_search="{search_expr}"\n'
+        'for _d in $_search; do\n'
+        '  [ -n "$_d" ] || continue\n'
+        '  case "$_d" in\n'
+        f'    {q_shims}|{q_shims}/*|{q_auto}|{q_orca}|{q_t3}|/usr/local/lib/cage-claude-bin|/usr/local/lib/cage-codex-bin) continue ;;\n'
+        '  esac\n'
+        f'  if [ -f "$_d"/{q_name} ] && [ -x "$_d"/{q_name} ]; then\n'
+        f'    _bin="$_d"/{q_name}\n'
+        '    break\n'
+        '  fi\n'
+        'done\n'
+        'set +f\n'
+        'IFS="$_old_ifs"\n'
+        'if [ -n "$_bin" ]; then\n'
+        '  exec "$_bin" "$@"\n'
+        'fi\n'
+        f'echo "未找到 {binary_name} 命令。" >&2\n'
+        'exit 127\n'
+    )
+
+
+def _write_claude_auto_shim():
+    helper = _claude_account_helper()
+    q_helper = shlex.quote(helper)
+    q_launch = shlex.quote(str(CLAUDE_LAUNCH_FILE))
+    content = (
+        "#!/bin/sh\n"
+        'if [ "${CAGE_CLAUDE_ACCOUNT_ID:-}" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n'
+        + _posix_strip_and_exec("claude")
+        + 'fi\n'
+        f'if [ -n "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n'
+        f'  exec {q_helper} run "$CAGE_CLAUDE_ACCOUNT_ID" "$@"\n'
+        'fi\n'
+        f'if [ -z "${{CLAUDE_CONFIG_DIR:-}}" ] && [ -r {q_launch} ] && [ -x {q_helper} ]; then\n'
+        f'  exec {q_helper} auto "$@"\n'
+        'fi\n'
+        + _posix_strip_and_exec("claude")
+    )
+    shim = AUTO_SHIMS_DIR / "claude"
+    if not shim.exists() or shim.read_text(encoding="utf-8", errors="ignore") != content:
+        atomic_write_text(shim, content, mode=0o755)
+
+
+def _write_codex_auto_shim(has_native_codex, has_agent_codex):
+    helper = _codex_account_helper()
+    q_helper = shlex.quote(helper)
+    q_native_launch = shlex.quote(str(CODEX_LAUNCH_FILE))
+    q_agent_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
+    q_py = shlex.quote(sys.executable)
+    q_rt = shlex.quote(str(Path(__file__).resolve()))
+    q_accts = shlex.quote(str(ACCOUNTS_ROOT / "codex"))
+    parts = [
+        "#!/bin/sh\n",
+        'if [ "${CAGE_CODEX_ACCOUNT_ID:-}" = "default" ] || [ "${CAGE_CLI_ACCOUNT_CODEX:-}" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n',
+        _posix_strip_and_exec("codex"),
+        'fi\n',
+        f'if [ -n "${{CAGE_CODEX_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n',
+        f'  exec {q_helper} run "$CAGE_CODEX_ACCOUNT_ID" "$@"\n',
+        'fi\n',
+        'if [ -n "${CAGE_CLI_ACCOUNT_CODEX:-}" ] && [ "${CAGE_CLI_ACCOUNT_CODEX}" != "auto" ]; then\n',
+        f'  _env={q_accts}/"$CAGE_CLI_ACCOUNT_CODEX"/profile.env\n',
+        '  if [ -r "$_env" ]; then\n',
+        '    . "$_env"\n',
+        _posix_strip_and_exec("codex"),
+        '  fi\n',
+        'fi\n',
+    ]
+    if has_native_codex:
+        parts.extend([
+            f'if [ -z "${{CODEX_HOME:-}}" ] && [ -r {q_native_launch} ] && [ -x {q_helper} ]; then\n',
+            f'  exec {q_helper} auto "$@"\n',
+            'fi\n',
+        ])
+    if has_agent_codex:
+        parts.extend([
+            f'if [ -z "${{CODEX_HOME:-}}" ] && [ -r {q_agent_launch} ]; then\n',
+            f'  exec {q_py} -I {q_rt} auto-exec codex codex "$@"\n',
+            'fi\n',
+        ])
+    parts.append(_posix_strip_and_exec("codex"))
+    content = "".join(parts)
+    shim = AUTO_SHIMS_DIR / "codex"
+    if not shim.exists() or shim.read_text(encoding="utf-8", errors="ignore") != content:
+        atomic_write_text(shim, content, mode=0o755)
+
+
+def _write_generic_auto_shim(agent_id, binary_name, spec):
+    per_agent_var = _agent_account_env_var(agent_id)
+    q_py = shlex.quote(sys.executable)
+    q_rt = shlex.quote(str(Path(__file__).resolve()))
+    q_accts = shlex.quote(str(ACCOUNTS_ROOT / agent_id))
+    q_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
+    q_agent = shlex.quote(agent_id)
+    q_bin_name = shlex.quote(binary_name)
+
+    iso = spec.get("isolation") or {}
+    config_flag = iso.get("config_flag") or ""
+    use_flag_dir = iso.get("mode") == "flag_dir" and bool(FLAG_RE.match(config_flag))
+
+    pinned_exec = ""
+    if use_flag_dir:
+        q_flag = shlex.quote(config_flag)
+        pinned_exec = (
+            '    _clean_bin=""\n'
+            + _posix_strip_and_exec(binary_name).replace('exec "$_bin" "$@"', f'exec "$_bin" {q_flag} "$_profile/config" "$@"')
+        )
+    else:
+        pinned_exec = _posix_strip_and_exec(binary_name)
+
+    content = (
+        "#!/bin/sh\n"
+        f'_pin="${{{per_agent_var}:-${{CAGE_CLI_ACCOUNT_ID:-}}}}"\n'
+        'if [ "$_pin" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n'
+        + _posix_strip_and_exec(binary_name)
+        + 'fi\n'
+        'if [ -n "$_pin" ] && [ "$_pin" != "auto" ]; then\n'
+        '  case "$_pin" in\n'
+        '    *[!0-9a-f]*) _pin="" ;;\n'
+        '    *) [ "${#_pin}" = 24 ] || _pin="" ;;\n'
+        '  esac\n'
+        '  if [ -n "$_pin" ]; then\n'
+        f'    _profile={q_accts}/"$_pin"\n'
+        '    if [ -r "$_profile/profile.env" ]; then\n'
+        '      . "$_profile/profile.env"\n'
+        + pinned_exec
+        + '    fi\n'
+        '  fi\n'
+        'fi\n'
+        f'if [ -r {q_launch} ]; then\n'
+        f'  exec {q_py} -I {q_rt} auto-exec {q_agent} {q_bin_name} "$@"\n'
+        'fi\n'
+        + _posix_strip_and_exec(binary_name)
+    )
+    shim = AUTO_SHIMS_DIR / binary_name
+    if not shim.exists() or shim.read_text(encoding="utf-8", errors="ignore") != content:
+        atomic_write_text(shim, content, mode=0o755)
+
+
+def _launch_has_accounts(path):
+    data = read_json(path)
+    if not isinstance(data, dict):
+        return False
+    accts = data.get("accounts")
+    return isinstance(accts, list) and len(accts) > 0
+
+
+def sync_auto_shims(payload=None):
+    """Publish optional agent launch schedule and synchronize universal auto-shims
+    in ~/.local/share/cage/auto-shims for Claude, Codex, and all Agent CLIs."""
+    payload = payload if isinstance(payload, dict) else {}
+    os.umask(0o077)
+    ACCOUNTS_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    if "schedule" in payload and isinstance(payload["schedule"], dict):
+        atomic_write_json(AGENT_LAUNCH_FILE, payload["schedule"], mode=0o600)
+
+    schedule = read_json(AGENT_LAUNCH_FILE)
+    agents_map = schedule.get("agents") if isinstance(schedule, dict) and isinstance(schedule.get("agents"), dict) else {}
+
+    has_claude = _launch_has_accounts(CLAUDE_LAUNCH_FILE)
+    has_native_codex = _launch_has_accounts(CODEX_LAUNCH_FILE)
+    codex_entry = agents_map.get("codex") if isinstance(agents_map.get("codex"), dict) else None
+    has_agent_codex = bool(codex_entry and isinstance(codex_entry.get("candidates"), list) and len(codex_entry["candidates"]) > 0)
+
+    AUTO_SHIMS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    desired = set()
+
+    if has_claude:
+        _write_claude_auto_shim()
+        desired.add("claude")
+
+    if has_native_codex or has_agent_codex:
+        if has_agent_codex and isinstance(codex_entry.get("spec"), dict):
+            spec = codex_entry["spec"]
+            for cand in codex_entry.get("candidates") or []:
+                gid = str((cand or {}).get("guest_id") or "")
+                if gid and gid != "default" and ACCOUNT_ID_RE.match(gid):
+                    base = profile_root("codex", gid)
+                    if not (base / "profile.env").is_file():
+                        with _profile_lock(base):
+                            base, dirs, _ = build_agent_env(spec, gid, for_login=False)
+                            sync_shared_resources(spec, base, dirs)
+                            write_profile_env(spec, gid)
+        _write_codex_auto_shim(has_native_codex, has_agent_codex)
+        desired.add("codex")
+
+    for agent_id, entry in agents_map.items():
+        if agent_id in ("claude", "codex") or not CLI_ID_RE.match(str(agent_id)):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        candidates = entry.get("candidates")
+        spec = entry.get("spec")
+        if not isinstance(candidates, list) or not candidates or not isinstance(spec, dict):
+            continue
+        for cand in candidates:
+            gid = str((cand or {}).get("guest_id") or "")
+            if gid and gid != "default" and ACCOUNT_ID_RE.match(gid):
+                base = profile_root(agent_id, gid)
+                if not (base / "profile.env").is_file():
+                    with _profile_lock(base):
+                        base, dirs, _ = build_agent_env(spec, gid, for_login=False)
+                        sync_shared_resources(spec, base, dirs)
+                        write_profile_env(spec, gid)
+        names = [spec.get("binary", ""), *(spec.get("fallback_binaries") or [])]
+        for bin_name in names:
+            if not bin_name or "/" in bin_name or bin_name in ("claude", "codex") or any(ch in bin_name for ch in ("\x00", "\r", "\n")):
+                continue
+            _write_generic_auto_shim(agent_id, bin_name, spec)
+            desired.add(bin_name)
+
+    # Remove stale shims for agents whose pools are now empty.
+    try:
+        for child in list(AUTO_SHIMS_DIR.iterdir()):
+            if child.name not in desired and (child.is_file() or child.is_symlink()):
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+    if desired or payload.get("ensure_shell_hook"):
+        _ensure_shell_shims_hook()
+
+    return {"ok": True, "shims": sorted(desired), "dir": str(AUTO_SHIMS_DIR)}
+
+
+def _match_project_pin(pins, cwd_str):
+    if not isinstance(pins, dict) or not pins or not cwd_str:
+        return ""
+    best_len = -1
+    matched = ""
+    cwd_norm = cwd_str.rstrip("/") or "/"
+    for ws, target in pins.items():
+        if not isinstance(ws, str) or not isinstance(target, str) or not target.strip():
+            continue
+        forms = [ws]
+        try:
+            resolved_ws = str(Path(ws).resolve())
+            if resolved_ws != ws:
+                forms.append(resolved_ws)
+        except OSError:
+            pass
+        for cand_ws in forms:
+            ws_norm = cand_ws.rstrip("/") or "/"
+            if cwd_norm == ws_norm or cwd_norm.startswith(ws_norm + "/"):
+                if len(ws_norm) > best_len:
+                    best_len = len(ws_norm)
+                    matched = target.strip()
+    return matched
+
+
+def _codex_candidate_exhausted(agent_id, guest_id, now):
+    if agent_id != "codex" or guest_id == "default":
+        return False
+    try:
+        cfg_dir = profile_root("codex", guest_id) / "config"
+        quota = read_codex_quota(cfg_dir)
+    except Exception:
+        return False
+    if not isinstance(quota, dict):
+        return False
+    for key in ("five_hour", "seven_day"):
+        w = quota.get(key)
+        if not isinstance(w, dict):
+            continue
+        used = w.get("used_percentage", 0)
+        resets_at = w.get("resets_at", 0)
+        obs = w.get("observed_at", 0)
+        fresh = obs > 0 and (now - obs) <= 15 * 60
+        if used >= 100 and (resets_at > now or fresh):
+            return True
+    return False
+
+
+def _pick_auto_candidate(agent_id, entry, cwd_str, now=None):
+    now = int(time.time()) if now is None else int(now)
+    candidates = entry.get("candidates")
+    if not isinstance(candidates, list) or not candidates:
+        return None
+    mode = str(entry.get("mode") or "smart").strip().lower()
+    pin = _match_project_pin(entry.get("project_pins"), cwd_str)
+
+    eligible = []
+    for cand in candidates[:64]:
+        if not isinstance(cand, dict):
+            continue
+        gid = str(cand.get("guest_id") or "").strip()
+        cid = str(cand.get("id") or "").strip()
+        if not gid or (gid != "default" and not ACCOUNT_ID_RE.match(gid)):
+            continue
+        cooldown = cand.get("cooldown_until") or 0
+        if isinstance(cooldown, (int, float)) and cooldown > now:
+            continue
+        if pin.startswith("account:"):
+            want = pin[len("account:"):]
+            if cid != want and gid != want:
+                continue
+        elif pin.startswith("group:"):
+            want_group = pin[len("group:"):]
+            if str(cand.get("handoff_group") or "") != want_group:
+                continue
+        if _codex_candidate_exhausted(agent_id, gid, now):
+            continue
+        eligible.append(cand)
+
+    if not eligible:
+        return None
+    if len(eligible) == 1 or mode in ("sequential", "quota_first", "drain", "sticky_project"):
+        return eligible[0]
+
+    # For balanced (all eligible) or smart (top-tier within 5 score points), rotate via a tiny 0600 cursor
+    # so consecutive invocations across Orca / Herdr / scripts distribute load smoothly.
+    pool = eligible
+    if mode == "smart":
+        top_score = eligible[0].get("score")
+        if isinstance(top_score, (int, float)):
+            near = [c for c in eligible if isinstance(c.get("score"), (int, float)) and (top_score - c["score"]) <= 5.0]
+            if near:
+                pool = near
+    if len(pool) == 1:
+        return pool[0]
+
+    rr_dir = ACCOUNTS_ROOT / agent_id
+    rr_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    rr_file = rr_dir / ".auto-rr"
+    idx = 0
+    try:
+        fd = os.open(str(rr_file), os.O_RDWR | os.O_CREAT, 0o600)
+        os.chmod(rr_file, 0o600)
+        with os.fdopen(fd, "r+") as fp:
+            fcntl.flock(fp, fcntl.LOCK_EX)
+            try:
+                raw = fp.read().strip()
+                last_id = raw
+                ids = [str(c.get("guest_id") or "") for c in pool]
+                if last_id in ids:
+                    idx = (ids.index(last_id) + 1) % len(pool)
+                chosen = pool[idx]
+                fp.seek(0)
+                fp.truncate()
+                fp.write(str(chosen.get("guest_id") or ""))
+                fp.flush()
+                return chosen
+            finally:
+                fcntl.flock(fp, fcntl.LOCK_UN)
+    except OSError:
+        return pool[0]
+
+
+def _exec_real_binary(binary_name, extra_args):
+    path_str = enriched_path()
+    binary = shutil.which(binary_name, path=path_str)
+    if not binary:
+        print(f"未找到 {binary_name} 命令。", file=sys.stderr)
+        return 127
+    env = os.environ.copy()
+    env["PATH"] = path_str
+    os.execve(binary, [binary, *extra_args], env)
+
+
+def auto_exec_agent(agent_id, binary_name, extra_args):
+    """Dynamically schedule a non-Claude Agent CLI invocation from launch.json.
+    Anything explicit or administrative bypasses scheduling and runs the real CLI."""
+    if not CLI_ID_RE.match(agent_id):
+        return _exec_real_binary(binary_name, extra_args)
+
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    if disabled or (extra_args and extra_args[0] in AUTO_UNSCHEDULED_ARGS):
+        return _exec_real_binary(binary_name, extra_args)
+
+    schedule = read_json(AGENT_LAUNCH_FILE)
+    agents_map = schedule.get("agents") if isinstance(schedule, dict) and isinstance(schedule.get("agents"), dict) else {}
+    entry = agents_map.get(agent_id)
+    if not isinstance(entry, dict) or not isinstance(entry.get("spec"), dict):
+        return _exec_real_binary(binary_name, extra_args)
+
+    spec = entry["spec"]
+    iso = spec.get("isolation") or {}
+    auth = spec.get("auth") or {}
+    # Respect caller's explicit isolation directory or API key overrides.
+    explicit_vars = set()
+    iso_var = iso.get("env_var") or ""
+    if is_safe_env_name(iso_var):
+        explicit_vars.add(iso_var)
+    for v in (auth.get("api_key_env_vars") or []):
+        if is_safe_env_name(v):
+            explicit_vars.add(v)
+    for v in (auth.get("strip_env_on_oauth") or []):
+        if is_safe_env_name(v):
+            explicit_vars.add(v)
+    if any(os.environ.get(v) for v in explicit_vars):
+        return _exec_real_binary(binary_name, extra_args)
+
+    try:
+        cwd_str = str(Path.cwd().resolve())
+    except OSError:
+        cwd_str = ""
+    chosen = _pick_auto_candidate(agent_id, entry, cwd_str)
+    if not chosen:
+        return _exec_real_binary(binary_name, extra_args)
+
+    guest_id = str(chosen.get("guest_id") or "default").strip() or "default"
+    if guest_id == "default":
+        return _exec_real_binary(binary_name, extra_args)
+
+    # Pin child processes within this session to the chosen account (matching Claude's CLAUDE_CONFIG_DIR stickiness).
+    os.environ[_agent_account_env_var(agent_id)] = guest_id
+    return exec_agent(spec, guest_id, extra_args)
 
 
 # ---------------------------------------------------------------------------
@@ -2474,13 +3024,44 @@ def t3code_start(payload, restart=False):
 
         # Build isolated provider routing for `t3 serve` WITHOUT polluting global
         # XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME or CODEX_HOME on the parent process.
+        # Keep ~/.local/share/cage/auto-shims synced so "auto" bindings dynamically
+        # pick healthy accounts per-invocation without restarting T3 Code!
+        try:
+            sync_auto_shims({})
+        except Exception:
+            pass
         env = os.environ.copy()
         env.pop("CAGE_CLI_ACCOUNT_ID", None)
         shim_prefixes = []
+        include_auto_shims = False
         for agent_id, binding in bindings.items():
             if not isinstance(binding, dict):
                 continue
+            mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
+            if mode == "auto":
+                include_auto_shims = True
+                if agent_id == "claude":
+                    env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
+                    env.pop("CAGE_CLAUDE_SUBJECT", None)
+                elif agent_id == "codex":
+                    env.pop("CAGE_CODEX_ACCOUNT_ID", None)
+                    env.pop("CAGE_CODEX_SUBJECT", None)
+                    env.pop(_agent_account_env_var("codex"), None)
+                elif CLI_ID_RE.match(str(agent_id)):
+                    env.pop(_agent_account_env_var(str(agent_id)), None)
+                continue
+            if mode == "default":
+                if agent_id == "claude":
+                    env["CAGE_CLAUDE_ACCOUNT_ID"] = "default"
+                    env.pop("CAGE_CLAUDE_SUBJECT", None)
+                elif agent_id == "codex":
+                    env["CAGE_CODEX_ACCOUNT_ID"] = "default"
+                    env.pop("CAGE_CODEX_SUBJECT", None)
+                    env[_agent_account_env_var("codex")] = "default"
+                elif CLI_ID_RE.match(str(agent_id)):
+                    env[_agent_account_env_var(str(agent_id))] = "default"
+                continue
             if agent_id == "claude":
                 if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
                     raise ValueError("invalid claude guest_id")
@@ -2501,12 +3082,30 @@ def t3code_start(payload, restart=False):
                 if guest_id != "default":
                     claude_cfg = HOME / ".local/share/cage/claude-accounts" / guest_id / "config"
                     claude_cfg.mkdir(parents=True, exist_ok=True, mode=0o700)
+            elif agent_id == "codex" and binding.get("codex_native"):
+                if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
+                    raise ValueError("invalid codex guest_id")
+                shim_prefixes.append("/usr/local/lib/cage-codex-bin")
+                env["CAGE_CODEX_ACCOUNT_ID"] = guest_id
+                subject = str(binding.get("subject") or "").strip()
+                if subject:
+                    if len(subject) > 128 or any(ch in subject for ch in ("\x00", "\r", "\n")):
+                        raise ValueError("invalid codex subject")
+                    env["CAGE_CODEX_SUBJECT"] = subject
+                else:
+                    env.pop("CAGE_CODEX_SUBJECT", None)
+                if guest_id != "default":
+                    codex_home_dir = HOME / ".local/share/cage/codex-accounts" / guest_id / "home"
+                    codex_home_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
             else:
                 spec = binding.get("spec")
                 if isinstance(spec, dict) and spec.get("id"):
                     prep = prepare_session({"spec": spec, "account_id": guest_id})
                     shim_prefixes.append(prep["shim_dir"])
                     env[_agent_account_env_var(spec["id"])] = guest_id
+
+        if include_auto_shims and AUTO_SHIMS_DIR.is_dir():
+            shim_prefixes.append(str(AUTO_SHIMS_DIR))
 
         dedup_prefixes = []
         for p in shim_prefixes:
@@ -3976,6 +4575,1124 @@ def herdr_attach():
     _herdr_exec_viewer(binary, name, env, workspace, history)
 
 
+# ---------------------------------------------------------------------------
+# Managed Orca Server (stablyai/orca orcad server-only) Guest Lifecycle
+# ---------------------------------------------------------------------------
+
+@contextmanager
+def _orca_lifecycle_lock():
+    """Serialize Orca Server install, uninstall, start, stop, pair and identity operations."""
+    os.umask(0o077)
+    ORCA_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd = os.open(str(ORCA_LOCK_FILE), os.O_RDWR | os.O_CREAT, 0o600)
+    os.chmod(ORCA_LOCK_FILE, 0o600)
+    with os.fdopen(fd, "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def _validate_orca_port(port):
+    if isinstance(port, bool) or not isinstance(port, int) or not (1024 <= port <= 65535):
+        raise ValueError("Orca Server 端口须在 1024-65535 之间")
+    return port
+
+
+def _requested_orca_port(payload, default=ORCA_DEFAULT_PORT):
+    raw = payload.get("port") if isinstance(payload, dict) else None
+    if raw is None or raw == "" or raw == 0:
+        return _validate_orca_port(default)
+    if isinstance(raw, bool):
+        raise ValueError("Orca Server 端口须在 1024-65535 之间")
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Orca Server 端口须在 1024-65535 之间") from exc
+    return _validate_orca_port(port)
+
+
+def _orca_find_binary(path_str=None):
+    """Locate Orca Server binary without ever colliding with Linux /usr/bin/orca (GNOME screen reader)."""
+    current_bin = ORCA_CURRENT_LINK / "bin/orca-ide"
+    if current_bin.is_file() and os.access(current_bin, os.X_OK):
+        return str(current_bin)
+    local_bin = HOME / ".local/bin/orca-ide"
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+    found = shutil.which("orca-ide", path=path_str or enriched_path())
+    if found:
+        return found
+    if sys.platform == "darwin":
+        for app in (Path("/Applications/Orca.app"), HOME / "Applications/Orca.app"):
+            cand = app / "Contents/Resources/bin/orca"
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+    return ""
+
+
+def _orca_read_version(binary, path_str=None):
+    if not binary:
+        return ""
+    # Fast path (<0.1ms): read VERSION file bundled in official orca-server tarball.
+    try:
+        resolved = Path(binary).resolve()
+        for parent in (resolved.parent.parent, ORCA_CURRENT_LINK):
+            vf = parent / "VERSION"
+            if vf.is_file():
+                text = vf.read_text(encoding="utf-8", errors="ignore").strip().lstrip("v")
+                if ORCA_VERSION_RE.match(text):
+                    return text
+            build_json = parent / "orca-local-build.json"
+            if build_json.is_file():
+                data = read_json(build_json)
+                if isinstance(data, dict) and isinstance(data.get("version"), str):
+                    v = data["version"].strip().lstrip("v")
+                    if ORCA_VERSION_RE.match(v):
+                        return v
+    except OSError:
+        pass
+    return _read_cached_cli_version(binary, path_str or enriched_path())
+
+
+def _orca_instance_id():
+    """Persisted per-profile UUID so VM clones never share pairing identity."""
+    try:
+        val = ORCA_INSTANCE_ID_FILE.read_text(encoding="utf-8", errors="ignore").strip()
+        if val and len(val) <= 64 and re.fullmatch(r"[A-Za-z0-9._-]+", val):
+            return val
+    except OSError:
+        pass
+    val = str(uuid.uuid4())
+    atomic_write_text(ORCA_INSTANCE_ID_FILE, val + "\n", mode=0o600)
+    return val
+
+
+def _orca_ensure_guest_browser_wrapper():
+    """Return an executable guest browser launcher for BROWSER so Orca's assembly.ts
+    never routes OAuth URLs back to the host Desktop (anti-ban IP isolation)."""
+    if os.path.isfile(OPEN_BIN) and os.access(OPEN_BIN, os.X_OK):
+        return OPEN_BIN
+    # Fallback wrapper invoking xdg-open / guest chromium, or safe no-op if headless.
+    script = (
+        "#!/bin/sh\n"
+        "if command -v xdg-open >/dev/null 2>&1; then\n"
+        '  exec xdg-open "$@"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+    if not ORCA_BROWSER_WRAPPER.exists() or ORCA_BROWSER_WRAPPER.read_text(encoding="utf-8", errors="ignore") != script:
+        atomic_write_text(ORCA_BROWSER_WRAPPER, script, mode=0o700)
+    return str(ORCA_BROWSER_WRAPPER)
+
+
+def _orca_tailscale_ip(path_str=None):
+    ts = shutil.which("tailscale", path=path_str or enriched_path())
+    if not ts:
+        return ""
+    try:
+        res = subprocess.run(
+            [ts, "ip", "-4"],
+            env={**os.environ, "PATH": path_str or enriched_path()},
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2.0,
+        )
+        if res.returncode != 0:
+            return ""
+        cgnat = ipaddress.IPv4Network("100.64.0.0/10")
+        for line in (res.stdout or "").splitlines():
+            cand = line.strip()
+            if not cand:
+                continue
+            try:
+                addr = ipaddress.IPv4Address(cand)
+                if addr in cgnat:
+                    return str(addr)
+            except ValueError:
+                continue
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ""
+
+
+def _orca_resolve_bind_ip(bind_mode, path_str=None):
+    mode = str(bind_mode or "loopback").strip().lower()
+    if mode == "loopback":
+        return "127.0.0.1"
+    if mode == "tailscale":
+        ts_ip = _orca_tailscale_ip(path_str)
+        if not ts_ip:
+            raise ValueError("未检测到已连接的 Tailscale 100.x IPv4 地址，请先在「设置 → Tailscale」中连接私有网络，或切回仅本机回环模式")
+        return ts_ip
+    raise ValueError("Orca Server 绑定模式无效，仅支持 loopback 或 tailscale")
+
+
+def _orca_prepare_bindings(bindings, path_str):
+    """Prepare universal auto-shims and any explicit per-agent override shims for Orca.
+    Returns (extra_env, shim_prefixes, orca_override_dir)."""
+    try:
+        sync_auto_shims({"ensure_shell_hook": True})
+    except Exception:
+        pass
+
+    extra_env = {}
+    shim_prefixes = []
+    override_written = False
+
+    # Rebuild ORCA_SHIMS_DIR cleanly on each start so stale explicit pins never linger.
+    if ORCA_SHIMS_DIR.exists():
+        shutil.rmtree(ORCA_SHIMS_DIR, ignore_errors=True)
+
+    def write_override_shim(name, content):
+        nonlocal override_written
+        ORCA_SHIMS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_write_text(ORCA_SHIMS_DIR / name, content, mode=0o755)
+        override_written = True
+
+    if isinstance(bindings, dict):
+        for agent_id, binding in bindings.items():
+            if not isinstance(binding, dict):
+                continue
+            mode = str(binding.get("mode") or "").strip().lower()
+            guest_id = str(binding.get("guest_id") or "default").strip() or "default"
+            if mode == "auto":
+                # Dynamic live scheduling via ~/.local/share/cage/auto-shims (no pinned env!).
+                continue
+            if mode == "default":
+                if agent_id == "claude":
+                    extra_env["CAGE_CLAUDE_ACCOUNT_ID"] = "default"
+                elif agent_id == "codex":
+                    extra_env["CAGE_CODEX_ACCOUNT_ID"] = "default"
+                    extra_env[_agent_account_env_var("codex")] = "default"
+                elif CLI_ID_RE.match(str(agent_id)):
+                    extra_env[_agent_account_env_var(str(agent_id))] = "default"
+                continue
+            if agent_id == "claude":
+                if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
+                    raise ValueError("invalid claude guest_id")
+                helper = _claude_account_helper()
+                subject = str(binding.get("subject") or "").strip()
+                if subject and (len(subject) > 128 or any(ch in subject for ch in ("\x00", "\r", "\n"))):
+                    raise ValueError("invalid claude subject")
+                extra_env["CAGE_CLAUDE_ACCOUNT_ID"] = guest_id
+                if subject:
+                    extra_env["CAGE_CLAUDE_SUBJECT"] = subject
+                if guest_id != "default":
+                    (HOME / ".local/share/cage/claude-accounts" / guest_id / "config").mkdir(parents=True, exist_ok=True, mode=0o700)
+                    write_override_shim(
+                        "claude",
+                        f"#!/bin/sh\nexport CAGE_CLAUDE_ACCOUNT_ID={shlex.quote(guest_id)}\n"
+                        + (f"export CAGE_CLAUDE_SUBJECT={shlex.quote(subject)}\n" if subject else "")
+                        + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
+                    )
+            elif agent_id == "codex" and binding.get("codex_native"):
+                if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
+                    raise ValueError("invalid codex guest_id")
+                helper = _codex_account_helper()
+                subject = str(binding.get("subject") or "").strip()
+                if subject and (len(subject) > 128 or any(ch in subject for ch in ("\x00", "\r", "\n"))):
+                    raise ValueError("invalid codex subject")
+                extra_env["CAGE_CODEX_ACCOUNT_ID"] = guest_id
+                if subject:
+                    extra_env["CAGE_CODEX_SUBJECT"] = subject
+                if guest_id != "default":
+                    (HOME / ".local/share/cage/codex-accounts" / guest_id / "home").mkdir(parents=True, exist_ok=True, mode=0o700)
+                    write_override_shim(
+                        "codex",
+                        f"#!/bin/sh\nexport CAGE_CODEX_ACCOUNT_ID={shlex.quote(guest_id)}\n"
+                        + (f"export CAGE_CODEX_SUBJECT={shlex.quote(subject)}\n" if subject else "")
+                        + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
+                    )
+            else:
+                spec = binding.get("spec")
+                if isinstance(spec, dict) and spec.get("id"):
+                    prep = prepare_session({"spec": spec, "account_id": guest_id})
+                    shim_prefixes.append(prep["shim_dir"])
+                    extra_env[_agent_account_env_var(spec["id"])] = guest_id
+                    if guest_id != "default":
+                        for bin_name in [spec.get("binary", ""), *(spec.get("fallback_binaries") or [])]:
+                            if not bin_name or "/" in bin_name:
+                                continue
+                            target_shim = Path(prep["shim_dir"]) / bin_name
+                            if target_shim.is_file():
+                                write_override_shim(
+                                    bin_name,
+                                    f"#!/bin/sh\nexport {_agent_account_env_var(spec['id'])}={shlex.quote(guest_id)}\n"
+                                    f'exec {shlex.quote(str(target_shim))} "$@"\n',
+                                )
+
+    if override_written:
+        shim_prefixes.insert(0, str(ORCA_SHIMS_DIR))
+        extra_env["CAGE_ORCA_SHIM_DIR"] = str(ORCA_SHIMS_DIR)
+    if AUTO_SHIMS_DIR.is_dir():
+        shim_prefixes.append(str(AUTO_SHIMS_DIR))
+    return extra_env, shim_prefixes, (str(ORCA_SHIMS_DIR) if override_written else "")
+
+
+def _orca_base_env(path_str, extra_env=None, shim_prefixes=None, terminal_memory_max=""):
+    ORCA_DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    env = os.environ.copy()
+    env.pop("CAGE_CLI_ACCOUNT_ID", None)
+    env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
+    env.pop("CAGE_CLAUDE_SUBJECT", None)
+    env.pop("CAGE_CODEX_ACCOUNT_ID", None)
+    env.pop("CAGE_CODEX_SUBJECT", None)
+    env.pop("CAGE_ORCA_SHIM_DIR", None)
+    prefixes = []
+    for p in (shim_prefixes or []):
+        if p and p not in prefixes:
+            prefixes.append(p)
+    if str(AUTO_SHIMS_DIR) not in prefixes and AUTO_SHIMS_DIR.is_dir():
+        prefixes.append(str(AUTO_SHIMS_DIR))
+    env["PATH"] = os.pathsep.join([*prefixes, path_str]) if prefixes else path_str
+    env["ORCA_USER_DATA"] = str(ORCA_DATA_DIR)
+    env["ORCA_INSTANCE_ID"] = _orca_instance_id()
+    env["DO_NOT_TRACK"] = "1"
+    env["ORCA_TELEMETRY_DISABLED"] = "1"
+    env["ORCA_BACKGROUND_LAUNCH"] = "1"
+    env["BROWSER"] = _orca_ensure_guest_browser_wrapper()
+    if sys.platform == "darwin":
+        env["ORCA_SERVE_RUNTIME"] = "orcad"
+    mem = str(terminal_memory_max or "").strip().upper()
+    if mem and ORCA_MEM_LIMIT_RE.match(mem):
+        env["ORCA_TERMINAL_MEMORY_MAX"] = mem
+    if extra_env:
+        env.update(extra_env)
+    return env
+
+
+def orca_supervise(cfg):
+    """Detached supervisor for `orca-ide serve` with live redaction and 64 KiB log cap."""
+    os.umask(0o077)
+    cmd = cfg["cmd"]
+    cwd = cfg.get("cwd") or str(HOME)
+    log_file = Path(cfg.get("log_file") or ORCA_LOG_FILE)
+    handshake_file = Path(cfg["handshake_file"])
+
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    logger = _BoundedRedactedLog(log_file, max_bytes=ORCA_LOG_MAX_BYTES)
+    child = None
+    term_state = {"requested": False, "sent": False}
+
+    def forward_term(_signum, _frame):
+        term_state["requested"] = True
+        if child is not None and not term_state["sent"]:
+            term_state["sent"] = True
+            try:
+                os.killpg(child.pid, signal.SIGTERM)
+            except OSError:
+                try:
+                    child.terminate()
+                except OSError:
+                    pass
+
+    signal.signal(signal.SIGTERM, forward_term)
+    signal.signal(signal.SIGINT, forward_term)
+
+    try:
+        child = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    except OSError as exc:
+        logger.write_raw_line(f"Failed to start orca-ide: {exc}")
+        logger.close()
+        try:
+            atomic_write_json(handshake_file, {"error": str(exc), "supervisor_pid": os.getpid()}, mode=0o600)
+        except OSError:
+            pass
+        return 1
+
+    if term_state["requested"] and not term_state["sent"]:
+        forward_term(signal.SIGTERM, None)
+
+    try:
+        atomic_write_json(
+            handshake_file,
+            {"child_pid": child.pid, "supervisor_pid": os.getpid()},
+            mode=0o600,
+        )
+    except OSError:
+        pass
+
+    try:
+        assert child.stdout is not None
+        while True:
+            raw = child.stdout.readline(65536)
+            if not raw:
+                break
+            line = raw.decode("utf-8", errors="replace")
+            logger.write_raw_line(line)
+    finally:
+        if child.stdout is not None:
+            try:
+                child.stdout.close()
+            except OSError:
+                pass
+        rc = child.wait()
+        logger.close()
+    return rc if isinstance(rc, int) else 0
+
+
+def orca_status(payload=None):
+    payload = payload if isinstance(payload, dict) else {}
+    requested_port = _requested_orca_port(payload, default=ORCA_DEFAULT_PORT)
+    path_str = enriched_path()
+    binary = _orca_find_binary(path_str)
+    version = _orca_read_version(binary, path_str) if binary else ""
+    state = read_json(ORCA_STATE_FILE)
+    running = False
+    pid = 0
+    bind_ip = "127.0.0.1"
+    bind_mode = "loopback"
+    if isinstance(state, dict):
+        cand_pid = state.get("pid")
+        cand_port = state.get("port")
+        cand_ident = str(state.get("pid_identity") or "")
+        cand_bind_ip = str(state.get("bind_ip") or "127.0.0.1")
+        cand_bind_mode = str(state.get("bind_mode") or "loopback")
+        if (
+            not isinstance(cand_pid, bool)
+            and isinstance(cand_pid, int)
+            and cand_pid > 0
+            and not isinstance(cand_port, bool)
+            and isinstance(cand_port, int)
+            and cand_port == requested_port
+            and _pid_matches(cand_pid, cand_ident)
+            and _http_responsive(cand_bind_ip, requested_port, timeout=0.45)
+        ):
+            running = True
+            pid = cand_pid
+            bind_ip = cand_bind_ip
+            bind_mode = cand_bind_mode
+    has_rollback = False
+    try:
+        if ORCA_PREVIOUS_LINK.is_symlink() and (ORCA_PREVIOUS_LINK / "bin/orca-ide").is_file():
+            has_rollback = True
+    except OSError:
+        pass
+    return {
+        "installed": bool(binary),
+        "binary_path": binary,
+        "version": version,
+        "running": running,
+        "pid": pid if running else 0,
+        "port": requested_port,
+        "bind_ip": bind_ip,
+        "bind_mode": bind_mode,
+        "has_rollback": has_rollback,
+        "tailscale_ip": _orca_tailscale_ip(path_str),
+        "platform": sys.platform,
+    }
+
+
+def _orca_fetch(curl, url, dest, env, max_time=300, headers=()):
+    cmd = [
+        curl, "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2",
+        "-fsSL", "--connect-timeout", "20", "--max-time", str(max_time),
+    ]
+    for h in headers:
+        cmd.extend(["-H", h])
+    cmd.extend(["-o", str(dest), url])
+    res = subprocess.run(cmd, env=env, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+    if res.returncode != 0:
+        err_tail = (res.stderr or "").strip().splitlines()[-1:] or [""]
+        raise ValueError(f"下载失败（curl 退出码 {res.returncode}）：{url} {err_tail[0]}".strip())
+
+
+def _orca_resolve_latest_version(curl, env, tmp_dir):
+    meta_file = Path(tmp_dir) / "latest.json"
+    _orca_fetch(
+        curl, ORCA_RELEASES_API, meta_file, env, max_time=30,
+        headers=("Accept: application/vnd.github+json", "User-Agent: super-cage"),
+    )
+    data = read_json(meta_file)
+    tag = str(data.get("tag_name") or "").strip() if isinstance(data, dict) else ""
+    ver = tag.lstrip("v")
+    if not ORCA_VERSION_RE.match(ver):
+        raise ValueError("无法解析 Orca Server 最新官方版本号")
+    return ver
+
+
+def _orca_safe_extract_tar(archive_path, dest_dir):
+    """Safely extract an official orca-server tarball, blocking path traversal,
+    escaping symlinks, device nodes, and setuid/setgid bits."""
+    dest = Path(dest_dir).resolve()
+    dest.mkdir(parents=True, exist_ok=True, mode=0o700)
+    total_size = 0
+    max_total = 1024 << 20  # 1 GiB upper bound
+    with tarfile.open(archive_path, "r:gz") as tar:
+        members = tar.getmembers()
+        if len(members) > 50000:
+            raise ValueError("安装包内文件数量超出安全上限")
+        for m in members:
+            name = m.name
+            if not name or name.startswith("/") or "\x00" in name:
+                raise ValueError(f"安装包包含非法绝对路径：{name}")
+            parts = Path(name).parts
+            if ".." in parts:
+                raise ValueError(f"安装包包含路径穿越：{name}")
+            target = (dest / name).resolve()
+            if target != dest and dest not in target.parents:
+                raise ValueError(f"安装包目标路径逃逸：{name}")
+            if m.isdev() or m.isfifo():
+                raise ValueError(f"安装包包含非法设备文件：{name}")
+            if m.issym():
+                if not m.linkname or m.linkname.startswith("/"):
+                    raise ValueError(f"安装包包含非法绝对符号链接：{name} -> {m.linkname}")
+                link_target = (target.parent / m.linkname).resolve()
+                if link_target != dest and dest not in link_target.parents:
+                    raise ValueError(f"安装包包含越界符号链接：{name} -> {m.linkname}")
+            if m.islnk():
+                if not m.linkname or m.linkname.startswith("/"):
+                    raise ValueError(f"安装包包含非法硬链接：{name}")
+                link_target = (dest / m.linkname).resolve()
+                if link_target != dest and dest not in link_target.parents:
+                    raise ValueError(f"安装包包含越界硬链接：{name}")
+            if m.isfile():
+                total_size += max(0, m.size)
+                if total_size > max_total:
+                    raise ValueError("安装包解压体积超出安全上限")
+        for m in members:
+            m.mode = m.mode & ~0o7000
+            if m.isdir():
+                m.mode = (m.mode & 0o777) or 0o755
+            target_path = dest / m.name
+            if m.isdir():
+                target_path.mkdir(parents=True, exist_ok=True)
+                os.chmod(target_path, m.mode)
+            elif m.isfile():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                src = tar.extractfile(m)
+                if src is not None:
+                    with src, open(target_path, "wb") as out:
+                        shutil.copyfileobj(src, out)
+                    os.chmod(target_path, m.mode & 0o777)
+            elif m.issym():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists() or target_path.is_symlink():
+                    target_path.unlink()
+                target_path.symlink_to(m.linkname)
+            elif m.islnk():
+                target_path.parent.mkdir(parents=True, exist_ok=True)
+                if target_path.exists() or target_path.is_symlink():
+                    target_path.unlink()
+                os.link(dest / m.linkname, target_path)
+
+
+def _atomic_symlink(link_path, target):
+    link_path = Path(link_path)
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_link = link_path.parent / f".{link_path.name}.tmp.{os.getpid()}.{time.time_ns()}"
+    try:
+        tmp_link.symlink_to(target)
+        os.replace(tmp_link, link_path)
+    finally:
+        if tmp_link.is_symlink() or tmp_link.exists():
+            try:
+                tmp_link.unlink()
+            except OSError:
+                pass
+
+
+def orca_install(payload=None):
+    """Atomically install the official Orca Server (orcad server-only) release."""
+    payload = payload if isinstance(payload, dict) else {}
+    requested_version = str(payload.get("version") or "").strip().lstrip("v")
+    if requested_version.lower() == "latest":
+        requested_version = ""
+    if requested_version and not ORCA_VERSION_RE.match(requested_version):
+        raise ValueError("指定的 Orca Server 版本号格式无效")
+
+    with _orca_lifecycle_lock():
+        path_str = enriched_path()
+        if sys.platform == "darwin":
+            existing = _orca_find_binary(path_str)
+            if existing:
+                ver = _orca_read_version(existing, path_str)
+                print(f"Detected Orca CLI ({ver or 'ready'}) at {existing}; reusing it.", flush=True)
+                return {"installed": True, "binary_path": existing, "version": ver, "reused": True}
+            raise ValueError("macOS 客机请先在客机内安装官方 Orca.app（/Applications/Orca.app），安装后 Super Cage 将自动托管其服务端运行时")
+
+        if not sys.platform.startswith("linux"):
+            raise ValueError("Orca Server 托管安装目前仅支持 Linux 与 macOS 环境")
+
+        machine = os.uname().machine.lower()
+        arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+        if not arch:
+            raise ValueError(f"Orca Server 官方服务端暂无适用于 {machine} 架构的构建")
+
+        curl = shutil.which("curl", path=path_str)
+        if not curl:
+            raise ValueError("环境中未找到 curl，请先同步环境工具")
+
+        env = os.environ.copy()
+        env["PATH"] = path_str
+        ORCA_RELEASES_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+        (HOME / ".local/bin").mkdir(parents=True, exist_ok=True)
+
+        archive_name = f"orca-server-linux-{arch}.tar.gz"
+        with tempfile.TemporaryDirectory(prefix="cage-orca-install-") as tmp:
+            version = requested_version
+            if not version:
+                print("Resolving latest official Orca Server release...", flush=True)
+                version = _orca_resolve_latest_version(curl, env, tmp)
+
+            sums_file = Path(tmp) / "orca-server-sha256sums.txt"
+            sums_url = f"{ORCA_RELEASE_DL_BASE}/v{version}/orca-server-sha256sums.txt"
+            print(f"Downloading Orca Server v{version} checksums...", flush=True)
+            try:
+                _orca_fetch(curl, sums_url, sums_file, env, max_time=60)
+            except ValueError:
+                if requested_version:
+                    print(f"Release v{version} not found on GitHub; falling back to latest release...", flush=True)
+                    version = _orca_resolve_latest_version(curl, env, tmp)
+                    sums_url = f"{ORCA_RELEASE_DL_BASE}/v{version}/orca-server-sha256sums.txt"
+                    _orca_fetch(curl, sums_url, sums_file, env, max_time=60)
+                else:
+                    raise
+
+            want_sha = ""
+            for line in sums_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                parts = line.strip().split()
+                if len(parts) >= 2 and ORCA_SHA256_RE.match(parts[0].lower()):
+                    fname = os.path.basename(parts[1].lstrip("*"))
+                    if fname == archive_name:
+                        want_sha = parts[0].lower()
+                        break
+            if not want_sha:
+                raise ValueError(f"官方校验清单中未找到 {archive_name} 的 SHA-256 记录")
+
+            archive_file = Path(tmp) / archive_name
+            archive_url = f"{ORCA_RELEASE_DL_BASE}/v{version}/{archive_name}"
+            print(f"Downloading official Orca Server v{version} ({arch})...", flush=True)
+            _orca_fetch(curl, archive_url, archive_file, env, max_time=600)
+
+            digest = hashlib.sha256()
+            with open(archive_file, "rb") as fp:
+                for chunk in iter(lambda: fp.read(1 << 20), b""):
+                    digest.update(chunk)
+            if digest.hexdigest().lower() != want_sha:
+                raise ValueError("Orca Server 安装包 SHA-256 校验失败，已中止安装")
+            print("SHA-256 verified against official release checksums.", flush=True)
+
+            extract_root = Path(tmp) / "extracted"
+            _orca_safe_extract_tar(archive_file, extract_root)
+
+            # Locate unpacked server root containing bin/orca-ide (depth 0 or 1).
+            server_src = None
+            if (extract_root / "bin/orca-ide").is_file():
+                server_src = extract_root
+            else:
+                for child in sorted(extract_root.iterdir()):
+                    if child.is_dir() and (child / "bin/orca-ide").is_file():
+                        server_src = child
+                        break
+            if server_src is None:
+                raise ValueError("解压后的 Orca Server 目录缺少 bin/orca-ide 可执行入口")
+
+            staged_dir = ORCA_RELEASES_DIR / f"{version}-{int(time.time())}"
+            if staged_dir.exists():
+                shutil.rmtree(staged_dir, ignore_errors=True)
+            shutil.move(str(server_src), str(staged_dir))
+            staged_bin = staged_dir / "bin/orca-ide"
+            os.chmod(staged_bin, 0o755)
+
+            # Smoke test under clean environment before flipping current symlink.
+            clean_env = {"PATH": "/usr/bin:/bin", "HOME": str(HOME), "DO_NOT_TRACK": "1", "ORCA_TELEMETRY_DISABLED": "1"}
+            try:
+                smoke = subprocess.run(
+                    [str(staged_bin), "--version"],
+                    env=clean_env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=15,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+                raise ValueError(f"Orca Server 自检失败：{exc}") from exc
+            if smoke.returncode != 0:
+                shutil.rmtree(staged_dir, ignore_errors=True)
+                raise ValueError(f"Orca Server 无法在此环境运行（退出码 {smoke.returncode}）")
+
+            prev_target = None
+            try:
+                if ORCA_CURRENT_LINK.is_symlink():
+                    prev_target = ORCA_CURRENT_LINK.resolve()
+            except OSError:
+                prev_target = None
+
+            if prev_target and prev_target.is_dir() and prev_target != staged_dir.resolve():
+                _atomic_symlink(ORCA_PREVIOUS_LINK, str(prev_target))
+            _atomic_symlink(ORCA_CURRENT_LINK, str(staged_dir))
+            _atomic_symlink(HOME / ".local/bin/orca-ide", str(ORCA_CURRENT_LINK / "bin/orca-ide"))
+
+            # Prune old releases beyond current and previous.
+            keep = {staged_dir.resolve()}
+            if prev_target and prev_target.is_dir():
+                keep.add(prev_target.resolve())
+            for entry in list(ORCA_RELEASES_DIR.iterdir()):
+                try:
+                    if entry.is_dir() and entry.resolve() not in keep:
+                        shutil.rmtree(entry, ignore_errors=True)
+                except OSError:
+                    pass
+
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+        final_bin = _orca_find_binary(enriched_path())
+        final_ver = _orca_read_version(final_bin, enriched_path()) or version
+        print(f"Orca Server v{final_ver} installed atomically at {final_bin}.", flush=True)
+        return {"installed": True, "binary_path": final_bin, "version": final_ver, "reused": False}
+
+
+def _orca_stop_locked(requested_port=None):
+    state = read_json(ORCA_STATE_FILE)
+    if isinstance(state, dict):
+        state_port = state.get("port")
+        if (
+            requested_port is not None
+            and not isinstance(state_port, bool)
+            and isinstance(state_port, int)
+            and state_port != requested_port
+        ):
+            return {"running": False, "skipped_port_mismatch": True}
+        sup_pid = state.get("supervisor_pid")
+        sup_ident = str(state.get("supervisor_identity") or "")
+        pid = state.get("pid")
+        pid_ident = str(state.get("pid_identity") or "")
+        has_sup = not isinstance(sup_pid, bool) and isinstance(sup_pid, int) and sup_pid > 0
+        has_pid = not isinstance(pid, bool) and isinstance(pid, int) and pid > 0
+        if has_sup:
+            sup_st = _pid_state(sup_pid, sup_ident)
+            if sup_st == "unknown":
+                raise ValueError(f"无法验证 Orca 守护进程 ({sup_pid}) 身份，已保留运行状态文件")
+            if sup_st == "matched":
+                try:
+                    os.kill(sup_pid, signal.SIGTERM)
+                except OSError:
+                    pass
+                deadline = time.monotonic() + 3.0
+                while time.monotonic() < deadline:
+                    s_done = _pid_state(sup_pid, sup_ident) in ("gone", "mismatch")
+                    p_done = (not has_pid) or (_pid_state(pid, pid_ident) in ("gone", "mismatch"))
+                    if s_done and p_done:
+                        break
+                    time.sleep(0.08)
+        if has_pid:
+            pid_st = _pid_state(pid, pid_ident)
+            if pid_st == "unknown":
+                raise ValueError(f"无法验证 Orca Server 进程 ({pid}) 身份，已保留运行状态文件")
+            if pid_st == "matched":
+                if not _stop_managed_pid(pid, expected_identity=pid_ident, wait_secs=2.0):
+                    raise ValueError(f"Orca Server 进程 ({pid}) 未能终止，已保留运行状态文件")
+        if has_sup:
+            sup_st = _pid_state(sup_pid, sup_ident)
+            if sup_st == "unknown":
+                raise ValueError(f"无法验证 Orca 守护进程 ({sup_pid}) 身份，已保留运行状态文件")
+            if sup_st == "matched":
+                if not _stop_managed_pid(sup_pid, expected_identity=sup_ident, wait_secs=1.0):
+                    raise ValueError(f"Orca 守护进程 ({sup_pid}) 未能终止，已保留运行状态文件")
+    ORCA_STATE_FILE.unlink(missing_ok=True)
+    return {"running": False}
+
+
+def orca_stop(payload=None):
+    req_port = None
+    if isinstance(payload, dict) and payload.get("port") not in (None, "", 0):
+        req_port = _requested_orca_port(payload)
+    with _orca_lifecycle_lock():
+        return _orca_stop_locked(requested_port=req_port)
+
+
+def orca_uninstall(payload=None):
+    payload = payload if isinstance(payload, dict) else {}
+    purge_data = bool(payload.get("purge_data"))
+    with _orca_lifecycle_lock():
+        _orca_stop_locked()
+        link = HOME / ".local/bin/orca-ide"
+        try:
+            if link.is_symlink():
+                target = link.resolve()
+                if ORCA_ROOT.resolve() in target.parents or target == ORCA_ROOT.resolve():
+                    link.unlink()
+        except OSError:
+            pass
+        for p in (ORCA_CURRENT_LINK, ORCA_PREVIOUS_LINK, ORCA_STATE_FILE, ORCA_BROWSER_WRAPPER):
+            try:
+                if p.is_symlink() or p.is_file():
+                    p.unlink()
+            except OSError:
+                pass
+        for d in (ORCA_RELEASES_DIR, ORCA_SHIMS_DIR):
+            if d.exists():
+                shutil.rmtree(d, ignore_errors=True)
+        if purge_data:
+            if ORCA_DATA_DIR.exists():
+                shutil.rmtree(ORCA_DATA_DIR, ignore_errors=True)
+            ORCA_INSTANCE_ID_FILE.unlink(missing_ok=True)
+        try:
+            PROBE_CACHE_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return {"installed": bool(_orca_find_binary(enriched_path())), "running": False}
+
+
+def _orca_parse_json_output(stdout_text):
+    text = (stdout_text or "").strip()
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except ValueError:
+        for line in reversed(text.splitlines()):
+            s = line.strip()
+            if s.startswith("{") and s.endswith("}"):
+                try:
+                    data = json.loads(s)
+                    if isinstance(data, dict):
+                        return data
+                except ValueError:
+                    continue
+    return None
+
+
+def _orca_sync_repos_inner(binary, env, projects):
+    if not isinstance(projects, list) or not projects:
+        return {"added": [], "existing": 0}
+    valid_paths = []
+    seen = set()
+    for raw in projects[:64]:
+        p = str(raw or "").strip()
+        if not p or not p.startswith("/") or "\x00" in p:
+            continue
+        path_obj = Path(p)
+        if not path_obj.is_dir():
+            continue
+        rp = str(path_obj.resolve())
+        if rp not in seen:
+            seen.add(rp)
+            valid_paths.append(rp)
+    if not valid_paths:
+        return {"added": [], "existing": 0}
+
+    existing_paths = set()
+    try:
+        res = subprocess.run(
+            [binary, "repo", "list", "--json"],
+            env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8,
+        )
+        data = _orca_parse_json_output(res.stdout)
+        if isinstance(data, dict):
+            result = data.get("result") if isinstance(data.get("result"), dict) else data
+            repos = result.get("repos") or result.get("items") or []
+            if isinstance(repos, list):
+                for item in repos:
+                    if isinstance(item, dict):
+                        rp = item.get("path") or item.get("rootPath") or item.get("repoPath") or ""
+                        if isinstance(rp, str) and rp:
+                            try:
+                                existing_paths.add(str(Path(rp).resolve()))
+                            except OSError:
+                                existing_paths.add(rp)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+    added = []
+    for rp in valid_paths:
+        if rp in existing_paths:
+            continue
+        kind = "git" if (Path(rp) / ".git").exists() else "folder"
+        try:
+            res = subprocess.run(
+                [binary, "repo", "add", "--path", rp, "--kind", kind, "--json"],
+                env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=8,
+            )
+            if res.returncode == 0:
+                added.append(rp)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    return {"added": added, "existing": len(existing_paths)}
+
+
+def orca_sync_repos(payload=None):
+    payload = payload if isinstance(payload, dict) else {}
+    projects = payload.get("projects") or []
+    path_str = enriched_path()
+    binary = _orca_find_binary(path_str)
+    if not binary:
+        raise ValueError("未找到 Orca Server，请先安装")
+    env = _orca_base_env(path_str)
+    return _orca_sync_repos_inner(binary, env, projects)
+
+
+def orca_start(payload=None, restart=False):
+    payload = payload if isinstance(payload, dict) else {}
+    port = _requested_orca_port(payload, default=ORCA_DEFAULT_PORT)
+    bind_mode = str(payload.get("bind_mode") or "loopback").strip().lower()
+    bindings = payload.get("bindings") or {}
+    if not isinstance(bindings, dict):
+        raise ValueError("invalid orca bindings")
+    terminal_memory_max = str(payload.get("terminal_memory_max") or "").strip().upper()
+    if terminal_memory_max and not ORCA_MEM_LIMIT_RE.match(terminal_memory_max):
+        raise ValueError("终端内存上限格式无效（例如 2G、512M）")
+    projects = payload.get("projects") or []
+
+    bindings_hash = hashlib.sha256(
+        json.dumps(
+            {"bindings": bindings, "bind_mode": bind_mode, "mem": terminal_memory_max},
+            sort_keys=True, ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()[:16]
+
+    with _orca_lifecycle_lock():
+        path_str = enriched_path()
+        binary = _orca_find_binary(path_str)
+        if not binary:
+            raise ValueError("未找到 Orca Server，请先安装")
+        version = _orca_read_version(binary, path_str)
+        bind_ip = _orca_resolve_bind_ip(bind_mode, path_str)
+
+        existing = read_json(ORCA_STATE_FILE)
+        if restart:
+            _orca_stop_locked()
+        elif isinstance(existing, dict):
+            old_pid = existing.get("pid")
+            old_pid_ident = str(existing.get("pid_identity") or "")
+            old_sup = existing.get("supervisor_pid")
+            old_sup_ident = str(existing.get("supervisor_identity") or "")
+            old_port = existing.get("port")
+            old_bind_ip = str(existing.get("bind_ip") or "127.0.0.1")
+            if (
+                not isinstance(old_pid, bool)
+                and isinstance(old_pid, int)
+                and old_port == port
+                and old_bind_ip == bind_ip
+                and existing.get("bindings_hash") == bindings_hash
+                and _pid_matches(old_pid, old_pid_ident)
+                and _http_responsive(bind_ip, port, timeout=0.45)
+            ):
+                if projects:
+                    _orca_sync_repos_inner(binary, _orca_base_env(path_str), projects)
+                return {
+                    "installed": True,
+                    "binary_path": binary,
+                    "version": version,
+                    "running": True,
+                    "pid": old_pid,
+                    "port": port,
+                    "bind_ip": bind_ip,
+                    "bind_mode": bind_mode,
+                    "tailscale_ip": _orca_tailscale_ip(path_str),
+                }
+            if (
+                (not isinstance(old_pid, bool) and isinstance(old_pid, int) and _pid_matches(old_pid, old_pid_ident))
+                or (not isinstance(old_sup, bool) and isinstance(old_sup, int) and _pid_matches(old_sup, old_sup_ident))
+            ):
+                _orca_stop_locked()
+
+        os.umask(0o077)
+        ORCA_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        extra_env, shim_prefixes, _ = _orca_prepare_bindings(bindings, path_str)
+        env = _orca_base_env(path_str, extra_env=extra_env, shim_prefixes=shim_prefixes, terminal_memory_max=terminal_memory_max)
+
+        cmd = [binary, "serve", "--bind", bind_ip, "--port", str(port), "--no-pairing", "--refuse-public"]
+        workspace = str(payload.get("workspace") or "").strip()
+        cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
+
+        def launch_once():
+            handshake_file = ORCA_ROOT / f".sup-{os.getpid()}-{time.time_ns()}.json"
+            sup_cfg = {
+                "cmd": cmd,
+                "cwd": cwd,
+                "log_file": str(ORCA_LOG_FILE),
+                "handshake_file": str(handshake_file),
+            }
+            sup_proc = subprocess.Popen(
+                [sys.executable, "-I", str(Path(__file__).resolve()), "orca-supervise"],
+                cwd=cwd,
+                env=env,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+            )
+            try:
+                assert sup_proc.stdin is not None
+                sup_proc.stdin.write(json.dumps(sup_cfg, ensure_ascii=False).encode("utf-8"))
+                sup_proc.stdin.close()
+            except OSError:
+                pass
+
+            child_pid = 0
+            deadline = time.monotonic() + 18.0
+            try:
+                while time.monotonic() < deadline:
+                    if not child_pid and handshake_file.is_file():
+                        hs = read_json(handshake_file)
+                        if isinstance(hs, dict):
+                            if hs.get("error"):
+                                return False, 1, 0, sup_proc.pid, f"Orca Server 启动失败：{hs['error']}"
+                            cpid = hs.get("child_pid")
+                            if not isinstance(cpid, bool) and isinstance(cpid, int) and cpid > 0:
+                                child_pid = cpid
+                    rc = sup_proc.poll()
+                    if rc is not None:
+                        tail = _redact_t3_log_tail(ORCA_LOG_FILE)
+                        suffix = f"：{tail}" if tail else ""
+                        return False, rc, child_pid, sup_proc.pid, f"Orca Server 启动失败（退出码 {rc}）{suffix}"
+                    if child_pid and not _pid_alive(child_pid):
+                        try:
+                            rc = sup_proc.wait(timeout=0.5)
+                        except subprocess.TimeoutExpired:
+                            rc = 1
+                        tail = _redact_t3_log_tail(ORCA_LOG_FILE)
+                        suffix = f"：{tail}" if tail else ""
+                        return False, rc, child_pid, sup_proc.pid, f"Orca Server 启动失败（退出码 {rc}）{suffix}"
+                    if child_pid and _http_responsive(bind_ip, port, timeout=0.45):
+                        return True, 0, child_pid, sup_proc.pid, ""
+                    time.sleep(0.12)
+
+                if child_pid:
+                    _stop_managed_pid(child_pid, expected_identity=_pid_identity(child_pid), wait_secs=1.5, require_identity=False)
+                _stop_managed_pid(sup_proc.pid, expected_identity=_pid_identity(sup_proc.pid), wait_secs=1.0, require_identity=False)
+                tail = _redact_t3_log_tail(ORCA_LOG_FILE)
+                suffix = f"：{tail}" if tail else ""
+                return False, -1, 0, 0, f"Orca Server 启动超时（{bind_ip}:{port} 未就绪）{suffix}"
+            finally:
+                handshake_file.unlink(missing_ok=True)
+
+        ok, rc, child_pid, sup_pid, err_msg = launch_once()
+        # Self-heal stale lock (Orca documented exit code 3) once automatically.
+        if not ok and rc == 3:
+            try:
+                subprocess.run(
+                    [binary, "serve", "--reclaim-stale-lock", "--data-root", str(ORCA_DATA_DIR), "--yes", "--json"],
+                    env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+            ok, rc, child_pid, sup_pid, err_msg = launch_once()
+
+        if not ok:
+            raise ValueError(err_msg)
+
+        state = {
+            "pid": child_pid,
+            "pid_identity": _pid_identity(child_pid),
+            "supervisor_pid": sup_pid,
+            "supervisor_identity": _pid_identity(sup_pid),
+            "port": port,
+            "bind_ip": bind_ip,
+            "bind_mode": bind_mode,
+            "version": version,
+            "binary": binary,
+            "started_at": int(time.time()),
+            "bindings_hash": bindings_hash,
+        }
+        atomic_write_json(ORCA_STATE_FILE, state, mode=0o600)
+
+        if projects:
+            _orca_sync_repos_inner(binary, env, projects)
+
+        return {
+            "installed": True,
+            "binary_path": binary,
+            "version": version,
+            "running": True,
+            "pid": child_pid,
+            "port": port,
+            "bind_ip": bind_ip,
+            "bind_mode": bind_mode,
+            "tailscale_ip": _orca_tailscale_ip(path_str),
+        }
+
+
+def orca_pair(payload=None):
+    """Mint an on-demand pairing offer via `orca-ide pair` without restarting Orca Server."""
+    payload = payload if isinstance(payload, dict) else {}
+    mobile = bool(payload.get("mobile"))
+    rotate = bool(payload.get("rotate"))
+    address = str(payload.get("address") or "").strip()
+    if address and (len(address) > 255 or any(ch in address for ch in ("\x00", "\r", "\n", " ", "\t"))):
+        raise ValueError("配对地址格式无效")
+
+    with _orca_lifecycle_lock():
+        path_str = enriched_path()
+        binary = _orca_find_binary(path_str)
+        if not binary:
+            raise ValueError("未找到 Orca Server，请先安装")
+        env = _orca_base_env(path_str)
+        cmd = [binary, "pair", "--json"]
+        if mobile:
+            cmd.append("--mobile")
+        if rotate:
+            cmd.append("--rotate")
+        if address:
+            cmd.extend(["--address", address])
+        try:
+            res = subprocess.run(
+                cmd, env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ValueError(f"生成 Orca 配对码失败：{exc}") from exc
+        data = _orca_parse_json_output(res.stdout) or _orca_parse_json_output(res.stderr)
+        result = data.get("result") if isinstance(data, dict) and isinstance(data.get("result"), dict) else data
+        if not isinstance(result, dict):
+            raise ValueError(f"Orca 配对命令返回无效结果（退出码 {res.returncode}）")
+        if result.get("available") is False or not result.get("pairingUrl"):
+            reason = str(result.get("guidance") or result.get("reason") or "Orca Server 未就绪，请先启动服务")
+            raise ValueError(reason)
+        return {
+            "available": True,
+            "scope": str(result.get("scope") or ("mobile" if mobile else "desktop")),
+            "pairing_url": str(result.get("pairingUrl") or ""),
+            "endpoint": str(result.get("endpoint") or ""),
+            "device_id": str(result.get("deviceId") or ""),
+            "web_client_url": str(result.get("webClientUrl") or ""),
+            "qr": str(result.get("qr") or ""),
+        }
+
+
+def orca_reset_identity(payload=None):
+    """Stop Orca Server, rotate ORCA_INSTANCE_ID, and reset server pairing identity."""
+    with _orca_lifecycle_lock():
+        _orca_stop_locked()
+        path_str = enriched_path()
+        binary = _orca_find_binary(path_str)
+        new_id = str(uuid.uuid4())
+        atomic_write_text(ORCA_INSTANCE_ID_FILE, new_id + "\n", mode=0o600)
+        if binary:
+            env = _orca_base_env(path_str)
+            try:
+                subprocess.run(
+                    [binary, "serve", "reset-identity", "--yes", "--json"],
+                    env=env, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=15, check=False,
+                )
+            except (OSError, subprocess.SubprocessError):
+                pass
+    return {"ok": True, "instance_id": new_id}
+
+
 
 def main(argv):
     if not argv:
@@ -3989,6 +5706,11 @@ def main(argv):
             raise ValueError("invalid shim spec")
         account_id = argv[2] or "default"
         return exec_agent(spec, account_id, argv[3:])
+
+    if cmd == "auto-exec":
+        if len(argv) < 3:
+            raise ValueError("auto-exec requires agent_id and binary_name")
+        return auto_exec_agent(argv[1], argv[2], argv[3:])
 
     if cmd == "t3code-supervise":
         raw_cfg = sys.stdin.read(65536)
@@ -4007,6 +5729,15 @@ def main(argv):
             pass
         cfg = json.loads(raw_cfg) if raw_cfg.strip() else {}
         return magpie_supervise(cfg)
+
+    if cmd == "orca-supervise":
+        raw_cfg = sys.stdin.read(65536)
+        try:
+            sys.stdin.close()
+        except OSError:
+            pass
+        cfg = json.loads(raw_cfg) if raw_cfg.strip() else {}
+        return orca_supervise(cfg)
 
     if cmd == "herdr-attach":
         return herdr_attach()
@@ -4042,6 +5773,36 @@ def main(argv):
         return 0
     if cmd == "prepare-session":
         print(json.dumps(prepare_session(payload), ensure_ascii=False))
+        return 0
+    if cmd == "sync-auto-shims":
+        print(json.dumps(sync_auto_shims(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-status":
+        print(json.dumps(orca_status(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-install":
+        print(json.dumps(orca_install(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-uninstall":
+        print(json.dumps(orca_uninstall(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-start":
+        print(json.dumps(orca_start(payload, restart=False), ensure_ascii=False))
+        return 0
+    if cmd == "orca-restart":
+        print(json.dumps(orca_start(payload, restart=True), ensure_ascii=False))
+        return 0
+    if cmd == "orca-stop":
+        print(json.dumps(orca_stop(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-pair":
+        print(json.dumps(orca_pair(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-sync-repos":
+        print(json.dumps(orca_sync_repos(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-reset-identity":
+        print(json.dumps(orca_reset_identity(payload), ensure_ascii=False))
         return 0
     if cmd == "t3code-status":
         print(json.dumps(t3code_status(payload), ensure_ascii=False))

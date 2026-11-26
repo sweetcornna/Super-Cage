@@ -389,5 +389,78 @@ clientSecret = "camel-client-secret"
                     self.fail("entered a session for another Codex home")
             self.assertIsNotNone(server.process.returncode)
 
+    def test_auto_schedules_codex_skipping_exhausted_and_respecting_explicit_env(self):
+        # Log in two distinct Codex accounts.
+        self.login(FIRST)
+        second_email = "second@example.test"
+        second_subject = hashlib.sha256((second_email + "\nworkspace-1").encode()).hexdigest()
+        second_env = {**self.env, "TEST_EMAIL": second_email, "CAGE_CODEX_SUBJECT": second_subject}
+        self.login(SECOND, env=second_env)
+        self.run_helper("snapshot", FIRST)
+        self.run_helper("snapshot", SECOND, env=second_env)
+
+        now = int(time.time())
+        # Mark FIRST exhausted (100% primary) and SECOND healthy (20% primary).
+        (self.base(FIRST) / "quota.json").write_text(json.dumps({
+            "identity": self.subject,
+            "observed_at": now,
+            "primary": {"used_percentage": 100, "resets_at": now + 3600, "window_minutes": 300, "observed_at": now},
+        }))
+        (self.base(SECOND) / "quota.json").write_text(json.dumps({
+            "identity": second_subject,
+            "observed_at": now,
+            "primary": {"used_percentage": 20, "resets_at": now + 3600, "window_minutes": 300, "observed_at": now},
+        }))
+
+        launch_file = self.home / ".local/share/cage/codex-accounts/launch.json"
+        launch_file.write_text(json.dumps({
+            "mode": "balanced",
+            "accounts": [
+                {"id": FIRST, "subject": self.subject, "preferred": False},
+                {"id": SECOND, "subject": second_subject, "preferred": False},
+            ],
+        }))
+
+        # Put a trap shim inside auto-shims to verify auto() strips Cage shim dirs (no recursion).
+        auto_shims = self.home / ".local/share/cage/auto-shims"
+        auto_shims.mkdir(parents=True, exist_ok=True)
+        trap = auto_shims / "codex"
+        trap.write_text("#!/bin/sh\necho recursion-trap >&2\nexit 99\n")
+        trap.chmod(0o755)
+
+        clean_env = {
+            "HOME": str(self.home),
+            "PATH": f"{auto_shims}:{self.home / '.local/bin'}:{os.defpath}",
+            "TMPDIR": str(self.home),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "TEST_CAPTURE": str(self.capture),
+            "TEST_EMAIL": second_email,
+        }
+        res = subprocess.run(
+            [sys.executable, str(source), "auto", "--search", "hello"],
+            env=clean_env, cwd=self.home, text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(res.returncode, 0)
+        seen = json.loads(self.capture.read_text())
+        self.assertEqual(Path(seen["env"]["CODEX_HOME"]), self.base(SECOND) / "home")
+        self.assertEqual(seen["argv"][-2:], ["--search", "hello"])
+
+        # Explicit opt-out (CAGE_ACCOUNT_SCHEDULING=off, CODEX_HOME, or --version) bypasses scheduling.
+        for label, extra_env, extra_args in (
+            ("scheduling_off", {"CAGE_ACCOUNT_SCHEDULING": "off"}, ["prompt"]),
+            ("explicit_home", {"CODEX_HOME": str(self.home / "custom-home")}, ["prompt"]),
+            ("unscheduled_flag", {}, ["--version"]),
+        ):
+            self.capture.unlink(missing_ok=True)
+            sub_env = {**clean_env, **extra_env}
+            res2 = subprocess.run(
+                [sys.executable, str(source), "auto", *extra_args],
+                env=sub_env, cwd=self.home, text=True, capture_output=True, check=True,
+            )
+            self.assertEqual(res2.returncode, 0, label)
+            seen2 = json.loads(self.capture.read_text())
+            self.assertNotEqual(seen2["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"), label)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,9 +33,10 @@ import { useClaudeAccounts } from "./claude-accounts";
 import { useCodexAccounts } from "./codex-accounts";
 import { codexSurfaces, codexTerminalDetail, codexTerminalLabel } from "./codex-accounts-state.mjs";
 import { AccountsHub } from "./accounts-hub";
-import { useAgents, useHerdr, useMagpie, useT3Code } from "./use-agents";
+import { useAgents, useHerdr, useMagpie, useOrca, useT3Code } from "./use-agents";
 import { T3CodeHeader, isT3CodeDirectAvailable, isT3CodeTab } from "./t3code-panel";
 import { MagpieHeader, isMagpieDirectAvailable, isMagpieTab } from "./magpie-panel";
+import { OrcaPairModal } from "./orca-panel";
 import { AccountProvider, AccountGate, useAccount } from "./account";
 import { BrowserHeader, BrowserTabRail, TerminalHeader, ExpandSidebar, ExpandPane } from "./pane-headers";
 import { loginReturnTerminal } from "./login-terminals.mjs";
@@ -237,6 +238,8 @@ function App() {
   const t3code = useT3Code({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const magpie = useMagpie({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const herdr = useHerdr({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const orca = useOrca({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const [orcaPairOpen, setOrcaPairOpen] = useState(false);
   const [t3codeShowBrowserBar, setT3codeShowBrowserBar] = useState(false);
   const [magpieShowBrowserBar, setMagpieShowBrowserBar] = useState(false);
   const browserHeaderRefs = useRef(new Map());
@@ -945,6 +948,19 @@ function App() {
     const created = await createTerminal(ws, "herdr");
     void herdr.refresh(false);
     return created;
+  };
+  const openOrca = async (options = {}) => {
+    if (!orca.can_auto_pair) {
+      setOrcaPairOpen(true);
+      return null;
+    }
+    const res = await orca.open({ workspace: contentWorkspace || workspace, ...options });
+    if (res?.newly_paired) {
+      notify(`已自动配对并打开 Orca（${res.environment_name || orca.server_name || "Super Cage"}）`);
+    } else if (res?.opened) {
+      notify("已打开本机 Orca 客户端");
+    }
+    return res;
   };
   const showTerminal = (result, placeholder) => {
     const tab = {
@@ -2149,6 +2165,9 @@ function App() {
             herdr={herdr}
             herdrActive={activeIsHerdr}
             onOpenHerdr={() => { void openHerdr().catch((e) => notify(e.message)); }}
+            orca={orca}
+            onOpenOrca={() => { void openOrca().catch((e) => notify(e.message)); }}
+            onShowOrcaPair={() => setOrcaPairOpen(true)}
             onInstallAgents={() => openSettings("agents")}
             tailscaleOpen={managementPage === "tailscale"}
             updateAction={<AppUpdateButton updates={appUpdates} />}
@@ -2583,6 +2602,7 @@ function App() {
           t3code={t3code}
           magpie={magpie}
           herdr={herdr}
+          orca={orca}
           initialSection={settingsSection}
           onClose={() => setSettingsOpen(false)}
           onSaved={refreshSettings}
@@ -2593,8 +2613,15 @@ function App() {
           onOpenMagpie={openMagpie}
           onOpenMagpieTUI={() => openMagpieTUI().catch((e) => notify(e.message))}
           onOpenHerdr={() => openHerdr().catch((e) => notify(e.message))}
+          onOpenOrca={(opts) => openOrca(opts)}
+          onShowOrcaPair={() => setOrcaPairOpen(true)}
         />
       )}
+      <OrcaPairModal
+        open={orcaPairOpen}
+        onClose={() => setOrcaPairOpen(false)}
+        store={orca}
+      />
       </Suspense>
       <Suspense fallback={null}>
       {projectDialog && (

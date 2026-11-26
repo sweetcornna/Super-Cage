@@ -33,11 +33,28 @@ PRIVATE_MODE = _runtime.get("PRIVATE_MODE", 0o700)
 
 SHIM = "/usr/local/lib/cage-codex-bin"
 DEFAULT = "default"
+# Subcommands that manage the CLI itself or a login run exactly as typed.
+UNSCHEDULED = {"login", "logout", "auth", "mcp", "features", "completion", "debug", "cloud",
+               "help", "-V", "--version", "-h", "--help"}
 # Provider, credential and state-location variables select another login or
 # another account's data. A managed account always uses its own CODEX_HOME.
 PRIVATE_ENVIRONMENT = ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_BASE", "OPENAI_ORG_ID",
                        "OPENAI_ORGANIZATION", "OPENAI_PROJECT_ID", "OPENAI_PROJECT", "CODEX_ACCESS_TOKEN",
                        "CODEX_SQLITE_HOME", "CODEX_HOME")
+
+
+def _is_cage_shim_dir(entry):
+    if not entry:
+        return True
+    if entry in (SHIM, "/usr/local/lib/cage-claude-bin"):
+        return True
+    auto_shims = str(Path.home() / ".local/share/cage/auto-shims")
+    agent_shims = str(Path.home() / ".local/share/cage/agent-shims")
+    orca_shims = str(Path.home() / ".local/share/cage/orca/shims")
+    t3_shims = str(Path.home() / ".local/share/cage/t3code/shims")
+    if entry in (auto_shims, orca_shims, t3_shims) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
+        return True
+    return False
 # Local instructions and helpers are shared. Credentials, conversations,
 # history, logs, state databases, plugins and agent roles stay per account.
 SHARED_RESOURCES = ("AGENTS.md", "AGENTS.override.md", "prompts", "rules")
@@ -99,8 +116,8 @@ def codex_home(base):
 
 def cli_environment(base):
     env = os.environ.copy()
-    # Executing the real binary must never recurse into the terminal's codex shim.
-    path = [p for p in env.get("PATH", os.defpath).split(os.pathsep) if p and p != SHIM]
+    # Executing the real binary must never recurse into any Cage codex shim.
+    path = [p for p in env.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p)]
     env["PATH"] = os.pathsep.join([str(Path.home() / ".local/bin"), *path])
     if base.name != DEFAULT:
         for name in PRIVATE_ENVIRONMENT:
@@ -734,7 +751,89 @@ def main(args):
     raise ValueError("unknown operation")
 
 
+def launch_headroom(quota, expected, now):
+    """The controller's headroom rule on the guest's own reading: None while a
+    window is used up, else the least known remaining percent (-1: unknown)."""
+    if not quota or quota.get("identity") != expected:
+        return -1
+    least = -1
+    for key in WINDOWS:
+        window = quota.get(key)
+        if not window:
+            continue
+        fresh = now - window["observed_at"] <= 15 * 60
+        if window["used_percentage"] >= 100 and (window["resets_at"] > now or fresh):
+            return None
+        if fresh and (least < 0 or 100 - window["used_percentage"] < least):
+            least = 100 - window["used_percentage"]
+    return least
+
+
+def launch_account(now=None):
+    """The account a plain `codex` starts on. The controller publishes its
+    scheduling order (preferred account first); a used-up account is skipped."""
+    now = int(time.time()) if now is None else now
+    schedule = json_file(profile(DEFAULT).parent / "launch.json")
+    if not isinstance(schedule, dict) or not isinstance(schedule.get("accounts"), list):
+        return None
+    best = None
+    for item in schedule["accounts"][:64]:
+        if not isinstance(item, dict):
+            continue
+        account, expected = item.get("id"), item.get("subject")
+        if not isinstance(account, str) or not re.fullmatch("[0-9a-f]{24}", account) or \
+                not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
+            continue
+        base = profile(account)
+        room = launch_headroom(merged_quota(base, codex_home(base), expected), expected, now)
+        if room is None:
+            continue
+        if item.get("preferred") is True or schedule.get("mode") == "sequential":
+            return account, expected
+        if best is None or room > best[2]:
+            best = (account, expected, room)
+    return best[:2] if best else None
+
+
+def auto(args):
+    """`codex` typed in a guest shell or spawned via auto-shims (Orca, T3 Code,
+    Herdr, scripts). Starts on the scheduled account like a Codex terminal
+    does; anything that does not fit runs the CLI unchanged."""
+    picked = None
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    explicit = disabled or any(os.environ.get(name) for name in ("CAGE_CODEX_ACCOUNT_ID", *PRIVATE_ENVIRONMENT))
+    if not explicit and not (args and args[0] in UNSCHEDULED):
+        try:
+            picked = launch_account()
+        except Exception:
+            picked = None
+    if picked:
+        account, expected = picked
+        mask = os.umask(0)
+        os.umask(mask)
+        _controller_context["CAGE_CODEX_SUBJECT"] = expected
+        try:
+            rc = main(["run", account, *args])  # replaces this process once the account is verified
+            if rc == 0:
+                return 0
+        except KeyboardInterrupt:
+            return 130
+        except Exception:
+            pass
+        os.umask(mask)
+        _controller_context.pop("CAGE_CODEX_SUBJECT", None)
+        print("Super Cage 调度的 Codex 账号暂不可用，本次用默认登录启动。", file=sys.stderr)
+    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))
+    binary = shutil.which("codex", path=path)
+    if not binary:
+        print("未找到 codex 命令。", file=sys.stderr)
+        return 127
+    os.execv(binary, [binary, *args])
+
+
 def entrypoint(args):
+    if args[:1] == ["auto"]:
+        return auto(args[1:])
     try:
         return main(args)
     except KeyboardInterrupt:

@@ -141,6 +141,14 @@ func AgentOperations() []AgentOperation {
 	}
 	get("herdr.legacy", "Read whether the old Herdr TUI is still installed or running with panes", "/api/herdr/legacy")
 	post("herdr.legacy_uninstall", "Remove the old Herdr TUI; refuses while it holds panes unless force", "/api/herdr/legacy/uninstall", object(map[string]string{"force": "boolean"}))
+	get("orca.get", "Read optional Orca Server (orcad) status, local desktop detection, tunnel port and account bindings", "/api/orca")
+	post("orca.config", "Configure optional Orca Server guest port, host tunnel port, bind mode, project sync and account bindings", "/api/orca/config", object(map[string]string{"enabled": "boolean", "guest_port": "integer", "host_tunnel_port": "integer", "bind_mode": "string", "server_name": "string", "auto_sync_projects": "boolean", "terminal_memory_max": "string", "account_bindings": "object"}))
+	post("orca.install", "Install or update the official server-only Orca Server release inside the Cage guest", "/api/orca/install", object(map[string]string{"version": "string"}))
+	post("orca.uninstall", "Uninstall Orca Server inside the Cage guest while preserving data by default", "/api/orca/uninstall", object(map[string]string{"purge_data": "boolean"}))
+	post("orca.sync_projects", "Sync Cage authorized projects into the running Orca Server", "/api/orca/sync-projects", object(nil))
+	for _, action := range []string{"start", "stop", "restart"} {
+		post("orca."+action, "Control the managed Orca Server inside the guest", "/api/orca/"+action, object(nil))
+	}
 	get("vault.get", "List metadata; passwords remain hidden exactly as in the UI", "/api/vault")
 	post("vault.change", "Save/delete/unblock; reveal requires the same account_password reauthentication as the UI", "/api/vault", object(map[string]string{"action": "string", "entry": "object", "id": "string", "origin": "string", "account_password": "string"}))
 	ops[len(ops)-1].InputSchema["properties"].(map[string]any)["entry"] = from(vaultEntry{})

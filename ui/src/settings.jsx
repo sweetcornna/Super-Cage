@@ -74,6 +74,7 @@ export function SettingsPanel({
   t3code,
   magpie,
   herdr,
+  orca,
   onClose,
   onSaved,
   onConfirm,
@@ -83,6 +84,8 @@ export function SettingsPanel({
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
+  onOpenOrca,
+  onShowOrcaPair,
   initialSection = "keyboard",
 }) {
   const [localKeyboard, setLocalKeyboard] = useState(() => clientKeyboard(current.keyboard));
@@ -300,6 +303,7 @@ export function SettingsPanel({
               t3code={t3code}
               magpie={magpie}
               herdr={herdr}
+              orca={orca}
               status={status}
               onConfirm={onConfirm}
               onOpenAccounts={(id) => {
@@ -328,6 +332,8 @@ export function SettingsPanel({
                 onClose();
                 return await onOpenHerdr?.();
               }}
+              onOpenOrca={onOpenOrca}
+              onShowOrcaPair={onShowOrcaPair}
               onSavedClaudeCommand={onSaved}
             />
           )}
@@ -631,7 +637,7 @@ export function SettingsPanel({
                 {agents && (
                   <div className="inline-info">
                     <Bot size={16} />
-                    <span>需要安装 Antigravity CLI、OpenCode、Copilot、Qwen Code，或启用 T3 Code、Magpie 与 Herdr 终端工作区？</span>
+                    <span>需要安装 Antigravity CLI、OpenCode、Copilot、Qwen Code，或启用 T3 Code、Magpie、Herdr 与 Orca Server？</span>
                     <button type="button" className="text-button" onClick={() => setSection("agents")}>
                       管理 Agent CLI
                     </button>

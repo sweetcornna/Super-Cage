@@ -110,6 +110,10 @@ type agentManager struct {
 	lastPick         map[string]string
 	recent           map[string]map[string]claudeProjectPick
 	loginNotice      map[string]string
+	launchPublished  string
+	launchMu         sync.Mutex
+	launchRunning    bool
+	launchAgain      bool
 	// Test hooks allow deterministic unit tests without an SSH VM.
 	probeHook   func(context.Context, []agentcatalog.AgentSpec, bool) (agentProbeSnapshot, error)
 	runtimeHook func(context.Context, string, any, any) error
@@ -294,7 +298,7 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 
 func agentRuntimeUsesSharedSession(subcommand string) bool {
 	switch subcommand {
-	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list":
+	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "orca-status":
 		return true
 	default:
 		return false
@@ -462,6 +466,7 @@ func (m *agentManager) resetGuestCaches() {
 	m.defaultCache = nil
 	m.pendingAttempted = nil
 	m.loginNotice = nil
+	m.launchPublished = ""
 	m.mu.Unlock()
 }
 

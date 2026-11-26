@@ -37,7 +37,7 @@ class AgentRuntimeTests(unittest.TestCase):
 
     def tearDown(self):
         # Ensure any mock servers started by a test are stopped cleanly.
-        for stop_cmd in ("t3code-stop", "magpie-stop", "herdr-stop"):
+        for stop_cmd in ("t3code-stop", "magpie-stop", "herdr-stop", "orca-stop"):
             try:
                 self.run_rt(stop_cmd, {}, check=False)
             except Exception:
@@ -1483,6 +1483,367 @@ class AgentRuntimeTests(unittest.TestCase):
         snap4 = json.loads(self.run_rt("snapshot", {"spec": custom_xdg, "account_id": acc4}).stdout)
         self.assertTrue(snap4["logged_in"], f"Generic XDG subdir credential not detected: {snap4}")
         self.assertEqual(snap4["email"], "demo@example.com")
+
+    def test_sync_auto_shims_and_auto_exec_all_clis_with_project_pins_and_rr(self):
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        fake_oc = bin_dir / "opencode"
+        fake_oc.write_text(
+            f"#!{sys.executable}\n"
+            "import json, os, sys\n"
+            "print(json.dumps({\n"
+            "    'XDG_CONFIG_HOME': os.environ.get('XDG_CONFIG_HOME', ''),\n"
+            "    'CAGE_CLI_ACCOUNT_OPENCODE': os.environ.get('CAGE_CLI_ACCOUNT_OPENCODE', ''),\n"
+            "    'ANTHROPIC_API_KEY': os.environ.get('ANTHROPIC_API_KEY', ''),\n"
+            "    'ARGS': sys.argv[1:],\n"
+            "}))\n"
+        )
+        fake_oc.chmod(0o755)
+
+        acc1, acc2, acc3 = "1" * 24, "2" * 24, "3" * 24
+        oc_spec = {
+            "id": "opencode",
+            "name": "OpenCode",
+            "binary": "opencode",
+            "isolation": {"mode": "xdg"},
+            "auth": {"api_key_env_vars": ["ANTHROPIC_API_KEY"]},
+        }
+        self.run_rt("set-api-key", {"spec": oc_spec, "account_id": acc1, "api_key": "sk-ant-acc1-secret"})
+        self.run_rt("set-api-key", {"spec": oc_spec, "account_id": acc2, "api_key": "sk-ant-acc2-secret"})
+        self.run_rt("set-api-key", {"spec": oc_spec, "account_id": acc3, "api_key": "sk-ant-acc3-secret"})
+
+        # Seed Claude & native Codex launch.json so sync-auto-shims creates all three shims.
+        claude_launch = self.home / ".local/share/cage/claude-accounts/launch.json"
+        claude_launch.parent.mkdir(parents=True, exist_ok=True)
+        claude_launch.write_text(json.dumps({"mode": "balanced", "accounts": [{"id": acc1, "subject": "a" * 64, "preferred": True}]}))
+        codex_launch = self.home / ".local/share/cage/codex-accounts/launch.json"
+        codex_launch.parent.mkdir(parents=True, exist_ok=True)
+        codex_launch.write_text(json.dumps({"mode": "balanced", "accounts": [{"id": acc2, "subject": "b" * 64, "preferred": False}]}))
+
+        pinned_proj = self.home / "workspace/pinned-repo"
+        pinned_sub = pinned_proj / "pkg/sub"
+        pinned_sub.mkdir(parents=True)
+        other_proj = self.home / "workspace/other-repo"
+        other_proj.mkdir(parents=True)
+
+        now = int(time.time())
+        sync_res = json.loads(self.run_rt("sync-auto-shims", {
+            "schedule": {
+                "agents": {
+                    "opencode": {
+                        "mode": "balanced",
+                        "project_pins": {str(pinned_proj): f"account:{acc2}"},
+                        "spec": oc_spec,
+                        "candidates": [
+                            {"id": acc1, "guest_id": acc1, "score": 90.0},
+                            {"id": acc2, "guest_id": acc2, "score": 88.0},
+                            {"id": acc3, "guest_id": acc3, "score": 99.0, "cooldown_until": now + 3600},
+                        ],
+                    },
+                },
+            },
+        }).stdout)
+        self.assertTrue(sync_res["ok"])
+        self.assertEqual(sync_res["shims"], ["claude", "codex", "opencode"])
+
+        auto_dir = Path(sync_res["dir"])
+        for name in ("claude", "codex", "opencode"):
+            self.assertTrue((auto_dir / name).is_file())
+            self.assertTrue(os.access(auto_dir / name, os.X_OK))
+        # Shell rc hooks idempotently installed for login-shell PATH preservation.
+        self.assertIn("# >>> super-cage-auto-shims >>>", (self.home / ".bashrc").read_text())
+        self.assertIn("# >>> super-cage-auto-shims >>>", (self.home / ".profile").read_text())
+
+        shim_env = {k: v for k, v in self.env.items() if not k.startswith("XDG_") and k != "ANTHROPIC_API_KEY"}
+        shim_env["PATH"] = f"{auto_dir}:{self.env['PATH']}"
+
+        # Consecutive balanced invocations rotate acc1 -> acc2 and skip cooled-down acc3.
+        r1 = json.loads(subprocess.check_output(["opencode", "run", "task1"], cwd=other_proj, env=shim_env, text=True, timeout=10))
+        r2 = json.loads(subprocess.check_output(["opencode", "run", "task2"], cwd=other_proj, env=shim_env, text=True, timeout=10))
+        self.assertEqual(r1["CAGE_CLI_ACCOUNT_OPENCODE"], acc1)
+        self.assertEqual(r1["ANTHROPIC_API_KEY"], "sk-ant-acc1-secret")
+        self.assertTrue(r1["XDG_CONFIG_HOME"].endswith(f"/opencode/{acc1}/config"))
+        self.assertEqual(r2["CAGE_CLI_ACCOUNT_OPENCODE"], acc2)
+        self.assertEqual(r2["ANTHROPIC_API_KEY"], "sk-ant-acc2-secret")
+        rr_file = self.home / ".local/share/cage/agent-accounts/opencode/.auto-rr"
+        self.assertEqual(stat.S_IMODE(rr_file.stat().st_mode), 0o600)
+
+        # Project pin forces acc2 inside pinned_proj subtree even when RR would pick acc1.
+        r_pin = json.loads(subprocess.check_output(["opencode", "run", "pinned"], cwd=pinned_sub, env=shim_env, text=True, timeout=10))
+        self.assertEqual(r_pin["CAGE_CLI_ACCOUNT_OPENCODE"], acc2)
+        self.assertEqual(r_pin["ARGS"], ["run", "pinned"])
+
+        # Bypass on --version or CAGE_ACCOUNT_SCHEDULING=off runs real binary without account isolation.
+        r_ver = json.loads(subprocess.check_output(["opencode", "--version"], cwd=other_proj, env=shim_env, text=True, timeout=10))
+        self.assertEqual(r_ver["CAGE_CLI_ACCOUNT_OPENCODE"], "")
+        self.assertEqual(r_ver["ANTHROPIC_API_KEY"], "")
+        off_env = {**shim_env, "CAGE_ACCOUNT_SCHEDULING": "off"}
+        r_off = json.loads(subprocess.check_output(["opencode", "run"], cwd=other_proj, env=off_env, text=True, timeout=10))
+        self.assertEqual(r_off["CAGE_CLI_ACCOUNT_OPENCODE"], "")
+        self.assertEqual(r_off["ANTHROPIC_API_KEY"], "")
+
+        # Emptying schedules cleans up stale shims cleanly.
+        claude_launch.unlink()
+        codex_launch.unlink()
+        sync_empty = json.loads(self.run_rt("sync-auto-shims", {"schedule": {"agents": {}}}).stdout)
+        self.assertEqual(sync_empty["shims"], [])
+        self.assertEqual(list(auto_dir.iterdir()), [])
+
+    def test_orca_server_atomic_install_lifecycle_pair_and_stale_lock_recovery(self):
+        import hashlib
+        import importlib.util
+        import io
+        import tarfile
+        from unittest.mock import patch
+
+        # --- Part A: Atomic Linux tarball installer (checksum, traversal, rollback) ---
+        saved_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(self.home)
+        try:
+            spec = importlib.util.spec_from_file_location("agent_runtime_orca_install", RUNTIME)
+            rt = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(rt)
+        finally:
+            os.environ["HOME"] = saved_home
+
+        bin_dir = self.home / ".local/bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        served = self.home / "orca-served"
+        served.mkdir()
+        fake_curl = bin_dir / "curl"
+        fake_curl.write_text(
+            "#!/bin/sh\n"
+            "out=''; url=''\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  case \"$1\" in\n"
+            "    -o) out=\"$2\"; shift 2 ;;\n"
+            "    -H|--proto|--proto-redir|--connect-timeout|--max-time) shift 2 ;;\n"
+            "    https://*) url=\"$1\"; shift ;;\n"
+            "    *) shift ;;\n"
+            "  esac\n"
+            "done\n"
+            "name=$(basename \"$url\")\n"
+            "if [ \"$name\" = latest ]; then name=latest.json; fi\n"
+            "if [ ! -f '" + str(served) + "'/\"$name\" ]; then echo missing \"$name\" >&2; exit 22; fi\n"
+            "cp '" + str(served) + "'/\"$name\" \"$out\"\n"
+        )
+        fake_curl.chmod(0o755)
+
+        machine = os.uname().machine.lower()
+        arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine, "arm64")
+        archive_name = f"orca-server-linux-{arch}.tar.gz"
+
+        def make_orca_tarball(version, evil_member=None):
+            buf = io.BytesIO()
+            with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+                ver_bytes = (version + "\n").encode()
+                vi = tarfile.TarInfo(f"orca-server-{version}/VERSION")
+                vi.size, vi.mode = len(ver_bytes), 0o644
+                tar.addfile(vi, io.BytesIO(ver_bytes))
+
+                script = f"#!/bin/sh\n[ \"$1\" = --version ] && echo 'orca {version}' && exit 0\nexit 0\n".encode()
+                bi = tarfile.TarInfo(f"orca-server-{version}/bin/orca-ide")
+                bi.size, bi.mode = len(script), 0o755
+                tar.addfile(bi, io.BytesIO(script))
+                if evil_member:
+                    ei = tarfile.TarInfo(evil_member)
+                    ei.size, ei.mode = 4, 0o644
+                    tar.addfile(ei, io.BytesIO(b"evil"))
+            return buf.getvalue()
+
+        def publish_orca(version, archive_bytes, sha=None):
+            (served / "latest.json").write_text(json.dumps({"tag_name": f"v{version}"}))
+            (served / archive_name).write_bytes(archive_bytes)
+            digest = sha or hashlib.sha256(archive_bytes).hexdigest()
+            (served / "orca-server-sha256sums.txt").write_text(f"{digest}  {archive_name}\n")
+
+        with patch.object(rt.sys, "platform", "linux"), patch.dict(os.environ, {"HOME": str(self.home), "PATH": f"{bin_dir}:/usr/bin:/bin"}):
+            # 1. Bad SHA-256 must abort cleanly without creating current symlink.
+            publish_orca("1.4.277", make_orca_tarball("1.4.277"), sha="0" * 64)
+            with self.assertRaisesRegex(ValueError, "SHA-256"):
+                rt.orca_install({})
+            self.assertFalse((self.home / ".local/share/cage/orca/current").exists())
+
+            # 2. Path traversal member must be refused.
+            publish_orca("1.4.277", make_orca_tarball("1.4.277", evil_member="../escape.txt"))
+            with self.assertRaisesRegex(ValueError, "路径穿越"):
+                rt.orca_install({})
+            self.assertFalse((self.home / ".local/share/cage/orca/current").exists())
+
+            # 3. Clean v1.4.277 install creates current + ~/.local/bin/orca-ide.
+            publish_orca("1.4.277", make_orca_tarball("1.4.277"))
+            ins1 = rt.orca_install({})
+            self.assertTrue(ins1["installed"])
+            self.assertEqual(ins1["version"], "1.4.277")
+            self.assertTrue((self.home / ".local/bin/orca-ide").is_symlink())
+            time.sleep(1.05)  # distinct second for staged_dir timestamp
+
+            # 4. Upgrade to v1.4.278 atomically swaps current and retains previous rollback.
+            publish_orca("1.4.278", make_orca_tarball("1.4.278"))
+            ins2 = rt.orca_install({})
+            self.assertEqual(ins2["version"], "1.4.278")
+            self.assertTrue((self.home / ".local/share/cage/orca/previous").is_symlink())
+            self.assertIn("1.4.277", str((self.home / ".local/share/cage/orca/previous").resolve()))
+            self.assertTrue(rt.orca_status({})["has_rollback"])
+
+        # --- Part B: Full subprocess lifecycle, stale-lock auto-heal, bindings, pair, repo sync, uninstall ---
+        port = free_port()
+        env_dump = self.home / "orca-seen-env.json"
+        reclaim_marker = self.home / "orca-reclaimed.flag"
+        first_fail_marker = self.home / "orca-first-fail.flag"
+        repos_file = self.home / "orca-repos.json"
+        reset_marker = self.home / "orca-reset.flag"
+        proj_dir = self.home / "projects/demo-app"
+        (proj_dir / ".git").mkdir(parents=True)
+
+        # Install mock `orca-ide` directly into managed current/bin/orca-ide.
+        cur_bin = self.home / ".local/share/cage/orca/current/bin/orca-ide"
+        cur_bin.write_text(
+            f"#!{sys.executable}\n"
+            "import http.server, json, os, pathlib, signal, socketserver, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['--version']:\n"
+            "    print('orca 1.4.278')\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['serve', 'reset-identity']:\n"
+            f"    pathlib.Path({str(reset_marker)!r}).write_text('reset')\n"
+            "    print(json.dumps({'ok': True}))\n"
+            "    sys.exit(0)\n"
+            "if args[:1] == ['serve'] and '--reclaim-stale-lock' in args:\n"
+            f"    pathlib.Path({str(reclaim_marker)!r}).write_text(' '.join(args))\n"
+            "    print(json.dumps({'ok': True}))\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['repo', 'list']:\n"
+            f"    rf = pathlib.Path({str(repos_file)!r})\n"
+            "    items = json.loads(rf.read_text()) if rf.exists() else []\n"
+            "    print(json.dumps({'ok': True, 'result': {'repos': [{'path': p} for p in items]}}))\n"
+            "    sys.exit(0)\n"
+            "if args[:2] == ['repo', 'add']:\n"
+            f"    rf = pathlib.Path({str(repos_file)!r})\n"
+            "    items = json.loads(rf.read_text()) if rf.exists() else []\n"
+            "    p = args[args.index('--path') + 1] if '--path' in args else ''\n"
+            "    if p and p not in items:\n"
+            "        items.append(p)\n"
+            "    rf.write_text(json.dumps(items))\n"
+            "    print(json.dumps({'ok': True, 'result': {'path': p}}))\n"
+            "    sys.exit(0)\n"
+            "if args[:1] == ['pair']:\n"
+            "    addr = args[args.index('--address') + 1] if '--address' in args else '127.0.0.1:16768'\n"
+            "    mobile = '--mobile' in args\n"
+            "    print(json.dumps({'ok': True, 'result': {\n"
+            "        'available': True,\n"
+            "        'scope': 'mobile' if mobile else 'desktop',\n"
+            "        'pairingUrl': f'orca://pair?endpoint=ws://{addr}&token=minted_pair_tok',\n"
+            "        'endpoint': f'ws://{addr}',\n"
+            "        'deviceId': 'dev-orca-123',\n"
+            "        'qr': 'QR_TEXT',\n"
+            "    }}))\n"
+            "    sys.exit(0)\n"
+            "if args[:1] == ['serve']:\n"
+            f"    ff = pathlib.Path({str(first_fail_marker)!r})\n"
+            f"    if not ff.exists() and not pathlib.Path({str(reclaim_marker)!r}).exists():\n"
+            "        ff.write_text('1')\n"
+            "        print('stale lock detected', flush=True)\n"
+            "        sys.exit(3)\n"
+            "    bind = args[args.index('--bind') + 1]\n"
+            "    port = int(args[args.index('--port') + 1])\n"
+            f"    pathlib.Path({str(env_dump)!r}).write_text(json.dumps({{\n"
+            "        'args': args,\n"
+            "        'PATH': os.environ.get('PATH', ''),\n"
+            "        'ORCA_USER_DATA': os.environ.get('ORCA_USER_DATA', ''),\n"
+            "        'ORCA_INSTANCE_ID': os.environ.get('ORCA_INSTANCE_ID', ''),\n"
+            "        'DO_NOT_TRACK': os.environ.get('DO_NOT_TRACK', ''),\n"
+            "        'ORCA_TELEMETRY_DISABLED': os.environ.get('ORCA_TELEMETRY_DISABLED', ''),\n"
+            "        'ORCA_BACKGROUND_LAUNCH': os.environ.get('ORCA_BACKGROUND_LAUNCH', ''),\n"
+            "        'ORCA_TERMINAL_MEMORY_MAX': os.environ.get('ORCA_TERMINAL_MEMORY_MAX', ''),\n"
+            "        'BROWSER': os.environ.get('BROWSER', ''),\n"
+            "        'CAGE_CLAUDE_ACCOUNT_ID': os.environ.get('CAGE_CLAUDE_ACCOUNT_ID', ''),\n"
+            "    }))\n"
+            "    class H(http.server.BaseHTTPRequestHandler):\n"
+            "        def do_GET(self):\n"
+            "            self.send_response(200); self.end_headers(); self.wfile.write(b'ok')\n"
+            "        def log_message(self, *a): pass\n"
+            "    socketserver.TCPServer.allow_reuse_address = True\n"
+            "    srv = socketserver.TCPServer((bind, port), H)\n"
+            "    signal.signal(signal.SIGTERM, lambda *a: sys.exit(0))\n"
+            "    print('Orca server listening on 127.0.0.1', flush=True)\n"
+            "    print('Secret leak orca://pair?token=top_secret_pair_999', flush=True)\n"
+            "    print('deviceToken=dev_secret_888', flush=True)\n"
+            "    srv.serve_forever()\n"
+        )
+        cur_bin.chmod(0o755)
+
+        started = json.loads(self.run_rt("orca-start", {
+            "port": port,
+            "bind_mode": "loopback",
+            "terminal_memory_max": "2G",
+            "workspace": str(self.home),
+            "projects": [str(proj_dir)],
+            "bindings": {
+                "claude": {"mode": "default"},
+                "opencode": {"mode": "auto"},
+            },
+        }).stdout)
+        self.assertTrue(started["installed"])
+        self.assertTrue(started["running"])
+        self.assertEqual(started["port"], port)
+        self.assertEqual(started["bind_ip"], "127.0.0.1")
+        # Stale-lock exit code 3 automatically ran --reclaim-stale-lock and succeeded!
+        self.assertTrue(reclaim_marker.is_file())
+        self.assertIn("--reclaim-stale-lock", reclaim_marker.read_text())
+
+        seen = json.loads(env_dump.read_text())
+        self.assertIn("--no-pairing", seen["args"])
+        self.assertIn("--refuse-public", seen["args"])
+        self.assertEqual(seen["DO_NOT_TRACK"], "1")
+        self.assertEqual(seen["ORCA_TELEMETRY_DISABLED"], "1")
+        self.assertEqual(seen["ORCA_BACKGROUND_LAUNCH"], "1")
+        self.assertEqual(seen["ORCA_TERMINAL_MEMORY_MAX"], "2G")
+        self.assertTrue(seen["ORCA_USER_DATA"].endswith("/orca/data"))
+        self.assertTrue(bool(seen["ORCA_INSTANCE_ID"]))
+        self.assertTrue(bool(seen["BROWSER"]))
+        self.assertEqual(seen["CAGE_CLAUDE_ACCOUNT_ID"], "default")
+        self.assertIn("auto-shims", seen["PATH"])
+
+        # Project auto-sync added proj_dir once.
+        self.assertEqual(json.loads(repos_file.read_text()), [str(proj_dir.resolve())])
+        sync2 = json.loads(self.run_rt("orca-sync-repos", {"projects": [str(proj_dir)]}).stdout)
+        self.assertEqual(sync2["added"], [])
+        self.assertEqual(sync2["existing"], 1)
+
+        # Log file is 0600 and redacts pairing URLs & device tokens.
+        log_file = self.home / ".local/share/cage/orca/server.log"
+        self.assertEqual(stat.S_IMODE(log_file.stat().st_mode), 0o600)
+        log_text = log_file.read_text()
+        self.assertIn("Orca server listening", log_text)
+        self.assertNotIn("top_secret_pair_999", log_text)
+        self.assertNotIn("dev_secret_888", log_text)
+
+        # Status & on-demand pairing offer.
+        st = json.loads(self.run_rt("orca-status", {"port": port}).stdout)
+        self.assertTrue(st["running"])
+        self.assertEqual(st["pid"], started["pid"])
+        pair = json.loads(self.run_rt("orca-pair", {"mobile": True, "rotate": True, "address": "100.64.0.9:16768"}).stdout)
+        self.assertTrue(pair["available"])
+        self.assertEqual(pair["scope"], "mobile")
+        self.assertIn("100.64.0.9:16768", pair["pairing_url"])
+
+        # Reset identity rotates ORCA_INSTANCE_ID and stops server.
+        old_id = seen["ORCA_INSTANCE_ID"]
+        reset = json.loads(self.run_rt("orca-reset-identity", {}).stdout)
+        self.assertTrue(reset["ok"])
+        self.assertNotEqual(reset["instance_id"], old_id)
+        self.assertTrue(reset_marker.is_file())
+        self.assertFalse(json.loads(self.run_rt("orca-status", {"port": port}).stdout)["running"])
+
+        # Uninstall preserves data/ by default, purges data/ when purge_data=True.
+        data_marker = self.home / ".local/share/cage/orca/data/keep.txt"
+        data_marker.write_text("keep")
+        self.run_rt("orca-uninstall", {"purge_data": False})
+        self.assertFalse((self.home / ".local/bin/orca-ide").exists())
+        self.assertTrue(data_marker.is_file())
+        self.run_rt("orca-uninstall", {"purge_data": True})
+        self.assertFalse((self.home / ".local/share/cage/orca/data").exists())
 
 
 if __name__ == "__main__":
