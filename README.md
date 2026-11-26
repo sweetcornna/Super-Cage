@@ -138,13 +138,13 @@ Super Cage 支持 **桌面版**、**服务器版** 和 **手机端** 三种使�
 
 ### 1. 桌面版
 
-从 [v0.1.27 发布页](https://github.com/sweetcornna/Super-Cage/releases/tag/v0.1.27) 下载对应平台安装包：
+从 [v0.1.28 发布页](https://github.com/sweetcornna/Super-Cage/releases/tag/v0.1.28) 下载对应平台安装包：
 
 | 平台 | 下载链接 | 系统要求 |
 | --- | --- | --- |
-| **macOS** | [`Super-Cage-0.1.27-macos-arm64.dmg`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.27/Super-Cage-0.1.27-macos-arm64.dmg) | Apple Silicon，macOS 14 或更新 |
-| **Windows** | [`Super-Cage-0.1.27-windows-amd64-setup-unsigned.exe`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.27/Super-Cage-0.1.27-windows-amd64-setup-unsigned.exe)（未签名预览版，SmartScreen 会提示） | Windows 10 22H2 或 Windows 11，x64 |
-| **Linux** | [`Super-Cage-0.1.27-linux-amd64.deb`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.27/Super-Cage-0.1.27-linux-amd64.deb) | Debian 12、Ubuntu 22.04 或 24.04，x86-64，需支持 KVM |
+| **macOS** | [`Super-Cage-0.1.28-macos-arm64.dmg`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.28/Super-Cage-0.1.28-macos-arm64.dmg) | Apple Silicon，macOS 14 或更新 |
+| **Windows** | [`Super-Cage-0.1.28-windows-amd64-setup-unsigned.exe`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.28/Super-Cage-0.1.28-windows-amd64-setup-unsigned.exe)（未签名预览版，SmartScreen 会提示） | Windows 10 22H2 或 Windows 11，x64 |
+| **Linux** | [`Super-Cage-0.1.28-linux-amd64.deb`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.28/Super-Cage-0.1.28-linux-amd64.deb) | Debian 12、Ubuntu 22.04 或 24.04，x86-64，需支持 KVM |
 
 > 暂不支持 Intel Mac、Windows ARM64 与 Linux ARM64。
 
@@ -153,7 +153,7 @@ Super Cage 支持 **桌面版**、**服务器版** 和 **手机端** 三种使�
 1. **校验安装包**：macOS 对照 `SHA256SUMS`，Linux 桌面版对照 `SHA256SUMS-linux-desktop.txt`，Windows 安装器对照 `SHA256SUMS-windows-desktop.txt`。
 2. **完成安装**：
    - **macOS**：打开 DMG 并将 `Super Cage.app` 拖入「应用程序」。自 `0.1.16` 起已完成 Developer ID 签名与 Apple 公证，后续支持应用内自动更新。
-   - **Linux**：运行 `sudo apt install ./Super-Cage-0.1.27-linux-amd64.deb`；如需在本机运行隔离环境，补装 `sudo apt install qemu-system-x86 qemu-utils ovmf openssh-client iproute2 git`，并确保当前用户可读写 `/dev/kvm`。
+   - **Linux**：运行 `sudo apt install ./Super-Cage-0.1.28-linux-amd64.deb`；如需在本机运行隔离环境，补装 `sudo apt install qemu-system-x86 qemu-utils ovmf openssh-client iproute2 git`，并确保当前用户可读写 `/dev/kvm`。
 3. **首次引导**：创建 Super Cage 账户（密码不少于 8 位，妥善保存恢复密钥），选择客机系统与存储目录，导入自有代理（Clash/Mihomo YAML 订阅/文件，或 HTTP / SOCKS5 / SSH 节点），点击「开始安装」，待网络自检通过后即可进入工作台。
 4. **启动工作**：点击项目旁加号打开本地项目目录，选择「新建 Claude 终端」，在隔离环境内完成 Claude Code 登录。
 
@@ -182,11 +182,11 @@ Windows 与 Linux 版暂不支持应用内自动安装更新，发现新版时�
 1. **下载并校验**（`arm64` 主机将命令中的 `amd64` 替换为 `arm64`）：
 
    ```sh
-   base=https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.27
-   curl -fLO "$base/Super-Cage-NoVirt-0.1.27-linux-amd64.tar.gz" -fLO "$base/SHA256SUMS"
+   base=https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.28
+   curl -fLO "$base/Super-Cage-NoVirt-0.1.28-linux-amd64.tar.gz" -fLO "$base/SHA256SUMS"
    sha256sum -c --ignore-missing SHA256SUMS
-   tar -xzf Super-Cage-NoVirt-0.1.27-linux-amd64.tar.gz
-   cd Super-Cage-NoVirt-0.1.27-linux-amd64
+   tar -xzf Super-Cage-NoVirt-0.1.28-linux-amd64.tar.gz
+   cd Super-Cage-NoVirt-0.1.28-linux-amd64
    ```
 
 2. **执行安装**：
@@ -219,8 +219,8 @@ Windows 与 Linux 版暂不支持应用内自动安装更新，发现新版时�
 3. **启动网关**：下载对应架构的 `Super-Cage-Server` 归档并校验 `SHA256SUMS`，解压运行：
 
    ```sh
-   tar -xzf Super-Cage-Server-0.1.27-linux-amd64.tar.gz
-   cd Super-Cage-Server-0.1.27-linux-amd64
+   tar -xzf Super-Cage-Server-0.1.28-linux-amd64.tar.gz
+   cd Super-Cage-Server-0.1.28-linux-amd64
    ./cage-tenant \
      -origin https://cage.example.org \
      -state-dir /var/lib/cage-tenant \
@@ -238,7 +238,7 @@ Windows 与 Linux 版暂不支持应用内自动安装更新，发现新版时�
 - **手机浏览器（直连服务器门户）**：直接打开门户地址并登录，进入虚拟机即自动呈现手机界面；iPhone Safari 与 Android Chrome 均可「添加到主屏幕」。网页版仅连接服务器，不支持配对电脑，也不包含远程浏览器与 Claude Desktop 入口（需要时可切至桌面版）。
 - **原生手机客户端**：支持「连接服务器」（门户账号登录）与「连接电脑」（扫描电脑「设置 → 设备 → 添加设备」二维码或粘贴长配对码）。手机仅负责展示与交互，命令均在电脑或服务器环境中执行。
   - **iPhone**（iOS 17+）：通过 TestFlight 分发 —— <https://testflight.apple.com/join/qCbA6gMQ>（Apple 测试版审核通过后生效）。
-  - **Android**（8.0+，arm64）：下载 [`Super-Cage-0.1.27-android-arm64.apk`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.27/Super-Cage-0.1.27-android-arm64.apk)，对照 `SHA256SUMS` 校验后按系统提示允许安装；之后可在「设置 → 应用更新」里更新。也可按 [移动端说明](mobile/README.md#android-构建与签名) 自行构建。
+  - **Android**（8.0+，arm64）：下载 [`Super-Cage-0.1.28-android-arm64.apk`](https://github.com/sweetcornna/Super-Cage/releases/download/v0.1.28/Super-Cage-0.1.28-android-arm64.apk)，对照 `SHA256SUMS` 校验后按系统提示允许安装；之后可在「设置 → 应用更新」里更新。也可按 [移动端说明](mobile/README.md#android-构建与签名) 自行构建。
 
 ---
 
