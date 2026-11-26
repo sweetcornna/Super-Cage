@@ -28,8 +28,11 @@ import (
 
 // The files the boot check reads; tests point them elsewhere.
 var (
-	bootMeminfo    = "/proc/meminfo"
-	bootOvercommit = "/proc/sys/vm/overcommit_memory"
+	bootMeminfo     = "/proc/meminfo"
+	bootOvercommit  = "/proc/sys/vm/overcommit_memory"
+	bootIncusPort   = "/dev/virtio-ports/org.linuxcontainers.incus"
+	bootBoardVendor = "/sys/class/dmi/id/board_vendor"
+	bootBoardName   = "/sys/class/dmi/id/board_name"
 )
 
 const (
@@ -112,16 +115,40 @@ func parseBootMeminfo(path string) (BootMachine, bool) {
 	return m, seen == 5 && m.Total > 0 && m.Available <= m.Total
 }
 
-// bootGrowable reports an outer balloon holding memory of this machine: its
-// counters in /proc/vmstat, or, on kernels without them, memory blocks
-// online beyond MemTotal by more than the kernel's own reservations. Read only
-// on the slow path.
+// bootGrowable reports whether an outer gateway can give this machine more
+// memory: an inflated outer balloon (/proc/vmstat counters, or online memory
+// blocks well beyond MemTotal), or a Linux Incus VM that may have cold-booted
+// at a shrunk limits.memory (for example after a host reboot while shrunk) and
+// can still grow via Incus memory hotplug. Read only on the slow path.
 func bootGrowable() bool {
 	if balloonBytes() > 0 {
 		return true
 	}
+	if runtime.GOOS == "linux" && isIncusVM(bootIncusPort, bootBoardVendor, bootBoardName) {
+		return true
+	}
 	m, ok := readBootMachine()
 	return ok && onlineMemory() > m.Total+gib
+}
+
+// isIncusVM reports whether the Incus guest-agent virtio-serial port or the
+// Incus SMBIOS baseboard identity is present.
+func isIncusVM(portPath, vendorPath, namePath string) bool {
+	if portPath != "" {
+		if _, err := os.Lstat(portPath); err == nil {
+			return true
+		}
+	}
+	if vendorPath != "" && namePath != "" {
+		vendor, err1 := os.ReadFile(vendorPath)
+		name, err2 := os.ReadFile(namePath)
+		if err1 == nil && err2 == nil &&
+			strings.TrimSpace(string(vendor)) == "LinuxContainers" &&
+			strings.TrimSpace(string(name)) == "Incus" {
+			return true
+		}
+	}
+	return false
 }
 
 // readOvercommit is vm.overcommit_memory, 0 (the default) when unreadable.
