@@ -16,6 +16,7 @@ GIB = 1 << 30
 
 
 REAL_GETPWNAM = governor.pwd.getpwnam
+PROC_MOUNTS = governor.MOUNTS
 
 
 class Guest:
@@ -30,9 +31,9 @@ class Guest:
         for name in ('cgroup', 'run/in', 'proc', 'control'):
             (self.root / name).mkdir(parents=True, exist_ok=True)
         (self.root / 'cgroup' / 'cgroup.controllers').write_text('cpu memory\n')
-        for unit, current, pressure in (('system.slice', 400 * MIB, '0.50'), ('user.slice', 513 * MIB, '0.00'), ('cage-browser.slice', 1700 * MIB, '31.00')):
+        for unit, current, pressure in (('system.slice', 400 * MIB, '0.50'), ('user.slice', 513 * MIB, '0.00'), ('cage.slice/cage-browser.slice', 1700 * MIB, '31.00')):
             directory = self.root / 'cgroup' / unit
-            directory.mkdir()
+            directory.mkdir(parents=True)
             (directory / 'memory.current').write_text('%d\n' % current)
             (directory / 'memory.low').write_text('0\n')
             (directory / 'memory.high').write_text('max\n')
@@ -41,7 +42,9 @@ class Guest:
         (self.root / 'proc' / 'meminfo').write_text('MemTotal:       %d kB\nMemFree: 1 kB\n' % (total // 1024))
         (self.root / 'proc' / 'uptime').write_text('123.45 100.00\n')
         options = 'rw,nosuid,nodev,noexec,relatime,nsdelegate' + (',memory_recursiveprot' if recursiveprot else '')
-        (self.root / 'proc' / 'mounts').write_text('proc /proc proc rw 0 0\ncgroup2 %s cgroup2 %s 0 0\n' % (self.root / 'cgroup', options))
+        (self.root / 'proc' / 'self').mkdir()
+        (self.root / 'proc' / 'self' / 'mounts').write_text('proc /proc proc rw 0 0\ncgroup2 %s cgroup2 %s 0 0\n' % (self.root / 'cgroup', options))
+        (self.root / 'proc' / 'mounts').symlink_to('self/mounts')
         recorder = self.root / 'systemctl'
         recorder.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\nmkdir -p "%s/$3.d" && printf "[Slice]\\n%%s\\n" "$4" > "%s/$3.d/50-${4%%%%=*}.conf"\n' % (
             self.calls, self.root / 'control', self.root / 'control'))
@@ -50,7 +53,7 @@ class Guest:
         governor.RUN = str(self.root / 'run')
         governor.MEMINFO = str(self.root / 'proc' / 'meminfo')
         governor.UPTIME = str(self.root / 'proc' / 'uptime')
-        governor.MOUNTS = str(self.root / 'proc' / 'mounts')
+        governor.MOUNTS = str(self.root / PROC_MOUNTS.lstrip('/'))
         governor.SYSTEMCTL = [str(recorder)]
         governor.CONTROL = str(self.root / 'control')
         self.accounts({'cage': 1000, 'cage-browser': 1001}, 'cage', 'cage-browser')

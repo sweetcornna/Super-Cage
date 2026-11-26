@@ -88,22 +88,23 @@ pwd.getpwnam = getpwnam
 spec = importlib.util.spec_from_file_location('governor', path)
 g = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(g)
-for name in ('cgroup', 'run/in', 'proc'):
+for name in ('cgroup', 'run/in', 'proc/self'):
     (root / name).mkdir(parents=True, exist_ok=True)
 (root / 'cgroup' / 'cgroup.controllers').write_text('cpu memory\n')
-for unit, size in (('system.slice', 400), ('user.slice', 1600), ('cage-browser.slice', 100), ('user.slice/user-1000.slice', 400), ('user.slice/user-1001.slice', 1200)):
+for unit, size in (('system.slice', 400), ('user.slice', 1600), ('cage.slice/cage-browser.slice', 100), ('user.slice/user-1000.slice', 400), ('user.slice/user-1001.slice', 1200)):
     directory = root / 'cgroup' / unit
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'memory.current').write_text('%d\n' % (size << 20))
     (directory / 'memory.pressure').write_text('some avg10=0.00 avg60=0.00 avg300=0.00 total=1\n')
 (root / 'proc' / 'meminfo').write_text('MemTotal: %d kB\n' % (4 << 20))
 (root / 'proc' / 'uptime').write_text('100.0 50.0\n')
-(root / 'proc' / 'mounts').write_text('cgroup2 %s cgroup2 rw,nsdelegate,memory_recursiveprot 0 0\n' % (root / 'cgroup'))
+(root / 'proc' / 'self' / 'mounts').write_text('cgroup2 %s cgroup2 rw,nsdelegate,memory_recursiveprot 0 0\n' % (root / 'cgroup'))
+(root / 'proc' / 'mounts').symlink_to('self/mounts')
 calls = root / 'calls'
 recorder = root / 'systemctl'
 recorder.write_text('#!/bin/sh\nprintf "%%s\\n" "$*" >> %s\n' % calls)
 recorder.chmod(0o755)
-g.CGROUP, g.RUN, g.MEMINFO, g.UPTIME, g.MOUNTS = str(root / 'cgroup'), str(root / 'run'), str(root / 'proc' / 'meminfo'), str(root / 'proc' / 'uptime'), str(root / 'proc' / 'mounts')
+g.CGROUP, g.RUN, g.MEMINFO, g.UPTIME, g.MOUNTS = str(root / 'cgroup'), str(root / 'run'), str(root / 'proc' / 'meminfo'), str(root / 'proc' / 'uptime'), str(root / g.MOUNTS.lstrip('/'))
 g.SYSTEMCTL = [str(recorder)]
 g.Governor().once()
 print(json.dumps({'calls': calls.read_text().splitlines() if calls.exists() else [], 'state': (root / 'run' / 'state').read_text().splitlines()}))
