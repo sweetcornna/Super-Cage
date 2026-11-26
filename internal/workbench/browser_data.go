@@ -1028,7 +1028,7 @@ func (s *Server) reattachBrowser(ctx context.Context, token string) error {
 	}
 	s.mu.Unlock()
 	if newlyReady {
-		s.kickClaudeLaunchSchedule()
+		s.kickAllLaunchSchedules()
 	}
 	s.browserViews.reset()
 	s.browserViews.background(s.changeBrowserVisibility)

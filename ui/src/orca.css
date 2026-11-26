@@ -1,0 +1,103 @@
+/* Orca Server optional integration card and pairing modal (shares t3code.css tokens). */
+
+.orca-security-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--chrome);
+  font-size: var(--s-xs, 0.8rem);
+  color: var(--muted);
+}
+
+.orca-security-strip svg {
+  color: var(--ok, #16a34a);
+  flex: none;
+}
+
+.orca-advanced {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+.orca-advanced summary {
+  cursor: pointer;
+  font-size: var(--s-xs, 0.84rem);
+  font-weight: 560;
+  color: var(--ink);
+  user-select: none;
+}
+
+.orca-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 10px;
+}
+
+.orca-pair-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.orca-pair-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--chrome);
+}
+
+.orca-pair-link-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.orca-pair-link-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--s-xs, 0.8rem);
+}
+
+.orca-pair-qr {
+  margin: 0;
+  padding: 12px;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #111111;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 9px;
+  line-height: 1;
+  overflow: auto;
+  text-align: center;
+  border: 1px solid var(--line);
+}
+
+.orca-pair-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: var(--s-xs, 0.8rem);
+  color: var(--muted);
+}
+
+.orca-pair-meta code {
+  color: var(--strong);
+}
+
+.orca-pair-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}

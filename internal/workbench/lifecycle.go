@@ -256,6 +256,7 @@ func (s *Server) closeService() error {
 		s.closeProjectShares()
 		s.closeT3CodeProxy()
 		s.closeMagpieProxy()
+		s.closeOrcaTunnel()
 		s.closeAgents()
 		s.closeWindowsBrowser()
 		if s.windowsGuest != nil {

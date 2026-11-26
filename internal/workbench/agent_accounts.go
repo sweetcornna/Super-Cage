@@ -168,6 +168,7 @@ func (s *Server) saveAgentPoolsLocked(pools map[string]*agentAccountPool) error 
 	s.agentCLIs.pools = pools
 	s.agentCLIs.poolsLoaded = true
 	s.agentCLIs.poolsDirty = false
+	s.kickAgentLaunchSchedule()
 	return nil
 }
 
@@ -220,6 +221,7 @@ func (s *Server) flushAgentPools() {
 			s.agentCLIs.poolsDirty = false
 		}
 		s.agentCLIs.mu.Unlock()
+		s.kickAgentLaunchSchedule()
 	}
 }
 

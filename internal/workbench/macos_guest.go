@@ -313,6 +313,7 @@ func (s *Server) attachMacOSGuest() error {
 	}
 	s.mu.Unlock()
 	if newlyReady && !s.macSetupPending() {
+		s.kickAllLaunchSchedules()
 		s.restoreProjectShares()
 		if checkAfterReconnect {
 			_, _ = s.submitJob("network-recovery", s.checkNetworkIfWanted)

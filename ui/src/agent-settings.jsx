@@ -16,6 +16,7 @@ import { InlineSelect } from "./inline-select";
 import { T3CodeSettingsCard } from "./t3code-panel";
 import { MagpieSettingsCard } from "./magpie-panel";
 import { HerdrSettingsCard } from "./herdr-panel";
+import { OrcaSettingsCard } from "./orca-panel";
 import "./agent-settings.css";
 
 const CATEGORY_LABELS = {
@@ -284,6 +285,7 @@ export function AgentSettings({
   t3code,
   magpie,
   herdr,
+  orca,
   status,
   onConfirm,
   onOpenAccounts,
@@ -292,6 +294,8 @@ export function AgentSettings({
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
+  onOpenOrca,
+  onShowOrcaPair,
   onSavedClaudeCommand,
 }) {
   const [query, setQuery] = useState("");
@@ -549,6 +553,17 @@ export function AgentSettings({
           status={status}
           onConfirm={onConfirm}
           onOpenHerdr={onOpenHerdr}
+        />
+      )}
+
+      {orca && (
+        <OrcaSettingsCard
+          store={orca}
+          agentsStore={store}
+          status={status}
+          onConfirm={onConfirm}
+          onOpenOrca={onOpenOrca}
+          onShowPairModal={onShowOrcaPair}
         />
       )}
 

@@ -94,6 +94,7 @@ type Server struct {
 	t3code                                           t3CodeManager
 	magpie                                           magpieManager
 	herdr                                            herdrManager
+	orca                                             orcaManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
 	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
@@ -467,6 +468,14 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("GET /api/herdr/legacy", s.herdrLegacyHTTP)
 	mux.HandleFunc("POST /api/herdr/legacy/uninstall", s.herdrLegacyUninstallHTTP)
 	mux.HandleFunc("POST /api/herdr/{action}", s.herdrActionHTTP)
+	mux.HandleFunc("GET /api/orca", s.orcaStatusHTTP)
+	mux.HandleFunc("POST /api/orca/config", s.orcaConfigHTTP)
+	mux.HandleFunc("POST /api/orca/install", s.orcaInstallHTTP)
+	mux.HandleFunc("POST /api/orca/uninstall", s.orcaUninstallHTTP)
+	mux.HandleFunc("POST /api/orca/open", s.orcaOpenHTTP)
+	mux.HandleFunc("POST /api/orca/pair", s.orcaPairHTTP)
+	mux.HandleFunc("POST /api/orca/sync-projects", s.orcaSyncProjectsHTTP)
+	mux.HandleFunc("POST /api/orca/{action}", s.orcaActionHTTP)
 	mux.HandleFunc("GET /api/vault", s.vaultList)
 	mux.HandleFunc("POST /api/vault", s.vaultMutation)
 	mux.HandleFunc("POST /api/vault/browser", s.vaultBrowser)

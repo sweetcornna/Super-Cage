@@ -469,3 +469,160 @@ export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) 
     restart,
   };
 }
+
+// Manages the optional Orca Server (stablyai/orca server-only orcad) integration without idle polling.
+export function useOrca({ vmRunning = false, ready = false, job = null } = {}) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const generation = useRef(0);
+  const lastJobId = useRef("");
+
+  const applyPayload = useCallback((result) => {
+    if (result && typeof result === "object") {
+      setData(result);
+      setError("");
+    }
+    return result;
+  }, []);
+
+  const refresh = useCallback(async (force = false) => {
+    const request = ++generation.current;
+    setLoading(true);
+    try {
+      const result = await api(force ? "/orca?force=1" : "/orca");
+      if (generation.current === request) {
+        setData(result);
+        setError("");
+      }
+      return result;
+    } catch (e) {
+      if (generation.current === request) setError(e.message);
+      return null;
+    } finally {
+      if (generation.current === request) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh(false);
+    return () => { generation.current++; };
+  }, [refresh, vmRunning, ready]);
+
+  useEffect(() => {
+    if (!job || job.running || !job.id) return;
+    if (lastJobId.current === job.id) return;
+    if (
+      job.kind === "orca-install" ||
+      job.kind === "orca-uninstall" ||
+      job.kind === "environment-tools" ||
+      job.kind === "start" ||
+      job.kind === "stop"
+    ) {
+      lastJobId.current = job.id;
+      void refresh(true);
+    }
+  }, [job, refresh]);
+
+  const saveConfig = useCallback(async (patch) => {
+    const result = await api("/orca/config", patch);
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const install = useCallback(async (version = "match_desktop") => {
+    return await api("/orca/install", { version });
+  }, []);
+
+  const uninstall = useCallback(async ({ purgeData = false, removePaired = false } = {}) => {
+    return await api("/orca/uninstall", { purge_data: Boolean(purgeData), remove_paired: Boolean(removePaired) });
+  }, []);
+
+  const start = useCallback(async () => {
+    const result = await api("/orca/start", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const stop = useCallback(async () => {
+    const result = await api("/orca/stop", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const restart = useCallback(async () => {
+    const result = await api("/orca/restart", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const resetIdentity = useCallback(async () => {
+    const result = await api("/orca/reset-identity", {});
+    return applyPayload(result);
+  }, [applyPayload]);
+
+  const open = useCallback(async (options = {}) => {
+    const result = await api("/orca/open", options);
+    if (result && typeof result === "object") {
+      setData((prev) => (prev ? {
+        ...prev,
+        running: true,
+        tunnel_active: true,
+        tunnel_port: result.tunnel_port || prev.tunnel_port,
+        tunnel_endpoint: result.endpoint || prev.tunnel_endpoint,
+        paired: Boolean(result.paired),
+        paired_name: result.environment_name || prev.paired_name,
+        error: "",
+      } : prev));
+      setError("");
+    }
+    return result;
+  }, []);
+
+  const pair = useCallback(async (options = {}) => {
+    return await api("/orca/pair", options);
+  }, []);
+
+  const syncProjects = useCallback(async () => {
+    return await api("/orca/sync-projects", {});
+  }, []);
+
+  return {
+    data,
+    enabled: Boolean(data?.enabled),
+    guest_port: data?.guest_port || 16768,
+    host_tunnel_port: data?.host_tunnel_port || 0,
+    bind_mode: data?.bind_mode || "loopback",
+    server_name: data?.server_name || "",
+    auto_sync_projects: data?.auto_sync_projects !== false,
+    terminal_memory_max: data?.terminal_memory_max || "",
+    account_bindings: data?.account_bindings || {},
+    installed: Boolean(data?.installed),
+    version: data?.version || "",
+    running: Boolean(data?.running),
+    bind_ip: data?.bind_ip || "",
+    tailscale_ip: data?.tailscale_ip || "",
+    has_rollback: Boolean(data?.has_rollback),
+    tunnel_active: Boolean(data?.tunnel_active),
+    tunnel_port: data?.tunnel_port || 0,
+    tunnel_endpoint: data?.tunnel_endpoint || "",
+    paired: Boolean(data?.paired),
+    paired_name: data?.paired_name || "",
+    local_desktop: data?.local_desktop || { installed: false },
+    can_auto_pair: Boolean(data?.can_auto_pair),
+    download_url: data?.download_url || "https://orca.so",
+    active_bindings: data?.active_bindings || {},
+    supports_managed: data?.supports_managed,
+    is_macos_guest: Boolean(data?.is_macos_guest),
+    serverError: data?.error || "",
+    loading,
+    error,
+    refresh,
+    saveConfig,
+    install,
+    uninstall,
+    start,
+    stop,
+    restart,
+    resetIdentity,
+    open,
+    pair,
+    syncProjects,
+  };
+}

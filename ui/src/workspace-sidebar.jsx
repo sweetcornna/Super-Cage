@@ -14,6 +14,7 @@ import {
   Network,
   PanelLeftClose,
   Plus,
+  QrCode,
   RefreshCw,
   Settings,
   Server,
@@ -99,6 +100,9 @@ export function WorkspaceSidebar({
   herdr = null,
   herdrActive = false,
   onOpenHerdr,
+  orca = null,
+  onOpenOrca,
+  onShowOrcaPair,
   onInstallAgents,
   onClaudeWeb,
   onClaudeDesktop,
@@ -255,6 +259,36 @@ export function WorkspaceSidebar({
                 <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />
               ) : null}
             </button>
+          )}
+          {orca?.enabled && (
+            <div className="sidebar-browser-row sidebar-t3code-row">
+              <button
+                className="sidebar-link"
+                onClick={() => onOpenOrca?.()}
+                disabled={busy || !running || !orca.installed}
+                aria-label="在 Orca 中打开"
+                title={orca.installed
+                  ? (orca.can_auto_pair
+                      ? (orca.running ? "唤醒本机 Orca 客户端（服务端运行中）" : "启动 Orca Server 并自动连接本机 Orca 客户端")
+                      : "查看 Orca Server 配对码 / 二维码")
+                  : "尚未安装 Orca Server，请前往设置一键安装"}
+              >
+                <AgentIcon agentId="orca" size={17} />
+                <span className="sidebar-t3code-label">Orca</span>
+                {orca.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
+              </button>
+              {orca.installed && (
+                <button
+                  className="icon-button sidebar-claude-shortcut"
+                  onClick={() => onShowOrcaPair?.()}
+                  disabled={busy || !running}
+                  aria-label="Orca 配对码与二维码"
+                  title="显示 Orca 配对码 / 手机扫码"
+                >
+                  <QrCode size={14} />
+                </button>
+              )}
+            </div>
           )}
           <button className={`sidebar-link ${desktopOpen ? "selected" : ""}`} onClick={onClaudeDesktop} disabled={!running || busy} title="安装或打开 Claude Desktop"><Monitor size={17} />Claude Desktop</button>
           <button className={`sidebar-link ${claudeScienceOpen ? "selected" : ""}`} aria-current={claudeScienceOpen ? "page" : undefined} onClick={onClaudeScience} disabled={!running} title="安装或打开 Claude Science"><FlaskConical size={17} />Claude Science</button>

@@ -69,7 +69,7 @@ func (s *Server) kickClaudeLaunchSchedule() {
 }
 
 func (s *Server) publishClaudeLaunchSchedule() {
-	if s.windowsGuest != nil || s.macosGuest != nil {
+	if s.windowsGuest != nil {
 		return
 	}
 	s.mu.Lock()
@@ -104,6 +104,9 @@ func (s *Server) publishClaudeLaunchSchedule() {
 	if _, err := s.guestQuick(ctx, script); err != nil {
 		return
 	}
+	// Keep ~/.local/share/cage/auto-shims/claude synced so non-shell direct exec
+	// spawns (Orca Structured Chat, T3 Code, scripts) also honor Claude scheduling.
+	_ = s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{}, nil)
 	m.mu.Lock()
 	m.launchPublished = string(data)
 	m.mu.Unlock()

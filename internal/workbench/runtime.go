@@ -242,7 +242,7 @@ func (s *Server) attach() error {
 	}
 	s.mu.Unlock()
 	if newlyReady {
-		s.kickClaudeLaunchSchedule()
+		s.kickAllLaunchSchedules()
 	}
 	s.restoreProjectShares()
 	s.desktopViews.background(s.changeDesktopVisibility)
@@ -847,6 +847,8 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.invalidateT3CodeStatus()
 	s.closeMagpieProxy()
 	s.invalidateMagpieStatus()
+	s.closeOrcaTunnel()
+	s.invalidateOrcaStatus()
 	s.invalidateHerdrStatus()
 	s.invalidateAgentProbeCache()
 	s.closeProjectShares()
