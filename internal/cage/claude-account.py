@@ -914,7 +914,8 @@ def auto(args):
     Herdr, scripts). Starts on the scheduled account like a Claude terminal
     does; anything that does not fit runs the CLI unchanged."""
     picked = None
-    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    magpie_takeover = (Path.home() / ".local/share/cage/magpie/takeover").is_file()
+    disabled = magpie_takeover or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
     explicit = disabled or any(os.environ.get(name) for name in ("CAGE_CLAUDE_ACCOUNT_ID", "CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
     if not explicit and not (args and args[0] in UNSCHEDULED):
         try:

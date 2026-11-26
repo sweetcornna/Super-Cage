@@ -72,6 +72,17 @@ func (s *Server) publishCodexLaunchSchedule() {
 		return
 	}
 	m := &s.codexAccounts
+	s.magpie.syncMu.Lock()
+	defer s.magpie.syncMu.Unlock()
+	if s.magpieTakesOverScheduling() {
+		m.mu.Lock()
+		already := m.launchPublished == launchPublishedMagpie
+		m.mu.Unlock()
+		if !already {
+			s.disableGuestAccountSchedulingLocked(epoch, false)
+		}
+		return
+	}
 	m.mu.Lock()
 	list, err := s.loadCodexAccounts()
 	published := m.launchPublished
@@ -81,7 +92,18 @@ func (s *Server) publishCodexLaunchSchedule() {
 	}
 	schedule := codexLaunchScheduleOf(list)
 	data, err := json.Marshal(schedule)
-	if err != nil || string(data) == published || published == "" && len(schedule.Accounts) == 0 {
+	if err != nil {
+		return
+	}
+	if published == launchPublishedMagpie && len(schedule.Accounts) == 0 {
+		m.mu.Lock()
+		if m.launchPublished == launchPublishedMagpie {
+			m.launchPublished = ""
+		}
+		m.mu.Unlock()
+		return
+	}
+	if string(data) == published || published == "" && len(schedule.Accounts) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(epoch, 10*time.Second)
@@ -91,7 +113,7 @@ func (s *Server) publishCodexLaunchSchedule() {
 	if _, err := s.guestQuick(ctx, script); err != nil {
 		return
 	}
-	_ = s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{}, nil)
+	_ = s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"magpie_takeover": false}, nil)
 	m.mu.Lock()
 	m.launchPublished = string(data)
 	m.mu.Unlock()
@@ -287,6 +309,17 @@ func (s *Server) publishAgentLaunchSchedule() {
 		return
 	}
 	m := &s.agentCLIs
+	s.magpie.syncMu.Lock()
+	defer s.magpie.syncMu.Unlock()
+	if s.magpieTakesOverScheduling() {
+		m.mu.Lock()
+		already := m.closed || m.launchPublished == launchPublishedMagpie
+		m.mu.Unlock()
+		if !already {
+			s.disableGuestAccountSchedulingLocked(epoch, false)
+		}
+		return
+	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -306,12 +339,23 @@ func (s *Server) publishAgentLaunchSchedule() {
 	specs := agentcatalog.All(store.CustomSpecs)
 	schedule := agentLaunchScheduleOf(poolsSnap, specs, s.cliWorkspace, time.Now())
 	data, err := json.Marshal(schedule)
-	if err != nil || string(data) == published || published == "" && len(schedule.Agents) == 0 {
+	if err != nil {
+		return
+	}
+	if published == launchPublishedMagpie && len(schedule.Agents) == 0 {
+		m.mu.Lock()
+		if m.launchPublished == launchPublishedMagpie {
+			m.launchPublished = ""
+		}
+		m.mu.Unlock()
+		return
+	}
+	if string(data) == published || published == "" && len(schedule.Agents) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(epoch, 12*time.Second)
 	defer cancel()
-	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"schedule": schedule}, nil); err != nil {
+	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"schedule": schedule, "magpie_takeover": false}, nil); err != nil {
 		return
 	}
 	m.mu.Lock()
@@ -340,6 +384,22 @@ func (s *Server) kickAllLaunchSchedules() {
 func (s *Server) resolveToolAccountBindings(bindings map[string]string, workspace, toolName string) (map[string]any, map[string]string, error) {
 	guestBindings := map[string]any{}
 	labels := map[string]string{}
+
+	// When Magpie is enabled, Super Cage automatically hands off account
+	// scheduling to Magpie across all harnesses so every CLI reads its native
+	// config written by Magpie without Cage isolation overrides.
+	if s.magpieTakesOverScheduling() {
+		for agentID, choice := range bindings {
+			agentID = strings.TrimSpace(agentID)
+			choice = strings.TrimSpace(choice)
+			if agentID == "" || choice == "" {
+				continue
+			}
+			guestBindings[agentID] = map[string]any{"mode": "magpie"}
+			labels[agentID] = magpieTakeoverLabel
+		}
+		return guestBindings, labels, nil
+	}
 
 	for agentID, choice := range bindings {
 		agentID = strings.TrimSpace(agentID)

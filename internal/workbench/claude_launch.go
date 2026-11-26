@@ -83,6 +83,17 @@ func (s *Server) publishClaudeLaunchSchedule() {
 		return
 	}
 	m := &s.claudeAccounts
+	s.magpie.syncMu.Lock()
+	defer s.magpie.syncMu.Unlock()
+	if s.magpieTakesOverScheduling() {
+		m.mu.Lock()
+		already := m.launchPublished == launchPublishedMagpie
+		m.mu.Unlock()
+		if !already {
+			s.disableGuestAccountSchedulingLocked(epoch, false)
+		}
+		return
+	}
 	m.mu.Lock()
 	list, err := s.loadClaudeAccounts()
 	published := m.launchPublished
@@ -92,9 +103,20 @@ func (s *Server) publishClaudeLaunchSchedule() {
 	}
 	schedule := claudeLaunchScheduleOf(list)
 	data, err := json.Marshal(schedule)
+	if err != nil {
+		return
+	}
+	if published == launchPublishedMagpie && len(schedule.Accounts) == 0 {
+		m.mu.Lock()
+		if m.launchPublished == launchPublishedMagpie {
+			m.launchPublished = ""
+		}
+		m.mu.Unlock()
+		return
+	}
 	// Without accounts there is nothing to tell a guest that was never told
 	// anything; an emptied list still replaces one published before.
-	if err != nil || string(data) == published || published == "" && len(schedule.Accounts) == 0 {
+	if string(data) == published || published == "" && len(schedule.Accounts) == 0 {
 		return
 	}
 	ctx, cancel := context.WithTimeout(epoch, 10*time.Second)
@@ -106,7 +128,7 @@ func (s *Server) publishClaudeLaunchSchedule() {
 	}
 	// Keep ~/.local/share/cage/auto-shims/claude synced so non-shell direct exec
 	// spawns (Orca Structured Chat, T3 Code, scripts) also honor Claude scheduling.
-	_ = s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{}, nil)
+	_ = s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"magpie_takeover": false}, nil)
 	m.mu.Lock()
 	m.launchPublished = string(data)
 	m.mu.Unlock()

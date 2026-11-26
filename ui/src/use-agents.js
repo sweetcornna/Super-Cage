@@ -217,6 +217,7 @@ export function useT3Code({ vmRunning = false, ready = false, job = null } = {})
     running: Boolean(data?.running),
     url: data?.url || "",
     active_bindings: data?.active_bindings || {},
+    magpie_takeover: Boolean(data?.magpie_takeover),
     serverError: data?.error || "",
     loading,
     error,
@@ -333,6 +334,7 @@ export function useMagpie({ vmRunning = false, ready = false, job = null } = {})
   return {
     data,
     enabled: Boolean(data?.enabled),
+    scheduling_disabled: Boolean(data?.scheduling_disabled ?? data?.enabled),
     mode: data?.mode || "managed",
     external_url: data?.external_url || "",
     port: data?.port || 0,
@@ -608,6 +610,7 @@ export function useOrca({ vmRunning = false, ready = false, job = null } = {}) {
     can_auto_pair: Boolean(data?.can_auto_pair),
     download_url: data?.download_url || "https://orca.so",
     active_bindings: data?.active_bindings || {},
+    magpie_takeover: Boolean(data?.magpie_takeover),
     supports_managed: data?.supports_managed,
     is_macos_guest: Boolean(data?.is_macos_guest),
     serverError: data?.error || "",

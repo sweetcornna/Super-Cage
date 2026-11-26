@@ -13,6 +13,7 @@ export function AccountsHub({
   claudeProfiles,
   codexProfiles,
   codexNative = false,
+  magpieEnabled = false,
   agents = [],
   agentAccountsRevision = 0,
   tabs = [],
@@ -27,9 +28,13 @@ export function AccountsHub({
   onStartAgentLogin,
   onLaunchAgent,
   onOpenSettings,
+  onOpenMagpieSettings,
   onAgentChanged,
 }) {
   const tabListRef = useRef(null);
+  const magpieTakeover = Boolean(
+    magpieEnabled || claudeProfiles?.magpieTakeover || codexProfiles?.magpieTakeover,
+  );
 
   const claudeReady = useMemo(
     () => (claudeProfiles?.accounts || []).filter((a) => a.status === "ready" || a.ready).length,
@@ -157,6 +162,28 @@ export function AccountsHub({
           </button>
         )}
       </div>
+      {magpieTakeover && (
+        <div className="accounts-hub-magpie-banner" role="status">
+          <div className="accounts-hub-magpie-banner-body">
+            <AgentIcon agentId="magpie" size={20} />
+            <div>
+              <strong>已启用 Magpie，Super Cage 账号调度已自动关闭并由 Magpie 接管</strong>
+              <p>
+                所有新建终端、Shell、Herdr、T3 Code 与 Orca Server 中的 Claude、Codex 及其他 Agent CLI 均以原生配置运行，确保 Magpie 接管生效。下方已保存账号会安全保留，关闭 Magpie 后自动恢复调度。
+              </p>
+            </div>
+          </div>
+          {(onOpenMagpieSettings || onOpenSettings) && (
+            <button
+              type="button"
+              className="quiet-button"
+              onClick={onOpenMagpieSettings || onOpenSettings}
+            >
+              前往 Magpie 设置
+            </button>
+          )}
+        </div>
+      )}
       <div
         className="accounts-hub-panel"
         role="tabpanel"

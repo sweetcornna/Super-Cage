@@ -119,7 +119,7 @@ func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, str
 		}
 		// An existing default subscription can use the same guest-side subject
 		// check as a registered account, without enrolling it in scheduling.
-		if launcher == "claude" && selection.ID == "" && !update {
+		if launcher == "claude" && selection.ID == "" && !update && !s.magpieTakesOverScheduling() {
 			if epoch, ok := s.account.access(); ok {
 				if status, _, err := s.inspectClaudeDefault(epoch, true); err == nil && status.subject() != "" {
 					selection = claudeSelection{GuestID: "default", Subject: status.subject()}

@@ -461,6 +461,20 @@ clientSecret = "camel-client-secret"
             seen2 = json.loads(self.capture.read_text())
             self.assertNotEqual(seen2["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"), label)
 
+        # Magpie takeover marker bypasses scheduling even with valid launch.json present.
+        takeover = self.home / ".local/share/cage/magpie/takeover"
+        takeover.parent.mkdir(parents=True, exist_ok=True)
+        takeover.write_text("1\n")
+        self.capture.unlink(missing_ok=True)
+        res3 = subprocess.run(
+            [sys.executable, str(source), "auto", "--search", "magpie"],
+            env=clean_env, cwd=self.home, text=True, capture_output=True, check=True,
+        )
+        self.assertEqual(res3.returncode, 0)
+        seen3 = json.loads(self.capture.read_text())
+        self.assertNotEqual(seen3["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"))
+        self.assertEqual(seen3["argv"][-2:], ["--search", "magpie"])
+
 
 if __name__ == "__main__":
     unittest.main()

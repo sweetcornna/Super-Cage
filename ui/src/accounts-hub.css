@@ -112,3 +112,38 @@
   min-height: 0;
   overflow-y: auto;
 }
+
+.accounts-hub-magpie-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 38%, var(--line));
+  border-radius: var(--r-md, 10px);
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.accounts-hub-magpie-banner-body {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  flex: 1 1 320px;
+}
+
+.accounts-hub-magpie-banner-body strong {
+  display: block;
+  font-size: var(--fs-secondary, 0.9286rem);
+  color: var(--strong, var(--ink));
+  margin-bottom: 3px;
+}
+
+.accounts-hub-magpie-banner-body p {
+  margin: 0;
+  font-size: var(--fs-caption, 0.8571rem);
+  color: var(--muted);
+  line-height: 1.5;
+}

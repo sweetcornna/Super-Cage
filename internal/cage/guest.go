@@ -65,7 +65,7 @@ sudo tee /etc/profile.d/cage-claude.sh >/dev/null <<'CAGE_CLAUDE_FUNCTION'
 # A plain claude typed in any guest shell (Herdr included) starts on the
 # account Super Cage schedules for new sessions; see cage-claude-account auto.
 claude() {
-  if [ -z "${CAGE_CLAUDE_ACCOUNT_ID:-}" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -r "$HOME/.local/share/cage/claude-accounts/launch.json" ] && [ -x /usr/local/bin/cage-claude-account ]; then
+  if [ ! -f "$HOME/.local/share/cage/magpie/takeover" ] && [ -z "${CAGE_CLAUDE_ACCOUNT_ID:-}" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -r "$HOME/.local/share/cage/claude-accounts/launch.json" ] && [ -x /usr/local/bin/cage-claude-account ]; then
     /usr/local/bin/cage-claude-account auto "$@"
   else
     command claude "$@"
@@ -95,7 +95,7 @@ sudo tee /etc/profile.d/cage-codex.sh >/dev/null <<'CAGE_CODEX_FUNCTION'
 # A plain codex typed in any guest shell (Herdr/Orca included) starts on the
 # account Super Cage schedules for new sessions; see cage-codex-account auto.
 codex() {
-  if [ -z "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ -z "${CODEX_HOME:-}" ] && [ -r "$HOME/.local/share/cage/codex-accounts/launch.json" ] && [ -x /usr/local/bin/cage-codex-account ]; then
+  if [ ! -f "$HOME/.local/share/cage/magpie/takeover" ] && [ -z "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ -z "${CODEX_HOME:-}" ] && [ -r "$HOME/.local/share/cage/codex-accounts/launch.json" ] && [ -x /usr/local/bin/cage-codex-account ]; then
     /usr/local/bin/cage-codex-account auto "$@"
   else
     command codex "$@"

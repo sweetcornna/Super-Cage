@@ -47,7 +47,7 @@ export function useCodexAccounts(enabled = true) {
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
     guestSupported: registry?.guest_supported !== false, loginPending: Boolean(registry?.login_pending),
-    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, loginNotice: registry?.login_notice, error, load };
+    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
 }
 
 const statusLabels = {
