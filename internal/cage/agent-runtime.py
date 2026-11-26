@@ -62,6 +62,7 @@ MAGPIE_STATE_FILE = MAGPIE_ROOT / "runtime.json"
 MAGPIE_LOG_FILE = MAGPIE_ROOT / "server.log"
 MAGPIE_LOCK_FILE = MAGPIE_ROOT / "lifecycle.lock"
 MAGPIE_KEY_FILE = MAGPIE_ROOT / "web.key"
+MAGPIE_TAKEOVER_FILE = MAGPIE_ROOT / "takeover"
 MAGPIE_DEFAULT_PORT = 3430
 MAGPIE_DEFAULT_GATEWAY_PORT = 3425
 MAGPIE_LOG_MAX_BYTES = 65536
@@ -1597,6 +1598,7 @@ def ensure_shim(spec):
         q_shims = shlex.quote(shims_root_str)
         q_auto = shlex.quote(str(AUTO_SHIMS_DIR))
         q_orca_shims = shlex.quote(str(ORCA_SHIMS_DIR))
+        q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
         q_name = shlex.quote(name)
 
         exec_lines = []
@@ -1611,6 +1613,9 @@ def ensure_shim(spec):
 
         content = (
             "#!/bin/sh\n"
+            f'if [ -f {q_takeover} ]; then\n'
+            + _posix_strip_and_exec(name)
+            + 'fi\n'
             f'_acct="${{{per_agent_var}:-${{CAGE_CLI_ACCOUNT_ID:-default}}}}"\n'
             'case "$_acct" in\n'
             '  default) ;;\n'
@@ -1891,9 +1896,10 @@ def _write_claude_auto_shim():
     helper = _claude_account_helper()
     q_helper = shlex.quote(helper)
     q_launch = shlex.quote(str(CLAUDE_LAUNCH_FILE))
+    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     content = (
         "#!/bin/sh\n"
-        'if [ "${CAGE_CLAUDE_ACCOUNT_ID:-}" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n'
+        f'if [ -f {q_takeover} ] || [ "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec("claude")
         + 'fi\n'
         f'if [ -n "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n'
@@ -1914,12 +1920,13 @@ def _write_codex_auto_shim(has_native_codex, has_agent_codex):
     q_helper = shlex.quote(helper)
     q_native_launch = shlex.quote(str(CODEX_LAUNCH_FILE))
     q_agent_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
+    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_py = shlex.quote(sys.executable)
     q_rt = shlex.quote(str(Path(__file__).resolve()))
     q_accts = shlex.quote(str(ACCOUNTS_ROOT / "codex"))
     parts = [
         "#!/bin/sh\n",
-        'if [ "${CAGE_CODEX_ACCOUNT_ID:-}" = "default" ] || [ "${CAGE_CLI_ACCOUNT_CODEX:-}" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n',
+        f'if [ -f {q_takeover} ] || [ "${{CAGE_CODEX_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_CLI_ACCOUNT_CODEX:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n',
         _posix_strip_and_exec("codex"),
         'fi\n',
         f'if [ -n "${{CAGE_CODEX_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n',
@@ -1958,6 +1965,7 @@ def _write_generic_auto_shim(agent_id, binary_name, spec):
     q_rt = shlex.quote(str(Path(__file__).resolve()))
     q_accts = shlex.quote(str(ACCOUNTS_ROOT / agent_id))
     q_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
+    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_agent = shlex.quote(agent_id)
     q_bin_name = shlex.quote(binary_name)
 
@@ -1978,7 +1986,7 @@ def _write_generic_auto_shim(agent_id, binary_name, spec):
     content = (
         "#!/bin/sh\n"
         f'_pin="${{{per_agent_var}:-${{CAGE_CLI_ACCOUNT_ID:-}}}}"\n'
-        'if [ "$_pin" = "default" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "off" ] || [ "${CAGE_ACCOUNT_SCHEDULING:-}" = "0" ]; then\n'
+        f'if [ -f {q_takeover} ] || [ "$_pin" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec(binary_name)
         + 'fi\n'
         'if [ -n "$_pin" ] && [ "$_pin" != "auto" ]; then\n'
@@ -2012,12 +2020,64 @@ def _launch_has_accounts(path):
     return isinstance(accts, list) and len(accts) > 0
 
 
+def _clear_all_scheduling_artifacts():
+    """Remove all Cage launch manifests and executable shims so every harness
+    runs in its native default config directory (e.g. when Magpie takes over)."""
+    for launch_file in (CLAUDE_LAUNCH_FILE, CODEX_LAUNCH_FILE, AGENT_LAUNCH_FILE):
+        try:
+            launch_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+    for shim_dir in (AUTO_SHIMS_DIR, ORCA_SHIMS_DIR, T3CODE_ROOT / "shims"):
+        if not shim_dir.is_dir():
+            continue
+        try:
+            for child in list(shim_dir.iterdir()):
+                if child.is_file() or child.is_symlink():
+                    try:
+                        child.unlink()
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    if SHIMS_ROOT.is_dir():
+        try:
+            for agent_dir in list(SHIMS_ROOT.iterdir()):
+                if not agent_dir.is_dir():
+                    continue
+                for child in list(agent_dir.iterdir()):
+                    if child.name == "spec.json":
+                        continue
+                    if child.is_file() or child.is_symlink():
+                        try:
+                            child.unlink()
+                        except OSError:
+                            pass
+        except OSError:
+            pass
+
+
 def sync_auto_shims(payload=None):
     """Publish optional agent launch schedule and synchronize universal auto-shims
     in ~/.local/share/cage/auto-shims for Claude, Codex, and all Agent CLIs."""
     payload = payload if isinstance(payload, dict) else {}
     os.umask(0o077)
     ACCOUNTS_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+
+    disable_all = bool(payload.get("disable_all"))
+    magpie_takeover = payload.get("magpie_takeover")
+    if magpie_takeover is True or disable_all:
+        MAGPIE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_write_text(MAGPIE_TAKEOVER_FILE, "1\n", mode=0o600)
+    elif magpie_takeover is False:
+        try:
+            MAGPIE_TAKEOVER_FILE.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    if disable_all or MAGPIE_TAKEOVER_FILE.is_file():
+        _clear_all_scheduling_artifacts()
+        return {"ok": True, "shims": [], "dir": str(AUTO_SHIMS_DIR), "magpie_takeover": True}
 
     if "schedule" in payload and isinstance(payload["schedule"], dict):
         atomic_write_json(AGENT_LAUNCH_FILE, payload["schedule"], mode=0o600)
@@ -2091,7 +2151,7 @@ def sync_auto_shims(payload=None):
     if desired or payload.get("ensure_shell_hook"):
         _ensure_shell_shims_hook()
 
-    return {"ok": True, "shims": sorted(desired), "dir": str(AUTO_SHIMS_DIR)}
+    return {"ok": True, "shims": sorted(desired), "dir": str(AUTO_SHIMS_DIR), "magpie_takeover": False}
 
 
 def _match_project_pin(pins, cwd_str):
@@ -2234,7 +2294,10 @@ def auto_exec_agent(agent_id, binary_name, extra_args):
     if not CLI_ID_RE.match(agent_id):
         return _exec_real_binary(binary_name, extra_args)
 
-    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    disabled = (
+        MAGPIE_TAKEOVER_FILE.is_file()
+        or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    )
     if disabled or (extra_args and extra_args[0] in AUTO_UNSCHEDULED_ARGS):
         return _exec_real_binary(binary_name, extra_args)
 
@@ -2950,8 +3013,12 @@ def _ensure_macos_claude_shim():
     shim_path = shim_dir / "claude"
     q_dir = shlex.quote(str(shim_dir))
     q_helper = shlex.quote(helper)
+    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     script = (
         "#!/bin/sh\n"
+        f"if [ -f {q_takeover} ]; then\n"
+        + _posix_strip_and_exec("claude")
+        + "fi\n"
         f"SHIM_DIR={q_dir}\n"
         'CLEAN_PATH=""\n'
         'OLD_IFS="$IFS"\n'
@@ -3026,12 +3093,23 @@ def t3code_start(payload, restart=False):
         # XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME or CODEX_HOME on the parent process.
         # Keep ~/.local/share/cage/auto-shims synced so "auto" bindings dynamically
         # pick healthy accounts per-invocation without restarting T3 Code!
+        magpie_mode = any(
+            isinstance(b, dict) and str(b.get("mode") or "").strip().lower() == "magpie"
+            for b in bindings.values()
+        )
         try:
-            sync_auto_shims({})
+            sync_auto_shims({"disable_all": True, "magpie_takeover": True} if magpie_mode else {})
         except Exception:
             pass
         env = os.environ.copy()
         env.pop("CAGE_CLI_ACCOUNT_ID", None)
+        for k in list(env):
+            if k.startswith("CAGE_CLI_ACCOUNT_"):
+                env.pop(k, None)
+        env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
+        env.pop("CAGE_CLAUDE_SUBJECT", None)
+        env.pop("CAGE_CODEX_ACCOUNT_ID", None)
+        env.pop("CAGE_CODEX_SUBJECT", None)
         shim_prefixes = []
         include_auto_shims = False
         for agent_id, binding in bindings.items():
@@ -3039,7 +3117,7 @@ def t3code_start(payload, restart=False):
                 continue
             mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
-            if mode == "auto":
+            if mode in ("auto", "magpie"):
                 include_auto_shims = True
                 if agent_id == "claude":
                     env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
@@ -3602,6 +3680,7 @@ def magpie_uninstall(payload=None):
                 except OSError:
                     pass
         MAGPIE_STATE_FILE.unlink(missing_ok=True)
+        MAGPIE_TAKEOVER_FILE.unlink(missing_ok=True)
         try:
             PROBE_CACHE_FILE.unlink(missing_ok=True)
         except OSError:
@@ -3668,6 +3747,16 @@ def magpie_start(payload, restart=False):
         web_key = _ensure_magpie_web_key()
 
         env = os.environ.copy()
+        for k in list(env):
+            if k.startswith("CAGE_CLI_ACCOUNT_"):
+                env.pop(k, None)
+        for k in (
+            "CAGE_CLAUDE_ACCOUNT_ID", "CAGE_CLAUDE_SUBJECT",
+            "CAGE_CODEX_ACCOUNT_ID", "CAGE_CODEX_SUBJECT",
+            "CAGE_CLI_ACCOUNT_ID", "CAGE_CLI_ID", "CAGE_ORCA_SHIM_DIR",
+            "CLAUDE_CONFIG_DIR", "CODEX_HOME", "GEMINI_CLI_HOME",
+        ):
+            env.pop(k, None)
         env["PATH"] = path_str
         env["MAGPIE_WEB_KEY"] = web_key
 
@@ -4734,14 +4823,23 @@ def _orca_resolve_bind_ip(bind_mode, path_str=None):
 def _orca_prepare_bindings(bindings, path_str):
     """Prepare universal auto-shims and any explicit per-agent override shims for Orca.
     Returns (extra_env, shim_prefixes, orca_override_dir)."""
+    magpie_mode = isinstance(bindings, dict) and any(
+        isinstance(b, dict) and str(b.get("mode") or "").strip().lower() == "magpie"
+        for b in bindings.values()
+    )
     try:
-        sync_auto_shims({"ensure_shell_hook": True})
+        sync_auto_shims(
+            {"ensure_shell_hook": True, "disable_all": True, "magpie_takeover": True}
+            if magpie_mode
+            else {"ensure_shell_hook": True}
+        )
     except Exception:
         pass
 
     extra_env = {}
     shim_prefixes = []
     override_written = False
+    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
 
     # Rebuild ORCA_SHIMS_DIR cleanly on each start so stale explicit pins never linger.
     if ORCA_SHIMS_DIR.exists():
@@ -4759,8 +4857,8 @@ def _orca_prepare_bindings(bindings, path_str):
                 continue
             mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
-            if mode == "auto":
-                # Dynamic live scheduling via ~/.local/share/cage/auto-shims (no pinned env!).
+            if mode in ("auto", "magpie"):
+                # Dynamic live scheduling via ~/.local/share/cage/auto-shims (empty under Magpie takeover).
                 continue
             if mode == "default":
                 if agent_id == "claude":
@@ -4785,7 +4883,11 @@ def _orca_prepare_bindings(bindings, path_str):
                     (HOME / ".local/share/cage/claude-accounts" / guest_id / "config").mkdir(parents=True, exist_ok=True, mode=0o700)
                     write_override_shim(
                         "claude",
-                        f"#!/bin/sh\nexport CAGE_CLAUDE_ACCOUNT_ID={shlex.quote(guest_id)}\n"
+                        "#!/bin/sh\n"
+                        f"if [ -f {q_takeover} ]; then\n"
+                        + _posix_strip_and_exec("claude")
+                        + "fi\n"
+                        + f"export CAGE_CLAUDE_ACCOUNT_ID={shlex.quote(guest_id)}\n"
                         + (f"export CAGE_CLAUDE_SUBJECT={shlex.quote(subject)}\n" if subject else "")
                         + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
                     )
@@ -4803,7 +4905,11 @@ def _orca_prepare_bindings(bindings, path_str):
                     (HOME / ".local/share/cage/codex-accounts" / guest_id / "home").mkdir(parents=True, exist_ok=True, mode=0o700)
                     write_override_shim(
                         "codex",
-                        f"#!/bin/sh\nexport CAGE_CODEX_ACCOUNT_ID={shlex.quote(guest_id)}\n"
+                        "#!/bin/sh\n"
+                        f"if [ -f {q_takeover} ]; then\n"
+                        + _posix_strip_and_exec("codex")
+                        + "fi\n"
+                        + f"export CAGE_CODEX_ACCOUNT_ID={shlex.quote(guest_id)}\n"
                         + (f"export CAGE_CODEX_SUBJECT={shlex.quote(subject)}\n" if subject else "")
                         + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
                     )
@@ -4821,7 +4927,11 @@ def _orca_prepare_bindings(bindings, path_str):
                             if target_shim.is_file():
                                 write_override_shim(
                                     bin_name,
-                                    f"#!/bin/sh\nexport {_agent_account_env_var(spec['id'])}={shlex.quote(guest_id)}\n"
+                                    "#!/bin/sh\n"
+                                    f"if [ -f {q_takeover} ]; then\n"
+                                    + _posix_strip_and_exec(bin_name)
+                                    + "fi\n"
+                                    + f"export {_agent_account_env_var(spec['id'])}={shlex.quote(guest_id)}\n"
                                     f'exec {shlex.quote(str(target_shim))} "$@"\n',
                                 )
 
@@ -4836,6 +4946,9 @@ def _orca_prepare_bindings(bindings, path_str):
 def _orca_base_env(path_str, extra_env=None, shim_prefixes=None, terminal_memory_max=""):
     ORCA_DATA_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     env = os.environ.copy()
+    for k in list(env):
+        if k.startswith("CAGE_CLI_ACCOUNT_"):
+            env.pop(k, None)
     env.pop("CAGE_CLI_ACCOUNT_ID", None)
     env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
     env.pop("CAGE_CLAUDE_SUBJECT", None)

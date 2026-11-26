@@ -369,6 +369,9 @@ type claudeSelection struct{ ID, GuestID, Subject string }
 
 func (s *Server) selectClaudeAccount(requestedID string, login bool, workspace string) (claudeSelection, error) {
 	var empty claudeSelection
+	if !login && s.magpieTakesOverScheduling() {
+		return empty, nil
+	}
 	if !login && requestedID != "" && requestedID != "auto" {
 		return empty, errors.New("Claude 终端会自动分配账号")
 	}

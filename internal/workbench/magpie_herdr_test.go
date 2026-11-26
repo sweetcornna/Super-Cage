@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -649,5 +650,215 @@ func TestHerdrConfigTakeoverQuotingAndSecurityBoundaries(t *testing.T) {
 	s.account.lock()
 	if w = request(s, "GET", "/api/herdr", "", "", true); w.Code != http.StatusLocked {
 		t.Fatalf("locked Cage exposed /api/herdr: %d", w.Code)
+	}
+}
+
+func TestMagpieTakeoverDisablesAndRestoresAllAccountScheduling(t *testing.T) {
+	s := testServer(t)
+	s.ready = true
+
+	claudeID := strings.Repeat("a", 24)
+	codexID := strings.Repeat("b", 24)
+	ocID := strings.Repeat("c", 24)
+
+	s.claudeAccounts.mu.Lock()
+	_ = s.saveClaudeAccounts(claudeAccountList{
+		Accounts:   []claudeAccount{{ID: claudeID, Label: "Claude Pro", Source: "managed", Email: "c@example.test", Enabled: true, Status: "ready"}},
+		Scheduling: (claudeScheduling{}).defaults(),
+	})
+	s.claudeAccounts.mu.Unlock()
+	s.claudeAccounts.probe = func(_ context.Context, id string) (claudeGuestSnapshot, error) {
+		if id == claudeID {
+			return claudeGuestSnapshot{LoggedIn: true, Email: "c@example.test"}, nil
+		}
+		return claudeGuestSnapshot{}, nil
+	}
+
+	s.codexAccounts.mu.Lock()
+	_ = s.saveCodexAccounts(codexAccountList{
+		Accounts:   []codexAccount{{ID: codexID, Label: "Codex Plus", Email: "x@example.test", Enabled: true, Status: "ready"}},
+		Scheduling: (claudeScheduling{}).defaults(),
+	})
+	s.codexAccounts.mu.Unlock()
+	s.codexAccounts.probe = func(_ context.Context, id string) (codexGuestSnapshot, error) {
+		if id == codexID {
+			return codexGuestSnapshot{LoggedIn: true, Email: "x@example.test"}, nil
+		}
+		return codexGuestSnapshot{}, nil
+	}
+
+	s.agentCLIs.mu.Lock()
+	_ = s.saveAgentPoolsLocked(map[string]*agentAccountPool{
+		"opencode": {
+			Scheduling: defaultAgentScheduling(),
+			Accounts:   []agentAccount{{ID: ocID, Label: "OpenCode Key", Source: "api_key", AuthMode: "api_key", Enabled: true, Status: "ready", Weight: 10, HealthEWMA: 1.0}},
+		},
+	})
+	s.agentCLIs.mu.Unlock()
+
+	var syncMu sync.Mutex
+	var syncCalls []map[string]any
+	resetSyncCalls := func() {
+		syncMu.Lock()
+		syncCalls = nil
+		syncMu.Unlock()
+	}
+	snapshotSyncCalls := func() []map[string]any {
+		syncMu.Lock()
+		defer syncMu.Unlock()
+		out := make([]map[string]any, len(syncCalls))
+		copy(out, syncCalls)
+		return out
+	}
+	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, _ any) error {
+		if subcmd == "sync-auto-shims" {
+			if m, ok := input.(map[string]any); ok {
+				cp := make(map[string]any, len(m))
+				for k, v := range m {
+					cp[k] = v
+				}
+				syncMu.Lock()
+				syncCalls = append(syncCalls, cp)
+				syncMu.Unlock()
+			}
+		}
+		return nil
+	}
+
+	ocSpec, _, ok := s.lookupAgentSpec("opencode")
+	if !ok {
+		t.Fatal("opencode built-in spec missing")
+	}
+
+	// 1. Before Magpie is enabled, Cage schedules accounts normally.
+	if sel, _, err := s.selectAgentAccount(ocSpec, "", false, "/proj"); err != nil || sel.ID != ocID {
+		t.Fatalf("pre-magpie selectAgentAccount = %+v err=%v, want %s", sel, err, ocID)
+	}
+	if gb, labels, err := s.resolveToolAccountBindings(map[string]string{
+		"claude":   claudeID,
+		"codex":    codexID,
+		"opencode": "auto",
+	}, "/proj", "Orca Server"); err != nil {
+		t.Fatalf("pre-magpie resolveToolAccountBindings failed: %v", err)
+	} else if labels["claude"] != "Claude Pro" || labels["codex"] != "Codex Plus" || gb["opencode"].(map[string]any)["mode"] != "auto" {
+		t.Fatalf("unexpected pre-magpie tool bindings: gb=%+v labels=%+v", gb, labels)
+	}
+
+	// 2. Enabling Magpie immediately clears guest scheduling and hands over ALL harnesses.
+	resetSyncCalls()
+	w := request(s, "POST", "/api/magpie/config", s.origin, `{"enabled":true,"mode":"managed"}`, true)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enabling magpie failed: %d %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"scheduling_disabled":true`) {
+		t.Fatalf("magpie status missing scheduling_disabled=true: %s", w.Body.String())
+	}
+	calls := snapshotSyncCalls()
+	sawDisable := false
+	for _, call := range calls {
+		if call["disable_all"] == true && call["magpie_takeover"] == true {
+			sawDisable = true
+			break
+		}
+	}
+	if !sawDisable {
+		t.Fatalf("enabling magpie did not invoke sync-auto-shims disable_all+magpie_takeover: %+v", calls)
+	}
+	if !s.allLaunchPublishedMagpie() {
+		t.Fatal("expected allLaunchPublishedMagpie=true after enabling magpie")
+	}
+
+	// Claude, Codex, and generic Agent CLI selection all bypass scheduling while preserving explicit login.
+	if sel, err := s.selectClaudeAccount("", false, "/proj"); err != nil || sel != (claudeSelection{}) {
+		t.Fatalf("magpie selectClaudeAccount = %+v err=%v, want empty", sel, err)
+	}
+	if sel, err := s.selectTerminalClaudeAccount("claude", "", false, "/proj"); err != nil || sel != (claudeSelection{}) {
+		t.Fatalf("magpie selectTerminalClaudeAccount = %+v err=%v, want empty", sel, err)
+	}
+	if sel, err := s.selectCodexAccount("", false, "/proj"); err != nil || sel != (codexSelection{}) {
+		t.Fatalf("magpie selectCodexAccount = %+v err=%v, want empty", sel, err)
+	}
+	if sel, dec, err := s.selectAgentAccount(ocSpec, ocID, false, "/proj"); err != nil || sel.ID != "" || sel.GuestID != "default" || dec.Strategy != "magpie" {
+		t.Fatalf("magpie selectAgentAccount = %+v dec=%+v err=%v, want default+magpie", sel, dec, err)
+	}
+	if loginSel, _, err := s.selectAgentAccount(ocSpec, "", true, "/proj"); err != nil || loginSel.ID == "" {
+		t.Fatalf("explicit agent login broken under magpie: %+v err=%v", loginSel, err)
+	}
+
+	// T3 Code & Orca Server tool bindings switch to mode="magpie" (even for previously pinned IDs).
+	gb, labels, err := s.resolveToolAccountBindings(map[string]string{
+		"claude":   claudeID,
+		"codex":    codexID,
+		"opencode": "auto",
+		"gemini":   "default",
+	}, "/proj", "Orca Server")
+	if err != nil {
+		t.Fatalf("magpie resolveToolAccountBindings failed: %v", err)
+	}
+	for _, agent := range []string{"claude", "codex", "opencode", "gemini"} {
+		m, _ := gb[agent].(map[string]any)
+		if m["mode"] != "magpie" || labels[agent] != magpieTakeoverLabel {
+			t.Fatalf("magpie binding[%s] = %+v label=%q, want mode=magpie label=%q", agent, m, labels[agent], magpieTakeoverLabel)
+		}
+	}
+
+	// All status APIs report magpie_takeover=true and preserve saved accounts untouched.
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{"/api/claude-accounts", `"magpie_takeover":true`},
+		{"/api/codex-accounts", `"magpie_takeover":true`},
+		{"/api/agent-clis/opencode/accounts?skip_detect=1", `"magpie_takeover":true`},
+		{"/api/agent-clis/opencode/accounts?skip_detect=1", `"strategy":"magpie"`},
+		{"/api/t3code", `"magpie_takeover":true`},
+		{"/api/orca", `"magpie_takeover":true`},
+	} {
+		resp := request(s, "GET", tc.path, "", "", true)
+		if resp.Code != http.StatusOK || !strings.Contains(resp.Body.String(), tc.want) {
+			t.Fatalf("GET %s = %d %s, want %s", tc.path, resp.Code, resp.Body.String(), tc.want)
+		}
+	}
+
+	// Cold-start stale-file protection: resetting launchPublished to "" while Magpie is enabled
+	// must still run disableGuestAccountScheduling once across all 3 publishers.
+	resetSyncCalls()
+	s.markAllLaunchPublished("")
+	s.publishClaudeLaunchSchedule()
+	s.publishCodexLaunchSchedule()
+	s.publishAgentLaunchSchedule()
+	calls = snapshotSyncCalls()
+	if len(calls) != 1 || calls[0]["disable_all"] != true {
+		t.Fatalf("cold-start publish under magpie ran %d sync calls (%+v), want 1 coalesced disable_all", len(calls), calls)
+	}
+
+	// 3. Disabling Magpie clears takeover marker and immediately restores Cage scheduling over preserved accounts.
+	resetSyncCalls()
+	w = request(s, "POST", "/api/magpie/config", s.origin, `{"enabled":false}`, true)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"scheduling_disabled":false`) {
+		t.Fatalf("disabling magpie failed: %d %s", w.Code, w.Body.String())
+	}
+	calls = snapshotSyncCalls()
+	sawClear := false
+	for _, call := range calls {
+		if call["magpie_takeover"] == false {
+			sawClear = true
+			break
+		}
+	}
+	if !sawClear {
+		t.Fatalf("disabling magpie did not clear guest takeover marker: %+v", calls)
+	}
+	if sel, _, err := s.selectAgentAccount(ocSpec, "", false, "/proj"); err != nil || sel.ID != ocID {
+		t.Fatalf("post-magpie selectAgentAccount = %+v err=%v, want restored %s", sel, err, ocID)
+	}
+	if gb, labels, err := s.resolveToolAccountBindings(map[string]string{
+		"claude":   claudeID,
+		"codex":    codexID,
+		"opencode": "auto",
+	}, "/proj", "T3 Code"); err != nil {
+		t.Fatalf("post-magpie resolveToolAccountBindings failed: %v", err)
+	} else if labels["claude"] != "Claude Pro" || labels["codex"] != "Codex Plus" || gb["opencode"].(map[string]any)["mode"] != "auto" {
+		t.Fatalf("post-magpie bindings not restored: gb=%+v labels=%+v", gb, labels)
 	}
 }

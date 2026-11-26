@@ -505,6 +505,14 @@ export function MagpieSettingsCard({
                 网关 :{gatewayPort}
               </span>
             )}
+            {store.enabled && (
+              <span
+                className="agent-pill agent-pill--ok"
+                title="已自动关闭 Super Cage 内置多账号调度并交由 Magpie 统一接管"
+              >
+                已接管账号调度
+              </span>
+            )}
           </div>
           <p className="agent-card-desc">
             可选安装与托管 Magpie 统一模型路由与本地网关：一键切换任意 Agent CLI 的模型与供应商，自动故障转移与配额统计；提供原版 Magpie 网页界面（工作台分屏或 0 VNC 延迟原生直连窗口）与 Magpie TUI。
@@ -632,6 +640,14 @@ export function MagpieSettingsCard({
               </span>
             )}
           </div>
+
+          {store.enabled && (
+            <div className="inline-info t3code-info-banner" role="status">
+              <span>
+                已启用 Magpie：Super Cage 内置多账号调度已自动关闭并交由 Magpie 统一接管，所有 Claude、Codex 及其他 Agent CLI（含终端、Shell、Herdr、T3 Code 与 Orca Server）均以原生配置运行以确保 Magpie 接管生效。您在 Cage 中保存的账号已保留，关闭或卸载 Magpie 后将自动恢复调度。
+              </span>
+            </div>
+          )}
 
           {!supportsManaged && (
             <div className="inline-info t3code-info-banner" role="status">

@@ -533,6 +533,7 @@ export function AgentSettings({
           store={t3code}
           agentsStore={store}
           status={status}
+          magpieEnabled={Boolean(magpie?.enabled)}
           onOpenT3Code={onOpenT3Code}
         />
       )}
@@ -561,6 +562,7 @@ export function AgentSettings({
           store={orca}
           agentsStore={store}
           status={status}
+          magpieEnabled={Boolean(magpie?.enabled)}
           onConfirm={onConfirm}
           onOpenOrca={onOpenOrca}
           onShowPairModal={onShowOrcaPair}

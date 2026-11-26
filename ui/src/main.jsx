@@ -239,6 +239,22 @@ function App() {
   const magpie = useMagpie({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const herdr = useHerdr({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
   const orca = useOrca({ vmRunning: Boolean(status?.vm_running), ready: Boolean(status?.ready), job: status?.job });
+  const prevMagpieEnabled = useRef(null);
+  useEffect(() => {
+    if (magpie.data === null) return;
+    const next = Boolean(magpie.enabled);
+    if (prevMagpieEnabled.current === null) {
+      prevMagpieEnabled.current = next;
+      return;
+    }
+    if (prevMagpieEnabled.current === next) return;
+    prevMagpieEnabled.current = next;
+    void claudeProfiles.load();
+    if (codexUI.accounts) void codexProfiles.load();
+    void t3code.refresh();
+    void orca.refresh(false);
+    setAgentAccountsRevision((n) => n + 1);
+  }, [magpie.data, magpie.enabled, codexUI.accounts, claudeProfiles.load, codexProfiles.load, t3code.refresh, orca.refresh]);
   const [orcaPairOpen, setOrcaPairOpen] = useState(false);
   const [t3codeShowBrowserBar, setT3codeShowBrowserBar] = useState(false);
   const [magpieShowBrowserBar, setMagpieShowBrowserBar] = useState(false);
@@ -2291,6 +2307,7 @@ function App() {
                     claudeProfiles={claudeProfiles}
                     codexProfiles={codexProfiles}
                     codexNative={codexUI.accounts}
+                    magpieEnabled={Boolean(magpie?.enabled)}
                     agents={agentCatalog.agents}
                     agentAccountsRevision={agentAccountsRevision}
                     tabs={tabs}
@@ -2305,6 +2322,7 @@ function App() {
                     onStartAgentLogin={(id, accountId, mode) => startAgentLogin(id, accountId, mode).catch((e) => notify(e.message))}
                     onLaunchAgent={(id, accountId) => launchAgentTerminal(id, accountId).catch((e) => notify(e.message))}
                     onOpenSettings={() => openSettings("agents")}
+                    onOpenMagpieSettings={() => openSettings("agents")}
                     onAgentChanged={() => { void agentCatalog.refresh(false); }}
                   />
                 )}

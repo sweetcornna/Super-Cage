@@ -40,7 +40,7 @@ export function useClaudeAccounts() {
   return { accounts: registry?.accounts ?? null, detected: registry?.detected,
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
-    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, error, load };
+    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
 }
 
 const statusLabels = {

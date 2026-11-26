@@ -296,6 +296,9 @@ func (a codexAccount) headroom(now time.Time) (float64, bool) {
 // terminal then uses the environment's own ~/.codex login, as before.
 func (s *Server) selectCodexAccount(requestedID string, login bool, workspace string) (codexSelection, error) {
 	var empty codexSelection
+	if !login && s.magpieTakesOverScheduling() {
+		return empty, nil
+	}
 	if !login && requestedID != "" && requestedID != "auto" {
 		return empty, errors.New("Codex 终端会自动分配账号")
 	}

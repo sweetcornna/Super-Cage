@@ -714,6 +714,17 @@ else:
         self.assertEqual(observed["quota"]["seven_day"]["used_percentage"], 67)
         self.assertEqual(observed["quota"]["seven_day"]["resets_at"], 0)
 
+    def test_auto_bypasses_when_magpie_takeover_marker_present(self):
+        capture = self.home / "env.txt"
+        self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}])
+        takeover = self.home / ".local/share/cage/magpie/takeover"
+        takeover.parent.mkdir(parents=True, exist_ok=True)
+        takeover.write_text("1\n")
+        result = self.run_helper("auto", "hello-magpie", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture)))
+        self.assertEqual(result.stdout.splitlines(), ["hello-magpie"])
+        env = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+
 
 if __name__ == "__main__":
     unittest.main()

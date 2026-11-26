@@ -306,6 +306,7 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 		"running":          st.Running,
 		"url":              displayURL,
 		"active_bindings":  activeBindings,
+		"magpie_takeover":  s.magpieTakesOverScheduling(),
 		"error":            probeErr,
 		"vm_running":       runningVM,
 		"ready":            ready,

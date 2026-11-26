@@ -169,11 +169,13 @@ export function OrcaSettingsCard({
   store,
   agentsStore,
   status,
+  magpieEnabled = false,
   onConfirm,
   onOpenOrca,
   onShowPairModal,
 }) {
   const supportsManaged = isOrcaManagedSupported(store, status);
+  const magpieTakeover = Boolean(magpieEnabled || store?.magpie_takeover);
   const [serverName, setServerName] = useState(store?.server_name || "");
   const [guestPortInput, setGuestPortInput] = useState(String(store?.guest_port || 16768));
   const [hostPortInput, setHostPortInput] = useState(store?.host_tunnel_port ? String(store.host_tunnel_port) : "");
@@ -673,11 +675,19 @@ export function OrcaSettingsCard({
             <div className="t3code-bindings-head">
               <strong>Agent CLI 多账号调度绑定</strong>
               <small>
-                默认「跟随 Cage 自动调度」会在 Orca 的结构化对话、终端与子 Agent 中实时动态调度健康账号（额度耗尽或限流冷却自动避让，无需重启 Orca）。
+                {magpieTakeover
+                  ? "当前已启用 Magpie，账号调度与绑定已自动暂停并由 Magpie 统一接管；关闭 Magpie 后自动恢复下方配置。"
+                  : "默认「跟随 Cage 自动调度」会在 Orca 的结构化对话、终端与子 Agent 中实时动态调度健康账号（额度耗尽或限流冷却自动避让，无需重启 Orca）。"}
               </small>
             </div>
 
-            {bindingRestartHint && (
+            {magpieTakeover && (
+              <div className="inline-info t3code-info-banner" role="status">
+                <span>Magpie 接管生效中：Orca Server 中的 Claude、Codex 及其他 Agent CLI 均沿用客机原生配置由 Magpie 路由，暂不使用下方 Cage 账号绑定。</span>
+              </div>
+            )}
+
+            {bindingRestartHint && !magpieTakeover && (
               <div className="inline-info t3code-restart-hint">
                 <span>固定指定具体账号的变更需重启 Orca Server 后对新会话生效。</span>
                 <button
@@ -700,18 +710,22 @@ export function OrcaSettingsCard({
                 const id = entry.spec.id;
                 const currentVal = store.account_bindings?.[id] || "auto";
                 const accounts = (accountOptions[id] || []).filter((a) => a.status === "ready" || a.ready);
-                const activeLabel = store.active_bindings?.[id];
+                const activeLabel = magpieTakeover ? "Magpie 接管" : store.active_bindings?.[id];
                 return (
                   <div key={id} className="t3code-binding-row">
                     <div className="t3code-binding-agent">
                       <AgentIcon agentId={id} accentColor={entry.spec.accent_color} size={18} />
                       <span>{entry.spec.short_name || entry.spec.name}</span>
-                      {activeLabel && <span className="agent-pill">{activeLabel}</span>}
+                      {activeLabel && (
+                        <span className={`agent-pill ${magpieTakeover ? "agent-pill--ok" : ""}`}>
+                          {activeLabel}
+                        </span>
+                      )}
                     </div>
                     <InlineSelect
                       aria-label={`${entry.spec.name} 账号绑定`}
                       value={currentVal}
-                      disabled={busy}
+                      disabled={busy || magpieTakeover}
                       onValueChange={(val) => changeBinding(id, val)}
                     >
                       <option value="auto">跟随 Cage 自动调度（推荐）</option>
