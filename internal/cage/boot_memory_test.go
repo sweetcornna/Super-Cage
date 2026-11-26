@@ -268,6 +268,49 @@ func TestBootMeminfoParsing(t *testing.T) {
 	}
 }
 
+func TestBootIncusVMDetection(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	if isIncusVM(missing, missing, missing) {
+		t.Fatal("missing paths detected as Incus VM")
+	}
+	port := filepath.Join(dir, "org.linuxcontainers.incus")
+	if err := os.WriteFile(port, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !isIncusVM(port, missing, missing) {
+		t.Fatal("Incus virtio-serial port not detected")
+	}
+	vendor := filepath.Join(dir, "board_vendor")
+	name := filepath.Join(dir, "board_name")
+	if err := os.WriteFile(vendor, []byte("LinuxContainers\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(name, []byte("Incus\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !isIncusVM(missing, vendor, name) {
+		t.Fatal("Incus DMI identity not detected")
+	}
+	for _, tc := range []struct {
+		vendor, name string
+	}{
+		{"Dell Inc.\n", "Incus\n"},
+		{"LinuxContainers\n", "LXD\n"},
+		{"QEMU\n", "Standard PC\n"},
+	} {
+		if err := os.WriteFile(vendor, []byte(tc.vendor), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(tc.name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if isIncusVM(missing, vendor, name) {
+			t.Fatalf("non-Incus DMI %q/%q detected as Incus VM", tc.vendor, tc.name)
+		}
+	}
+}
+
 func TestJobMessageLine(t *testing.T) {
 	var out strings.Builder
 	t.Setenv(JobEnv, "")
