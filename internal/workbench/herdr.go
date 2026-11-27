@@ -28,6 +28,7 @@ type herdrConfig struct {
 	Enabled           bool `json:"enabled"`
 	TakeoverTerminals bool `json:"takeover_terminals"`       // when installed & enabled, workbench terminals are hc terminals
 	InstalledHint     bool `json:"installed_hint,omitempty"` // fast hint set on install/probe so terminal launch needs 0 extra SSH RTT
+	Run               bool `json:"run,omitempty"`            // workbench used the managed core
 }
 
 func defaultHerdrConfig() herdrConfig {
@@ -48,20 +49,22 @@ type herdrGuestStatus struct {
 }
 
 type herdrProbeCall struct {
-	done   chan struct{}
-	forced bool
-	status herdrGuestStatus
-	err    error
+	done       chan struct{}
+	forced     bool
+	generation uint64
+	status     herdrGuestStatus
+	err        error
 }
 
 type herdrManager struct {
-	opMu          sync.Mutex
-	mu            sync.Mutex
-	configLoaded  bool
-	config        herdrConfig
-	statusCache   herdrGuestStatus
-	statusAt      time.Time
-	probeInflight *herdrProbeCall
+	opMu             sync.Mutex
+	mu               sync.Mutex
+	configLoaded     bool
+	config           herdrConfig
+	statusCache      herdrGuestStatus
+	statusAt         time.Time
+	statusGeneration uint64
+	probeInflight    *herdrProbeCall
 	// The hc terminal list and Cage's own records (herdr_terminals.go):
 	// fetchMu lets one list read run at a time, listMu guards the rest.
 	fetchMu   sync.Mutex
@@ -109,6 +112,7 @@ func (s *Server) herdrConfig() (herdrConfig, error) {
 func (s *Server) invalidateHerdrStatus() {
 	s.herdr.mu.Lock()
 	s.herdr.statusAt = time.Time{}
+	s.herdr.statusGeneration++
 	s.herdr.mu.Unlock()
 	s.invalidateHerdrList()
 }
@@ -122,7 +126,7 @@ func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestSt
 			m.mu.Unlock()
 			return cached, nil
 		}
-		if call := m.probeInflight; call != nil {
+		if call := m.probeInflight; call != nil && call.generation == m.statusGeneration {
 			if !force || call.forced {
 				m.mu.Unlock()
 				select {
@@ -140,7 +144,7 @@ func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestSt
 				continue
 			}
 		}
-		call := &herdrProbeCall{done: make(chan struct{}), forced: force}
+		call := &herdrProbeCall{done: make(chan struct{}), forced: force, generation: m.statusGeneration}
 		m.probeInflight = call
 		m.mu.Unlock()
 
@@ -158,7 +162,7 @@ func (s *Server) probeHerdrStatus(ctx context.Context, force bool) (herdrGuestSt
 			st.Version = herdrText(st.Version, 32)
 		}
 		m.mu.Lock()
-		if err == nil {
+		if err == nil && call.generation == m.statusGeneration {
 			m.statusCache = st
 			m.statusAt = time.Now()
 			if cfg, loadErr := s.loadHerdrConfigLocked(); loadErr == nil && cfg.InstalledHint != st.Installed {
@@ -264,6 +268,7 @@ func (s *Server) herdrConfigHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.herdr.mu.Lock()
+	cfg.Run = cfg.Enabled && s.herdr.config.Run
 	saveErr := s.saveHerdrConfigLocked(cfg)
 	s.herdr.mu.Unlock()
 	if saveErr != nil {
@@ -327,13 +332,18 @@ func (s *Server) herdrInstallHTTP(w http.ResponseWriter, r *http.Request) {
 			return errors.New("安装 Herdr 失败，请查看操作详情排查网络或运行环境")
 		}
 		s.herdr.mu.Lock()
-		if cfg, err := s.loadHerdrConfigLocked(); err == nil {
+		cfg, err := s.loadHerdrConfigLocked()
+		if err == nil {
 			cfg.Enabled = true
 			cfg.InstalledHint = true
-			_ = s.saveHerdrConfigLocked(cfg)
+			err = s.saveHerdrConfigLocked(cfg)
 		}
 		s.herdr.statusAt = time.Time{}
+		s.herdr.statusGeneration++
 		s.herdr.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		s.setMessage("Herdr 安装完成，正在验证状态…")
 		return nil
 	})
@@ -367,14 +377,20 @@ func (s *Server) herdrUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 			return errors.New("卸载 Herdr 失败，请查看操作详情")
 		}
 		s.herdr.mu.Lock()
-		if cfg, err := s.loadHerdrConfigLocked(); err == nil {
+		cfg, err := s.loadHerdrConfigLocked()
+		if err == nil {
 			cfg.Enabled = false
 			cfg.InstalledHint = false
-			_ = s.saveHerdrConfigLocked(cfg)
+			cfg.Run = false
+			err = s.saveHerdrConfigLocked(cfg)
 		}
 		s.herdr.statusCache = herdrGuestStatus{}
 		s.herdr.statusAt = time.Time{}
+		s.herdr.statusGeneration++
 		s.herdr.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		s.invalidateHerdrList()
 		s.setMessage("Herdr 已卸载")
 		return nil
@@ -412,25 +428,87 @@ func (s *Server) herdrActionHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.vmRunning() {
 		if action == "stop" {
+			if err := s.setHerdrRunIntent(false); err != nil {
+				requestError(w, err)
+				return
+			}
 			jsonReplyHerdr(s, w, r)
 			return
 		}
 		http.Error(w, "请先启动 Cage 环境后再运行 Herdr", http.StatusConflict)
 		return
 	}
+	if err := s.runHerdrAction(r.Context(), action, in.Force); err != nil {
+		http.Error(w, err.Error(), http.StatusConflict)
+		return
+	}
+	jsonReplyHerdr(s, w, r)
+}
+
+// noteWorkbenchHerdrUse is shared by the picker and admitted Herdr terminals.
+// Terminal admission already holds the environment operation lock.
+func (s *Server) noteWorkbenchHerdrUse() error { return s.setHerdrRunIntent(true) }
+
+func (s *Server) setHerdrRunIntent(run bool) error {
+	s.herdr.mu.Lock()
+	defer s.herdr.mu.Unlock()
+	cfg, err := s.loadHerdrConfigLocked()
+	if err != nil || cfg.Run == run || run && !cfg.Enabled {
+		return err
+	}
+	cfg.Run = run
+	return s.saveHerdrConfigLocked(cfg)
+}
+
+func (s *Server) runHerdrAction(ctx context.Context, action string, force bool) error {
+	if !s.lockProjectOperation(ctx) {
+		return errTerminalBusy
+	}
+	defer s.op.Unlock()
+	if action != "stop" {
+		active, finish, err := s.workbenchToolContext(ctx)
+		if err != nil {
+			return err
+		}
+		defer finish()
+		ctx = active
+		if !s.vmRunning() || s.busy() {
+			return errTerminalNotReady
+		}
+	}
 	timeout := 15 * time.Second
 	if action == "restart" {
 		timeout = 25 * time.Second
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	runErr := s.runAgentRuntime(ctx, "herdr-"+action, map[string]any{"force": in.Force}, nil)
-	cancel()
-	if runErr != nil {
-		http.Error(w, runErr.Error(), http.StatusConflict)
-		return
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var st herdrGuestStatus
+	if err := s.runAgentRuntime(ctx, "herdr-"+action, map[string]any{"force": force}, &st); err != nil {
+		return err
+	}
+	if st.ServerRunning != (action != "stop") {
+		return errors.New("Herdr 未达到请求的运行状态")
 	}
 	s.invalidateHerdrStatus()
-	jsonReplyHerdr(s, w, r)
+	return s.setHerdrRunIntent(st.ServerRunning)
+}
+
+func (s *Server) restoreHerdr(ctx context.Context) error {
+	s.herdr.opMu.Lock()
+	defer s.herdr.opMu.Unlock()
+	cfg, err := s.herdrConfig()
+	if err != nil || !cfg.Enabled || !cfg.Run {
+		return err
+	}
+	s.invalidateHerdrStatus()
+	probe, cancel := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
+	st, err := s.probeHerdrStatus(probe, true)
+	cancel()
+	if err != nil || st.ServerRunning {
+		return err
+	}
+	// Leave live terminal reattachment to the normal workbench entry.
+	return s.runHerdrAction(ctx, "start", false)
 }
 
 func jsonReplyHerdr(s *Server, w http.ResponseWriter, r *http.Request) {

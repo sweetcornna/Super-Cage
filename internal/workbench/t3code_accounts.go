@@ -8,6 +8,129 @@ import (
 	"time"
 )
 
+// Keep the admitted identities and their guest routing, without copying any
+// Agent spec, credentials, pairing URLs or process IDs into the run intent.
+type t3CodeRunIntent struct {
+	Workspace string                          `json:"workspace"`
+	Bindings  map[string]t3CodeRestoreBinding `json:"bindings"`
+}
+
+type t3CodeRestoreBinding struct {
+	Mode        string `json:"mode,omitempty"`
+	AccountID   string `json:"account_id,omitempty"`
+	GuestID     string `json:"guest_id,omitempty"`
+	Subject     string `json:"subject,omitempty"`
+	Label       string `json:"label,omitempty"`
+	CodexNative bool   `json:"codex_native,omitempty"`
+}
+
+func snapshotT3CodeRun(workspace string, resolved map[string]any, labels map[string]string) *t3CodeRunIntent {
+	intent := &t3CodeRunIntent{Workspace: workspace, Bindings: make(map[string]t3CodeRestoreBinding, len(resolved))}
+	for agent, raw := range resolved {
+		intent.Bindings[agent] = t3CodeBindingForRestore(raw.(map[string]any), labels[agent])
+	}
+	return intent
+}
+
+func t3CodeBindingForRestore(binding map[string]any, label string) t3CodeRestoreBinding {
+	saved := t3CodeRestoreBinding{Label: label}
+	saved.Mode, _ = binding["mode"].(string)
+	saved.AccountID, _ = binding["account_id"].(string)
+	saved.GuestID, _ = binding["guest_id"].(string)
+	saved.Subject, _ = binding["subject"].(string)
+	saved.CodexNative, _ = binding["codex_native"].(bool)
+	return saved
+}
+
+func (s *Server) resolveT3CodeRun(intent *t3CodeRunIntent, replacing map[string]string) (map[string]any, map[string]string, error) {
+	if len(intent.Bindings) == 0 {
+		return nil, nil, fmt.Errorf("T3 Code 缺少原会话的账号绑定，请重启以重新分配")
+	}
+	resolved := make(map[string]any, len(intent.Bindings))
+	labels := make(map[string]string, len(intent.Bindings))
+	takeover := s.magpieTakesOverScheduling()
+	for agent, saved := range intent.Bindings {
+		if takeover != (saved.Mode == "magpie") {
+			return nil, nil, fmt.Errorf("Magpie 接管设置已变化，请重启 T3 Code 以重新分配账户")
+		}
+		if saved.Mode == "magpie" {
+			resolved[agent], labels[agent] = map[string]any{"mode": "magpie"}, saved.Label
+			continue
+		}
+		choice := saved.AccountID
+		if choice == "" && saved.Mode == "default" {
+			choice = "default"
+		} else if !validClaudeID(choice) {
+			return nil, nil, fmt.Errorf("T3 Code 原有 %s 账号绑定无效", agent)
+		}
+		binding, label, err := s.resolveT3CodeAccount(agent, choice, intent.Workspace, replacing[agent])
+		if err != nil {
+			return nil, nil, fmt.Errorf("T3 Code 无法恢复原有 %s 账号：%w", agent, err)
+		}
+		actual := t3CodeBindingForRestore(binding, saved.Label)
+		if saved != actual && !(saved.Mode == "default" && saved.AccountID == "" && actual.Mode == "default") {
+			return nil, nil, fmt.Errorf("T3 Code 原有 %s 账号身份已变化，请重启以重新分配", agent)
+		}
+		resolved[agent], labels[agent] = binding, label
+	}
+	return resolved, labels, nil
+}
+
+// Older controllers saved account IDs in the guest's running process state.
+// Adopt a complete report when the user opens that process. A legacy dynamic
+// process without a complete report can still be used and restarted in place.
+func (s *Server) adoptT3CodeRun(cfg t3CodeConfig, live t3CodeGuestStatus, workspace string) error {
+	choices := defaultT3CodeConfig().AccountBindings
+	maps.Copy(choices, cfg.AccountBindings)
+	if len(live.Accounts) != len(choices) || s.magpieTakesOverScheduling() {
+		return nil
+	}
+	if workspace == "" {
+		workspace = s.workspace()
+	}
+	if workspace != "" {
+		path, err := s.projectWorkspace(workspace)
+		if err != nil {
+			return nil
+		}
+		workspace = path
+	}
+	resolved := make(map[string]any, len(choices))
+	labels := make(map[string]string, len(choices))
+	for agent := range choices {
+		account := live.Accounts[agent]
+		if account != "default" && !validClaudeID(account) {
+			return nil
+		}
+		binding, label, err := s.resolveT3CodeAccount(agent, account, workspace, account)
+		if err != nil {
+			return nil
+		}
+		resolved[agent], labels[agent] = binding, label
+	}
+	cfg.Run = snapshotT3CodeRun(workspace, resolved, labels)
+	s.t3code.mu.Lock()
+	defer s.t3code.mu.Unlock()
+	s.t3code.activeBindings = labels
+	return s.saveT3CodeConfigLocked(cfg)
+}
+
+// A live process can be reused without consulting a roster that may have been
+// edited while the process was running. Only label a binding it still owns.
+func (run *t3CodeRunIntent) activeLabels(accounts map[string]string) map[string]string {
+	labels := map[string]string{}
+	for agent, saved := range run.Bindings {
+		want := saved.AccountID
+		if want == "" && saved.Mode == "default" {
+			want = "default"
+		}
+		if owner := accounts[agent]; want == owner {
+			labels[agent] = saved.Label
+		}
+	}
+	return labels
+}
+
 // A managed T3 server gives its provider children a single binding per
 // provider. Resolve these at admission, while the environment lock also
 // excludes terminal launch and changes to the account roster.

@@ -241,6 +241,7 @@ export function T3CodeSettingsCard({
   const directAvailable = isT3CodeDirectAvailable(store);
   const magpieTakeover = Boolean(magpieEnabled || store?.magpie_takeover);
   const hasConfig = Boolean(store?.data);
+  const restorePending = Boolean(store?.data?.restore_pending && !store.running);
   const savedMode = supportsManaged ? (store?.mode || "managed") : "external";
   const savedUrl = store?.external_url || "";
   const savedPort = String(store?.port || 13773);
@@ -568,8 +569,28 @@ export function T3CodeSettingsCard({
                     }, "T3 Code 已启动")}
                   >
                     {submitting === "start" ? <LoaderCircle size={14} className="spin" /> : <Play size={13} />}
-                    启动服务
+                      {restorePending ? "用原账号启动" : "启动服务"}
                   </button>
+                )}
+                {restorePending && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!vmRunning || busy}
+                      onClick={() => void runAction("restart", () => store.restart(), "T3 Code 已按最新绑定启动")}
+                    >
+                      <RotateCw size={14} />
+                      用最新账号绑定启动
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void runAction("stop", () => store.stop(), "T3 Code 恢复已取消")}
+                    >
+                      <Square size={13} />
+                      取消恢复
+                    </button>
+                  </>
                 )}
               </>
             )}

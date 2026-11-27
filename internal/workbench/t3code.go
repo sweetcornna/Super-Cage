@@ -34,6 +34,7 @@ type t3CodeConfig struct {
 	OpenMode        string            `json:"open_mode"`                  // workbench | direct
 	FocusChrome     bool              `json:"focus_chrome"`               // distraction-free 36px app header in workbench
 	AccountBindings map[string]string `json:"account_bindings,omitempty"` // agentID -> "auto" | "default" | <accountID>
+	Run             *t3CodeRunIntent  `json:"run,omitempty"`
 }
 
 func defaultT3CodeConfig() t3CodeConfig {
@@ -313,6 +314,7 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 		"installed":        st.Installed,
 		"version":          st.Version,
 		"running":          st.Running,
+		"restore_pending":  cfg.Enabled && cfg.Mode == "managed" && cfg.Run != nil && !st.Running,
 		"url":              displayURL,
 		"active_bindings":  activeBindings,
 		"magpie_takeover":  s.magpieTakesOverScheduling(),
@@ -429,6 +431,9 @@ func (s *Server) t3CodeConfigHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	needStopManaged := prevEnabled && prevMode == "managed" && (!cfg.Enabled || cfg.Mode != "managed" || cfg.Port != prevPort)
+	if !cfg.Enabled || cfg.Mode != "managed" || needStopManaged {
+		cfg.Run = nil
+	}
 	if needStopManaged && s.vmRunning() && s.windowsGuest == nil {
 		stopErr := s.stopManagedT3Code(r.Context(), prevPort)
 		if stopErr != nil {
@@ -563,18 +568,35 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 		return cfg, previous, err
 	}
 	if !restart && previous.Running {
-		return cfg, previous, nil
+		if cfg.Run == nil {
+			err = s.adoptT3CodeRun(cfg, previous, workspace)
+		} else {
+			s.t3code.mu.Lock()
+			s.t3code.activeBindings = cfg.Run.activeLabels(previous.Accounts)
+			s.t3code.mu.Unlock()
+		}
+		return cfg, previous, err
 	}
 
-	if workspace == "" {
+	if !restart && cfg.Run != nil {
+		workspace = cfg.Run.Workspace
+	}
+	if workspace == "" && (restart || cfg.Run == nil) {
 		workspace = s.workspace()
-	} else {
-		workspace, err = s.projectWorkspace(workspace)
+	}
+	if workspace != "" {
+		workspace, err = s.connectProject(workspace, false)
 		if err != nil {
 			return cfg, t3CodeGuestStatus{}, err
 		}
 	}
-	guestBindings, labels, err := s.resolveT3CodeLaunchBindings(cfg, workspace, previous.Accounts)
+	var guestBindings map[string]any
+	var labels map[string]string
+	if !restart && cfg.Run != nil {
+		guestBindings, labels, err = s.resolveT3CodeRun(cfg.Run, previous.Accounts)
+	} else {
+		guestBindings, labels, err = s.resolveT3CodeLaunchBindings(cfg, workspace, previous.Accounts)
+	}
 	if err != nil {
 		return cfg, t3CodeGuestStatus{}, err
 	}
@@ -604,11 +626,13 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 	}
 	st.Port = cfg.Port
 	st.Installed = true
+	cfg.Run = snapshotT3CodeRun(workspace, guestBindings, labels)
 	s.t3code.mu.Lock()
 	s.t3code.statusCache = st
 	s.t3code.statusAt = time.Now()
 	s.t3code.statusGeneration++
 	s.t3code.activeBindings = labels
+	saveErr := s.saveT3CodeConfigLocked(cfg)
 	s.t3code.mu.Unlock()
 	for agentID, id := range st.Accounts {
 		if !validClaudeID(id) {
@@ -628,7 +652,32 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 		}
 	}
 	s.kickAllLaunchSchedules()
-	return cfg, st, nil
+	return cfg, st, saveErr
+}
+
+func (s *Server) restoreT3Code(ctx context.Context) error {
+	s.t3code.opMu.Lock()
+	defer s.t3code.opMu.Unlock()
+	s.t3code.mu.Lock()
+	cfg, err := s.loadT3CodeConfigLocked()
+	s.t3code.mu.Unlock()
+	if err != nil || !cfg.Enabled || cfg.Mode != "managed" || cfg.Run == nil {
+		return err
+	}
+	s.invalidateT3CodeStatus()
+	_, _, err = s.ensureManagedT3CodeRunning(ctx, false, cfg.Run.Workspace)
+	return err
+}
+
+func (s *Server) clearT3CodeRun() error {
+	s.t3code.mu.Lock()
+	defer s.t3code.mu.Unlock()
+	cfg, err := s.loadT3CodeConfigLocked()
+	if err != nil || cfg.Run == nil {
+		return err
+	}
+	cfg.Run = nil
+	return s.saveT3CodeConfigLocked(cfg)
 }
 
 func (s *Server) stopManagedT3Code(ctx context.Context, port int) error {
@@ -649,7 +698,7 @@ func (s *Server) stopManagedT3Code(ctx context.Context, port int) error {
 	s.t3code.activeBindings = nil
 	s.t3code.mu.Unlock()
 	s.kickAllLaunchSchedules()
-	return nil
+	return s.clearT3CodeRun()
 }
 
 func (s *Server) t3CodeActionHTTP(w http.ResponseWriter, r *http.Request) {
@@ -684,6 +733,11 @@ func (s *Server) t3CodeActionHTTP(w http.ResponseWriter, r *http.Request) {
 			err := s.stopManagedT3Code(r.Context(), cfg.Port)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusConflict)
+				return
+			}
+		} else if cfg.Mode == "managed" {
+			if err := s.clearT3CodeRun(); err != nil {
+				requestError(w, err)
 				return
 			}
 		}

@@ -57,6 +57,7 @@ type herdrRecord struct {
 	AgentID   string `json:"agent_id,omitempty"`
 	AgentName string `json:"agent_name,omitempty"`
 	Created   int64  `json:"created"`
+	Closed    bool   `json:"closed,omitempty"`
 }
 
 // herdrEntry is one live hc terminal as agent-runtime.py herdr-list reports
@@ -173,6 +174,7 @@ func (s *Server) rememberHerdrSession(session *terminalSession, kind string) {
 	id := session.id
 	session.mu.Unlock()
 	s.rememberHerdrTerminal(id, record)
+	_ = s.noteWorkbenchHerdrUse()
 }
 
 func (s *Server) herdrRecord(id string) (herdrRecord, bool) {
@@ -188,6 +190,17 @@ func (s *Server) forgetHerdrTerminal(id string) {
 	records := s.herdrRecordsLocked()
 	if _, ok := records[id]; ok {
 		delete(records, id)
+		s.saveHerdrRecordsLocked()
+	}
+}
+
+func (s *Server) markHerdrTerminalClosed(id string) {
+	s.herdr.listMu.Lock()
+	defer s.herdr.listMu.Unlock()
+	records := s.herdrRecordsLocked()
+	if record, ok := records[id]; ok && !record.Closed {
+		record.Closed = true
+		records[id] = record
 		s.saveHerdrRecordsLocked()
 	}
 }
@@ -303,6 +316,9 @@ func (s *Server) herdrViews(list herdrList) []herdrView {
 	for _, entry := range list.Terminals {
 		if id, ok := own[entry.Name]; ok && entry.Name != "" {
 			record := records[id]
+			if record.Closed {
+				continue
+			}
 			views = append(views, herdrView{ID: id, Target: record.Name, Title: record.Title, Kind: record.Kind,
 				Workspace: record.Workspace, AgentID: record.AgentID, AgentName: record.AgentName})
 			continue
@@ -458,6 +474,9 @@ func (s *Server) openHerdrViewer(ctx context.Context, id string) (*terminalSessi
 }
 
 func (s *Server) openHerdrViewerLocked(id string, view herdrView) (*terminalSession, error) {
+	if record, ok := s.herdrRecord(id); ok && record.Closed {
+		return nil, nil
+	}
 	if current := s.terminals.get(id); current != nil && !current.finished() {
 		return current, nil
 	}
@@ -524,13 +543,15 @@ func (s *Server) endHerdrTerminal(id string, session *terminalSession) {
 			}
 		}
 	}
-	s.forgetHerdrTerminal(id)
 	if target == "" || !(herdrNamePattern.MatchString(target) || herdrAddressPattern.MatchString(target)) || !s.vmRunning() {
 		return
 	}
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 10*time.Second)
-	_ = s.runAgentRuntime(ctx, "herdr-close", map[string]any{"terminal": target}, nil)
+	err := s.runAgentRuntime(ctx, "herdr-close", map[string]any{"terminal": target}, nil)
 	cancel()
+	if err == nil {
+		s.forgetHerdrTerminal(id)
+	}
 	s.invalidateHerdrList()
 }
 
