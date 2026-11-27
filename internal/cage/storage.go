@@ -80,7 +80,16 @@ func writeStorageJSON(path string, value any) error {
 	if err = errors.Join(err, f.Close()); err != nil {
 		return err
 	}
-	return renameStorage(f.Name(), path)
+	return CommitSyncedFile(f.Name(), path)
+}
+
+// CommitSyncedFile installs a flushed and closed file from the same directory
+// and makes the new directory entry durable across a sudden power loss.
+func CommitSyncedFile(temporary, path string) error {
+	if err := renameStorage(temporary, path); err != nil {
+		return err
+	}
+	return syncStorageDir(filepath.Dir(path))
 }
 
 func sameStoragePath(a, b string) bool {
