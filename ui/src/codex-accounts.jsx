@@ -4,6 +4,7 @@ import { EmptyState } from "./drawings";
 import { ProviderMark } from "./provider-mark";
 import { api } from "./api";
 import { InlineSelect } from "./inline-select";
+import { LaunchAccountPolicy, launchModeLabel } from "./launch-account-policy";
 import { QuotaClock, QuotaWindow, UsageNote, useUsageCheck } from "./claude-accounts";
 import { codexAccountName, codexActiveCounts, codexQuotaView, codexWindowLabel } from "./codex-accounts-state.mjs";
 import { useWindowVisibility } from "./window-visibility";
@@ -47,7 +48,8 @@ export function useCodexAccounts(enabled = true) {
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
     guestSupported: registry?.guest_supported !== false, loginPending: Boolean(registry?.login_pending),
-    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
+    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, schedulingAPI: registry?.scheduling_api || 0,
+    loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
 }
 
 const statusLabels = {
@@ -182,6 +184,7 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
     catch (e) { setActionError(e.message); }
     finally { setBusy(false); }
   };
+  const schedulingBase = store.schedulingAPI >= 1 ? {} : store.scheduling;
   const remove = async (profile) => {
     const last = accounts.length === 1;
     if (await onConfirm({ title: `移除「${codexAccountName(profile) || "未命名账号"}」？`,
@@ -201,21 +204,19 @@ export function CodexAccountsPanel({ store, running, environmentBusy, tabs, logi
     </div>
     {!guestSupported && <p className="claude-profile-note" role="status">Codex 账号目前只支持 Linux 环境。macOS 和 Windows 环境请在普通终端中使用 Codex。</p>}
     <details className="claude-scheduling">
-      <summary>调度设置 · {store.scheduling.mode === "sequential" ? "顺序优先" : "均衡分配"}</summary>
-      <label>新会话分配<InlineSelect inline aria-label="新会话分配" value={store.scheduling.mode} disabled={busy}
-        onValueChange={mode => perform(() => load({action:"scheduling",scheduling:{...store.scheduling,mode}}))}>
-        <option value="balanced">均衡分配</option><option value="sequential">按列表顺序优先</option>
-      </InlineSelect></label>
+      <summary>调度设置 · {launchModeLabel(store.scheduling.mode)}</summary>
+      <LaunchAccountPolicy scheduling={store.scheduling} accounts={accounts} enabled={store.schedulingAPI >= 1} busy={busy}
+        change={body => perform(() => load(body))} />
       <label>新会话切换授权<InlineSelect inline aria-label="新会话切换授权" value={store.scheduling.switch_policy} disabled={busy}
-        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:{...store.scheduling,switch_policy}}))}>
+        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:{...schedulingBase,switch_policy}}))}>
         <option value="ask">每次询问</option><option value="allow">额度耗尽后自动接续</option><option value="wait">始终等待原账号</option>
       </InlineSelect></label>
       <p className="field-help">Codex 与 Claude 的调度设置互相独立。已打开的 Codex 终端保持原账号，不会在会话中途切换；切换授权会随设置保存，供以后的接续功能使用。</p>
-      {store.scheduling.mode === "sequential" && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
+      {["sequential", "exhaust"].includes(store.scheduling.mode) && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
         {accounts.map((profile,index) => <div key={profile.id}><span>{index+1}. {codexAccountName(profile)}</span>
           <button disabled={busy || index===0} aria-label={`提高 ${codexAccountName(profile)} 的优先级`} onClick={() => {
             const order=accounts.map(a=>a.id); [order[index-1],order[index]]=[order[index],order[index-1]];
-            perform(() => load({action:"scheduling",scheduling:store.scheduling,order}));
+            perform(() => load({action:"scheduling",scheduling:schedulingBase,order}));
           }}>上移</button></div>)}
       </div>}
     </details>

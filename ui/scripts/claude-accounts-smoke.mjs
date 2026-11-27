@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { createWorkbench } from "./workbench-fixture.mjs";
 
 // Drives the shared workbench with an isolated account registry. No real credentials or VM.
@@ -20,8 +19,8 @@ let lastLoginNotice = "";
 const joins = [];
 const now = Math.floor(Date.now() / 1000);
 const openAccounts = async () => {
-  await page.getByRole("button", { name: "Claude 账号管理", exact: true }).click();
-  await page.getByRole("main", { name: "Claude 账号管理", exact: true }).waitFor();
+  await page.getByRole("button", { name: /^账号管理(?:\s*\d+)?$/ }).click();
+  await page.getByRole("main", { name: "账号管理", exact: true }).waitFor();
   assert.ok(await page.getByRole("navigation", { name: "主导航" }).isVisible());
   assert.equal(await page.getByRole("dialog", { name: "Claude 账号管理", exact: true }).count(), 0);
 };
@@ -41,7 +40,7 @@ async function checkLongAccountList() {
   const last = list.getByRole("article", { name: "测试账号 " + total, exact: true });
   await last.waitFor({ state: "attached" });
   assert.equal(await list.getByRole("article").count(), total);
-  const header = page.getByRole("heading", { name: "Claude 账号管理", exact: true });
+  const header = page.getByRole("heading", { name: "账号管理", exact: true });
   const add = page.getByRole("button", { name: "登录新账号", exact: true });
   const headerY = (await header.boundingBox()).y;
   const addY = (await add.boundingBox()).y;
@@ -337,17 +336,13 @@ try {
   assert.equal(await card.getByRole("button", { name: "重新登录" }).isEnabled(), false);
   const detectedA = profileCard(identityA.email);
   await detectedA.getByText(/已发现，未加入/).waitFor();
-  const clawd = await readFile(new URL("../src/claude-account-crab.svg", import.meta.url), "utf8");
-  assert.ok(await detectedA.locator("img").evaluate(async (img, source) => {
-    await img.decode();
-    const shape = (svg) => {
-      const root = new DOMParser().parseFromString(svg, "image/svg+xml").documentElement;
-      return [root.getAttribute("viewBox"), root.getAttribute("fill"), ...Array.from(root.querySelectorAll("path"), (p) => p.getAttribute("d"))];
-    };
-    const data = /^data:image\/svg\+xml(;base64)?,(.*)$/s.exec(img.currentSrc);
-    const rendered = data ? data[1] ? atob(data[2]) : decodeURIComponent(data[2]) : await (await fetch(img.currentSrc)).text();
-    return img.naturalWidth > 0 && JSON.stringify(shape(rendered)) === JSON.stringify(shape(source));
-  }, clawd), "the detected account renders the same Clawd artwork as managed accounts");
+  for (const profile of [card, detectedA]) {
+    const mark = profile.locator(".claude-profile-avatar .provider-mark-claude");
+    assert.equal(await mark.getAttribute("aria-hidden"), "true");
+    const image = mark.locator("img");
+    assert.ok(await image.evaluate(async img => { await img.decode(); return img.naturalWidth > 0; }),
+      "managed and detected accounts load the shared Claude provider mark");
+  }
   assert.equal(await detectedA.getByRole("checkbox").count(), 0);
   await page.setViewportSize({ width: 375, height: 700 });
   const panelList = page.getByRole("region", { name: "账号列表", exact: true });

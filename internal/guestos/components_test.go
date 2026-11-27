@@ -13,7 +13,7 @@ func nativeManifestKit(t *testing.T, system string) string {
 	kit := t.TempDir()
 	names := []string{"payload/Cage.GuestClipboard.exe", "payload/cage-guest-files.exe", "payload/cage-guest-boot.exe", "payload/Cage.HyperVManager.exe", "payload/windows-browser.mjs", "payload/cli-dependencies.json"}
 	if system == MacOS {
-		names = []string{"Cage Guest Window.app/Contents/MacOS/CageGuestWindow", "Cage Guest Clipboard.app/Contents/MacOS/CageGuestClipboard", "project/cage-sshfs", "project/cage-macos-terminal", "native-browser/macos-native-browser.mjs", "native-browser/macos-browser-service.mjs", "native-browser/macos-browser-window.mjs", "register-macos-browser.sh", "enable-macos-screensharing.sh", "macos-cli.py", "cli_channel.py", "claude-account.py"}
+		names = []string{"Cage Guest Window.app/Contents/MacOS/CageGuestWindow", "Cage Guest Clipboard.app/Contents/MacOS/CageGuestClipboard", "project/cage-sshfs", "project/cage-macos-terminal", "native-browser/macos-native-browser.mjs", "native-browser/macos-browser-service.mjs", "native-browser/macos-browser-window.mjs", "register-macos-browser.sh", "enable-macos-screensharing.sh", "macos-cli.py", "cli_channel.py", "claude-account.py", "client_runtime.py"}
 	}
 	for _, name := range names {
 		filename := filepath.Join(kit, filepath.FromSlash(name))
@@ -54,7 +54,7 @@ func TestNativeManifestTracksInstalledComponents(t *testing.T) {
 			if err != nil || next.Revision == first.Revision {
 				t.Fatalf("new component was omitted: %v", err)
 			}
-			found, packet, sharing := false, false, false
+			found, packet, sharing, browserLogin := false, false, false, false
 			for _, item := range next.Files {
 				if item.Source == source {
 					found = item.Target != "" && item.SHA256 == item.InstalledSHA256
@@ -66,13 +66,14 @@ func TestNativeManifestTracksInstalledComponents(t *testing.T) {
 					sharing = item.Target == "/usr/local/libexec/cage-enable-screensharing"
 				}
 				if item.Source == "claude-account.py" {
+					browserLogin = browserLogin || item.Target == "/usr/local/libexec/cage-cli/bin/cage-open"
 					expected := sha256.Sum256([]byte("#!" + MacOSCLIRuntime + "/bin/python3 -I\n{}"))
 					if item.InstalledSHA256 != hex.EncodeToString(expected[:]) {
 						t.Fatal("installed Python entry point digest differs from installer")
 					}
 				}
 			}
-			if !found || (system == Windows11 && !packet) || (system == MacOS && !sharing) {
+			if !found || (system == Windows11 && !packet) || (system == MacOS && (!sharing || !browserLogin)) {
 				t.Fatal("manifest did not include installed guest capabilities")
 			}
 			if err = os.Symlink(source, filepath.Join(kit, "unexpected-link")); err != nil {

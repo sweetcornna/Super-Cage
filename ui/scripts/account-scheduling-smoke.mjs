@@ -101,7 +101,7 @@ try{
     if(body?.action==="prefer")scheduling.preferred=body.id; // 参与分配 stays as it was
     return route.fulfill({json:{accounts:profiles,scheduling,detection_status:"offline",handoff_api:2}});
   });
-  await page.getByRole("button",{name:"Claude 账号管理",exact:true}).click();
+  await page.getByRole("button",{name:/^账号管理(?:\s*\d+)?$/}).click();
   await page.getByText("调度设置 · 均衡分配 · 额度用完时待设定",{exact:true}).click();
   const offer=page.getByRole("group",{name:"额度用完时"});
   await offer.waitFor();

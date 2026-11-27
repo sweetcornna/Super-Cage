@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Unit tests for the universal guest Agent CLI runtime."""
 import base64
+import hashlib
 import json
 import os
 import shlex
@@ -437,6 +438,8 @@ class AgentRuntimeTests(unittest.TestCase):
             "        'CAGE_CLAUDE_SUBJECT': os.environ.get('CAGE_CLAUDE_SUBJECT', ''),\n"
             "        'CAGE_CLI_ACCOUNT_CODEX': os.environ.get('CAGE_CLI_ACCOUNT_CODEX', ''),\n"
             "        'CAGE_CLI_ACCOUNT_OPENCODE': os.environ.get('CAGE_CLI_ACCOUNT_OPENCODE', ''),\n"
+            "        'CAGE_CLI_ACCOUNT_COPILOT': os.environ.get('CAGE_CLI_ACCOUNT_COPILOT', ''),\n"
+            "        'CAGE_CLI_ACCOUNT_GEMINI': os.environ.get('CAGE_CLI_ACCOUNT_GEMINI', ''),\n"
             "        'CAGE_CLI_ACCOUNT_ID': os.environ.get('CAGE_CLI_ACCOUNT_ID', ''),\n"
             "        'T3CODE_NO_BROWSER': os.environ.get('T3CODE_NO_BROWSER', ''),\n"
             "    }, f)\n"
@@ -477,6 +480,7 @@ class AgentRuntimeTests(unittest.TestCase):
         codex_id = "1" * 24
         claude_id = "2" * 24
         opencode_id = "3" * 24
+        copilot_id = "4" * 24
         claude_subject = "a" * 64
         codex_spec = {"id": "codex", "name": "OpenAI Codex", "binary": "codex", "isolation": {"mode": "env_dir", "env_var": "CODEX_HOME"}, "auth": {}}
         opencode_spec = {"id": "opencode", "name": "OpenCode", "binary": "opencode", "isolation": {"mode": "xdg"}, "auth": {}}
@@ -487,8 +491,10 @@ class AgentRuntimeTests(unittest.TestCase):
             "workspace": str(self.home),
             "bindings": {
                 "claude": {"guest_id": claude_id, "subject": claude_subject},
-                "codex": {"guest_id": codex_id, "spec": codex_spec},
-                "opencode": {"guest_id": opencode_id, "spec": opencode_spec},
+                "codex": {"account_id": codex_id, "guest_id": codex_id, "spec": codex_spec},
+                "opencode": {"account_id": opencode_id, "guest_id": opencode_id, "spec": opencode_spec},
+                "copilot": {"mode": "default", "account_id": copilot_id},
+                "gemini": {"mode": "default"},
             },
         }, env=start_env).stdout)
         self.assertTrue(started["installed"])
@@ -497,6 +503,8 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(started["port"], port)
         self.assertEqual(started["version"], "0.9.4")
         self.assertTrue(started["has_pair_url"])
+        expected_accounts = {"codex": codex_id, "opencode": opencode_id, "copilot": copilot_id, "gemini": "default"}
+        self.assertEqual(started["accounts"], expected_accounts)
         self.assertNotIn("secret_boot_tok_123", json.dumps(started))
 
         # Verify state (0600, ZERO tokens), log (0600, redacted secrets & QR), and pair.once (0600).
@@ -514,6 +522,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(state_obj["port"], port)
         self.assertEqual(state_obj["version"], "0.9.4")
         self.assertEqual(state_obj["binary"], str(mock_t3))
+        self.assertEqual(state_obj["accounts"], expected_accounts)
         self.assertNotIn("pair_url", state_obj)
         self.assertNotIn("secret_boot_tok_123", state_raw)
 
@@ -551,6 +560,8 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(seen_env["CAGE_CLAUDE_SUBJECT"], claude_subject)
         self.assertEqual(seen_env["CAGE_CLI_ACCOUNT_CODEX"], codex_id)
         self.assertEqual(seen_env["CAGE_CLI_ACCOUNT_OPENCODE"], opencode_id)
+        self.assertEqual(seen_env["CAGE_CLI_ACCOUNT_COPILOT"], "default")
+        self.assertEqual(seen_env["CAGE_CLI_ACCOUNT_GEMINI"], "default")
         self.assertEqual(seen_env["CAGE_CLI_ACCOUNT_ID"], "")
         self.assertEqual(seen_env["CODEX_HOME"], "")
         self.assertEqual(seen_env["XDG_CONFIG_HOME"], "")
@@ -574,6 +585,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertTrue(st1["running"])
         self.assertEqual(st1["pid"], started["pid"])
         self.assertEqual(st1["port"], port)
+        self.assertEqual(st1["accounts"], expected_accounts)
         self.assertTrue(st1["has_pair_url"])
         self.assertNotIn("secret_boot_tok_123", json.dumps(st1))
         self.assertNotIn("pair_url", st1)
@@ -583,6 +595,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertFalse(st_mismatch["running"])
         self.assertEqual(st_mismatch["pid"], 0)
         self.assertEqual(st_mismatch["port"], other_port)
+        self.assertEqual(st_mismatch["accounts"], {})
         self.assertFalse(st_mismatch["has_pair_url"])
 
         # 4. t3code-open-url with consume=False preserves pair.once; consume=True (default) unlinks pair.once!
@@ -1484,6 +1497,63 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertTrue(snap4["logged_in"], f"Generic XDG subdir credential not detected: {snap4}")
         self.assertEqual(snap4["email"], "demo@example.com")
 
+    def test_generic_codex_resume_verifies_history_profile(self):
+        old = "1" * 24
+        thread = "19b38927-d608-49d6-b690-870ef502e802"
+        spec = {"id": "codex", "name": "Codex", "binary": "codex", "isolation": {"mode": "env_dir", "env_var": "CODEX_HOME"}}
+        home = self.home / ".local/share/cage/agent-accounts/codex" / old / "config"
+        rollout = home / "sessions/2026/10/03" / f"rollout-2026-10-03T07-09-01-{thread}.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread, "cwd": "/previous/project"}}) + "\n")
+        auth = home / "auth.json"
+        def account(email):
+            auth.write_text(json.dumps({"tokens": {"id_token": make_jwt({"email": email}), "access_token": "fixture"}}))
+        account("owner@example.test")
+        subject = hashlib.sha256(b"owner@example.test\n").hexdigest()
+        fake = self.home / ".local/bin/codex"
+        fake.parent.mkdir(parents=True)
+        fake.write_text('#!/bin/sh\nif [ "$1 $2" = "login status" ]; then echo "Logged in using ChatGPT"; else printf "%s\\n" "$CODEX_HOME" "$@"; fi\n')
+        fake.chmod(0o700)
+        self.run_rt("sync-auto-shims", {"schedule": {"agents": {"codex": {"spec": spec, "candidates": [],
+                                                                         "history_accounts": [{"id": old, "subject": subject}]}}}})
+        env = {key: value for key, value in self.env.items() if key not in ("CODEX_HOME", "CAGE_ACCOUNT_SCHEDULING")}
+        args = ("codex", "codex", "-c", "disable_paste_burst=true", "--dangerously-bypass-approvals-and-sandbox", "resume", thread)
+        route = self.run_rt("auto-exec", {}, args, env=env)
+        self.assertEqual(route.stdout.splitlines(), [str(home), *args[2:]])
+        account("other@example.test")
+        denied = self.run_rt("auto-exec", {}, args, env=env, check=False)
+        self.assertEqual(denied.returncode, 78)
+        self.assertEqual(denied.stdout, "")
+
+        self.run_rt("sync-auto-shims", {"schedule": {"agents": {"codex": {
+            "mode": "manual", "selected_account_id": old, "spec": spec,
+            "candidates": [{"id": old, "guest_id": old, "subject": subject, "auth_mode": "oauth"}],
+        }}}})
+        new_args = ("codex", "codex", "prompt")
+        denied = self.run_rt("auto-exec", {}, new_args, env=env, check=False)
+        self.assertEqual(denied.returncode, 78)
+        self.assertEqual(denied.stdout, "")
+
+        account("owner@example.test")
+        now = int(time.time())
+        os.utime(auth, (now - 30, now - 30))
+
+        def rate_limit(seen, bucket):
+            return json.dumps({"type": "event_msg", "timestamp": seen, "payload": {
+                "type": "token_count", "rate_limits": {"limit_id": bucket, "primary": {
+                    "used_percent": 100, "resets_at": now + 3600,
+                }},
+            }}) + "\n"
+
+        rollout.write_text(rate_limit(now - 60, "codex") + rate_limit(now - 5, "model-specific"))
+        route = self.run_rt("auto-exec", {}, new_args, env=env)
+        self.assertEqual(route.stdout.splitlines(), [str(home), "prompt"])
+        rollout.write_text(rate_limit(now - 5, "codex"))
+        denied = self.run_rt("auto-exec", {}, new_args, env=env, check=False)
+        self.assertEqual(denied.returncode, 78)
+        self.assertIn("手动选择", denied.stderr)
+        self.assertEqual(denied.stdout, "")
+
     def test_sync_auto_shims_and_auto_exec_all_clis_with_project_pins_and_rr(self):
         bin_dir = self.home / ".local/bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
@@ -1573,6 +1643,15 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(r_pin["CAGE_CLI_ACCOUNT_OPENCODE"], acc2)
         self.assertEqual(r_pin["ARGS"], ["run", "pinned"])
 
+        for binary, key in (("opencode", "CAGE_CLI_ACCOUNT_OPENCODE"), ("codex", "CAGE_CLI_ACCOUNT_CODEX")):
+            for missing in ("f" * 24, "invalid"):
+                with self.subTest(binary=binary, pin=missing):
+                    rejected = subprocess.run([str(auto_dir / binary), "run"], cwd=other_proj,
+                                              env={**shim_env, key: missing}, text=True, capture_output=True, timeout=10)
+                    self.assertEqual(rejected.returncode, 78, rejected.stderr)
+                    self.assertIn("绑定账号", rejected.stderr)
+                    self.assertEqual(rejected.stdout, "")
+
         # Bypass on --version or CAGE_ACCOUNT_SCHEDULING=off runs real binary without account isolation.
         r_ver = json.loads(subprocess.check_output(["opencode", "--version"], cwd=other_proj, env=shim_env, text=True, timeout=10))
         self.assertEqual(r_ver["CAGE_CLI_ACCOUNT_OPENCODE"], "")
@@ -1581,6 +1660,18 @@ class AgentRuntimeTests(unittest.TestCase):
         r_off = json.loads(subprocess.check_output(["opencode", "run"], cwd=other_proj, env=off_env, text=True, timeout=10))
         self.assertEqual(r_off["CAGE_CLI_ACCOUNT_OPENCODE"], "")
         self.assertEqual(r_off["ANTHROPIC_API_KEY"], "")
+
+        # Full and paused pools keep their shim and refuse the launch. An
+        # active seat published by the workbench counts for an external CLI.
+        entry = {"mode": "balanced", "spec": oc_spec, "candidates": [
+            {"id": acc1, "guest_id": acc1, "active": 1, "max_concurrency": 1},
+        ]}
+        for candidates in (entry["candidates"], []):
+            entry["candidates"] = candidates
+            self.run_rt("sync-auto-shims", {"schedule": {"agents": {"opencode": entry}}})
+            refused = subprocess.run(["opencode", "run"], cwd=other_proj, env=shim_env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(refused.returncode, 78, refused.stderr)
+            self.assertEqual(refused.stdout, "")
 
         # Emptying schedules cleans up stale shims cleanly.
         claude_launch.unlink()
@@ -1702,6 +1793,140 @@ class AgentRuntimeTests(unittest.TestCase):
         r_restored = json.loads(subprocess.check_output(["opencode", "run"], cwd=self.home, env=shim_env, text=True, timeout=10))
         self.assertEqual(r_restored["CAGE_CLI_ACCOUNT_OPENCODE"], acc1)
         self.assertEqual(r_restored["ANTHROPIC_API_KEY"], "sk-ant-acc1-secret")
+
+    def test_generic_policy_manual_exhaust_and_smart(self):
+        binary = self.home / ".local/bin/opencode"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_text('#!/bin/sh\nprintf "%s\\n" "$CAGE_CLI_ACCOUNT_OPENCODE"\n')
+        binary.chmod(0o700)
+        spec = {"id": "opencode", "name": "OpenCode", "binary": "opencode", "isolation": {"mode": "xdg"}}
+        gids = [char * 24 for char in "123"]
+        accounts = [{"id": f"account-{index}", "guest_id": gid} for index, gid in enumerate(gids)]
+        ids = [account["id"] for account in accounts]
+        pinned = self.home / "pinned"
+        pinned.mkdir()
+        env = {key: value for key, value in self.env.items() if not key.startswith("XDG_")}
+
+        def publish(mode, candidates=accounts, **extra):
+            result = self.run_rt("sync-auto-shims", {"schedule": {"agents": {"opencode": {
+                "mode": mode, "spec": spec, "candidates": candidates, "account_order": ids, **extra}}}})
+            return Path(json.loads(result.stdout)["dir"]) / "opencode"
+
+        def launch(shim, cwd=None, *, check=True, **extra):
+            return subprocess.run([str(shim), "run"], env={**env, **extra}, cwd=cwd or self.home,
+                                  check=check, capture_output=True, text=True, timeout=10)
+
+        shim = publish("manual", selected_account_id=ids[1], project_pins={str(pinned): f"account:{ids[2]}"})
+        self.assertEqual(launch(shim).stdout.strip(), gids[1])
+        self.assertEqual(launch(shim, pinned).stdout.strip(), gids[2])
+        self.assertEqual(launch(shim, CAGE_CLI_ACCOUNT_OPENCODE=gids[0]).stdout.strip(), gids[0])
+        self.assertEqual(launch(shim, CAGE_CLI_ACCOUNT_OPENCODE="default").stdout.strip(), "default")
+        publish("manual", [accounts[0]], selected_account_id=ids[1])
+        denied = launch(shim, check=False)
+        self.assertEqual(denied.returncode, 78)
+        self.assertIn("手动选择", denied.stderr)
+        self.assertEqual(denied.stdout, "")
+
+        def current():
+            return json.loads(self.run_rt("schedule-cursor", {"agent_id": "opencode"}).stdout)
+
+        choice = {"selected_account_id": ids[0], "selected_account_revision": "revision-1"}
+        publish("exhaust", **choice)
+        self.assertEqual(launch(shim).stdout.strip(), gids[0])
+        now = int(time.time())
+        quota = {"seven_day": {"used_percentage": 100, "resets_at": now + 3600, "observed_at": now}}
+        publish("exhaust", [{**accounts[0], "quota": quota}, accounts[2]], **choice)
+        self.assertEqual(launch(shim).stdout.strip(), gids[2])
+        self.assertEqual(current(), {**choice, "account_id": ids[2]})
+        publish("exhaust", project_pins={str(pinned): f"account:{ids[1]}"}, **choice)
+        self.assertEqual(launch(shim, pinned).stdout.strip(), gids[1])
+        self.assertEqual(launch(shim).stdout.strip(), gids[2])
+        publish("exhaust", **{**choice, "selected_account_revision": "revision-2"})
+        self.assertEqual(current(), {})
+        self.assertEqual(launch(shim).stdout.strip(), gids[0])
+
+        # Active load wins, then trusted current quota. Equal tiers rotate.
+        fresh = {"five_hour": {"used_percentage": 20, "resets_at": now + 3600, "observed_at": now}}
+        publish("smart", [{**accounts[0], "active": 1, "quota": fresh}, accounts[1],
+                          {**accounts[2], "quota": fresh}], selected_account_id=ids[0])
+        self.assertEqual(launch(shim).stdout.strip(), gids[2])
+        publish("smart", [{**account, "score": 90 - index / 10} for index, account in enumerate(accounts)])
+        self.assertEqual(launch(shim).stdout.strip(), gids[0])
+        self.assertEqual(launch(shim).stdout.strip(), gids[1])
+
+    def test_orca_auto_binding_requires_policy_without_a_shell(self):
+        import runpy
+        from unittest.mock import patch
+
+        fixture_env = {k: v for k, v in self.env.items() if not k.startswith(("XDG_", "CAGE_"))}
+        with patch.dict(os.environ, fixture_env, clear=True):
+            runtime = runpy.run_path(str(RUNTIME))
+
+        def prepare(bindings):
+            with patch.dict(os.environ, fixture_env, clear=True):
+                env, prefixes, override = runtime["_orca_prepare_bindings"](bindings, fixture_env["PATH"])
+            return {**fixture_env, **env, "PATH": os.pathsep.join([*prefixes, fixture_env["PATH"]])}, override
+
+        spec = {"id": "opencode", "binary": "opencode", "fallback_binaries": ["opencode-alt"]}
+        managed_env, override = prepare({"opencode": {**spec, "mode": "auto"}})
+        self.assertTrue(override)
+        self.assertEqual(runtime["_orca_fixed_accounts"]({
+            "opencode": {"mode": "auto", "account_id": "a" * 24},
+            "antigravity": {"mode": "magpie", "account_id": "b" * 24},
+            "claude": {"mode": "default", "account_id": ""},
+            "codex": {"account_id": "c" * 24, "guest_id": "d" * 24},
+        }), {"claude": "", "codex": "c" * 24})
+
+        real_binary = self.home / ".local/bin/opencode"
+        real_binary.parent.mkdir(parents=True, exist_ok=True)
+        real_binary.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\"\nexit 23\n")
+        real_binary.chmod(0o755)
+        real_binary.with_name("opencode-alt").symlink_to(real_binary)
+
+        def launch(name, env):
+            return subprocess.run([name, "run", "prompt"], env=env,
+                                  capture_output=True, text=True, timeout=10)
+
+        manifest = runtime["AGENT_LAUNCH_FILE"]
+        self.assertFalse(manifest.exists())
+        missing = launch(str(Path(override) / "opencode"), managed_env)
+        self.assertEqual(missing.returncode, 78, missing.stderr)
+        self.assertIn("调度配置", missing.stderr)
+        self.assertEqual(missing.stdout, "")
+
+        stale_manifest = json.dumps({"agents": {"gemini": {
+            "spec": {"id": "gemini", "binary": "gemini"}, "candidates": [],
+        }}})
+        manifest.write_text(stale_manifest)
+        for name in ("opencode", "opencode-alt"):
+            with self.subTest(binary=name):
+                stale = launch(str(Path(override) / name), managed_env)
+                self.assertEqual(stale.returncode, 78, stale.stderr)
+                self.assertIn("调度配置", stale.stderr)
+                self.assertEqual(stale.stdout, "")
+
+        ssh = self.run_rt("auto-exec", {}, ("opencode", "opencode", "run", "prompt"), check=False, env=fixture_env)
+        self.assertEqual(ssh.returncode, 23, ssh.stderr)
+        self.assertEqual(ssh.stdout, "run prompt\n")
+
+        manifest.write_text(json.dumps({"agents": {"opencode": {"spec": spec, "mode": "balanced", "candidates": []}}}))
+        empty = launch("opencode", managed_env)
+        self.assertEqual(empty.returncode, 78, empty.stderr)
+        self.assertIn("暂无可启动", empty.stderr)
+        self.assertEqual(empty.stdout, "")
+
+        default_env, default_override = prepare({"opencode": {"mode": "default"}})
+        self.assertEqual(default_override, "")
+        default = launch("opencode", default_env)
+        self.assertEqual(default.returncode, 23, default.stderr)
+        self.assertEqual(default.stdout, "run prompt\n")
+
+        manifest.write_text(stale_manifest)
+        unregistered_env, unregistered_override = prepare({})
+        self.assertEqual(unregistered_override, "")
+        unregistered = launch("opencode", unregistered_env)
+        self.assertEqual(unregistered.returncode, 23, unregistered.stderr)
+        self.assertEqual(unregistered.stdout, "run prompt\n")
 
     def test_orca_server_atomic_install_lifecycle_pair_and_stale_lock_recovery(self):
         import hashlib
@@ -1887,21 +2112,28 @@ class AgentRuntimeTests(unittest.TestCase):
         )
         cur_bin.chmod(0o755)
 
-        started = json.loads(self.run_rt("orca-start", {
+        start_payload = {
             "port": port,
             "bind_mode": "loopback",
             "terminal_memory_max": "2G",
+            "config_key": "e" * 64,
             "workspace": str(self.home),
             "projects": [str(proj_dir)],
             "bindings": {
-                "claude": {"mode": "default"},
+                "claude": {"mode": "default", "account_id": ""},
+                "codex": {"codex_native": True, "guest_id": "a" * 24, "account_id": "b" * 24},
                 "opencode": {"mode": "auto"},
             },
-        }).stdout)
+        }
+        started = json.loads(self.run_rt("orca-start", start_payload).stdout)
         self.assertTrue(started["installed"])
         self.assertTrue(started["running"])
         self.assertEqual(started["port"], port)
         self.assertEqual(started["bind_ip"], "127.0.0.1")
+        self.assertEqual(started["accounts"], {"claude": "", "codex": "b" * 24})
+        self.assertEqual(started["config_key"], "e" * 64)
+        reattached = json.loads(self.run_rt("orca-start", start_payload).stdout)
+        self.assertEqual((reattached["pid"], reattached["accounts"]), (started["pid"], started["accounts"]))
         # Stale-lock exit code 3 automatically ran --reclaim-stale-lock and succeeded!
         self.assertTrue(reclaim_marker.is_file())
         self.assertIn("--reclaim-stale-lock", reclaim_marker.read_text())
@@ -1937,10 +2169,54 @@ class AgentRuntimeTests(unittest.TestCase):
         st = json.loads(self.run_rt("orca-status", {"port": port}).stdout)
         self.assertTrue(st["running"])
         self.assertEqual(st["pid"], started["pid"])
+        self.assertEqual(st["accounts"], started["accounts"])
+        state = json.loads(rt.ORCA_STATE_FILE.read_text())
+        with patch.object(rt, "_http_responsive", return_value=False):
+            unhealthy = rt.orca_status({"port": port})
+            self.assertFalse(unhealthy["running"])
+            self.assertEqual(unhealthy["accounts"], started["accounts"])
+        # A recycled PID does not own the account reservations of its predecessor.
+        rt.ORCA_STATE_FILE.write_text(json.dumps({**state, "pid_identity": "unrelated-process"}))
+        try:
+            recycled = json.loads(self.run_rt("orca-status", {"port": port}).stdout)
+            self.assertEqual(recycled["pid"], 0)
+            self.assertEqual(recycled["accounts"], {})
+        finally:
+            rt.ORCA_STATE_FILE.write_text(json.dumps(state))
         pair = json.loads(self.run_rt("orca-pair", {"mobile": True, "rotate": True, "address": "100.64.0.9:16768"}).stdout)
         self.assertTrue(pair["available"])
         self.assertEqual(pair["scope"], "mobile")
         self.assertIn("100.64.0.9:16768", pair["pairing_url"])
+
+        other_port = 16768 if port != 16768 else 16769
+        stopped = json.loads(self.run_rt("orca-stop", {"port": other_port}).stdout)
+        self.assertTrue(stopped["skipped_port_mismatch"])
+        self.assertEqual(json.loads(self.run_rt("orca-status", {"port": port}).stdout)["accounts"], started["accounts"])
+        start_payload["bindings"]["codex"]["account_id"] = "c" * 24
+        start_payload["config_key"] = "f" * 64
+        restarted = json.loads(self.run_rt("orca-restart", start_payload).stdout)
+        self.assertNotEqual(restarted["pid"], started["pid"])
+        self.assertEqual(restarted["accounts"], {"claude": "", "codex": "c" * 24})
+        self.run_rt("orca-stop", {"port": port})
+        self.assertEqual(json.loads(self.run_rt("orca-status", {"port": port}).stdout)["accounts"], {})
+
+        write_json = rt.atomic_write_json
+
+        def deny_state_file(path, *args, **kwargs):
+            if path == rt.ORCA_STATE_FILE:
+                raise OSError("fixture: Orca state write rejected")
+            return write_json(path, *args, **kwargs)
+
+        old_mask = os.umask(0o077)
+        try:
+            with patch.dict(os.environ, self.env, clear=True), patch.object(rt, "atomic_write_json", side_effect=deny_state_file):
+                with self.assertRaisesRegex(OSError, "state write rejected"):
+                    rt.orca_start(start_payload)
+            self.assertFalse(rt.ORCA_STATE_FILE.exists())
+            self.assertFalse(rt._http_responsive("127.0.0.1", port, timeout=0.2))
+        finally:
+            os.umask(old_mask)
+        self.run_rt("orca-start", start_payload)
 
         # Reset identity rotates ORCA_INSTANCE_ID and stops server.
         old_id = seen["ORCA_INSTANCE_ID"]

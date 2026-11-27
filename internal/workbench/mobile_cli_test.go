@@ -13,6 +13,21 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestCompletedMobilePersistenceFailuresDoNotConsumeTurnCapacity(t *testing.T) {
+	_, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := mobileCLIStore{active: map[string]*mobileRun{
+		"failed-save-1": {},
+		"failed-save-2": {},
+		"failed-save-3": {},
+		"failed-save-4": {},
+		"running":       {cancel: cancel},
+	}}
+	if got := m.activeTurnCount(); got != 1 {
+		t.Fatalf("counted %d running turns, want one", got)
+	}
+}
+
 func TestMobileCLIRecoveryDoesNotReplayAndChangesEpoch(t *testing.T) {
 	s := testServer(t)
 	project, _ := filepath.EvalSymlinks(t.TempDir())

@@ -28,7 +28,9 @@ class ClaudeAccountTests(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        self.home = Path(tmp.name)
+        self.home = Path(tmp.name) / "home"
+        temporary = Path(tmp.name) / "tmp"
+        temporary.mkdir()
         fake = self.home / ".local/bin/claude"
         fake.parent.mkdir(parents=True)
         # Emulate the documented status shape of the official CLI. Its response
@@ -49,17 +51,17 @@ printf '%s\\n' "$@"
         self.email = "owner@example.test"
         self.subject = hashlib.sha256((self.email + "\ntest-org").encode()).hexdigest()
         self.env = {"HOME": str(self.home), "PATH": os.defpath, "TEST_EMAIL": self.email,
-                    "CAGE_CLAUDE_SUBJECT": self.subject, "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(self.home)}
+                    "CAGE_CLAUDE_SUBJECT": self.subject, "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(temporary)}
 
     def run_helper(self, mode, account, *args, data=None, env=None, check=True, cwd=None):
         return subprocess.run([sys.executable, str(source), mode, account, *args], env=env or self.env,
                               cwd=cwd or self.home, input=json.dumps(data) if data else None, text=True,
                               capture_output=True, check=check)
 
-    def write_launch(self, accounts, mode="balanced"):
+    def write_launch(self, accounts, mode="balanced", **extra):
         root = self.home / ".local/share/cage/claude-accounts"
         root.mkdir(parents=True, exist_ok=True)
-        (root / "launch.json").write_text(json.dumps({"mode": mode, "accounts": accounts}))
+        (root / "launch.json").write_text(json.dumps({"mode": mode, "accounts": accounts, **extra}))
 
     def write_quota(self, account, used, subject=None):
         base = self.home / ".local/share/cage/claude-accounts" / account
@@ -74,28 +76,60 @@ printf '%s\\n' "$@"
 
     def test_launch_account_follows_the_published_order_and_skips_used_up_accounts(self):
         with patch.object(Path, "home", return_value=self.home):
-            self.assertIsNone(helper.launch_account())
+            launch = self.home / ".local/share/cage/claude-accounts/launch.json"
+            def pick():
+                schedule = json.loads(launch.read_text())
+                candidates = helper._runtime["launch_order"](launch.parent, schedule, helper.launch_candidates(schedule),
+                                                              schedule["mode"], "")
+                return (candidates[0]["id"], candidates[0]["subject"]) if candidates else None
             self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}, {"id": SECOND, "subject": self.subject}])
-            self.assertEqual(helper.launch_account(), (FIRST, self.subject))  # preferred, quota unknown
+            self.assertEqual(pick(), (FIRST, self.subject))  # preferred, quota unknown
             self.write_quota(FIRST, 100)
             self.write_quota(SECOND, 40)
-            self.assertEqual(helper.launch_account(), (SECOND, self.subject))
+            self.assertEqual(pick(), (SECOND, self.subject))
             self.write_quota(SECOND, 100)
-            self.assertIsNone(helper.launch_account())
+            self.assertIsNone(pick())
             # Balanced: the most remaining; sequential: the first that can start.
             third = "3" * 24
             self.write_launch([{"id": FIRST, "subject": self.subject}, {"id": SECOND, "subject": self.subject}, {"id": third, "subject": self.subject}])
             self.write_quota(FIRST, 90)
             self.write_quota(third, 20)
-            self.assertEqual(helper.launch_account(), (third, self.subject))
+            self.assertEqual(pick(), (third, self.subject))
             self.write_launch([{"id": FIRST, "subject": self.subject}, {"id": third, "subject": self.subject}], mode="sequential")
-            self.assertEqual(helper.launch_account(), (FIRST, self.subject))
+            self.assertEqual(pick(), (FIRST, self.subject))
             # A reading of another login says nothing about this one.
             self.write_quota(FIRST, 100, subject="f" * 64)
-            self.assertEqual(helper.launch_account(), (FIRST, self.subject))
-            (self.home / ".local/share/cage/claude-accounts/launch.json").write_text("{not json")
-            with self.assertRaises(ValueError):
-                helper.launch_account()
+            self.assertEqual(pick(), (FIRST, self.subject))
+
+    def test_manual_and_exhaust_identity_guard_and_cursor(self):
+        accounts = [{"id": FIRST, "subject": self.subject}, {"id": SECOND, "subject": self.subject}]
+        capture = self.home / "env.txt"
+        env = self.plain_shell_env(TEST_CAPTURE_ENV=str(capture))
+
+        def launch():
+            result = self.run_helper("auto", "prompt", env=env)
+            values = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+            self.assertEqual(result.returncode, 0)
+            return Path(values["CLAUDE_CONFIG_DIR"]).resolve().parent.name
+
+        self.write_launch(accounts, "manual", selected_account_id=SECOND)
+        self.assertEqual(launch(), SECOND)
+        self.write_quota(SECOND, 100)
+        denied = self.run_helper("auto", "prompt", env=env, check=False)
+        self.assertEqual(denied.returncode, 78)
+        self.assertIn("手动选择", denied.stderr)
+        self.assertEqual(denied.stdout, "")
+
+        self.write_quota(SECOND, 10)
+        self.write_launch(accounts, "exhaust", selected_account_id=FIRST, selected_account_revision="one",
+                          account_order=[FIRST, SECOND])
+        self.assertEqual(launch(), FIRST)
+        with helper._runtime["launch_guard"](self.home / ".local/share/cage/claude-accounts" / FIRST, login=True):
+            self.assertEqual(launch(), SECOND)
+        self.assertEqual(launch(), SECOND)
+        self.write_launch(accounts, "exhaust", selected_account_id=FIRST, selected_account_revision="two",
+                          account_order=[FIRST, SECOND])
+        self.assertEqual(launch(), FIRST)
 
     def test_plain_claude_starts_on_the_scheduled_account(self):
         capture = self.home / "env.txt"
@@ -109,6 +143,34 @@ printf '%s\\n' "$@"
         settings = json.loads(Path(lines[lines.index("--settings") + 1]).read_text())
         launcher = shlex.split(settings["statusLine"]["command"])[2]
         self.assertIn(self.subject, Path(launcher).read_text())
+
+    def test_resume_routes_to_original_profile_outside_rotation(self):
+        sid = "19b38927-d608-49d6-b690-870ef502e802"
+        root = self.home / ".local/share/cage/claude-accounts"
+        old = root / FIRST / "config"
+        project = self.home / "previous checkout"
+        slug = str(project).replace("/", "-").replace(" ", "-")
+        session = old / "projects" / slug / (sid + ".jsonl")
+        session.parent.mkdir(parents=True)
+        record = {"type": "user", "sessionId": sid, "cwd": str(project), "message": {"role": "user", "content": "fixture"}}
+        content = json.dumps(record) + "\n"
+        session.write_text(content)
+        (session.parent / "sessions-index.json").write_text('{"version":1,"entries":[]}')
+        self.write_quota(FIRST, 100)
+        self.write_launch([{"id": SECOND, "subject": self.subject}], history_accounts=[{"id": FIRST, "subject": self.subject}])
+        capture = self.home / "env.txt"
+        env = self.plain_shell_env(TEST_CAPTURE_ENV=str(capture))
+        for args in [("--resume", sid), ("-r=" + sid,), ("--resume",), ("--resume", str(session))]:
+            result = self.run_helper("auto", *args, env=env)
+            self.assertEqual(result.stdout.splitlines()[-len(args):], list(args))
+            observed = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+            self.assertEqual(Path(observed["CLAUDE_CONFIG_DIR"]).resolve(), old.resolve())
+        changed = self.run_helper("auto", "--resume", sid, env={**env, "TEST_EMAIL": "other@example.test"}, check=False)
+        self.assertNotEqual(changed.returncode, 0)
+        self.assertEqual(changed.stdout, "")
+        self.assertEqual(session.read_text(), content)
+        unknown = self.run_helper("auto", "--resume", str(self.home / (sid + ".jsonl")), env=env, check=False)
+        self.assertEqual(unknown.returncode, 78)
 
     def test_plain_claude_runs_unchanged_when_it_does_not_fit_the_schedule(self):
         capture = self.home / "env.txt"
@@ -126,12 +188,14 @@ printf '%s\\n' "$@"
             result, env = plain(*args, **extra)
             self.assertEqual(result.stdout.splitlines()[-len(args):], list(args))
             self.assertEqual(env.get("CLAUDE_CONFIG_DIR"), extra.get("CLAUDE_CONFIG_DIR"))
-        # A profile that no longer answers as the published login falls back.
+        # A profile that no longer answers as the published login is refused.
         self.write_launch([{"id": FIRST, "subject": "e" * 64, "preferred": True}])
-        result, env = plain("hello")
-        self.assertEqual(result.stdout.splitlines(), ["hello"])
-        self.assertIn("默认登录", result.stderr)
-        self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+        capture.unlink()
+        result = self.run_helper("auto", "hello", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture)), check=False)
+        self.assertEqual(result.returncode, 78)
+        self.assertIn("暂无可启动", result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("CLAUDE_CONFIG_DIR=", capture.read_text())  # only the managed identity probe ran
 
     def test_isolated_cli_snapshot_and_subject_bound_quota(self):
         reset = int(time.time()) + 3600

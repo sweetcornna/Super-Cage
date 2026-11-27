@@ -79,10 +79,10 @@ func TestClaudeCrossAccountTranscriptResume(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 65*time.Second)
 	defer cancel()
-	run := func(account int, args ...string) []byte {
+	runIn := func(t *testing.T, dir string, account int, args ...string) []byte {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, "/usr/bin/sandbox-exec", append([]string{"-p", policy, binary}, args...)...)
-		cmd.Dir = project
+		cmd.Dir = dir
 		cmd.Env = []string{"HOME=" + home, "PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=" + configs[account], "HTTP_PROXY=" + proxy, "HTTPS_PROXY=" + proxy, "NO_PROXY=localhost,127.0.0.1", "NODE_EXTRA_CA_CERTS=" + ca, "SSL_CERT_FILE=" + ca, "DISABLE_AUTOUPDATER=1", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"}
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -90,6 +90,7 @@ func TestClaudeCrossAccountTranscriptResume(t *testing.T) {
 		}
 		return out
 	}
+	run := func(account int, args ...string) []byte { return runIn(t, project, account, args...) }
 	for i := range configs {
 		out := run(i, "auth", "status")
 		if !strings.Contains(string(out), fmt.Sprintf("account-%d@example.invalid", i)) || !strings.Contains(string(out), "claude.ai") {
@@ -133,6 +134,13 @@ func TestClaudeCrossAccountTranscriptResume(t *testing.T) {
 		t.Fatal("resumed history not persisted in target account")
 	}
 	t.Logf("official CLI: two isolated subscription identities; source requests=%d target requests=%d; completed tool count unchanged; source transcript unchanged; target history persisted", aRequests.Load(), bRequests.Load())
+	t.Run("original account by ID from another checkout", func(t *testing.T) {
+		resumed.Store(false)
+		out := runIn(t, t.TempDir(), 0, append(append([]string{}, flags...), "--resume", sourceID, "follow-up")...)
+		if !resumed.Load() || !strings.Contains(string(out), sourceID) {
+			t.Fatalf("original history did not resume by ID: %s", out)
+		}
+	})
 }
 
 // A turn that ended on a quota limit can leave a tool call without a

@@ -102,6 +102,10 @@ func (s *Server) clientRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := strings.TrimPrefix(r.URL.Path, "/api/client/")
+	if path == externalSessionClientPath && g.desktop != nil {
+		s.externalSessionRestoreHTTP(w, r)
+		return
+	}
 	if strings.HasPrefix(path, "tenant/") {
 		if g.desktop == nil {
 			http.NotFound(w, r)

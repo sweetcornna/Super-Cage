@@ -543,6 +543,7 @@ func (s *Server) proxyLogs(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	jsonReply(w, map[string]any{"lines": lines})
 }
+
 const proxySubscriptionRetryInterval = 15 * time.Minute
 
 func (s *Server) recordProxyRefreshAttempt(id string) {
@@ -618,11 +619,15 @@ func (s *Server) checkProxyHealth() {
 	p, err := managedproxy.Load(s.profile)
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 2*time.Second)
 	defer cancel()
-	if err == nil && cfg.RequireManagedProxy(s.profile) == nil && managedproxy.Running(ctx, s.profile, p) {
+	applied := err == nil && cfg.RequireManagedProxy(s.profile) == nil
+	if applied && proxyCoreRunning(ctx, s.profile, p) {
 		return
 	}
 	_ = s.closeProxyGate("内置代理已中断或节点状态变化，请重试应用节点")
 	s.mu.Lock()
 	s.safety.monitorError = "内置代理未就绪；外网保持关闭"
 	s.mu.Unlock()
+	if applied {
+		s.requestWorkbenchProxyRecovery()
+	}
 }

@@ -17,8 +17,9 @@ Design principles:
 """
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import ipaddress
@@ -26,11 +27,13 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import secrets
 import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -296,6 +299,23 @@ def _cache_set(cache, key, value, lock=None):
         cache[key] = value
 
 
+def executable_version(binary_path, version_args, path_str, timeout=4):
+    env = dict(os.environ, PATH=path_str, DISABLE_AUTOUPDATER="1", NO_COLOR="1")
+    args = [binary_path, *(version_args or ["--version"])]
+    res = subprocess.run(args, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT, text=True, errors="replace", timeout=timeout)
+    output = (res.stdout or "").strip()
+    if res.returncode:
+        missing = re.search(r"Missing optional dependency (@openai/codex-[\w-]+)", output)
+        reason = f"缺少平台包 {missing[1]}" if missing else f"退出码 {res.returncode}"
+        raise ValueError(f"{Path(binary_path).name} 版本验证失败（{reason}）")
+    for line in output.splitlines()[:5]:
+        match = VERSION_RE.search(line)
+        if match:
+            return match[1]
+    return output.splitlines()[0][:64] if output else ""
+
+
 def read_cli_version(binary_path, version_args, path_str, cache, cache_lock=None):
     fp = binary_fingerprint(binary_path)
     if fp:
@@ -304,24 +324,9 @@ def read_cli_version(binary_path, version_args, path_str, cache, cache_lock=None
             return cached, False
     ver = fast_npm_package_version(binary_path)
     if not ver:
-        env = os.environ.copy()
-        env["PATH"] = path_str
-        env["DISABLE_AUTOUPDATER"] = "1"
-        env["NO_COLOR"] = "1"
-        args = [binary_path, *(version_args or ["--version"])]
         try:
-            res = subprocess.run(args, env=env, stdin=subprocess.DEVNULL,
-                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                 text=True, timeout=4)
-            output = (res.stdout or "").strip()
-            for line in output.splitlines()[:5]:
-                m = VERSION_RE.search(line)
-                if m:
-                    ver = m.group(1)
-                    break
-            if not ver and res.returncode == 0 and output:
-                ver = output.splitlines()[0].strip()[:64]
-        except (OSError, subprocess.SubprocessError):
+            ver = executable_version(binary_path, version_args, path_str)
+        except (OSError, ValueError, subprocess.SubprocessError):
             ver = ""
     if fp and ver:
         _cache_set(cache, fp, ver, cache_lock)
@@ -506,7 +511,7 @@ def _parse_codex_window(window, observed_at, now):
 
 def _find_newest_codex_rollouts(sessions_dir, limit=3):
     sessions_dir = Path(sessions_dir)
-    if not sessions_dir.is_dir():
+    if sessions_dir.is_symlink() or not sessions_dir.is_dir():
         return []
     found = []
 
@@ -518,7 +523,7 @@ def _find_newest_codex_rollouts(sessions_dir, limit=3):
         except OSError:
             return
         for entry in entries:
-            if entry.is_file() and entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
+            if not entry.is_symlink() and entry.is_file() and entry.name.startswith("rollout-") and entry.name.endswith(".jsonl"):
                 found.append(entry)
                 if len(found) >= limit:
                     return
@@ -532,7 +537,7 @@ def _find_newest_codex_rollouts(sessions_dir, limit=3):
     return found
 
 
-def read_codex_quota(cfg_dir):
+def read_codex_quota(cfg_dir, *, observed_after=None):
     """Fast O(1) bounded reader for Codex 5h/7d rate_limits from newest rollout-*.jsonl files."""
     rollouts = _find_newest_codex_rollouts(Path(cfg_dir) / "sessions", limit=3)
     if not rollouts:
@@ -572,9 +577,15 @@ def read_codex_quota(cfg_dir):
                 rl = obj["payload"].get("rate_limits")
             if not isinstance(rl, dict) and isinstance(obj.get("msg"), dict):
                 rl = obj["msg"].get("rate_limits")
-            if not isinstance(rl, dict):
+            if not isinstance(rl, dict) or rl.get("limit_id") not in (None, "codex"):
                 continue
-            obs = _parse_timestamp_seconds(obj.get("timestamp")) or _parse_timestamp_seconds(rl.get("observed_at")) or file_mtime
+            obs = _parse_timestamp_seconds(obj.get("timestamp")) or _parse_timestamp_seconds(rl.get("observed_at"))
+            if observed_after is not None:
+                event = obj.get("payload")
+                if (obj.get("type") != "event_msg" or not isinstance(event, dict) or event.get("type") != "token_count"
+                        or event.get("rate_limits") is not rl or not obs or not observed_after < obs <= now):
+                    continue
+            obs = obs or file_mtime
             if not obs or obs > now + 300:
                 obs = min(file_mtime, now)
             if five_hour is None:
@@ -707,7 +718,7 @@ def _candidate_oauth_roots(spec, dirs):
     return roots
 
 
-def inspect_oauth_files(spec, dirs):
+def inspect_oauth_files(spec, dirs, *, include_quota=True):
     """Extract ONLY non-secret public identity from an agent's config/data directory."""
     agent_id = spec.get("id", "")
     cfg = dirs["config"]
@@ -737,7 +748,7 @@ def inspect_oauth_files(spec, dirs):
                     "plan": str(plan),
                     "expires_at": int(exp) if isinstance(exp, (int, float)) else 0,
                 }
-                quota = read_codex_quota(cfg)
+                quota = read_codex_quota(cfg) if include_quota else None
                 if quota:
                     out["quota"] = quota
                 return out
@@ -996,6 +1007,59 @@ def ensure_npm_user_prefix(env):
         pass
 
 
+def install_codex_npm(npm, env):
+    """Verify the platform payload before publishing a normal user-global npm installation."""
+    import ctypes
+
+    prefix = HOME / ".local"
+    package = prefix / "lib/node_modules/@openai/codex"
+    launcher = prefix / "bin/codex"
+    package.parent.mkdir(parents=True, exist_ok=True)
+    launcher.parent.mkdir(parents=True, exist_ok=True)
+    with (package.parent / ".cage-codex.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if package.is_symlink() or (package.exists() and
+                read_json(package / "package.json", {}).get("name") != "@openai/codex"):
+            raise ValueError(f"现有目录不属于 npm 的 Codex 安装：{package}")
+        if os.path.lexists(launcher) and (not launcher.is_symlink() or
+                launcher.resolve() != (package / "bin/codex.js").resolve()):
+            raise ValueError(f"现有 {launcher} 来自其他安装渠道，请使用原渠道升级")
+        with tempfile.TemporaryDirectory(prefix=".cage-install-", dir=package.parent) as tmp:
+            stage = Path(tmp)
+            subprocess.run([npm, "install", "--include=optional", "--registry=https://registry.npmjs.org",
+                            "--prefix", tmp, "--global", "@openai/codex@latest"],
+                           env=env, stdin=subprocess.DEVNULL, check=True)
+            new = stage / "lib/node_modules/@openai/codex"
+            try:
+                version = executable_version(str(stage / "bin/codex"), ["--version"], env["PATH"], timeout=12)
+            except ValueError as exc:
+                free_mib = shutil.disk_usage(prefix).free // (1024 * 1024)
+                raise ValueError(f"{exc}。安装盘可用 {free_mib} MiB，请检查 npm 的下载和解包日志。") from exc
+            if not version or version != read_json(new / "package.json", {}).get("version"):
+                raise ValueError("下载的 Codex 平台程序与 npm 包版本不符，已保留原安装")
+            # npm's standard relative launcher remains valid across manual npm updates.
+            created_link = not os.path.lexists(launcher)
+            if created_link:
+                launcher.symlink_to(os.path.relpath(package / "bin/codex.js", launcher.parent))
+            try:
+                if package.exists():
+                    # Both supported guest OSes can swap non-empty directories atomically.
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    src, dst = os.fsencode(new), os.fsencode(package)
+                    if sys.platform == "darwin":
+                        status = libc.renamex_np(src, dst, 2)  # RENAME_SWAP
+                    else:
+                        status = libc.renameat2(-100, src, -100, dst, 2)  # RENAME_EXCHANGE
+                    if status != 0:
+                        raise OSError(ctypes.get_errno(), "无法切换 Codex 安装目录")
+                else:
+                    new.rename(package)
+            except BaseException:
+                if created_link:
+                    launcher.unlink(missing_ok=True)
+                raise
+
+
 def install_agent(payload):
     spec = payload["spec"]
     channel = payload["channel"]
@@ -1008,7 +1072,10 @@ def install_agent(payload):
     env["npm_config_audit"] = "false"
     env["npm_config_fund"] = "false"
 
-    if kind == "existing":
+    if kind == "builtin" and spec["id"] == "claude":
+        subprocess.run(["/bin/bash", "/usr/local/share/cage/upgrade-claude.sh"], env=env,
+                       stdin=subprocess.DEVNULL, check=True)
+    elif kind == "existing":
         binary = find_binary(spec, path_str)
         if not binary:
             raise ValueError(f"未在环境 PATH 中找到 {spec['binary']}，请先确认已安装")
@@ -1021,12 +1088,15 @@ def install_agent(payload):
             raise ValueError("环境中未找到 npm，请先安装 Node.js 或同步环境工具")
         ensure_npm_user_prefix(env)
         print(f"Installing {pkg}@latest via npm official registry...", flush=True)
-        res = subprocess.run(
-            [npm, "install", "--registry=https://registry.npmjs.org", "--prefix", str(HOME / ".local"), "--global", f"{pkg}@latest"],
-            env=env, stdin=subprocess.DEVNULL,
-        )
-        if res.returncode != 0:
-            raise ValueError(f"npm 安装 {pkg} 失败（退出码 {res.returncode}）")
+        if pkg == "@openai/codex" and spec["id"] == "codex":
+            install_codex_npm(npm, env)
+        else:
+            res = subprocess.run(
+                [npm, "install", "--include=optional", "--registry=https://registry.npmjs.org", "--prefix", str(HOME / ".local"), "--global", f"{pkg}@latest"],
+                env=env, stdin=subprocess.DEVNULL,
+            )
+            if res.returncode != 0:
+                raise ValueError(f"npm 安装 {pkg} 失败（退出码 {res.returncode}）")
     elif kind == "uv":
         pkg = channel.get("package", "")
         if not PY_PKG_RE.match(pkg):
@@ -1094,9 +1164,48 @@ def install_agent(payload):
     binary = find_binary(spec, refreshed_path)
     if not binary:
         raise ValueError(f"安装完成但未在 PATH 中找到可执行文件 {spec['binary']}，请检查安装日志")
-    version, _ = read_cli_version(binary, spec.get("version_args"), refreshed_path, {})
+    # npm may exit zero even when a platform-specific optional binary was omitted.
+    version = executable_version(binary, spec.get("version_args"), refreshed_path)
     print(f"Installed {spec['name']} ({version or 'ready'}) at {binary}", flush=True)
     return {"installed": True, "binary_path": binary, "version": version}
+
+
+def upgrade_agent(argv, catalog):
+    if argv in (["-h"], ["--help"]):
+        print("Usage: cage-agent upgrade [agent-id]")
+        return 0
+    if len(argv) > 1:
+        raise ValueError("用法：cage-agent upgrade [agent-id]")
+    if not isinstance(catalog, list) or not catalog:
+        raise ValueError("找不到 Cage 的 Agent 目录，请先同步客机组件")
+    path_str = enriched_path()
+    installed = {}
+    for spec in catalog:
+        channels = [c for c in spec["channels"] if c["kind"] != "existing"]
+        if channels and find_binary(spec, path_str):
+            channel = next((c for c in channels if c.get("recommended")), channels[0])
+            installed[spec["id"]] = (spec, channel)
+    if not installed:
+        raise ValueError("没有检测到可升级的 Agent CLI")
+    if argv:
+        choice = argv[0]
+    else:
+        ids = list(installed)
+        for i, (spec, channel) in enumerate(installed.values(), start=1):
+            print(f"{i}. {spec['name']} ({spec['id']}) · {channel['label']}")
+        try:
+            choice = input("选择要升级的 Agent（编号或 ID，回车取消）：").strip()
+        except EOFError:
+            choice = ""
+        if not choice:
+            return 0
+        if choice.isascii() and choice.isdecimal() and 1 <= int(choice) <= len(ids):
+            choice = ids[int(choice) - 1]
+    if choice not in installed:
+        raise ValueError("选择的 Agent 未安装或没有可用的升级渠道")
+    spec, channel = installed[choice]
+    install_agent({"spec": spec, "channel": channel})
+    return 0
 
 
 def _is_in_safe_user_bin_dir(path):
@@ -1664,23 +1773,39 @@ def ensure_shim(spec):
     return shim_dir
 
 
-def exec_agent(spec, account_id, extra_args):
+def exec_agent(spec, account_id, extra_args, *, codex_subject="", require_api_key=False, before_exec=None, quiet=False):
     original_umask = os.umask(0o077)
     base = profile_root(spec["id"], account_id)
     with _profile_lock(base):
+        if require_api_key and not read_api_key_meta(base):
+            raise ValueError("Account API key is unavailable")
         base, dirs, env = build_agent_env(spec, account_id, for_login=False)
         sync_shared_resources(spec, base, dirs)
         write_profile_env(spec, account_id)
     binary = find_binary(spec, env["PATH"])
     if not binary:
-        print(f"未找到 {spec['name']} ({spec['binary']})，请先在「设置 → Agent CLI」中安装。", file=sys.stderr)
+        if not quiet:
+            print(f"未找到 {spec['name']} ({spec['binary']})，请先在「设置 → Agent CLI」中安装。", file=sys.stderr)
         return 1
+    if codex_subject:
+        found = inspect_oauth_files(spec, dirs, include_quota=False)
+        email = found.get("email", "").strip().lower()
+        org = found.get("organization", "").strip()
+        digest = hashlib.sha256(f"{email}\n{org}".encode()).hexdigest()
+        if not email or digest != codex_subject or found.get("auth_mode") != "oauth":
+            raise ValueError("Codex account identity changed")
+        status = subprocess.run([binary, "login", "status"], env=env, timeout=10,
+                                stdin=subprocess.DEVNULL, capture_output=True)
+        if status.returncode != 0 or b"Logged in using ChatGPT" not in (status.stdout + status.stderr).splitlines():
+            raise ValueError("Codex account login unavailable")
     args = [binary]
     iso = spec.get("isolation") or {}
     if account_id != "default" and iso.get("mode") == "flag_dir" and iso.get("config_flag"):
         args.extend([iso["config_flag"], str(dirs["config"])])
     args.extend(extra_args)
     os.umask(original_umask)
+    if before_exec is not None:
+        before_exec()
     os.execve(binary, args, env)
 
 
@@ -1729,7 +1854,9 @@ def run_login(payload):
     signal.signal(signal.SIGTERM, interrupted)
     os.umask(original_umask)
     try:
-        return subprocess.call(cmd, cwd=HOME, env=env)
+        guard = _auto_client_runtime()["launch_guard"](base, login=True) if os.name != "nt" else nullcontext()
+        with guard:
+            return subprocess.call(cmd, cwd=HOME, env=env)
     finally:
         if os.path.isfile(OPEN_BIN):
             subprocess.run([OPEN_BIN, "--login-id", account_id, "--finish-login"],
@@ -1795,8 +1922,8 @@ def _ensure_shell_shims_hook():
     block = (
         f"{SHELL_SHIMS_MARKER_START}\n"
         'if [ -d "$HOME/.local/share/cage/auto-shims" ]; then\n'
-        '  case ":$PATH:" in\n'
-        '    *":$HOME/.local/share/cage/auto-shims:"*) ;;\n'
+        '  case "$PATH" in\n'
+        '    "$HOME/.local/share/cage/auto-shims"|"$HOME/.local/share/cage/auto-shims:"*) ;;\n'
         '    *) export PATH="$HOME/.local/share/cage/auto-shims:$PATH" ;;\n'
         '  esac\n'
         'fi\n'
@@ -1805,14 +1932,17 @@ def _ensure_shell_shims_hook():
         'fi\n'
         f"{SHELL_SHIMS_MARKER_END}\n"
     )
-    targets = [HOME / ".bashrc", HOME / ".profile", HOME / ".zshenv", HOME / ".zshrc"]
+    # sshd's noninteractive Bash reads .bashrc but common distro versions
+    # return immediately, so place PATH setup before that guard.
+    targets = [HOME / ".bashrc", HOME / ".profile", HOME / ".zshenv", HOME / ".zprofile", HOME / ".zshrc"]
+    targets.extend(rc for rc in (HOME / ".bash_profile", HOME / ".bash_login") if rc.is_file())
     has_zsh = bool(shutil.which("zsh"))
     for rc in targets:
         try:
             exists = rc.exists()
             if rc.is_symlink():
                 continue
-            if not exists and rc.name in (".zshenv", ".zshrc") and not has_zsh:
+            if not exists and rc.name.startswith(".z") and not has_zsh:
                 continue
             existing = rc.read_text(encoding="utf-8", errors="ignore") if exists else ""
             if SHELL_SHIMS_MARKER_START in existing and SHELL_SHIMS_MARKER_END in existing:
@@ -1820,12 +1950,16 @@ def _ensure_shell_shims_hook():
                 end_idx = existing.index(SHELL_SHIMS_MARKER_END) + len(SHELL_SHIMS_MARKER_END)
                 if end_idx < len(existing) and existing[end_idx] == "\n":
                     end_idx += 1
-                updated = existing[:start_idx] + block + existing[end_idx:]
-                if updated == existing:
-                    continue
+                existing_without_block = existing[:start_idx] + existing[end_idx:]
             else:
-                sep = "" if (not existing or existing.endswith("\n")) else "\n"
-                updated = existing + sep + block
+                existing_without_block = existing
+            if rc.name == ".bashrc":
+                updated = block + existing_without_block
+            else:
+                sep = "" if (not existing_without_block or existing_without_block.endswith("\n")) else "\n"
+                updated = existing_without_block + sep + block
+            if updated == existing:
+                continue
             mode = (rc.stat().st_mode & 0o777) if exists else 0o644
             atomic_write_text(rc, updated, mode=mode)
         except OSError:
@@ -1895,20 +2029,20 @@ def _posix_strip_and_exec(binary_name):
 def _write_claude_auto_shim():
     helper = _claude_account_helper()
     q_helper = shlex.quote(helper)
-    q_launch = shlex.quote(str(CLAUDE_LAUNCH_FILE))
     q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     content = (
         "#!/bin/sh\n"
         f'if [ -f {q_takeover} ] || [ "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec("claude")
         + 'fi\n'
-        f'if [ -n "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n'
+        f'if [ -n "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" ] && [ "$CAGE_CLAUDE_ACCOUNT_ID" != "auto" ] && [ -x {q_helper} ]; then\n'
         f'  exec {q_helper} run "$CAGE_CLAUDE_ACCOUNT_ID" "$@"\n'
         'fi\n'
-        f'if [ -z "${{CLAUDE_CONFIG_DIR:-}}" ] && [ -r {q_launch} ] && [ -x {q_helper} ]; then\n'
-        f'  exec {q_helper} auto "$@"\n'
+        f'if [ -x {q_helper} ]; then\n'
+        f'  CAGE_REQUIRE_CLAUDE_SCHEDULE=1 exec {q_helper} auto "$@"\n'
         'fi\n'
-        + _posix_strip_and_exec("claude")
+        'echo "Super Cage Claude 调度组件尚未就绪。" >&2\n'
+        'exit 78\n'
     )
     shim = AUTO_SHIMS_DIR / "claude"
     if not shim.exists() or shim.read_text(encoding="utf-8", errors="ignore") != content:
@@ -1918,37 +2052,39 @@ def _write_claude_auto_shim():
 def _write_codex_auto_shim(has_native_codex, has_agent_codex):
     helper = _codex_account_helper()
     q_helper = shlex.quote(helper)
-    q_native_launch = shlex.quote(str(CODEX_LAUNCH_FILE))
-    q_agent_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
     q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_py = shlex.quote(sys.executable)
     q_rt = shlex.quote(str(Path(__file__).resolve()))
-    q_accts = shlex.quote(str(ACCOUNTS_ROOT / "codex"))
     parts = [
         "#!/bin/sh\n",
         f'if [ -f {q_takeover} ] || [ "${{CAGE_CODEX_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_CLI_ACCOUNT_CODEX:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n',
         _posix_strip_and_exec("codex"),
         'fi\n',
-        f'if [ -n "${{CAGE_CODEX_ACCOUNT_ID:-}}" ] && [ -x {q_helper} ]; then\n',
+        'if [ -n "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ "$CAGE_CODEX_ACCOUNT_ID" != "auto" ]; then\n',
+        f'  [ -x {q_helper} ] || {{ echo "Super Cage Codex 调度组件尚未就绪。" >&2; exit 78; }}\n',
         f'  exec {q_helper} run "$CAGE_CODEX_ACCOUNT_ID" "$@"\n',
         'fi\n',
         'if [ -n "${CAGE_CLI_ACCOUNT_CODEX:-}" ] && [ "${CAGE_CLI_ACCOUNT_CODEX}" != "auto" ]; then\n',
-        f'  _env={q_accts}/"$CAGE_CLI_ACCOUNT_CODEX"/profile.env\n',
-        '  if [ -r "$_env" ]; then\n',
-        '    . "$_env"\n',
-        _posix_strip_and_exec("codex"),
-        '  fi\n',
+        f'  exec {q_py} -I {q_rt} auto-exec codex codex "$@"\n',
         'fi\n',
     ]
     if has_native_codex:
         parts.extend([
-            f'if [ -z "${{CODEX_HOME:-}}" ] && [ -r {q_native_launch} ] && [ -x {q_helper} ]; then\n',
-            f'  exec {q_helper} auto "$@"\n',
+            f'if [ -x {q_helper} ] && {{\n',
+            '  [ -z "${CODEX_HOME:-}" ] || {\n',
+            '    [ "${TERM_PROGRAM:-}" = "Orca" ] && [ -n "${ORCA_USER_DATA_PATH:-}" ]\n',
+            '  }\n',
+            '}; then\n',
+            f'  CAGE_REQUIRE_CODEX_SCHEDULE=1 exec {q_helper} auto "$@"\n',
+            'fi\n',
+            'if [ -z "${CODEX_HOME:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then\n',
+            '  echo "Super Cage Codex 调度组件尚未就绪。" >&2\n',
+            '  exit 78\n',
             'fi\n',
         ])
     if has_agent_codex:
         parts.extend([
-            f'if [ -z "${{CODEX_HOME:-}}" ] && [ -r {q_agent_launch} ]; then\n',
+            'if [ -z "${CODEX_HOME:-}" ]; then\n',
             f'  exec {q_py} -I {q_rt} auto-exec codex codex "$@"\n',
             'fi\n',
         ])
@@ -1959,29 +2095,13 @@ def _write_codex_auto_shim(has_native_codex, has_agent_codex):
         atomic_write_text(shim, content, mode=0o755)
 
 
-def _write_generic_auto_shim(agent_id, binary_name, spec):
+def _write_generic_auto_shim(agent_id, binary_name):
     per_agent_var = _agent_account_env_var(agent_id)
     q_py = shlex.quote(sys.executable)
     q_rt = shlex.quote(str(Path(__file__).resolve()))
-    q_accts = shlex.quote(str(ACCOUNTS_ROOT / agent_id))
-    q_launch = shlex.quote(str(AGENT_LAUNCH_FILE))
     q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_agent = shlex.quote(agent_id)
     q_bin_name = shlex.quote(binary_name)
-
-    iso = spec.get("isolation") or {}
-    config_flag = iso.get("config_flag") or ""
-    use_flag_dir = iso.get("mode") == "flag_dir" and bool(FLAG_RE.match(config_flag))
-
-    pinned_exec = ""
-    if use_flag_dir:
-        q_flag = shlex.quote(config_flag)
-        pinned_exec = (
-            '    _clean_bin=""\n'
-            + _posix_strip_and_exec(binary_name).replace('exec "$_bin" "$@"', f'exec "$_bin" {q_flag} "$_profile/config" "$@"')
-        )
-    else:
-        pinned_exec = _posix_strip_and_exec(binary_name)
 
     content = (
         "#!/bin/sh\n"
@@ -1989,35 +2109,19 @@ def _write_generic_auto_shim(agent_id, binary_name, spec):
         f'if [ -f {q_takeover} ] || [ "$_pin" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec(binary_name)
         + 'fi\n'
-        'if [ -n "$_pin" ] && [ "$_pin" != "auto" ]; then\n'
-        '  case "$_pin" in\n'
-        '    *[!0-9a-f]*) _pin="" ;;\n'
-        '    *) [ "${#_pin}" = 24 ] || _pin="" ;;\n'
-        '  esac\n'
-        '  if [ -n "$_pin" ]; then\n'
-        f'    _profile={q_accts}/"$_pin"\n'
-        '    if [ -r "$_profile/profile.env" ]; then\n'
-        '      . "$_profile/profile.env"\n'
-        + pinned_exec
-        + '    fi\n'
-        '  fi\n'
-        'fi\n'
-        f'if [ -r {q_launch} ]; then\n'
         f'  exec {q_py} -I {q_rt} auto-exec {q_agent} {q_bin_name} "$@"\n'
-        'fi\n'
-        + _posix_strip_and_exec(binary_name)
     )
     shim = AUTO_SHIMS_DIR / binary_name
     if not shim.exists() or shim.read_text(encoding="utf-8", errors="ignore") != content:
         atomic_write_text(shim, content, mode=0o755)
 
 
-def _launch_has_accounts(path):
+def _launch_is_managed(path):
     data = read_json(path)
     if not isinstance(data, dict):
-        return False
+        return path.exists()
     accts = data.get("accounts")
-    return isinstance(accts, list) and len(accts) > 0
+    return not isinstance(accts, list) or _auto_client_runtime()["native_schedule_managed"](data)
 
 
 def _clear_all_scheduling_artifacts():
@@ -2084,11 +2188,13 @@ def sync_auto_shims(payload=None):
 
     schedule = read_json(AGENT_LAUNCH_FILE)
     agents_map = schedule.get("agents") if isinstance(schedule, dict) and isinstance(schedule.get("agents"), dict) else {}
+    if AGENT_LAUNCH_FILE.exists() and not (isinstance(schedule, dict) and isinstance(schedule.get("agents"), dict)):
+        raise ValueError("Agent CLI 调度配置无法读取")
 
-    has_claude = _launch_has_accounts(CLAUDE_LAUNCH_FILE)
-    has_native_codex = _launch_has_accounts(CODEX_LAUNCH_FILE)
+    has_claude = _launch_is_managed(CLAUDE_LAUNCH_FILE)
+    has_native_codex = _launch_is_managed(CODEX_LAUNCH_FILE)
     codex_entry = agents_map.get("codex") if isinstance(agents_map.get("codex"), dict) else None
-    has_agent_codex = bool(codex_entry and isinstance(codex_entry.get("candidates"), list) and len(codex_entry["candidates"]) > 0)
+    has_agent_codex = bool(codex_entry and isinstance(codex_entry.get("candidates"), list))
 
     AUTO_SHIMS_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     desired = set()
@@ -2119,7 +2225,7 @@ def sync_auto_shims(payload=None):
             continue
         candidates = entry.get("candidates")
         spec = entry.get("spec")
-        if not isinstance(candidates, list) or not candidates or not isinstance(spec, dict):
+        if not isinstance(candidates, list) or not isinstance(spec, dict):
             continue
         for cand in candidates:
             gid = str((cand or {}).get("guest_id") or "")
@@ -2134,7 +2240,7 @@ def sync_auto_shims(payload=None):
         for bin_name in names:
             if not bin_name or "/" in bin_name or bin_name in ("claude", "codex") or any(ch in bin_name for ch in ("\x00", "\r", "\n")):
                 continue
-            _write_generic_auto_shim(agent_id, bin_name, spec)
+            _write_generic_auto_shim(agent_id, bin_name)
             desired.add(bin_name)
 
     # Remove stale shims for agents whose pools are now empty.
@@ -2154,130 +2260,85 @@ def sync_auto_shims(payload=None):
     return {"ok": True, "shims": sorted(desired), "dir": str(AUTO_SHIMS_DIR), "magpie_takeover": False}
 
 
-def _match_project_pin(pins, cwd_str):
-    if not isinstance(pins, dict) or not pins or not cwd_str:
-        return ""
-    best_len = -1
-    matched = ""
-    cwd_norm = cwd_str.rstrip("/") or "/"
-    for ws, target in pins.items():
-        if not isinstance(ws, str) or not isinstance(target, str) or not target.strip():
+def _auto_client_runtime():
+    candidates = [Path(__file__).resolve().with_name("client_runtime.py")]
+    if sys.platform == "darwin":
+        candidates.append(Path("/usr/local/libexec/cage-cli/client_runtime.py"))
+    else:
+        candidates.append(Path("/usr/local/bin/client_runtime.py"))
+    for path in candidates:
+        if path.is_file():
+            return runpy.run_path(path)
+    raise FileNotFoundError("Cage guest client runtime")
+
+
+def _auto_candidates(agent_id, entry, runtime):
+    candidates = []
+    now = int(time.time())
+    for item in entry["candidates"]:
+        if not isinstance(item, dict):
             continue
-        forms = [ws]
-        try:
-            resolved_ws = str(Path(ws).resolve())
-            if resolved_ws != ws:
-                forms.append(resolved_ws)
-        except OSError:
-            pass
-        for cand_ws in forms:
-            ws_norm = cand_ws.rstrip("/") or "/"
-            if cwd_norm == ws_norm or cwd_norm.startswith(ws_norm + "/"):
-                if len(ws_norm) > best_len:
-                    best_len = len(ws_norm)
-                    matched = target.strip()
-    return matched
-
-
-def _codex_candidate_exhausted(agent_id, guest_id, now):
-    if agent_id != "codex" or guest_id == "default":
-        return False
-    try:
-        cfg_dir = profile_root("codex", guest_id) / "config"
-        quota = read_codex_quota(cfg_dir)
-    except Exception:
-        return False
-    if not isinstance(quota, dict):
-        return False
-    for key in ("five_hour", "seven_day"):
-        w = quota.get(key)
-        if not isinstance(w, dict):
+        cid, gid = item.get("id"), item.get("guest_id")
+        if not isinstance(cid, str) or not cid or not isinstance(gid, str) or not (gid == "default" or ACCOUNT_ID_RE.fullmatch(gid)):
             continue
-        used = w.get("used_percentage", 0)
-        resets_at = w.get("resets_at", 0)
-        obs = w.get("observed_at", 0)
-        fresh = obs > 0 and (now - obs) <= 15 * 60
-        if used >= 100 and (resets_at > now or fresh):
-            return True
-    return False
-
-
-def _pick_auto_candidate(agent_id, entry, cwd_str, now=None):
-    now = int(time.time()) if now is None else int(now)
-    candidates = entry.get("candidates")
-    if not isinstance(candidates, list) or not candidates:
-        return None
-    mode = str(entry.get("mode") or "smart").strip().lower()
-    pin = _match_project_pin(entry.get("project_pins"), cwd_str)
-
-    eligible = []
-    for cand in candidates[:64]:
-        if not isinstance(cand, dict):
+        cooldown = item.get("cooldown_until")
+        if type(cooldown) is int and cooldown > now:
             continue
-        gid = str(cand.get("guest_id") or "").strip()
-        cid = str(cand.get("id") or "").strip()
-        if not gid or (gid != "default" and not ACCOUNT_ID_RE.match(gid)):
-            continue
-        cooldown = cand.get("cooldown_until") or 0
-        if isinstance(cooldown, (int, float)) and cooldown > now:
-            continue
-        if pin.startswith("account:"):
-            want = pin[len("account:"):]
-            if cid != want and gid != want:
-                continue
-        elif pin.startswith("group:"):
-            want_group = pin[len("group:"):]
-            if str(cand.get("handoff_group") or "") != want_group:
-                continue
-        if _codex_candidate_exhausted(agent_id, gid, now):
-            continue
-        eligible.append(cand)
-
-    if not eligible:
-        return None
-    if len(eligible) == 1 or mode in ("sequential", "quota_first", "drain", "sticky_project"):
-        return eligible[0]
-
-    # For balanced (all eligible) or smart (top-tier within 5 score points), rotate via a tiny 0600 cursor
-    # so consecutive invocations across Orca / Herdr / scripts distribute load smoothly.
-    pool = eligible
-    if mode == "smart":
-        top_score = eligible[0].get("score")
-        if isinstance(top_score, (int, float)):
-            near = [c for c in eligible if isinstance(c.get("score"), (int, float)) and (top_score - c["score"]) <= 5.0]
-            if near:
-                pool = near
-    if len(pool) == 1:
-        return pool[0]
-
-    rr_dir = ACCOUNTS_ROOT / agent_id
-    rr_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    rr_file = rr_dir / ".auto-rr"
-    idx = 0
-    try:
-        fd = os.open(str(rr_file), os.O_RDWR | os.O_CREAT, 0o600)
-        os.chmod(rr_file, 0o600)
-        with os.fdopen(fd, "r+") as fp:
-            fcntl.flock(fp, fcntl.LOCK_EX)
+        base = profile_root(agent_id, gid)
+        quota = item.get("quota")
+        expected = item.get("subject")
+        if agent_id == "codex" and isinstance(expected, str) and re.fullmatch("[a-f0-9]{64}", expected):
+            config = resolve_dirs(entry["spec"], base)["config"]
             try:
-                raw = fp.read().strip()
-                last_id = raw
-                ids = [str(c.get("guest_id") or "") for c in pool]
-                if last_id in ids:
-                    idx = (ids.index(last_id) + 1) % len(pool)
-                chosen = pool[idx]
-                fp.seek(0)
-                fp.truncate()
-                fp.write(str(chosen.get("guest_id") or ""))
-                fp.flush()
-                return chosen
-            finally:
-                fcntl.flock(fp, fcntl.LOCK_UN)
-    except OSError:
-        return pool[0]
+                # Ignore previous logins' rollouts. The account subject is
+                # verified again under its launch guard before exec.
+                credential_write = int((config / "auth.json").stat().st_mtime)
+                live = read_codex_quota(config, observed_after=credential_write)
+                quota = runtime["merge_scheduling_quota"](quota, live)
+            except OSError:
+                pass
+        headroom = runtime["scheduling_headroom"](quota, now)
+        if headroom is None:
+            continue
+        load = runtime["launch_load"](base, item.get("active"), item.get("max_concurrency"))
+        if load is not None:
+            candidates.append({**item, "headroom": headroom, "load": load})
+    return candidates
 
 
-def _exec_real_binary(binary_name, extra_args):
+def _auto_schedule_entry(agent_id):
+    schedule = read_json(AGENT_LAUNCH_FILE)
+    agents_map = schedule.get("agents") if isinstance(schedule, dict) else None
+    if not isinstance(agents_map, dict):
+        return None
+    if agent_id not in agents_map:
+        return False
+    entry = agents_map[agent_id]
+    if (isinstance(entry, dict) and isinstance(entry.get("spec"), dict) and entry["spec"].get("id") == agent_id
+            and isinstance(entry.get("candidates"), list)):
+        return entry
+    return None
+
+
+def _schedule_cursor(payload):
+    agent_id = payload.get("agent_id")
+    if not isinstance(agent_id, str) or not CLI_ID_RE.fullmatch(agent_id):
+        raise ValueError("invalid agent_id")
+    if MAGPIE_TAKEOVER_FILE.is_file():
+        return {}
+    if agent_id == "claude" or (agent_id == "codex" and payload.get("codex_native") is True):
+        launch = CLAUDE_LAUNCH_FILE if agent_id == "claude" else CODEX_LAUNCH_FILE
+        schedule = read_json(launch)
+        directory = launch.parent
+    else:
+        schedule = _auto_schedule_entry(agent_id)
+        directory = ACCOUNTS_ROOT / agent_id
+    if not isinstance(schedule, dict):
+        return {}
+    return _auto_client_runtime()["exhaust_cursor"](directory, schedule)
+
+
+def _exec_real_binary(binary_name, extra_args, *, before_exec=None):
     path_str = enriched_path()
     binary = shutil.which(binary_name, path=path_str)
     if not binary:
@@ -2285,27 +2346,58 @@ def _exec_real_binary(binary_name, extra_args):
         return 127
     env = os.environ.copy()
     env["PATH"] = path_str
+    if before_exec is not None:
+        before_exec()
     os.execve(binary, [binary, *extra_args], env)
+
+
+def _exec_pinned_agent(agent_id, binary_name, account, extra_args):
+    if ACCOUNT_ID_RE.fullmatch(account):
+        base = profile_root(agent_id, account)
+        entry = _auto_schedule_entry(agent_id)
+        spec = entry["spec"] if entry else read_json(SHIMS_ROOT / agent_id / "spec.json")
+        if isinstance(spec, dict) and spec.get("id") == agent_id and (base / "profile.env").is_file():
+            try:
+                with _auto_client_runtime()["launch_guard"](base):
+                    return exec_agent({**spec, "binary": binary_name, "fallback_binaries": []}, account, extra_args)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+    print("绑定账号的配置无效、尚未就绪或正在登录。", file=sys.stderr)
+    return 78
 
 
 def auto_exec_agent(agent_id, binary_name, extra_args):
     """Dynamically schedule a non-Claude Agent CLI invocation from launch.json.
     Anything explicit or administrative bypasses scheduling and runs the real CLI."""
-    if not CLI_ID_RE.match(agent_id):
-        return _exec_real_binary(binary_name, extra_args)
+    required = os.environ.pop("CAGE_REQUIRE_AGENT_SCHEDULE", "") == "1"
+    if not CLI_ID_RE.fullmatch(agent_id):
+        print("Agent CLI 调度配置中的类型无效。", file=sys.stderr)
+        return 78
 
     disabled = (
         MAGPIE_TAKEOVER_FILE.is_file()
         or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
     )
-    if disabled or (extra_args and extra_args[0] in AUTO_UNSCHEDULED_ARGS):
+    account_var = _agent_account_env_var(agent_id)
+    pinned = os.environ.get(account_var) or os.environ.get("CAGE_CLI_ACCOUNT_ID", "")
+    if disabled or pinned == "default":
         return _exec_real_binary(binary_name, extra_args)
+    if pinned not in ("", "auto"):
+        return _exec_pinned_agent(agent_id, binary_name, pinned, extra_args)
+    if extra_args and extra_args[0] in AUTO_UNSCHEDULED_ARGS:
+        return _exec_real_binary(binary_name, extra_args)
+    runtime = _auto_client_runtime() if agent_id == "codex" else None
+    if runtime is not None:
+        command = runtime["codex_subcommand"](extra_args)
+        if runtime["codex_explicit_remote"](extra_args) or (command and command[0] in AUTO_UNSCHEDULED_ARGS):
+            return _exec_real_binary(binary_name, extra_args)
 
-    schedule = read_json(AGENT_LAUNCH_FILE)
-    agents_map = schedule.get("agents") if isinstance(schedule, dict) and isinstance(schedule.get("agents"), dict) else {}
-    entry = agents_map.get(agent_id)
-    if not isinstance(entry, dict) or not isinstance(entry.get("spec"), dict):
+    entry = _auto_schedule_entry(agent_id)
+    if entry is False and not required:
         return _exec_real_binary(binary_name, extra_args)
+    if not entry:
+        print("无法读取 Super Cage 的 Agent CLI 调度配置。请同步环境组件后重试。", file=sys.stderr)
+        return 78
 
     spec = entry["spec"]
     iso = spec.get("isolation") or {}
@@ -2324,21 +2416,72 @@ def auto_exec_agent(agent_id, binary_name, extra_args):
     if any(os.environ.get(v) for v in explicit_vars):
         return _exec_real_binary(binary_name, extra_args)
 
+    runtime = runtime or _auto_client_runtime()
+    if agent_id == "codex" and iso_var == "CODEX_HOME":
+        thread = runtime["codex_history_request"](extra_args)
+        if thread is not None:
+            def history_home(guest):
+                return resolve_dirs(spec, profile_root(agent_id, guest))["config"]
+
+            try:
+                selected = runtime["history_account"](entry.get("history_accounts", []),
+                                                      history_home, runtime["codex_history"], thread)
+            except KeyboardInterrupt:
+                return 130
+            except ValueError as error:
+                print(error, file=sys.stderr)
+                return 78
+            if selected is None:
+                return 0
+            guest_id, expected = selected
+            try:
+                with runtime["launch_guard"](profile_root(agent_id, guest_id)):
+                    os.environ[_agent_account_env_var(agent_id)] = guest_id
+                    return exec_agent(spec, guest_id, extra_args, codex_subject=expected)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                print("无法打开原账号的 Codex 会话。请检查登录状态或稍后重试。", file=sys.stderr)
+                return 78
+    mask = os.umask(0)
+    os.umask(mask)
+
+    def start(schedule, item, before_exec):
+        guest_id = item["guest_id"]
+        subject = item.get("subject") if agent_id == "codex" and item.get("auth_mode") == "oauth" else ""
+        if subject is not None and subject != "" and (not isinstance(subject, str) or not re.fullmatch("[a-f0-9]{64}", subject)):
+            return
+        if guest_id == "default" and not subject:
+            return _exec_real_binary(binary_name, extra_args, before_exec=before_exec)
+        previous = os.environ.get(account_var)
+        os.environ[account_var] = guest_id
+        try:
+            exec_agent(schedule["spec"], guest_id, extra_args, codex_subject=subject,
+                       require_api_key=item.get("auth_mode") == "api_key",
+                       before_exec=before_exec, quiet=True)
+        finally:
+            os.umask(mask)
+            if previous is None:
+                os.environ.pop(account_var, None)
+            else:
+                os.environ[account_var] = previous
+
     try:
-        cwd_str = str(Path.cwd().resolve())
-    except OSError:
-        cwd_str = ""
-    chosen = _pick_auto_candidate(agent_id, entry, cwd_str)
-    if not chosen:
-        return _exec_real_binary(binary_name, extra_args)
-
-    guest_id = str(chosen.get("guest_id") or "default").strip() or "default"
-    if guest_id == "default":
-        return _exec_real_binary(binary_name, extra_args)
-
-    # Pin child processes within this session to the chosen account (matching Claude's CLAUDE_CONFIG_DIR stickiness).
-    os.environ[_agent_account_env_var(agent_id)] = guest_id
-    return exec_agent(spec, guest_id, extra_args)
+        mode, pin = runtime["admit_account_launch"](
+            ACCOUNTS_ROOT / agent_id, lambda: _auto_schedule_entry(agent_id),
+            lambda entry: _auto_candidates(agent_id, entry, runtime),
+            lambda guest_id: profile_root(agent_id, guest_id), start,
+            default_mode="smart", legacy_rr=True)
+    except KeyboardInterrupt:
+        return 130
+    except (OSError, ValueError):
+        print("无法读取 Super Cage 的 Agent CLI 调度配置。请同步环境组件后重试。", file=sys.stderr)
+        return 78
+    if pin:
+        print("此项目绑定的 Super Cage Agent CLI 账号不可用。请检查项目绑定、登录状态和额度后重试。", file=sys.stderr)
+    elif mode == "manual":
+        print("手动选择的 Super Cage Agent CLI 账号不可用。请检查登录状态和额度，或在账号管理中重新选择。", file=sys.stderr)
+    else:
+        print("暂无可启动的 Super Cage Agent CLI 账号。请检查参与状态、额度和项目绑定后重试。", file=sys.stderr)
+    return 78
 
 
 # ---------------------------------------------------------------------------
@@ -2495,6 +2638,348 @@ def _pid_state(pid, expected_identity="", require_identity=True):
 
 def _pid_matches(pid, expected_identity="", require_identity=True):
     return _pid_state(pid, expected_identity, require_identity=require_identity) == "matched"
+
+
+_ORIGIN_HANDLE = re.compile(r"term_[A-Za-z0-9_-]{4,128}")
+_ORIGIN_UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
+_ORIGIN_ROLLOUT = re.compile(r"rollout-.+-(" + _ORIGIN_UUID.pattern + r")(?:_[0-9a-z-]{1,64})?\.jsonl", re.IGNORECASE)
+_ORIGIN_ENV = (b"ORCA_TERMINAL_HANDLE", b"ORCA_TAB_ID", b"ORCA_WORKTREE_ID", b"CODEX_HOME")
+_ORIGIN_AUTH_OVERRIDES = {
+    b"OPENAI_API_KEY", b"CODEX_API_KEY", b"OPENAI_BASE_URL", b"OPENAI_API_BASE",
+    b"OPENAI_ORG_ID", b"OPENAI_ORGANIZATION", b"OPENAI_PROJECT_ID", b"OPENAI_PROJECT",
+    b"CODEX_ACCESS_TOKEN", b"CODEX_SQLITE_HOME",
+}
+_ORIGIN_ENV_LIMIT = 256 * 1024
+_ORIGIN_META_LIMIT = 128 * 1024
+_ORIGIN_MAX_PROCESSES = 32768
+_ORIGIN_MAX_FDS = 4096
+
+
+class _OriginUnverified(ValueError):
+    pass
+
+
+def _origin_text(value, limit):
+    return (isinstance(value, str) and 0 < len(value) <= limit
+            and all(char.isprintable() for char in value))
+
+
+def _origin_workspace(value):
+    if not _origin_text(value, 4096) or not value.startswith("/"):
+        raise _OriginUnverified()
+    path = Path(value).resolve(strict=True)
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise _OriginUnverified()
+    return path, (info.st_dev, info.st_ino)
+
+
+@contextmanager
+def _origin_directory(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _origin_file(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _OriginUnverified()
+        yield stream
+
+
+def _origin_read(path, limit, parent=None, *, private=False):
+    with _origin_file(path, parent) as stream:
+        if private:
+            info = os.fstat(stream.fileno())
+            if info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > limit:
+                raise _OriginUnverified()
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise _OriginUnverified()
+    return data
+
+
+def _origin_start_time(process):
+    raw = _origin_read("stat", 4096, process)
+    marker = raw.rfind(b") ")
+    fields = raw[marker + 2:].split()
+    if marker < 0 or len(fields) < 20 or fields[0] in (b"Z", b"X", b"x") or not fields[19].isdigit():
+        raise _OriginUnverified()
+    return fields[19]
+
+
+def _origin_binding(process, expected):
+    selected = {}
+    duplicates = False
+    overrides = False
+    for entry in _origin_read("environ", _ORIGIN_ENV_LIMIT, process).split(b"\0"):
+        key, _, value = entry.partition(b"=")
+        if key in _ORIGIN_AUTH_OVERRIDES and value:
+            overrides = True
+        if key in _ORIGIN_ENV:
+            if key in selected:
+                duplicates = True
+            selected.setdefault(key, value)
+    if any(selected.get(key) != value for key, value in expected.items()):
+        return None
+    if overrides or duplicates:
+        raise _OriginUnverified()
+    return os.fsdecode(selected.get(b"CODEX_HOME", b""))
+
+
+def _origin_account(raw, home):
+    if not _origin_text(raw, 4096) or not raw.startswith("/"):
+        raise _OriginUnverified()
+    accounts = home / ".local/share/cage/codex-accounts"
+    profile = Path(raw)
+    try:
+        account, leaf = profile.relative_to(accounts).parts
+    except ValueError as exc:
+        raise _OriginUnverified() from exc
+    if not ACCOUNT_ID_RE.fullmatch(account) or leaf != "home" or profile.resolve(strict=True) != profile:
+        raise _OriginUnverified()
+    for directory in (accounts, profile.parent, profile):
+        info = directory.lstat()
+        mask = 0o077 if directory == profile else 0o022
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & mask:
+            raise _OriginUnverified()
+    return accounts, account, profile
+
+
+def _origin_executable(process):
+    # The Linux exe link still refers to the live inode after a CLI upgrade.
+    path = os.readlink("exe", dir_fd=process).removesuffix(" (deleted)")
+    info = os.stat("exe", dir_fd=process)
+    if not path.startswith("/") or Path(path).name != "codex" or not stat.S_ISREG(info.st_mode):
+        raise _OriginUnverified()
+    if info.st_uid not in (0, os.getuid()) or not info.st_mode & 0o111:
+        raise _OriginUnverified()
+    return info.st_dev, info.st_ino
+
+
+def _origin_check_cwd(process, workspace, directory_id, *, allow_launcher_root):
+    observed = os.readlink("cwd", dir_fd=process)
+    if Path(observed) == workspace:
+        info = os.stat("cwd", dir_fd=process)
+        identity = info.st_dev, info.st_ino
+        if identity != directory_id:
+            raise _OriginUnverified()
+        return observed, identity
+    if observed != "/" or not allow_launcher_root:
+        raise _OriginUnverified()
+
+    # Older Orca Codex processes can report / after their old shared mount
+    # disconnects. The caller requires the exact tab and worktree binding and
+    # still verifies the root rollout's cwd against the current workspace.
+    try:
+        info = os.stat("cwd", dir_fd=process)
+    except OSError as exc:
+        if exc.errno != errno.ENOTCONN:
+            raise
+        identity = None
+    else:
+        if not os.path.samestat(info, os.stat("/")):
+            raise _OriginUnverified()
+        identity = info.st_dev, info.st_ino
+    if _origin_workspace(str(workspace))[1] != directory_id:
+        raise _OriginUnverified()
+    return observed, identity
+
+
+def _origin_metadata(rollout, descriptor, name, thread, workspace):
+    with _origin_file(rollout) as stream:
+        info = os.fstat(stream.fileno())
+        opened = os.stat(name, dir_fd=descriptor)
+        if info.st_uid != os.getuid() or (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise _OriginUnverified()
+        first = stream.readline(_ORIGIN_META_LIMIT + 1)
+        if len(first) > _ORIGIN_META_LIMIT or not first.endswith(b"\n"):
+            raise _OriginUnverified()
+    row = json.loads(first)
+    payload = row.get("payload") if isinstance(row, dict) and row.get("type") == "session_meta" else None
+    if not isinstance(payload, dict) or not isinstance(payload.get("id"), str) or payload["id"].lower() != thread:
+        raise _OriginUnverified()
+    source = payload.get("source")
+    if isinstance(source, dict):
+        subagent = source.get("subagent")
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+        if isinstance(parent, str) and _ORIGIN_UUID.fullmatch(parent) and parent.lower() != thread:
+            return None
+    if source != "cli" or payload.get("thread_source") == "subagent" or any(
+            payload.get(key) for key in ("parent", "parent_thread_id", "parent_session_id", "parent_id", "forked_from_id")):
+        raise _OriginUnverified()
+    if payload.get("model_provider") not in (None, "", "openai") or _origin_workspace(payload.get("cwd"))[0] != workspace:
+        raise _OriginUnverified()
+    return thread
+
+
+def _origin_rollouts(process, profile, workspace, deadline):
+    roots = set()
+    visited = set()
+    sessions = profile / "sessions"
+    with _origin_directory("fd", process) as directory, os.scandir(directory) as opened:
+        for index, entry in enumerate(opened):
+            if index >= _ORIGIN_MAX_FDS or time.monotonic() >= deadline:
+                raise _OriginUnverified()
+            try:
+                target = Path(os.readlink(entry.name, dir_fd=directory))
+            except FileNotFoundError:
+                # An unrelated FD may close while the process continues.
+                continue
+            match = _ORIGIN_ROLLOUT.fullmatch(target.name)
+            if not match:
+                continue
+            try:
+                target.relative_to(sessions)
+            except ValueError as exc:
+                raise _OriginUnverified() from exc
+            if target.resolve(strict=True) != target:
+                raise _OriginUnverified()
+            if target in visited:
+                continue
+            visited.add(target)
+            thread = _origin_metadata(target, directory, entry.name, match[1].lower(), workspace)
+            if thread:
+                roots.add((thread, target))
+                if len(roots) > 1:
+                    break
+    return roots
+
+
+def _origin_subject(accounts, account, profile):
+    launch = json.loads(_origin_read(accounts / "launch.json", 512 * 1024, private=True))
+    roster = launch.get("history_accounts") if isinstance(launch, dict) else None
+    if not isinstance(roster, list):
+        raise _OriginUnverified()
+    entries = [item for item in roster if isinstance(item, dict)]
+    selected = [item.get("subject") for item in entries if item.get("id") == account]
+    if len(selected) != 1 or not isinstance(selected[0], str) or not ORCA_SHA256_RE.fullmatch(selected[0]):
+        raise _OriginUnverified()
+    expected = selected[0]
+    if sum(item.get("subject") == expected for item in entries) != 1:
+        raise _OriginUnverified()
+    auth = json.loads(_origin_read(profile / "auth.json", 256 * 1024, private=True))
+    if not isinstance(auth, dict) or auth.get("auth_mode") not in (None, "chatgpt") or auth.get("OPENAI_API_KEY"):
+        raise _OriginUnverified()
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict) or not isinstance(tokens.get("access_token"), str) or not tokens["access_token"]:
+        raise _OriginUnverified()
+    claims = decode_jwt_claims(tokens.get("id_token"))
+    auth_claims = claims.get("https://api.openai.com/auth")
+    profile_claims = claims.get("https://api.openai.com/profile")
+    email = claims.get("email") or (profile_claims.get("email") if isinstance(profile_claims, dict) else None)
+    organization = (auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None) or tokens.get("account_id")
+    if not _origin_text(email, 320) or not _origin_text(organization, 256):
+        raise _OriginUnverified()
+    email, organization = email.strip().lower(), organization.strip()
+    if not email or not organization:
+        raise _OriginUnverified()
+    digest = hashlib.sha256(f"{email}\n{organization}".encode()).hexdigest()
+    if digest != expected:
+        raise _OriginUnverified()
+    return expected
+
+
+def _origin_process(process, expected, workspace, directory_id, home, deadline):
+    try:
+        if os.fstat(process).st_uid != os.getuid() or _origin_read("comm", 64, process) != b"codex\n":
+            return None
+        start = _origin_start_time(process)
+    except (OSError, _OriginUnverified):
+        return None
+    try:
+        config = _origin_binding(process, expected)
+    except OSError:
+        return None
+    if config is None:
+        return None
+    executable = _origin_executable(process)
+    allow_launcher_root = b"ORCA_TAB_ID" in expected and b"ORCA_WORKTREE_ID" in expected
+    cwd = _origin_check_cwd(process, workspace, directory_id, allow_launcher_root=allow_launcher_root)
+    accounts, account, profile = _origin_account(config, home)
+    roots = _origin_rollouts(process, profile, workspace, deadline)
+    if len(roots) > 1:
+        return {"state": "ambiguous"}
+    if not roots:
+        return None
+    subject = _origin_subject(accounts, account, profile)
+    # Recheck the same proc directory so an exited or re-execed PID cannot
+    # transfer an observation to the replacement process.
+    if (_origin_start_time(process) != start or _origin_executable(process) != executable
+            or _origin_binding(process, expected) != config
+            or _origin_check_cwd(process, workspace, directory_id, allow_launcher_root=allow_launcher_root) != cwd
+            or _origin_rollouts(process, profile, workspace, deadline) != roots):
+        raise _OriginUnverified()
+    (thread, _), = roots
+    return {"state": "found", "thread_id": thread, "account_id": account, "subject": subject}
+
+
+def external_session_origin(payload, *, proc_root=Path("/proc"), home=None):
+    """Find a native continuation using only live Orca binding and rollout metadata."""
+    unavailable = {"state": "unavailable"}
+    if not isinstance(payload, dict):
+        return unavailable
+    boot_only = payload.get("boot_only") is True
+    allowed = {"provider", "working_directory"}
+    allowed.update({"boot_only"} if boot_only else {"terminal_handle", "tab_id", "worktree_id"})
+    if payload.keys() - allowed:
+        return unavailable
+    handle, provider = payload.get("terminal_handle"), payload.get("provider")
+    if provider not in ("codex", "claude"):
+        return unavailable
+    if not boot_only and (not isinstance(handle, str) or not _ORIGIN_HANDLE.fullmatch(handle)):
+        return unavailable
+    expected = {} if boot_only else {b"ORCA_TERMINAL_HANDLE": handle.encode("ascii")}
+    for key, variable, limit in (("tab_id", b"ORCA_TAB_ID", 256), ("worktree_id", b"ORCA_WORKTREE_ID", 1200)):
+        if key in payload and payload[key] != "":
+            if not _origin_text(payload[key], limit):
+                return unavailable
+            expected[variable] = os.fsencode(payload[key])
+    if provider == "claude" or (home is None and sys.platform != "linux"):
+        return {"state": "unsupported"}
+    found = None
+    deadline = time.monotonic() + 2
+    try:
+        workspace, directory_id = _origin_workspace(payload.get("working_directory"))
+        with _origin_directory(proc_root) as proc:
+            boot_id = _origin_read("sys/kernel/random/boot_id", 64, proc).decode("ascii").strip().lower()
+            if not _ORIGIN_UUID.fullmatch(boot_id):
+                return unavailable
+            if boot_only:
+                return {"state": "boot", "boot_id": boot_id}
+            home = (home or HOME).resolve(strict=True)
+            with os.scandir(proc) as processes:
+                for index, entry in enumerate(processes):
+                    if index >= _ORIGIN_MAX_PROCESSES or time.monotonic() >= deadline:
+                        return unavailable
+                    if not entry.name.isascii() or not entry.name.isdigit():
+                        continue
+                    opened = False
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode):
+                            continue
+                        with _origin_directory(entry.name, proc) as process:
+                            opened = True
+                            observed = _origin_process(process, expected, workspace, directory_id, home, deadline)
+                    except (FileNotFoundError, PermissionError):
+                        if opened:
+                            return unavailable
+                        continue
+                    if observed is None:
+                        continue
+                    if observed["state"] == "ambiguous" or found is not None:
+                        return {"state": "ambiguous"}
+                    found = observed
+    except (OSError, ValueError, RuntimeError, UnicodeError):
+        return unavailable
+    return {**found, "boot_id": boot_id} if found is not None else unavailable
 
 
 def _redact_t3_log_tail(log_path, max_lines=6, max_chars=400):
@@ -2704,6 +3189,7 @@ def t3code_status(payload):
     running = False
     pid = 0
     has_pair_url = False
+    accounts = {}
     if isinstance(state, dict):
         cand_pid = state.get("pid")
         cand_port = state.get("port")
@@ -2716,19 +3202,20 @@ def t3code_status(payload):
             and isinstance(cand_port, int)
             and cand_port == requested_port
             and _pid_matches(cand_pid, cand_ident)
-            and _http_responsive("127.0.0.1", requested_port, timeout=0.45)
         ):
-            running = True
             pid = cand_pid
-            has_pair_url = bool(_read_pair_once(requested_port))
+            accounts = state.get("accounts", {})
+            running = _http_responsive("127.0.0.1", requested_port, timeout=0.45)
+            has_pair_url = running and bool(_read_pair_once(requested_port))
     return {
         "installed": bool(binary),
         "binary_path": binary,
         "version": version,
         "running": running,
-        "pid": pid if running else 0,
+        "pid": pid,
         "port": requested_port,
         "has_pair_url": has_pair_url,
+        "accounts": accounts,
     }
 
 
@@ -3042,6 +3529,17 @@ def t3code_start(payload, restart=False):
     bindings = payload.get("bindings") or {}
     if not isinstance(bindings, dict):
         raise ValueError("invalid t3code bindings")
+    accounts = {}
+    for agent_id, binding in bindings.items():
+        if not isinstance(binding, dict):
+            continue
+        account_id = binding.get("account_id")
+        if account_id:
+            if not CLI_ID_RE.fullmatch(agent_id) or not isinstance(account_id, str) or not ACCOUNT_ID_RE.fullmatch(account_id):
+                raise ValueError("invalid t3code account binding")
+            accounts[agent_id] = account_id
+        elif str(binding.get("mode") or "").strip().lower() == "default" and CLI_ID_RE.fullmatch(agent_id):
+            accounts[agent_id] = "default"
     bindings_hash = hashlib.sha256(
         json.dumps(bindings, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()[:16]
@@ -3054,9 +3552,8 @@ def t3code_start(payload, restart=False):
         version = _read_t3_version(binary, path_str)
 
         existing = read_json(T3CODE_STATE_FILE)
-        if restart:
-            _t3code_stop_locked()
-        elif isinstance(existing, dict):
+        stop_existing = restart
+        if not restart and isinstance(existing, dict):
             old_pid = existing.get("pid")
             old_pid_ident = str(existing.get("pid_identity") or "")
             old_sup = existing.get("supervisor_pid")
@@ -3078,29 +3575,28 @@ def t3code_start(payload, restart=False):
                     "pid": old_pid,
                     "port": port,
                     "has_pair_url": bool(_read_pair_once(port)),
+                    "accounts": existing.get("accounts", {}),
                 }
             if (
                 (not isinstance(old_pid, bool) and isinstance(old_pid, int) and _pid_matches(old_pid, old_pid_ident))
                 or (not isinstance(old_sup, bool) and isinstance(old_sup, int) and _pid_matches(old_sup, old_sup_ident))
             ):
-                _t3code_stop_locked()
+                stop_existing = True
 
         os.umask(0o077)
         T3CODE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-        T3CODE_PAIR_FILE.unlink(missing_ok=True)
 
         # Build isolated provider routing for `t3 serve` WITHOUT polluting global
         # XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME or CODEX_HOME on the parent process.
-        # Keep ~/.local/share/cage/auto-shims synced so "auto" bindings dynamically
-        # pick healthy accounts per-invocation without restarting T3 Code!
+        # "auto" remains accepted from older controllers. Current controllers
+        # choose a concrete account before starting the service.
         magpie_mode = any(
             isinstance(b, dict) and str(b.get("mode") or "").strip().lower() == "magpie"
             for b in bindings.values()
         )
-        try:
+        legacy_auto = any(isinstance(b, dict) and b.get("mode") == "auto" for b in bindings.values())
+        if legacy_auto or magpie_mode:
             sync_auto_shims({"disable_all": True, "magpie_takeover": True} if magpie_mode else {})
-        except Exception:
-            pass
         env = os.environ.copy()
         env.pop("CAGE_CLI_ACCOUNT_ID", None)
         for k in list(env):
@@ -3143,11 +3639,15 @@ def t3code_start(payload, restart=False):
             if agent_id == "claude":
                 if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
                     raise ValueError("invalid claude guest_id")
+                if agent_id in accounts and not os.access(_claude_account_helper(), os.X_OK):
+                    raise ValueError("Claude 账号辅助程序不可用，请更新客机组件")
                 if sys.platform == "darwin":
                     shim_prefixes.append(_ensure_macos_claude_shim())
                     if Path("/usr/local/libexec/cage-cli/bin").is_dir():
                         shim_prefixes.append("/usr/local/libexec/cage-cli/bin")
                 else:
+                    if agent_id in accounts and not os.access("/usr/local/lib/cage-claude-bin/claude", os.X_OK):
+                        raise ValueError("Claude 账号启动程序不可用，请更新客机组件")
                     shim_prefixes.append("/usr/local/lib/cage-claude-bin")
                 env["CAGE_CLAUDE_ACCOUNT_ID"] = guest_id
                 subject = str(binding.get("subject") or "").strip()
@@ -3163,6 +3663,9 @@ def t3code_start(payload, restart=False):
             elif agent_id == "codex" and binding.get("codex_native"):
                 if guest_id != "default" and not ACCOUNT_ID_RE.match(guest_id):
                     raise ValueError("invalid codex guest_id")
+                if agent_id in accounts and (not os.access(_codex_account_helper(), os.X_OK)
+                                             or not os.access("/usr/local/lib/cage-codex-bin/codex", os.X_OK)):
+                    raise ValueError("Codex 账号启动程序不可用，请更新客机组件")
                 shim_prefixes.append("/usr/local/lib/cage-codex-bin")
                 env["CAGE_CODEX_ACCOUNT_ID"] = guest_id
                 subject = str(binding.get("subject") or "").strip()
@@ -3197,6 +3700,11 @@ def t3code_start(payload, restart=False):
         cmd = _build_t3code_command(binary, port, env)
         workspace = str(payload.get("workspace") or "").strip()
         cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
+        if stop_existing:
+            _t3code_stop_locked()
+        if _http_responsive("127.0.0.1", port, timeout=0.45):
+            raise ValueError(f"T3 Code 端口 {port} 正在被其他服务使用")
+        T3CODE_PAIR_FILE.unlink(missing_ok=True)
 
         handshake_file = T3CODE_ROOT / f".sup-{os.getpid()}-{time.time_ns()}.json"
         sup_cfg = {
@@ -3256,10 +3764,6 @@ def t3code_start(payload, restart=False):
                 time.sleep(0.1)
 
             if not ready:
-                if child_pid:
-                    _stop_managed_pid(child_pid, expected_identity=_pid_identity(child_pid), wait_secs=1.5, require_identity=False)
-                _stop_managed_pid(sup_proc.pid, expected_identity=_pid_identity(sup_proc.pid), wait_secs=1.0, require_identity=False)
-                T3CODE_PAIR_FILE.unlink(missing_ok=True)
                 tail = _redact_t3_log_tail(T3CODE_LOG_FILE)
                 suffix = f"：{tail}" if tail else ""
                 raise ValueError(f"T3 Code 启动超时（端口 {port} 未就绪）{suffix}")
@@ -3279,6 +3783,7 @@ def t3code_start(payload, restart=False):
                 "binary": binary,
                 "started_at": int(time.time()),
                 "bindings_hash": bindings_hash,
+                "accounts": accounts,
             }
             atomic_write_json(T3CODE_STATE_FILE, state, mode=0o600)
             return {
@@ -3289,7 +3794,14 @@ def t3code_start(payload, restart=False):
                 "pid": child_pid,
                 "port": port,
                 "has_pair_url": bool(_read_pair_once(port)),
+                "accounts": accounts,
             }
+        except Exception:
+            if child_pid:
+                _stop_managed_pid(child_pid, expected_identity=_pid_identity(child_pid), wait_secs=1.5, require_identity=False)
+            _stop_managed_pid(sup_proc.pid, expected_identity=_pid_identity(sup_proc.pid), wait_secs=1.0, require_identity=False)
+            T3CODE_PAIR_FILE.unlink(missing_ok=True)
+            raise
         finally:
             handshake_file.unlink(missing_ok=True)
 
@@ -4857,8 +5369,23 @@ def _orca_prepare_bindings(bindings, path_str):
                 continue
             mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
-            if mode in ("auto", "magpie"):
-                # Dynamic live scheduling via ~/.local/share/cage/auto-shims (empty under Magpie takeover).
+            if mode == "magpie":
+                continue
+            if mode == "auto":
+                # Keep account dispatch present before the first manifest write
+                # and when Orca starts a child directly, without a login shell.
+                if agent_id == "claude":
+                    write_override_shim("claude", "#!/bin/sh\nCAGE_REQUIRE_CLAUDE_SCHEDULE=1 exec " +
+                                        shlex.quote(_claude_account_helper()) + ' auto "$@"\n')
+                elif agent_id == "codex" and binding.get("codex_native"):
+                    write_override_shim("codex", "#!/bin/sh\nCAGE_REQUIRE_CODEX_SCHEDULE=1 exec " +
+                                        shlex.quote(_codex_account_helper()) + ' orca-auto "$@"\n')
+                elif CLI_ID_RE.fullmatch(str(agent_id)):
+                    for name in [binding.get("binary"), *(binding.get("fallback_binaries") or [])]:
+                        if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", name):
+                            argv = [sys.executable, "-I", str(Path(__file__).resolve()), "auto-exec", agent_id, name]
+                            write_override_shim(name, "#!/bin/sh\nCAGE_REQUIRE_AGENT_SCHEDULE=1 exec " +
+                                                shlex.join(argv) + ' "$@"\n')
                 continue
             if mode == "default":
                 if agent_id == "claude":
@@ -4963,6 +5490,7 @@ def _orca_base_env(path_str, extra_env=None, shim_prefixes=None, terminal_memory
         prefixes.append(str(AUTO_SHIMS_DIR))
     env["PATH"] = os.pathsep.join([*prefixes, path_str]) if prefixes else path_str
     env["ORCA_USER_DATA"] = str(ORCA_DATA_DIR)
+    env["ORCA_USER_DATA_PATH"] = str(ORCA_DATA_DIR)
     env["ORCA_INSTANCE_ID"] = _orca_instance_id()
     env["DO_NOT_TRACK"] = "1"
     env["ORCA_TELEMETRY_DISABLED"] = "1"
@@ -5058,6 +5586,21 @@ def orca_supervise(cfg):
     return rc if isinstance(rc, int) else 0
 
 
+def _orca_fixed_accounts(bindings):
+    """One reservation per fixed provider, independent of dynamic child launches."""
+    accounts = {}
+    for agent_id, binding in bindings.items():
+        if not isinstance(agent_id, str) or not CLI_ID_RE.fullmatch(agent_id) or not isinstance(binding, dict):
+            continue
+        mode = str(binding.get("mode") or "").strip().lower()
+        if mode in ("auto", "magpie"):
+            continue
+        account_id = binding.get("account_id")
+        if isinstance(account_id, str) and (ACCOUNT_ID_RE.fullmatch(account_id) or account_id == "" and mode == "default"):
+            accounts[agent_id] = account_id
+    return accounts
+
+
 def orca_status(payload=None):
     payload = payload if isinstance(payload, dict) else {}
     requested_port = _requested_orca_port(payload, default=ORCA_DEFAULT_PORT)
@@ -5069,6 +5612,8 @@ def orca_status(payload=None):
     pid = 0
     bind_ip = "127.0.0.1"
     bind_mode = "loopback"
+    accounts = {}
+    config_key = ""
     if isinstance(state, dict):
         cand_pid = state.get("pid")
         cand_port = state.get("port")
@@ -5082,13 +5627,19 @@ def orca_status(payload=None):
             and not isinstance(cand_port, bool)
             and isinstance(cand_port, int)
             and cand_port == requested_port
-            and _pid_matches(cand_pid, cand_ident)
-            and _http_responsive(cand_bind_ip, requested_port, timeout=0.45)
         ):
-            running = True
-            pid = cand_pid
-            bind_ip = cand_bind_ip
-            bind_mode = cand_bind_mode
+            state_accounts = state.get("accounts")
+            pid_state = _pid_state(cand_pid, cand_ident)
+            if pid_state == "unknown" and state_accounts:
+                raise ValueError("无法验证 Orca Server 进程身份，已保留账号占用")
+            if pid_state == "matched":
+                pid = cand_pid
+                bind_ip = cand_bind_ip
+                bind_mode = cand_bind_mode
+                running = _http_responsive(cand_bind_ip, requested_port, timeout=0.45)
+                if isinstance(state_accounts, dict):
+                    accounts = state_accounts
+                config_key = str(state.get("config_key") or "")
     has_rollback = False
     try:
         if ORCA_PREVIOUS_LINK.is_symlink() and (ORCA_PREVIOUS_LINK / "bin/orca-ide").is_file():
@@ -5100,14 +5651,50 @@ def orca_status(payload=None):
         "binary_path": binary,
         "version": version,
         "running": running,
-        "pid": pid if running else 0,
+        "pid": pid,
         "port": requested_port,
         "bind_ip": bind_ip,
         "bind_mode": bind_mode,
         "has_rollback": has_rollback,
         "tailscale_ip": _orca_tailscale_ip(path_str),
         "platform": sys.platform,
+        "accounts": accounts,
+        "config_key": config_key,
     }
+
+
+def orca_codex_accounts(payload):
+    # Only discover the Cage-managed service and this OS user's default Orca
+    # profile. The payload cannot choose an endpoint or data directory.
+    path = enriched_path()
+    source = Path(__file__).resolve()
+    bridge = source.with_name(source.stem + ".orca-codex-bridge.py")
+    if not bridge.is_file():
+        bridge = source.with_name("orca-codex-bridge.py")
+    adapter = runpy.run_path(str(bridge))
+    managed_port = payload.get("managed_port")
+    candidates = []
+    if managed_port:
+        _validate_orca_port(managed_port)
+        state = read_json(ORCA_STATE_FILE)
+        if (isinstance(state, dict) and state.get("port") == managed_port
+                and _pid_matches(state.get("pid"), state.get("pid_identity") or "")):
+            candidates.append(ORCA_DATA_DIR)
+    standard = HOME / ("Library/Application Support/orca" if sys.platform == "darwin" else ".config/orca")
+    candidates.append(standard)
+    for data in candidates:
+        try:
+            adapter["runtime_transport"](data)
+        except (OSError, ValueError):
+            continue
+        journal = hashlib.sha256(str(data).encode()).hexdigest()[:16]
+        record_path = ORCA_ROOT / f"codex-registration-{journal}.json"
+        return adapter["bridge"](
+            payload, data=data, home=HOME, path=path, helper=_codex_account_helper(),
+            registration_record=read_json(record_path) if payload.get("register") else None,
+            write_record=lambda value: atomic_write_json(record_path, value, mode=0o600),
+        )
+    return {"available": False}
 
 
 def _orca_fetch(curl, url, dest, env, max_time=300, headers=()):
@@ -5561,6 +6148,10 @@ def orca_start(payload=None, restart=False):
     bindings = payload.get("bindings") or {}
     if not isinstance(bindings, dict):
         raise ValueError("invalid orca bindings")
+    accounts = _orca_fixed_accounts(bindings)
+    config_key = str(payload.get("config_key") or "")
+    if config_key and not re.fullmatch(r"[0-9a-f]{64}", config_key):
+        raise ValueError("invalid Orca config key")
     terminal_memory_max = str(payload.get("terminal_memory_max") or "").strip().upper()
     if terminal_memory_max and not ORCA_MEM_LIMIT_RE.match(terminal_memory_max):
         raise ValueError("终端内存上限格式无效（例如 2G、512M）")
@@ -5591,15 +6182,20 @@ def orca_start(payload=None, restart=False):
             old_sup_ident = str(existing.get("supervisor_identity") or "")
             old_port = existing.get("port")
             old_bind_ip = str(existing.get("bind_ip") or "127.0.0.1")
+            pid_state = _pid_state(old_pid, old_pid_ident)
+            supervisor_state = _pid_state(old_sup, old_sup_ident)
             if (
                 not isinstance(old_pid, bool)
                 and isinstance(old_pid, int)
                 and old_port == port
                 and old_bind_ip == bind_ip
                 and existing.get("bindings_hash") == bindings_hash
-                and _pid_matches(old_pid, old_pid_ident)
+                and pid_state == "matched"
                 and _http_responsive(bind_ip, port, timeout=0.45)
             ):
+                if config_key and existing.get("config_key") != config_key:
+                    existing["config_key"] = config_key
+                    atomic_write_json(ORCA_STATE_FILE, existing, mode=0o600)
                 if projects:
                     _orca_sync_repos_inner(binary, _orca_base_env(path_str), projects)
                 return {
@@ -5612,11 +6208,10 @@ def orca_start(payload=None, restart=False):
                     "bind_ip": bind_ip,
                     "bind_mode": bind_mode,
                     "tailscale_ip": _orca_tailscale_ip(path_str),
+                    "accounts": existing.get("accounts") or {},
+                    "config_key": existing.get("config_key") or "",
                 }
-            if (
-                (not isinstance(old_pid, bool) and isinstance(old_pid, int) and _pid_matches(old_pid, old_pid_ident))
-                or (not isinstance(old_sup, bool) and isinstance(old_sup, int) and _pid_matches(old_sup, old_sup_ident))
-            ):
+            if pid_state in ("matched", "unknown") or supervisor_state in ("matched", "unknown"):
                 _orca_stop_locked()
 
         os.umask(0o077)
@@ -5628,7 +6223,10 @@ def orca_start(payload=None, restart=False):
         workspace = str(payload.get("workspace") or "").strip()
         cwd = workspace if workspace and Path(workspace).is_dir() else str(HOME)
 
+        supervisor_process = None
+
         def launch_once():
+            nonlocal supervisor_process
             handshake_file = ORCA_ROOT / f".sup-{os.getpid()}-{time.time_ns()}.json"
             sup_cfg = {
                 "cmd": cmd,
@@ -5646,6 +6244,7 @@ def orca_start(payload=None, restart=False):
                 close_fds=True,
                 start_new_session=True,
             )
+            supervisor_process = sup_proc
             try:
                 assert sup_proc.stdin is not None
                 sup_proc.stdin.write(json.dumps(sup_cfg, ensure_ascii=False).encode("utf-8"))
@@ -5719,8 +6318,24 @@ def orca_start(payload=None, restart=False):
             "binary": binary,
             "started_at": int(time.time()),
             "bindings_hash": bindings_hash,
+            "accounts": accounts,
+            "config_key": config_key,
         }
-        atomic_write_json(ORCA_STATE_FILE, state, mode=0o600)
+        try:
+            if not state["pid_identity"] or not state["supervisor_identity"]:
+                raise ValueError("无法确认新 Orca Server 进程身份")
+            atomic_write_json(ORCA_STATE_FILE, state, mode=0o600)
+        except (OSError, ValueError):
+            # A service without a committed process record cannot own an account.
+            if state["supervisor_identity"]:
+                _stop_managed_pid(sup_pid, expected_identity=state["supervisor_identity"], wait_secs=1.5)
+            if state["pid_identity"]:
+                _stop_managed_pid(child_pid, expected_identity=state["pid_identity"], wait_secs=1.5)
+            try:
+                supervisor_process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
 
         if projects:
             _orca_sync_repos_inner(binary, env, projects)
@@ -5735,6 +6350,8 @@ def orca_start(payload=None, restart=False):
             "bind_ip": bind_ip,
             "bind_mode": bind_mode,
             "tailscale_ip": _orca_tailscale_ip(path_str),
+            "accounts": accounts,
+            "config_key": config_key,
         }
 
 
@@ -5811,6 +6428,8 @@ def main(argv):
     if not argv:
         raise ValueError("missing subcommand")
     cmd = argv[0]
+    if cmd == "upgrade":
+        return upgrade_agent(argv[1:], read_json("/usr/local/share/cage/cli-upgrades.json"))
     if cmd == "exec-shim":
         if len(argv) < 3:
             raise ValueError("exec-shim requires spec_file and account_id")
@@ -5890,8 +6509,40 @@ def main(argv):
     if cmd == "sync-auto-shims":
         print(json.dumps(sync_auto_shims(payload), ensure_ascii=False))
         return 0
+    if cmd == "schedule-cursor":
+        print(json.dumps(_schedule_cursor(payload)))
+        return 0
+    if cmd == "plain-launches":
+        agent_id = payload["agent_id"]
+        count = _auto_client_runtime()["plain_launch_count"]
+        print(json.dumps({gid: count(profile_root(agent_id, gid)) for gid in payload["guest_ids"]}))
+        return 0
+    if cmd == "external-session-origin":
+        print(json.dumps(external_session_origin(payload)))
+        return 0
+    if cmd == "orca-guest-restore":
+        source = Path(__file__).resolve()
+
+        def bundle_module(name):
+            bundled = source.with_name(source.stem + "." + name)
+            return runpy.run_path(str(bundled if bundled.is_file() else source.with_name(name)))
+
+        response = {"runtime_id": ""}
+        if sys.platform == "linux":
+            path = enriched_path()
+            response = bundle_module("guest-orca-restore.py")["execute"](
+                payload, home=HOME, managed_data=ORCA_DATA_DIR, managed_binary=_orca_find_binary(path),
+                search_path=path, transport=bundle_module("orca-codex-bridge.py")["runtime_transport"],
+            )
+        print(json.dumps(response))
+        return 0
     if cmd == "orca-status":
         print(json.dumps(orca_status(payload), ensure_ascii=False))
+        return 0
+    if cmd == "orca-codex-accounts":
+        writing = payload.get("target") or payload.get("register")
+        with _orca_lifecycle_lock() if writing else nullcontext():
+            print(json.dumps(orca_codex_accounts(payload), ensure_ascii=False))
         return 0
     if cmd == "orca-install":
         print(json.dumps(orca_install(payload), ensure_ascii=False))

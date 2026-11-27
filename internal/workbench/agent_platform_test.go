@@ -575,6 +575,10 @@ func TestAgentSecurityAndLifecycleHardening(t *testing.T) {
 	var lastGuestID string
 	var failClear bool
 	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
+		if subcmd == "sync-auto-shims" {
+			// Publication is asynchronous and independent of credential operations.
+			return nil
+		}
 		guestCalls = append(guestCalls, subcmd)
 		if m, ok := input.(map[string]any); ok {
 			if id, ok := m["account_id"].(string); ok {

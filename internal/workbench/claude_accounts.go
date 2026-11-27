@@ -58,6 +58,7 @@ type claudeGuestSnapshot struct {
 	Organization   string       `json:"organization"`
 	Plan           string       `json:"plan"`
 	Quota          *claudeQuota `json:"quota"`
+	PlainLaunches  int          `json:"plain_launches,omitempty"`
 }
 
 type claudeAccountList struct {
@@ -76,7 +77,9 @@ type claudeScheduling struct {
 	// for automatic continuation. Set only by the person's yes to it.
 	UngroupedHandoff bool `json:"ungrouped_handoff,omitempty"`
 	// Preferred is the account new sessions use while it is available.
-	Preferred string `json:"preferred,omitempty"`
+	Preferred               string `json:"preferred,omitempty"`
+	SelectedAccountID       string `json:"selected_account_id,omitempty"`
+	SelectedAccountRevision string `json:"selected_account_revision,omitempty"`
 }
 
 func (p claudeScheduling) defaults() claudeScheduling {
@@ -96,7 +99,22 @@ func (p claudeScheduling) answered() bool {
 }
 
 func (p claudeScheduling) valid() bool {
-	return (p.Mode == "balanced" || p.Mode == "sequential") && validSwitchPolicy(p.SwitchPolicy) && (p.Preferred == "" || validClaudeID(p.Preferred))
+	return slices.Contains([]string{"manual", "exhaust", "smart", "balanced", "sequential"}, p.Mode) &&
+		validSwitchPolicy(p.SwitchPolicy) && (p.Preferred == "" || validClaudeID(p.Preferred)) &&
+		(p.SelectedAccountID == "" || validClaudeID(p.SelectedAccountID))
+}
+
+func (p claudeScheduling) claudeSelectedAccountID() string {
+	if p.SelectedAccountID != "" {
+		return p.SelectedAccountID
+	}
+	return p.Preferred
+}
+
+func (p *claudeScheduling) selectAccount(id string) {
+	p.Mode = schedulingModeAfterSelect(p.Mode)
+	p.SelectedAccountID, p.Preferred = id, ""
+	p.SelectedAccountRevision = newSchedulingRevision()
 }
 
 type claudeAccountManager struct {
@@ -299,7 +317,10 @@ func (a *claudeAccount) mergeQuota(q *claudeQuota, now time.Time) bool {
 		if window.ObservedAt == 0 {
 			window.ObservedAt = q.ObservedAt
 		}
-		if window.ObservedAt < 0 || window.ObservedAt > q.ObservedAt || old != nil && old.ObservedAt > window.ObservedAt {
+		if window.ObservedAt < 0 || window.ObservedAt > q.ObservedAt {
+			return old
+		}
+		if old != nil && schedulingObservationTime(old.ObservedAt, next.ObservedAt, now.Unix()) > window.ObservedAt {
 			return old
 		}
 		if old != nil && window == *old {
@@ -311,6 +332,20 @@ func (a *claudeAccount) mergeQuota(q *claudeQuota, now time.Time) bool {
 	next.SevenDay = merge(next.SevenDay, q.SevenDay)
 	if next.FiveHour == nil && next.SevenDay == nil || a.Quota != nil && next == *a.Quota {
 		return false
+	}
+	// Keep older windows tied to their own observation while the snapshot
+	// timestamp advances for a newer reading from the other window.
+	for _, window := range []**claudeWindow{&next.FiveHour, &next.SevenDay} {
+		if *window == nil || (*window).ObservedAt != 0 {
+			continue
+		}
+		if next.ObservedAt <= 0 {
+			*window = nil
+			continue
+		}
+		reading := **window
+		reading.ObservedAt = next.ObservedAt
+		*window = &reading
 	}
 	next.ObservedAt = max(next.ObservedAt, q.ObservedAt)
 	a.Quota = &next
@@ -333,7 +368,11 @@ func (a claudeAccount) headroom(now time.Time) (float64, bool) {
 		if !validClaudeWindow(w) || w.ResetsAt > 0 && w.ResetsAt <= now.Unix() {
 			continue
 		}
-		fresh := now.Sub(time.Unix(w.ObservedAt, 0)) <= claudeQuotaFresh
+		obs := schedulingObservationTime(w.ObservedAt, a.Quota.ObservedAt, now.Unix())
+		if obs == 0 {
+			continue
+		}
+		fresh := now.Unix()-obs <= int64(claudeQuotaFresh/time.Second)
 		if w.UsedPercentage >= 100 && (w.ResetsAt > now.Unix() || fresh) {
 			return 0, false
 		}
@@ -356,7 +395,11 @@ func (a claudeAccount) exhaustedWindow(now time.Time) (string, int64) {
 	}
 	window, reset := "", int64(0)
 	for name, w := range map[string]*claudeWindow{"five_hour": a.Quota.FiveHour, "seven_day": a.Quota.SevenDay} {
-		if validClaudeWindow(w) && w.UsedPercentage >= 100 && (w.ResetsAt == 0 || w.ResetsAt > now.Unix()) && (window == "" || w.ResetsAt > reset) {
+		if validClaudeWindow(w) && w.UsedPercentage >= 100 && (window == "" || w.ResetsAt > reset) {
+			obs := schedulingObservationTime(w.ObservedAt, a.Quota.ObservedAt, now.Unix())
+			if obs == 0 || w.ResetsAt > 0 && w.ResetsAt <= now.Unix() || w.ResetsAt == 0 && now.Unix()-obs > int64(claudeQuotaFresh/time.Second) {
+				continue
+			}
 			window, reset = name, w.ResetsAt
 		}
 	}
@@ -369,11 +412,14 @@ type claudeSelection struct{ ID, GuestID, Subject string }
 
 func (s *Server) selectClaudeAccount(requestedID string, login bool, workspace string) (claudeSelection, error) {
 	var empty claudeSelection
+	if !login && requestedID == "auto" {
+		requestedID = ""
+	}
+	if !login && requestedID != "" {
+		return empty, errors.New("Claude 终端会自动分配账号")
+	}
 	if !login && s.magpieTakesOverScheduling() {
 		return empty, nil
-	}
-	if !login && requestedID != "" && requestedID != "auto" {
-		return empty, errors.New("Claude 终端会自动分配账号")
 	}
 	m := &s.claudeAccounts
 	m.mu.Lock()
@@ -413,7 +459,7 @@ func (s *Server) selectClaudeAccount(requestedID string, login bool, workspace s
 		}
 		return claudeSelection{ID: requestedID, GuestID: guestID}, nil
 	}
-	if len(list.Accounts) == 0 {
+	if !scheduleManagesLaunches(list.Scheduling.Mode, list.Scheduling.claudeSelectedAccountID(), len(list.Accounts)) {
 		return empty, nil
 	}
 	return s.allocateClaudeAccount(list, workspace, s.readClaudeGuestQuotas)
@@ -421,12 +467,13 @@ func (s *Server) selectClaudeAccount(requestedID string, login bool, workspace s
 
 type claudeGuestQuota struct {
 	claudeQuota
-	Identity string `json:"identity"`
+	Identity      string `json:"identity"`
+	PlainLaunches int    `json:"plain_launches,omitempty"`
 }
 
 func (s *Server) readClaudeGuestQuotas(ctx context.Context, ids []string) (map[string]claudeGuestQuota, error) {
 	for _, id := range ids {
-		if !validClaudeID(id) {
+		if !validClaudeGuestID(id) {
 			return nil, errors.New("Claude 账号 ID 无效")
 		}
 	}
@@ -457,6 +504,11 @@ func (s *Server) readClaudeGuestQuotas(ctx context.Context, ids []string) (map[s
 // was closed. Fetch only its small local files in one SSH command. The guest
 // does not start the CLI, read tokens, or contact Anthropic for this read.
 func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace string, read func(context.Context, []string) (map[string]claudeGuestQuota, error)) (claudeSelection, error) {
+	return s.allocateClaudeBinding(previous, workspace, "", read)
+}
+
+func (s *Server) allocateClaudeBinding(previous claudeAccountList, workspace, requestedID string, read func(context.Context, []string) (map[string]claudeGuestQuota, error)) (claudeSelection, error) {
+	const unavailable = "暂无可分配的 Claude 账号。请在账号面板检查登录、参与状态和额度重置时间"
 	var empty claudeSelection
 	epoch, unlocked := s.account.access()
 	if !unlocked {
@@ -464,20 +516,38 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 	}
 	var ids []string
 	checkDefault := false
+	mode := canonicalSchedulingMode(previous.Scheduling.Mode)
+	manual := requestedID == "" && mode == "manual"
+	manualCandidate := false
+	configured := previous.Scheduling.claudeSelectedAccountID()
+	legacyPreferred := previous.Scheduling.SelectedAccountID == "" && previous.Scheduling.Preferred != ""
 	for _, a := range previous.Accounts {
+		if requestedID != "" && a.ID != requestedID {
+			continue
+		}
 		// The preferred account is used for new sessions even when it does
 		// not take part in automatic scheduling.
-		candidate := a.Enabled || a.ID == previous.Scheduling.Preferred
+		if a.Status != "ready" || a.Email == "" || !a.Enabled && a.ID != previous.Scheduling.Preferred {
+			continue
+		}
+		manualCandidate = manualCandidate || a.ID == configured && (a.Enabled || legacyPreferred)
 		if a.Source == "default" {
-			checkDefault = checkDefault || candidate
-		} else if candidate && a.Status == "ready" {
+			checkDefault = true
+		} else {
 			ids = append(ids, a.guestID())
 		}
+	}
+	if manual && !manualCandidate {
+		return empty, manualSchedulingError("Claude")
+	}
+	if !checkDefault && len(ids) == 0 {
+		return empty, errors.New(unavailable)
 	}
 	// The default login is verified in a login shell and the managed quotas are
 	// small file reads: neither needs the other, so a launch waits for the
 	// slower of them, not for both.
 	defaultSubject := ""
+	defaultPlainLaunches := 0
 	var defaultCheck sync.WaitGroup
 	if checkDefault {
 		defaultCheck.Add(1)
@@ -485,6 +555,7 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 			defer defaultCheck.Done()
 			if reading, _, err := s.inspectClaudeDefault(epoch, true); err == nil {
 				defaultSubject = reading.subject()
+				defaultPlainLaunches = max(0, reading.PlainLaunches)
 			}
 		}()
 	}
@@ -495,6 +566,11 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 		cancel()
 	}
 	defaultCheck.Wait()
+	var guestCursor guestSchedulingCursor
+	if requestedID == "" && mode == "exhaust" {
+		guestCursor = s.readGuestSchedulingCursor("claude", false)
+	}
+	active, logins := s.claudeAccountLoad()
 	m := &s.claudeAccounts
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -506,32 +582,19 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 		return empty, err
 	}
 	now := time.Now()
+	list.applyDefaultServiceUsage(active)
 	updated := false
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
 		q, ok := readings[a.guestID()]
+		active[a.ID] += max(0, q.PlainLaunches)
+		if a.Source == "default" {
+			active[a.ID] += defaultPlainLaunches
+		}
 		if (a.Enabled || a.ID == list.Scheduling.Preferred) && a.Status == "ready" && ok && q.Identity == claudeIdentityHash(a.Email, a.Organization) {
 			if a.mergeQuota(&q.claudeQuota, now) {
 				updated = true
 			}
-		}
-	}
-	if updated {
-		if err = s.saveClaudeAccounts(list); err != nil {
-			return empty, err
-		}
-	}
-	active := s.mobileCLI.activeAccounts()
-	logins := make(map[string]bool)
-	for _, session := range s.terminals.snapshot() {
-		if session["closed"] == true {
-			continue
-		}
-		id, _ := session["claude_account_id"].(string)
-		if session["kind"] == "claude-login" {
-			logins[id] = true
-		} else {
-			active[id]++
 		}
 	}
 	recent := m.recent[workspace]
@@ -542,35 +605,154 @@ func (s *Server) allocateClaudeAccount(previous claudeAccountList, workspace str
 	// Only a positively verified matching default profile can be admitted.
 	for i := range list.Accounts {
 		a := &list.Accounts[i]
-		if a.Source == "default" && (defaultSubject == "" || defaultSubject != claudeIdentityHash(a.Email, a.Organization)) {
-			a.Enabled, a.Status = false, "unverified" // local selection view, not the persisted state
+		if a.Email == "" || a.Source == "default" && (defaultSubject == "" || defaultSubject != claudeIdentityHash(a.Email, a.Organization)) {
+			logins[a.ID] = true // only the admission view treats this profile as unavailable
 		}
 	}
-	selected := pickClaudeAccount(list, active, logins, m.lastPick, preferred, now)
+	selected := requestedID
+	mode = canonicalSchedulingMode(list.Scheduling.Mode)
 	if selected == "" {
-		return empty, errors.New("暂无可分配的 Claude 账号。请在账号面板检查登录、参与状态和额度重置时间")
+		view := list
+		configured := list.Scheduling.claudeSelectedAccountID()
+		guestID := configured
+		if a := list.find(configured); a != nil {
+			guestID = a.guestID()
+		}
+		if mode == "exhaust" && guestCursor.matches(guestID, list.Scheduling.SelectedAccountRevision) {
+			for _, a := range list.Accounts {
+				if a.guestID() == guestCursor.AccountID && (a.Source != "default" || defaultSubject == claudeIdentityHash(a.Email, a.Organization)) {
+					if a.ID != configured {
+						view.Scheduling.SelectedAccountID = a.ID
+					}
+					break
+				}
+			}
+		}
+		selected = pickClaudeAccount(view, active, logins, m.lastPick, preferred, now)
+		if mode == "exhaust" && selected != "" && selected != configured {
+			list.Scheduling.SelectedAccountID = selected
+			list.Scheduling.SelectedAccountRevision = newSchedulingRevision()
+			updated = true
+		}
+	} else if a := list.find(selected); a == nil || !a.Enabled || a.Status != "ready" || logins[selected] {
+		selected = ""
+	} else if _, eligible := a.headroom(now); !eligible {
+		selected = ""
+	}
+	if updated {
+		if err = s.saveClaudeAccounts(list); err != nil {
+			return empty, err
+		}
+	}
+	if selected == "" {
+		if requestedID == "" && mode == "manual" {
+			return empty, manualSchedulingError("Claude")
+		}
+		return empty, errors.New(unavailable)
 	}
 	a := list.find(selected)
 	return claudeSelection{ID: selected, GuestID: a.guestID(), Subject: claudeIdentityHash(a.Email, a.Organization)}, nil
 }
 
+// Count a shared conversation once even when both a PTY and the guest's
+// conversation index report it. An ended shared CLI leaves a plain shell.
+func (s *Server) claudeAccountLoad() (map[string]int, map[string]bool) {
+	active := s.mobileCLI.activeAccounts()
+	delete(active, "")
+	for id, count := range s.activeServiceAccounts("claude") {
+		active[id] += count
+	}
+	logins := make(map[string]bool)
+	counted := make(map[string]bool)
+	s.terminals.mu.Lock()
+	for _, session := range s.terminals.sessions {
+		id := session.claudeAccountID
+		if id == "" {
+			continue
+		}
+		select {
+		case <-session.done:
+			continue
+		default:
+		}
+		session.mu.Lock()
+		if session.kind == "claude-login" {
+			logins[id] = true
+		} else if !session.conversationEnded {
+			active[id]++
+		}
+		if session.sharedID != "" {
+			counted[session.sharedID] = true
+		}
+		session.mu.Unlock()
+	}
+	s.terminals.mu.Unlock()
+	s.mobileCLI.mu.Lock()
+	for id := range s.mobileCLI.claudeShared {
+		if account := s.mobileCLI.catalog[id].AccountID; account != "" && !counted[id] {
+			active[account]++
+		}
+	}
+	s.mobileCLI.mu.Unlock()
+	return active, logins
+}
+
+// An explicit default service can predate the default profile joining the roster.
+func (list claudeAccountList) applyDefaultServiceUsage(active map[string]int) {
+	if count := active[""]; count > 0 {
+		for _, account := range list.Accounts {
+			if account.Source == "default" {
+				active[account.ID] += count
+				break
+			}
+		}
+		delete(active, "")
+	}
+}
+
+// A resumed conversation retains the identity it already had. The enabled
+// flag controls automatic assignment of new work.
+func (s *Server) validateBoundClaudeAccount(list claudeAccountList, selection claudeSelection) error {
+	if selection.ID == "" {
+		return nil
+	}
+	account := list.find(selection.ID)
+	// A default login may subsequently be adopted into a managed profile
+	// without moving the existing transcript. Its old default binding is
+	// still subject to the guest's original identity check.
+	if account == nil || account.Status != "ready" || (account.guestID() != selection.GuestID && selection.GuestID != "default") ||
+		claudeIdentityHash(account.Email, account.Organization) != selection.Subject {
+		return errors.New("原会话的 Claude 账号已移除、退出登录或发生变化")
+	}
+	if _, err := s.terminals.existingClaudeLogin(selection.ID, false); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Start at the account following the last allocation. Among eligible accounts,
 // prefer fewer live sessions, then the largest known remaining minimum window.
 func pickClaudeAccount(list claudeAccountList, active map[string]int, logins map[string]bool, last, preferred string, now time.Time) string {
+	mode := canonicalSchedulingMode(list.Scheduling.Mode)
+	if mode != "smart" {
+		selected := list.Scheduling.claudeSelectedAccountID()
+		legacyPreferred := list.Scheduling.SelectedAccountID == "" && list.Scheduling.Preferred != ""
+		idx := orderedAccountIndex(list.Accounts, mode, selected, func(a claudeAccount) string { return a.ID }, func(a claudeAccount) bool {
+			_, eligible := a.headroom(now)
+			return (a.Enabled || legacyPreferred && a.ID == selected) && a.Status == "ready" && !logins[a.ID] && eligible
+		})
+		if idx >= 0 {
+			return list.Accounts[idx].ID
+		}
+		return ""
+	}
+
 	// The person's chosen account wins while it can take a session, whether
 	// or not it takes part in automatic scheduling.
 	if a := list.find(list.Scheduling.Preferred); a != nil && a.Status == "ready" && !logins[a.ID] {
 		if _, eligible := a.headroom(now); eligible {
 			return a.ID
 		}
-	}
-	if list.Scheduling.Mode == "sequential" {
-		for _, a := range list.Accounts {
-			if _, eligible := a.headroom(now); a.Enabled && a.Status == "ready" && !logins[a.ID] && eligible {
-				return a.ID
-			}
-		}
-		return ""
 	}
 	start := slices.IndexFunc(list.Accounts, func(a claudeAccount) bool { return a.ID == last }) + 1
 	best := ""

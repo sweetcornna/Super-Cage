@@ -2,8 +2,9 @@ import React, { createContext, useCallback, useContext, useEffect, useMemo, useR
 import { Check, ChevronDown, Pencil, Plus, RefreshCw, TerminalSquare, Timer } from "lucide-react";
 import { api } from "./api";
 import { InlineSelect } from "./inline-select";
+import { LaunchAccountPolicy, launchModeLabel } from "./launch-account-policy";
 import { EmptyState } from "./drawings";
-import crabIcon from "./claude-account-crab.svg";
+import { ProviderMark } from "./provider-mark";
 import { GROUP_SENTENCE, MANUAL_SENTENCE, OFFER_TEXT, offerChange, preferredLabel, ruleSentence, schedulingBody, showOffer, UNGROUPED_LABEL, ungroupedChange } from "./claude-scheduling-state.mjs";
 import { useWindowVisibility } from "./window-visibility";
 import "./claude-accounts.css";
@@ -40,7 +41,8 @@ export function useClaudeAccounts() {
   return { accounts: registry?.accounts ?? null, detected: registry?.detected,
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
-    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
+    scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, schedulingAPI: registry?.scheduling_api || 0,
+    handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
 }
 
 const statusLabels = {
@@ -194,7 +196,7 @@ function DetectedProfile({ profile, usageEnvironment, busy, join, perform, chang
   const usage = useUsageCheck(profile, usageEnvironment, perform, change);
   return <article className="claude-profile claude-detected" aria-label={profile.email}>
     <div className="claude-profile-heading">
-      <span className="claude-profile-avatar" aria-hidden="true"><img src={crabIcon} alt="" /></span>
+      <span className="claude-profile-avatar" aria-hidden="true"><ProviderMark provider="claude" decorative /></span>
       <div className="claude-profile-identity">
         <div className="claude-profile-name">
           <h4 title={profile.email}>{profile.email}</h4>
@@ -231,7 +233,7 @@ function ProfileCard({ profile, environment, usageEnvironment, busy, active, def
   const draft = !fromTerminal && !profile.email && !active && ["pending", "signed_out", "duplicate"].includes(profile.status);
   return <article className="claude-profile" aria-label={displayName} data-enabled={profile.enabled} data-open={open || undefined}>
     <div className="claude-profile-heading">
-      <span className="claude-profile-avatar" aria-hidden="true"><img src={crabIcon} alt="" /></span>
+      <span className="claude-profile-avatar" aria-hidden="true"><ProviderMark provider="claude" decorative /></span>
       <div className="claude-profile-identity">
         {renaming ? <form className="claude-profile-rename" onSubmit={(e) => {
           e.preventDefault();
@@ -349,6 +351,7 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
     catch (e) { setActionError(e.message); }
     finally { setBusy(false); }
   };
+  const schedulingBase = store.schedulingAPI >= 1 ? {} : store.scheduling;
   const cancelDraft = async (profile) => {
     const last = accounts.length === 1;
     if (await onConfirm({ title: `撤销添加「${profile.label}」？`,
@@ -375,36 +378,35 @@ export function ClaudeAccountsPanel({ store, running, environmentBusy, tabs, log
       </div>
     </div>
     <details className="claude-scheduling">
-      <summary>调度设置 · {store.scheduling.mode === "sequential" ? "顺序优先" : "均衡分配"}{showOffer(store) && " · 额度用完时待设定"}</summary>
+      <summary>调度设置 · {launchModeLabel(store.scheduling.mode)}{showOffer(store) && " · 额度用完时待设定"}</summary>
       {showOffer(store) && <div className="claude-scheduling-offer" role="group" aria-label="额度用完时">
         <p>{OFFER_TEXT}</p>
         <div>
-          <button type="button" className="primary" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"always")}))}>以后额度用完都自动接续</button>
-          <button type="button" className="quiet-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"ask")}))}>每次询问</button>
-          <button type="button" className="text-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(store.scheduling,"wait")}))}>以后都等待</button>
+          <button type="button" className="primary" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(schedulingBase,"always")}))}>以后额度用完都自动接续</button>
+          <button type="button" className="quiet-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(schedulingBase,"ask")}))}>每次询问</button>
+          <button type="button" className="text-button" disabled={busy} onClick={() => perform(() => load({action:"scheduling",scheduling:offerChange(schedulingBase,"wait")}))}>以后都等待</button>
         </div>
       </div>}
-      <label>新会话分配<InlineSelect inline aria-label="新会话分配" value={store.scheduling.mode} disabled={busy}
-        onValueChange={mode => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...store.scheduling,mode})}))}>
-        <option value="balanced">均衡分配</option><option value="sequential">按列表顺序优先</option>
-      </InlineSelect></label>
+      <LaunchAccountPolicy scheduling={store.scheduling} accounts={accounts} enabled={store.schedulingAPI >= 1} busy={busy}
+        change={body => perform(() => load(body.scheduling && !store.schedulingAPI
+          ? { ...body, scheduling: schedulingBody(store, body.scheduling) } : body))} />
       <label>额度用完时<InlineSelect inline aria-label="额度用完时" value={store.scheduling.switch_policy} disabled={busy}
-        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...store.scheduling,switch_policy})}))}>
+        onValueChange={switch_policy => perform(() => load({action:"scheduling",scheduling:schedulingBody(store,{...schedulingBase,switch_policy})}))}>
         <option value="ask">每次询问</option><option value="allow">自动换账号继续</option><option value="wait">等原账号恢复</option>
       </InlineSelect></label>
       {store.handoff_api >= 2 && store.scheduling.switch_policy === "allow" && <label className="check-line">
         <input type="checkbox" checked={!!store.scheduling.ungrouped_handoff} disabled={busy}
-          onChange={event => perform(() => load({action:"scheduling",scheduling:ungroupedChange(store.scheduling,event.target.checked)}))} />
+          onChange={event => perform(() => load({action:"scheduling",scheduling:ungroupedChange(schedulingBase,event.target.checked)}))} />
         <span>{UNGROUPED_LABEL}</span>
       </label>}
       <p className="field-help">{store.handoff_api >= 2 ? ruleSentence(store.scheduling) : "自动接续只在限额已确认且目标账号属于同一接续分组时进行。"} 跨账号可能重建缓存。{store.handoff_api >= 2 && " " + MANUAL_SENTENCE}</p>
       {store.handoff_api >= 2 && <p className="field-help">{GROUP_SENTENCE}</p>}
       {preferredLabel(store) && <p className="field-help">新会话优先使用 {preferredLabel(store)}，它额度用完或未登录时按上面的分配方式选择。它不因此参与自动分配或自动接续。</p>}
-      {store.scheduling.mode === "sequential" && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
+      {["sequential", "exhaust"].includes(store.scheduling.mode) && accounts?.length > 1 && <div className="claude-account-order" aria-label="账号优先顺序">
         {accounts.map((profile,index) => <div key={profile.id}><span>{index+1}. {profile.label || profile.email}</span>
           <button disabled={busy || index===0} aria-label={`提高 ${profile.label} 的优先级`} onClick={() => {
             const order=accounts.map(a=>a.id); [order[index-1],order[index]]=[order[index],order[index-1]];
-            perform(() => load({action:"scheduling",scheduling:schedulingBody(store,store.scheduling),order}));
+            perform(() => load({action:"scheduling",scheduling:schedulingBody(store,schedulingBase),order}));
           }}>上移</button></div>)}
       </div>}
     </details>

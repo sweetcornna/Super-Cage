@@ -179,7 +179,7 @@ func TestLinuxCoreStopPinsAndChecksProcessIdentity(t *testing.T) {
 	}
 	stale := record
 	stale.Started++
-	if err := stopLinuxProcess(stale, record.Executable); err != nil {
+	if err := stopLinuxProcess(stale, "/proc/self/exe"); err != nil {
 		t.Fatal("stale record prevented recovery", err)
 	}
 	if err := unix.Kill(cmd.Process.Pid, 0); err != nil {
@@ -201,6 +201,9 @@ func TestLinuxCoreStopPinsAndChecksProcessIdentity(t *testing.T) {
 	}
 	select {
 	case <-done:
+		if err := stopLinuxProcess(record, "/proc/self/exe"); err != nil {
+			t.Fatal("exited core from a previous installation blocked recovery", err)
+		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("proxy process was not reaped")
 	}

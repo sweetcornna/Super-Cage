@@ -18,6 +18,7 @@ import {
   isPendingTerminal, loginTerminalKind, markPendingTab, pendingTerminalTab, renamePendingLayout, settlePendingTab,
 } from "./terminal-pending.mjs";
 import { keepSame, reuseItems, terminalListDue } from "./poll-state.mjs";
+import { readTerminalFocus, terminalFocusAction, terminalFocusFor, writeTerminalFocus } from "./terminal-focus.mjs";
 import { usePasswordVault } from "./password-vault";
 import { validGuestChoice } from "./guest-system-picker";
 import { AppearanceProvider } from "./appearance";
@@ -110,6 +111,11 @@ const sessionPanePrefix = "session:";
 
 function App() {
   const { account } = useAccount();
+  const focusKey = clientStorageKey("cage-terminal-focus");
+  const [savedTerminalFocus] = useState(() => readTerminalFocus(focusKey));
+  const terminalFocus = useRef(savedTerminalFocus);
+  const recoveryAttempt = useRef(null);
+  const [terminalRecoveryNotice, setTerminalRecoveryNotice] = useState("");
   const [, refreshClientPreferences] = useState(0);
   useEffect(() => {
     const refresh = () => refreshClientPreferences((value) => value + 1);
@@ -118,7 +124,10 @@ function App() {
   }, []);
   const claudeProfiles = useClaudeAccounts();
   const [agentAccountsRevision, setAgentAccountsRevision] = useState(0);
-  const [managementPage, setManagementPage] = useState(() => { try { return Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000 ? "claude-science" : ""; } catch { return ""; } }); // Claude Science reloaded the window once for its frame (claude-science.jsx)
+  const [managementPage, setManagementPage] = useState(() => {
+    try { if (Date.now() - Number(sessionStorage.getItem("cage-science-frame-reload") || 0) < 120000) return "claude-science"; } catch { /* No frame reload to restore. */ }
+    return savedTerminalFocus?.pane ? sessionPanePrefix + savedTerminalFocus.pane : "";
+  });
   const [tailnetLogin, setTailnetLogin] = useState(null);
   const [desktopOpen, setDesktopOpen] = useState(false);
   const [browserStreamEpoch, setBrowserStreamEpoch] = useState(0);
@@ -142,7 +151,7 @@ function App() {
     [settings, setSettings] = useState(null),
     [proxy, setProxy] = useState(null),
     [tabs, setTabs] = useState([]),
-    [layout, setLayout] = useState(() => ({ active: localStorage.getItem(clientStorageKey("cage-active")) || "" })),
+    [layout, setLayout] = useState(() => ({ active: savedTerminalFocus?.terminal ? "terminal:" + savedTerminalFocus.terminal : localStorage.getItem(clientStorageKey("cage-active")) || "" })),
     [browser, setBrowser] = useState({ tabs: [] }),
     [browserSettingsRevision, setBrowserSettingsRevision] = useState(0),
     [settingsOpen, setSettingsOpen] = useState(false),
@@ -179,6 +188,18 @@ function App() {
   const status = clientStatus && startRequest
     ? { ...clientStatus, job: { running: true, kind: "start", message: "正在启动 Super Cage 环境…" } }
     : clientStatus;
+  const externalRestoreConnection = getClientContext().connection_id;
+  useEffect(() => {
+    if (!status?.ready || !getClientContext().desktop_gateway || !externalRestoreConnection) return;
+    const controller = new AbortController();
+    void import("./external_session_restore.jsx")
+      .then(({ externalSessionAPI }) => {
+        if (controller.signal.aborted || getClientContext().connection_id !== externalRestoreConnection) return;
+        return externalSessionAPI(undefined, { signal: controller.signal });
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [status?.ready, externalRestoreConnection]);
   const system = status?.guest_system || account?.guest_system;
   // Codex surfaces follow presence (choice C); unknown shows them as before.
   const codexUI = codexSurfaces(status, system, getClientContext());
@@ -187,6 +208,17 @@ function App() {
   const nativeGuestLabel = {macos: "macOS", "windows-11": "Windows", "windows-remote": "Windows 云端"}[system];
   const { active } = layout;
   const setActive = id => setLayout(previous => focusTab(previous, id));
+  const rememberTerminalFocus = value => {
+    const request = sessionOpenRequest.current;
+    if (request?.recovery) request.controller.abort();
+    terminalFocus.current = value;
+    writeTerminalFocus(focusKey, value);
+    setTerminalRecoveryNotice("");
+  };
+  const goHome = () => {
+    rememberTerminalFocus(null);
+    setHome(true);
+  };
   const workspaceBox = useRef(null);
   const [dropSide, setDropSide] = useState(null);
   const terminalControls = useRef(new Map());
@@ -533,6 +565,7 @@ function App() {
     setTailnetLogin(null);
     setManagementPage("");
     const tab = tabs.find((t) => t.id === id);
+    rememberTerminalFocus(terminalFocusFor(tab));
     if (tab && tab.kind !== "terminal") browserDismissed.current = false;
     setDesktopOpen(false);
     setHome(false);
@@ -976,6 +1009,14 @@ function App() {
     } else if (res?.opened) {
       notify("已打开本机 Orca 客户端");
     }
+    if (res?.opened && res.environment_id && res.guest_workspace) {
+      try {
+        const { externalSessionAPI } = await import("./external_session_restore.jsx");
+        await externalSessionAPI({ action: "watch_orca", connection: res.environment_id, workspace: res.guest_workspace });
+      } catch (error) {
+        notify(error.message);
+      }
+    }
     return res;
   };
   const showTerminal = (result, placeholder) => {
@@ -984,11 +1025,13 @@ function App() {
       terminalKind: result.kind, kind: "terminal",
     };
     if (!placeholder) return openTerminalTab(tab);
+    if (activeRef.current === placeholder) rememberTerminalFocus(terminalFocusFor(tab));
     // The user may have moved on meanwhile: only the placeholder changes.
     setTabs(list => settlePendingTab(list, placeholder, tab));
     setLayout(previous => renamePendingLayout(previous, placeholder, tab.id));
   };
   const openTerminalTab = tab => {
+    rememberTerminalFocus(terminalFocusFor(tab));
     setTailnetLogin(null);
     setManagementPage("");
     setTabs((list) => [...list.filter((t) => t.id !== tab.id && (!tab.cli_session_id || t.cli_session_id !== tab.cli_session_id)), tab]);
@@ -998,14 +1041,16 @@ function App() {
     setActive(tab.id);
   };
   const showSessionPane = session => {
+    rememberTerminalFocus({ pane: session.id });
     setTailnetLogin(null);
     setManagementPage(sessionPanePrefix + session.id);
     if (session.workspace) setSelectedProject(session.workspace);
   };
   // Resolves the error text when the session could not be opened.
-  const openSessionTerminal = async session => {
+  const openSessionTerminal = async (session, recovery = null) => {
+    if (!recovery) rememberTerminalFocus(null);
     const codex = isCodexSession(session);
-    if (codex) {
+    if (!recovery && codex) {
       // Codex rows stay clickable while another device writes: read-only then.
       const choice = codexSessionAction(session, tabs);
       if (choice.action === "focus") { void select(choice.tabId); return ""; }
@@ -1014,22 +1059,31 @@ function App() {
     if (sessionOpenRequest.current?.id === session.id) return "";
     sessionOpenRequest.current?.controller.abort();
     const controller = new AbortController();
-    const request = { id: session.id, controller };
+    const request = { id: session.id, controller, recovery };
     sessionOpenRequest.current = request;
     setOpeningSession(session.id);
     setSessionOpenError(null);
     const timer = setTimeout(() => controller.abort(new Error("打开会话超时，历史已保留。请重新打开；若仍失败，请在设置中导出诊断包。")), 60000);
     try {
-      const view = await api("/cli/sessions/" + session.id + "/open", {}, undefined, {}, { signal: controller.signal });
+      const view = await api("/cli/sessions/" + session.id + "/open", recovery ? { recover_terminal_id: recovery.terminal } : {}, undefined, {}, { signal: controller.signal });
       const terminals = await api("/terminals", undefined, undefined, {}, { signal: controller.signal });
-      if (sessionOpenRequest.current !== request) return;
+      if (sessionOpenRequest.current !== request || recovery && terminalFocus.current !== recovery) return;
       const terminal = terminals.find(item => item.id === view.desktop_terminal_id && item.cli_session_id === session.id);
       if (!terminal) throw new Error("终端状态已变化，请重新打开会话");
       showTerminal(terminal);
       sessionsChanged();
       return "";
     } catch (error) {
-      if (sessionOpenRequest.current === request && error.code !== "connection_changed") {
+      if (sessionOpenRequest.current === request && error.code !== "connection_changed" && (!recovery || terminalFocus.current === recovery)) {
+        if (recovery && error.status === 409 && !controller.signal.aborted) {
+          const terminals = await api("/terminals", undefined, undefined, {}, { signal: controller.signal }).catch(() => []);
+          const attached = terminals.find(item => item.cli_session_id === session.id && (!item.closed || item.herdr_live));
+          if (attached && sessionOpenRequest.current === request && terminalFocus.current === recovery) {
+            showTerminal(attached);
+            return "";
+          }
+        }
+        if (sessionOpenRequest.current !== request || recovery && terminalFocus.current !== recovery) return "";
         const reason = (controller.signal.aborted ? controller.signal.reason : error).message;
         // The list was older than the owner: show the session read-only.
         if (codex && error.status === 409 && Object.values(READONLY_REASONS).includes(reason) && !managementPage.startsWith(sessionPanePrefix)) {
@@ -1054,6 +1108,7 @@ function App() {
     await confirm({...archiveCopy(session, { closing }), pendingLabel:"正在归档…", anchor,
       submit: async () => {
         await api("/cli/sessions/" + session.id + "/archive", {});
+        if (terminalFocus.current?.pane === session.id || terminalFocus.current?.conversation === session.id) rememberTerminalFocus(null);
         setTabs(list => list.filter(tab => tab.cli_session_id !== session.id));
         if (managementPage === sessionPanePrefix + session.id) setManagementPage("");
         sessionsChanged();
@@ -1166,6 +1221,7 @@ function App() {
       if (!(await action("/browser/close", { id: tab.id }))) return;
       if (tab.id === tailnetLogin?.tabId) setTailnetLogin(null);
     }
+    if (terminalFocus.current?.terminal === tab.sessionId) rememberTerminalFocus(null);
     setTabs((list) => list.filter((t) => t.id !== tab.id));
     if (tab.incognito) setPrivateTabMetadata(previous => Object.fromEntries(Object.entries(previous).map(([key, value]) => [key,
       Object.fromEntries(Object.entries(value).filter(([id]) => id !== tab.id).map(([id, item]) =>
@@ -1365,6 +1421,29 @@ function App() {
               ...all.filter((item) => !previous.some((p) => p.id === item.id)),
             ]);
           });
+          const focused = terminalFocus.current;
+          if (fetched && focused?.terminal) {
+            const recovery = terminalFocusAction(focused, t);
+            if (recovery.terminal && (!initialized.current || recovery.terminal.id !== focused.terminal)) {
+              showTerminal(recovery.terminal);
+              initialized.current = true;
+              browserIds.current = new Set(b.tabs.map((item) => item.id));
+              return;
+            }
+            if (recovery.recover && recoveryAttempt.current !== focused) {
+              recoveryAttempt.current = focused;
+              void openSessionTerminal({ id: recovery.recover }, focused).then((message) => {
+                if (!live || terminalFocus.current !== focused || !message) return;
+                goHome();
+                setTerminalRecoveryNotice(message);
+              });
+              return;
+            }
+            if (recovery.missing) {
+              goHome();
+              setTerminalRecoveryNotice("上次的终端进程已结束，无法恢复。");
+            }
+          }
           if (!browserDismissed.current && initialized.current && b.active && b.active !== activeRef.current && !browserIds.current.has(b.active)) {
             setDesktopOpen(false);
             setHome(false);
@@ -1921,7 +2000,7 @@ function App() {
     await refreshStatus.current?.();
     setSelectedProject(path);
     setProjectDialog(null);
-    setHome(true);
+    goHome();
   };
   useEffect(() => {
     if (status?.workspace) setSelectedProject(status.workspace);
@@ -1969,7 +2048,7 @@ function App() {
     return <TerminalHeader tab={tab} project={projectName(path, groups)} metadata={metadata}
       contentWorkspace={path} terminalDetail={codexBound ? <CodexTerminalDetail store={sessionList} tab={tab}
         label={codexTerminalLabel(tab, codexProfiles.accounts)} /> : detail} terminalDetailHint={detailHint}
-      busy={busy} onHome={() => setHome(true)}
+      busy={busy} onHome={goHome}
       sidebarButton={sidebarButton(paneSide(tab?.id))} exitButton={codexBound ? <>
         <CodexTerminalActions store={sessionList} tab={tab} pinned={Boolean(metadata[tab.id]?.pinned)} busy={busy}
           onPin={() => pinTab(tab.id)} onRename={() => renameTab(tab)}
@@ -2004,7 +2083,7 @@ function App() {
         onRestart={() => restartT3Code(tab)}
         onToggleBrowserBar={() => toggleT3CodeBrowserBar(tab.id, true)}
         onOfficialSettings={() => { void openT3Code("", "settings").catch(() => {}); }}
-        onSettings={() => openSettings("agents")}
+        onSettings={() => openSettings("t3code")}
         onClose={() => closeTab(tab)}
         menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
       />;
@@ -2212,7 +2291,7 @@ function App() {
             running={running}
             runtimeLabel={runtimeLabel}
             network={network}
-            onHome={() => { setManagementPage(""); setDesktopOpen(false); setHome(true); }}
+            onHome={() => { setManagementPage(""); setDesktopOpen(false); goHome(); }}
             browserAvailable={browserAvailable}
             editorAvailable={editorAvailable}
             projectsAvailable={projectsAvailable}
@@ -2351,6 +2430,12 @@ function App() {
               <div className="environment-update-banner" role="status">
                 <span>{status.environment_update_error || "环境组件需要更新。请先保存编辑器中的文件。"}</span>
                 <button onClick={() => openSettings("project")}>查看并更新</button>
+              </div>
+            )}
+            {terminalRecoveryNotice && (
+              <div className="environment-update-banner" role="status">
+                <span>{terminalRecoveryNotice}</span>
+                <button onClick={() => setTerminalRecoveryNotice("")}>知道了</button>
               </div>
             )}
             {!storageRecovery && (status.vm_running || terminal) && (

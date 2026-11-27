@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   Check,
   Download,
@@ -14,7 +14,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { api } from "./api";
+import { useServiceAccounts } from "./use-service-accounts";
 import { isRemoteClient } from "./client-context.mjs";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
@@ -227,111 +227,64 @@ export function T3CodeHeader({
   );
 }
 
-const BINDING_PRIORITY = ["claude", "codex", "antigravity", "opencode"];
-
 export function T3CodeSettingsCard({
   store,
   agentsStore,
   status,
   magpieEnabled = false,
   onOpenT3Code,
+  onOpenAgentSettings,
+  onConfirm,
+  onDirty,
 }) {
   const supportsManaged = isT3CodeManagedSupported(store, status);
   const directAvailable = isT3CodeDirectAvailable(store);
   const magpieTakeover = Boolean(magpieEnabled || store?.magpie_takeover);
+  const hasConfig = Boolean(store?.data);
+  const restorePending = Boolean(store?.data?.restore_pending && !store.running);
+  const savedMode = supportsManaged ? (store?.mode || "managed") : "external";
+  const savedUrl = store?.external_url || "";
+  const savedPort = String(store?.port || 13773);
   const [installChannel, setInstallChannel] = useState("npm");
-  const [draftMode, setDraftMode] = useState(() =>
-    supportsManaged ? (store?.mode || "managed") : "external",
-  );
+  const [draftMode, setDraftMode] = useState(savedMode);
   const [pendingEnable, setPendingEnable] = useState(false);
-  const [externalUrl, setExternalUrl] = useState(store?.external_url || "");
-  const [portInput, setPortInput] = useState(String(store?.port || 13773));
+  const [externalUrl, setExternalUrl] = useState(savedUrl);
+  const [portInput, setPortInput] = useState(savedPort);
   const [submitting, setSubmitting] = useState("");
   const [actionError, setActionError] = useState("");
   const [savedNotice, setSavedNotice] = useState("");
   const [bindingRestartHint, setBindingRestartHint] = useState(false);
-  const [accountOptions, setAccountOptions] = useState({});
   const externalUrlRef = useRef(null);
 
   const vmRunning = Boolean(status?.vm_running);
   const envReady = Boolean(status?.ready);
   const jobRunning = Boolean(status?.job?.running);
   const isInstallJob = jobRunning && status?.job?.kind === "t3code-install";
+  const jobError = status?.job?.kind === "t3code-install" ? status.job.error : "";
   const busy = jobRunning || Boolean(submitting);
 
-  useEffect(() => {
-    if (!supportsManaged) {
-      setDraftMode("external");
-    } else if (store?.mode) {
-      setDraftMode(store.mode);
-    }
-  }, [store?.mode, supportsManaged]);
+  useEffect(() => { setDraftMode(savedMode); }, [savedMode]);
 
   useEffect(() => {
     if (store?.enabled) setPendingEnable(false);
   }, [store?.enabled]);
 
   useEffect(() => {
-    setExternalUrl(store?.external_url || "");
-  }, [store?.external_url]);
+    setExternalUrl(savedUrl);
+  }, [savedUrl]);
 
   useEffect(() => {
-    if (store?.port) setPortInput(String(store.port));
-  }, [store?.port]);
+    setPortInput(savedPort);
+  }, [savedPort]);
 
-  const bindableAgents = useMemo(() => {
-    const installed = agentsStore?.installedAgents || [];
-    const sorted = [...installed].sort((a, b) => {
-      const ia = BINDING_PRIORITY.indexOf(a.spec.id);
-      const ib = BINDING_PRIORITY.indexOf(b.spec.id);
-      if (ia !== -1 && ib !== -1) return ia - ib;
-      if (ia !== -1) return -1;
-      if (ib !== -1) return 1;
-      return a.spec.name.localeCompare(b.spec.name);
-    });
-    return sorted;
-  }, [agentsStore?.installedAgents]);
+  const dirty = pendingEnable || draftMode !== savedMode || externalUrl !== savedUrl || portInput !== savedPort;
+  useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
 
-  const bindableKey = bindableAgents.map((e) => e.spec.id).join(",");
-
-  // Lazily fetch each installed provider's accounts without SSH probing when enabled.
-  useEffect(() => {
-    if (!store?.enabled || !supportsManaged || !bindableKey) return;
-    let live = true;
-    const ids = bindableKey.split(",");
-    Promise.allSettled(
-      ids.map(async (id) => {
-        if (id === "claude") {
-          const res = await api("/claude-accounts");
-          return [id, res?.accounts || []];
-        }
-        if (id === "codex") {
-          const [nativeRes, agentRes] = await Promise.allSettled([
-            api("/codex-accounts"),
-            api("/agent-clis/codex/accounts?skip_detect=1"),
-          ]);
-          const nativeAccts = nativeRes.status === "fulfilled" && nativeRes.value?.guest_supported
-            ? (nativeRes.value?.accounts || [])
-            : [];
-          const agentAccts = agentRes.status === "fulfilled" ? (agentRes.value?.accounts || []) : [];
-          return [id, nativeAccts.length > 0 ? nativeAccts : agentAccts];
-        }
-        const res = await api(`/agent-clis/${encodeURIComponent(id)}/accounts?skip_detect=1`);
-        return [id, res?.accounts || []];
-      }),
-    ).then((results) => {
-      if (!live) return;
-      const next = {};
-      for (const item of results) {
-        if (item.status === "fulfilled") {
-          const [id, accounts] = item.value;
-          next[id] = accounts;
-        }
-      }
-      setAccountOptions(next);
-    });
-    return () => { live = false; };
-  }, [store?.enabled, supportsManaged, bindableKey]);
+  const { bindableAgents, accounts: accountOptions, errors: accountErrors, loading: accountsLoading, retry: retryAccounts } = useServiceAccounts(agentsStore, store?.account_bindings, {
+    available: hasConfig && supportsManaged && draftMode === "managed",
+    service: "t3code",
+  });
 
   if (!store) return null;
 
@@ -351,12 +304,19 @@ export function T3CodeSettingsCard({
     }
   };
 
-  const toggleEnabled = (checked) => {
+  const confirmInterruption = () => store.mode !== "managed" || !store.running || onConfirm?.({
+    title: "保存设置并停止托管 T3 Code？",
+    body: "保存后会停止当前托管实例。请先保存会话中的工作。",
+    confirm: "保存设置",
+  });
+
+  const toggleEnabled = async (checked) => {
     setActionError("");
     setSavedNotice("");
     if (!checked) {
       setPendingEnable(false);
       if (store.enabled) {
+        if (!(await confirmInterruption())) return;
         void runAction("toggle", () => store.saveConfig({ enabled: false }));
       }
       return;
@@ -376,6 +336,7 @@ export function T3CodeSettingsCard({
           mode: "external",
           external_url: cleaned,
         });
+        setExternalUrl(res.external_url || "");
         setPendingEnable(false);
         return res;
       }, "外部地址已保存并接入");
@@ -406,40 +367,47 @@ export function T3CodeSettingsCard({
   };
 
   const saveOpenMode = (open_mode) => {
-    if (!directAvailable && open_mode === "direct") return;
     void runAction("open-mode", () => store.saveConfig({ open_mode }), "默认打开方式已保存");
   };
 
   const saveFocusChrome = (focus_chrome) =>
     void runAction("focus-chrome", () => store.saveConfig({ focus_chrome }));
 
-  const saveExternalUrl = (e) => {
+  const saveExternalUrl = async (e) => {
     e.preventDefault();
     const cleaned = externalUrl.trim();
-    if (!cleaned) {
+    const enabled = store.enabled || pendingEnable;
+    if (!cleaned && enabled) {
       setActionError("请输入有效的外部 T3 Code URL（例如 http://127.0.0.1:3773）。");
       externalUrlRef.current?.focus();
       return;
     }
+    if (store.mode !== "external" && !(await confirmInterruption())) return;
     void runAction("ext-url", async () => {
       const res = await store.saveConfig({
         mode: "external",
         external_url: cleaned,
-        enabled: true,
+        ...(pendingEnable ? { enabled: true } : {}),
       });
+      setExternalUrl(res.external_url || "");
       setPendingEnable(false);
       return res;
-    }, "外部地址已保存并接入");
+    }, enabled ? "外部地址已保存并接入" : "外部地址已保存");
   };
 
-  const savePort = (e) => {
+  const savePort = async (e) => {
     e.preventDefault();
     const port = Number(portInput);
     if (!Number.isInteger(port) || port < 1024 || port > 65535) {
       setActionError("端口须为 1024 - 65535 之间的整数。");
       return;
     }
-    void runAction("port", () => store.saveConfig({ port }), "服务端口已保存");
+    if (port === Number(savedPort) || !(await confirmInterruption())) return;
+    void runAction("port", async () => {
+      const result = await store.saveConfig({ port });
+      setPortInput(String(result.port));
+      return result;
+    }, "服务端口已保存");
   };
 
   const updateBinding = (agentId, value) => {
@@ -459,10 +427,7 @@ export function T3CodeSettingsCard({
       ? Boolean(store.external_url)
       : (supportsManaged && vmRunning && store.installed)
   );
-  const externalUnchanged =
-    store.enabled &&
-    store.mode === "external" &&
-    externalUrl.trim() === (store.external_url || "");
+  const externalUnchanged = !pendingEnable && store.mode === "external" && externalUrl === savedUrl;
 
   return (
     <section className="t3code-card" aria-label="T3 Code 可选集成">
@@ -505,8 +470,8 @@ export function T3CodeSettingsCard({
             role="switch"
             aria-label="启用 T3 Code 集成"
             checked={expanded}
-            disabled={busy}
-            onChange={(e) => toggleEnabled(e.target.checked)}
+            disabled={busy || !hasConfig}
+            onChange={(e) => void toggleEnabled(e.target.checked)}
           />
         </label>
       </div>
@@ -518,13 +483,22 @@ export function T3CodeSettingsCard({
         </div>
       )}
 
-      {(actionError || store.error || store.serverError) && (
+      {(actionError || jobError || store.error || store.serverError) && (
         <div className="error-message" role="alert">
-          {actionError || store.error || store.serverError}
+          {actionError || jobError || store.error || store.serverError}
         </div>
       )}
+      {store.loading && !hasConfig && <p className="field-help" role="status">正在读取 T3 Code 设置…</p>}
+      <div className="t3code-quick-actions">
+        <button type="button" disabled={store.loading || busy}
+          onClick={() => { setActionError(""); void store.refresh(); }}>
+          <RefreshCw size={14} className={store.loading ? "spin" : undefined} />
+          刷新状态
+        </button>
+        {savedNotice && <span className="agent-pill agent-pill--ok" role="status"><Check size={12} />{savedNotice}</span>}
+      </div>
 
-      {expanded && (
+      {hasConfig && (
         <div className="t3code-card-body">
           <div className="t3code-quick-actions">
             {canLaunch && (
@@ -595,25 +569,30 @@ export function T3CodeSettingsCard({
                     }, "T3 Code 已启动")}
                   >
                     {submitting === "start" ? <LoaderCircle size={14} className="spin" /> : <Play size={13} />}
-                    启动服务
+                      {restorePending ? "用原账号启动" : "启动服务"}
                   </button>
                 )}
+                {restorePending && (
+                  <>
+                    <button
+                      type="button"
+                      disabled={!vmRunning || busy}
+                      onClick={() => void runAction("restart", () => store.restart(), "T3 Code 已按最新绑定启动")}
+                    >
+                      <RotateCw size={14} />
+                      用最新账号绑定启动
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void runAction("stop", () => store.stop(), "T3 Code 恢复已取消")}
+                    >
+                      <Square size={13} />
+                      取消恢复
+                    </button>
+                  </>
+                )}
               </>
-            )}
-            <button
-              type="button"
-              disabled={store.loading || busy}
-              onClick={() => void store.refresh()}
-              title="重新检测 T3 Code 运行状态"
-            >
-              <RefreshCw size={14} className={store.loading ? "spin" : undefined} />
-              刷新状态
-            </button>
-            {savedNotice && (
-              <span className="agent-pill agent-pill--ok">
-                <Check size={12} />
-                {savedNotice}
-              </span>
             )}
           </div>
 
@@ -625,7 +604,7 @@ export function T3CodeSettingsCard({
 
           {!directAvailable && (
             <div className="inline-info t3code-info-banner" role="status">
-              <span>当前通过远程客户端访问 Cage，本机回环直连窗口不可用，将自动使用 Cage 工作台内置沉浸视图打开 T3 Code。</span>
+              <span>这个窗口只能在 Cage 工作台内打开 T3 Code。默认打开方式会保留供支持直连的窗口使用。</span>
             </div>
           )}
 
@@ -663,14 +642,12 @@ export function T3CodeSettingsCard({
               默认打开方式
               <InlineSelect
                 aria-label="T3 Code 默认打开方式"
-                value={effectiveOpenMode}
-                disabled={busy || !directAvailable}
+                value={store.open_mode}
+                disabled={busy}
                 onValueChange={saveOpenMode}
               >
                 <option value="workbench">工作台沉浸网页（可分屏）</option>
-                {directAvailable && (
-                  <option value="direct">原生极速直连窗口（0 VNC 延迟）</option>
-                )}
+                <option value="direct">原生极速直连窗口（0 VNC 延迟）</option>
               </InlineSelect>
             </label>
           </div>
@@ -693,7 +670,7 @@ export function T3CodeSettingsCard({
                 <button
                   type="button"
                   className={store.installed ? "" : "primary"}
-                  disabled={!envReady || busy}
+                  disabled={!store.enabled || !envReady || busy}
                   onClick={() => void runAction("install", () => store.install(installChannel))}
                 >
                   {submitting === "install" ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
@@ -701,7 +678,7 @@ export function T3CodeSettingsCard({
                 </button>
               </div>
 
-              <form className="t3code-port-form" onSubmit={savePort}>
+              <form className="t3code-port-form" onSubmit={savePort} noValidate>
                 <label>
                   客机服务端口
                   <input
@@ -713,6 +690,7 @@ export function T3CodeSettingsCard({
                     onChange={(e) => setPortInput(e.target.value)}
                   />
                 </label>
+                {portInput !== savedPort && <button type="button" disabled={busy} onClick={() => { setPortInput(savedPort); setActionError(""); }}>放弃修改</button>}
                 <button
                   type="submit"
                   disabled={busy || Number(portInput) === Number(store.port || 13773)}
@@ -729,7 +707,7 @@ export function T3CodeSettingsCard({
                   <input
                     ref={externalUrlRef}
                     type="url"
-                    required
+                    required={expanded}
                     value={externalUrl}
                     disabled={busy}
                     onChange={(e) => setExternalUrl(e.target.value)}
@@ -737,18 +715,26 @@ export function T3CodeSettingsCard({
                     spellCheck="false"
                   />
                 </label>
+                {(pendingEnable || externalUrl !== savedUrl || draftMode !== savedMode) && (
+                  <button type="button" disabled={busy} onClick={() => {
+                    setPendingEnable(false);
+                    setExternalUrl(savedUrl);
+                    setDraftMode(savedMode);
+                    setActionError("");
+                  }}>放弃修改</button>
+                )}
                 <button
                   type="submit"
                   className="primary"
                   disabled={busy || externalUnchanged}
                 >
                   {submitting === "ext-url" && <LoaderCircle size={14} className="spin" />}
-                  保存地址并接入
+                  {expanded ? "保存地址并接入" : "保存外部地址"}
                 </button>
               </div>
               {(store.mode !== "external" || !store.enabled) && (
                 <p className="t3code-mode-hint">
-                  填写已有 T3 Code 实例的 HTTP(S) 地址后，点击「保存地址并接入」即可一次性保存并启用外部实例模式。
+                  填写已有 T3 Code 实例的地址。非回环地址须使用 HTTPS。
                 </p>
               )}
             </form>
@@ -777,6 +763,10 @@ export function T3CodeSettingsCard({
                     ? "当前已启用 Magpie，账号调度与绑定已自动暂停并由 Magpie 统一接管；关闭 Magpie 后自动恢复下方配置。"
                     : "为已安装的 Agent 指定 T3 Code 使用的 Cage 隔离账号，或交由智能调度器自动选择最优账号。"}
                 </small>
+                {bindableAgents.some(entry => !entry.runtime?.installed) && (
+                  <small>可以预先保存绑定，安装对应 CLI 后使用。 {onOpenAgentSettings && <button type="button" className="text-button" onClick={onOpenAgentSettings}>前往 Agent CLI</button>}</small>
+                )}
+                {Object.keys(accountErrors).length > 0 && <button type="button" disabled={accountsLoading} onClick={retryAccounts}>重试账号列表</button>}
               </div>
               {magpieTakeover && (
                 <div className="inline-info t3code-info-banner" role="status">
@@ -803,7 +793,7 @@ export function T3CodeSettingsCard({
               <div className="t3code-bindings-list">
                 {bindableAgents.map((entry) => {
                   const id = entry.spec.id;
-                  const currentValue = store.account_bindings?.[id] || "auto";
+                  const currentValue = Object.hasOwn(store.account_bindings, id) ? store.account_bindings[id] : "auto";
                   const accounts = accountOptions[id] || [];
                   const activeBound = magpieTakeover ? "Magpie 接管" : store.active_bindings?.[id];
                   return (
@@ -825,17 +815,21 @@ export function T3CodeSettingsCard({
                       <InlineSelect
                         aria-label={`${entry.spec.name} 的 T3 Code 账号绑定`}
                         value={currentValue}
-                        disabled={busy || magpieTakeover}
+                        disabled={busy}
                         onValueChange={(val) => updateBinding(id, val)}
                       >
                         <option value="auto">跟随 Cage 智能调度（自动）</option>
                         <option value="default">客机默认登录</option>
+                        {currentValue !== "auto" && currentValue !== "default" && !accounts.some(account => account.id === currentValue) && (
+                          <option value={currentValue} disabled>已保存的固定账号（当前不可用）</option>
+                        )}
                         {accounts.map((acc) => (
                           <option key={acc.id} value={acc.id}>
                             {acc.label || acc.email || acc.username || acc.provider || acc.key_hint || acc.id}
                           </option>
                         ))}
                       </InlineSelect>
+                      {accountErrors[id] && <small className="field-help t3code-binding-error" role="status">{accountErrors[id]}</small>}
                     </div>
                   );
                 })}

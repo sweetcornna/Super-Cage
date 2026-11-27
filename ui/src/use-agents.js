@@ -59,6 +59,8 @@ export function useAgents({ vmRunning = false, ready = false, job = null } = {})
   const saveConfig = useCallback(async (patch) => {
     const result = await api("/agent-clis/config", patch);
     if (result?.agents) {
+      generation.current++;
+      setLoading(false);
       setData(result);
       setError("");
     }
@@ -122,6 +124,8 @@ export function useT3Code({ vmRunning = false, ready = false, job = null } = {})
 
   const applyPayload = useCallback((result) => {
     if (result && typeof result === "object") {
+      generation.current++;
+      setLoading(false);
       setData(result);
       setError("");
     }
@@ -218,6 +222,8 @@ export function useT3Code({ vmRunning = false, ready = false, job = null } = {})
     url: data?.url || "",
     active_bindings: data?.active_bindings || {},
     magpie_takeover: Boolean(data?.magpie_takeover),
+    supports_managed: data?.supports_managed,
+    direct_available: data?.direct_available,
     serverError: data?.error || "",
     loading,
     error,
@@ -241,6 +247,8 @@ export function useMagpie({ vmRunning = false, ready = false, job = null } = {})
 
   const applyPayload = useCallback((result) => {
     if (result && typeof result === "object") {
+      generation.current++;
+      setLoading(false);
       setData(result);
       setError("");
     }
@@ -374,6 +382,8 @@ export function useHerdr({ vmRunning = false, ready = false, job = null } = {}) 
 
   const applyPayload = useCallback((result) => {
     if (result && typeof result === "object") {
+      generation.current++;
+      setLoading(false);
       setData(result);
       setError("");
     }
@@ -482,6 +492,8 @@ export function useOrca({ vmRunning = false, ready = false, job = null } = {}) {
 
   const applyPayload = useCallback((result) => {
     if (result && typeof result === "object") {
+      generation.current++;
+      setLoading(false);
       setData(result);
       setError("");
     }
@@ -581,6 +593,12 @@ export function useOrca({ vmRunning = false, ready = false, job = null } = {}) {
     return await api("/orca/pair", options);
   }, []);
 
+  const registerCodexAccount = useCallback(async accountID => {
+    const result = await api("/orca/register_codex_account", { account_id: accountID });
+    await refresh();
+    return result;
+  }, [refresh]);
+
   const syncProjects = useCallback(async () => {
     return await api("/orca/sync-projects", {});
   }, []);
@@ -626,6 +644,7 @@ export function useOrca({ vmRunning = false, ready = false, job = null } = {}) {
     resetIdentity,
     open,
     pair,
+    registerCodexAccount,
     syncProjects,
   };
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Check,
   Copy,
@@ -16,14 +16,26 @@ import {
   Square,
   Trash2,
 } from "lucide-react";
-import { api } from "./api";
+import { useServiceAccounts } from "./use-service-accounts";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
 import { Modal } from "./modal";
+import GuestOrcaRecovery from "./guest-orca-recovery";
 import "./t3code.css";
 import "./orca.css";
 
-const BINDING_PRIORITY = ["claude", "codex", "antigravity", "opencode"];
+function CodexSyncStatus({ bridge, accounts }) {
+  if (!bridge || bridge.state === "inactive") return null;
+  const profile = accounts.find(account => account.id === bridge.account_id);
+  const name = profile?.label || profile?.email;
+  const messages = {
+    linked: name ? `Orca 与 Cage 已关联到 ${name}。` : "Orca 与 Cage 已关联到同一账号。",
+    observing: "正在核对 Orca 与 Cage 的 Codex 账号。",
+    unmatched: "Orca 当前账号尚未与 Cage 匹配。请登记已有 Codex 账号，或在两侧选择相同的 ChatGPT 账号和工作区。",
+    unavailable: "暂时无法读取客机 Orca 的账号状态。",
+  };
+  return messages[bridge.state] ? <small className="field-help" role="status">{messages[bridge.state]}</small> : null;
+}
 
 export function isOrcaManagedSupported(orca, status = null) {
   if (orca?.supports_managed === false || orca?.data?.supports_managed === false) {
@@ -173,93 +185,44 @@ export function OrcaSettingsCard({
   onConfirm,
   onOpenOrca,
   onShowPairModal,
+  onOpenAgentSettings,
+  onDirty,
 }) {
   const supportsManaged = isOrcaManagedSupported(store, status);
+  const hasConfig = Boolean(store?.data);
   const magpieTakeover = Boolean(magpieEnabled || store?.magpie_takeover);
-  const [serverName, setServerName] = useState(store?.server_name || "");
-  const [guestPortInput, setGuestPortInput] = useState(String(store?.guest_port || 16768));
-  const [hostPortInput, setHostPortInput] = useState(store?.host_tunnel_port ? String(store.host_tunnel_port) : "");
-  const [memLimitInput, setMemLimitInput] = useState(store?.terminal_memory_max || "");
+  const savedName = store?.server_name || "";
+  const savedGuestPort = String(store?.guest_port || 16768);
+  const savedHostPort = store?.host_tunnel_port ? String(store.host_tunnel_port) : "";
+  const savedMemLimit = store?.terminal_memory_max || "";
+  const [draft, setDraft] = useState({});
+  const serverName = draft.name ?? savedName;
+  const guestPortInput = draft.guestPort ?? savedGuestPort;
+  const hostPortInput = draft.hostPort ?? savedHostPort;
+  const memLimitInput = draft.memory ?? savedMemLimit;
   const [submitting, setSubmitting] = useState("");
   const [actionError, setActionError] = useState("");
   const [savedNotice, setSavedNotice] = useState("");
   const [bindingRestartHint, setBindingRestartHint] = useState(false);
-  const [accountOptions, setAccountOptions] = useState({});
+  const [registrationID, setRegistrationID] = useState("");
 
   const vmRunning = Boolean(status?.vm_running);
   const envReady = Boolean(status?.ready);
   const jobRunning = Boolean(status?.job?.running);
   const isInstallJob = jobRunning && status?.job?.kind === "orca-install";
   const isUninstallJob = jobRunning && status?.job?.kind === "orca-uninstall";
+  const jobError = ["orca-install", "orca-uninstall"].includes(status?.job?.kind) ? status.job.error : "";
   const busy = jobRunning || Boolean(submitting);
 
-  useEffect(() => {
-    if (store?.server_name) setServerName(store.server_name);
-  }, [store?.server_name]);
+  const edit = (field, value, saved) => setDraft(previous => ({ ...previous, [field]: value === saved ? undefined : value }));
+  const dirty = serverName !== savedName || guestPortInput !== savedGuestPort || hostPortInput !== savedHostPort || memLimitInput !== savedMemLimit;
+  useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
 
-  useEffect(() => {
-    if (store?.guest_port) setGuestPortInput(String(store.guest_port));
-  }, [store?.guest_port]);
-
-  useEffect(() => {
-    setHostPortInput(store?.host_tunnel_port ? String(store.host_tunnel_port) : "");
-  }, [store?.host_tunnel_port]);
-
-  useEffect(() => {
-    setMemLimitInput(store?.terminal_memory_max || "");
-  }, [store?.terminal_memory_max]);
-
-  const bindableAgents = useMemo(() => {
-    const installed = agentsStore?.installedAgents || [];
-    return [...installed].sort((a, b) => {
-      const ia = BINDING_PRIORITY.indexOf(a.spec.id);
-      const ib = BINDING_PRIORITY.indexOf(b.spec.id);
-      if (ia !== -1 && ib !== -1) return ia - ib;
-      if (ia !== -1) return -1;
-      if (ib !== -1) return 1;
-      return a.spec.name.localeCompare(b.spec.name);
-    });
-  }, [agentsStore?.installedAgents]);
-
-  const bindableKey = bindableAgents.map((e) => e.spec.id).join(",");
-
-  useEffect(() => {
-    if (!store?.enabled || !supportsManaged || !bindableKey) return;
-    let live = true;
-    const ids = bindableKey.split(",");
-    Promise.allSettled(
-      ids.map(async (id) => {
-        if (id === "claude") {
-          const res = await api("/claude-accounts");
-          return [id, res?.accounts || []];
-        }
-        if (id === "codex") {
-          const [nativeRes, agentRes] = await Promise.allSettled([
-            api("/codex-accounts"),
-            api("/agent-clis/codex/accounts?skip_detect=1"),
-          ]);
-          const nativeAccts = nativeRes.status === "fulfilled" && nativeRes.value?.guest_supported
-            ? (nativeRes.value?.accounts || [])
-            : [];
-          const agentAccts = agentRes.status === "fulfilled" ? (agentRes.value?.accounts || []) : [];
-          return [id, nativeAccts.length > 0 ? nativeAccts : agentAccts];
-        }
-        const res = await api(`/agent-clis/${encodeURIComponent(id)}/accounts?skip_detect=1`);
-        return [id, res?.accounts || []];
-      }),
-    ).then((results) => {
-      if (!live) return;
-      const next = {};
-      for (const item of results) {
-        if (item.status === "fulfilled") {
-          const [id, accounts] = item.value;
-          next[id] = accounts;
-        }
-      }
-      setAccountOptions(next);
-    });
-    return () => { live = false; };
-  }, [store?.enabled, supportsManaged, bindableKey]);
+  const { bindableAgents, accounts: accountOptions, errors: accountErrors, loading: accountsLoading, retry: retryAccounts } = useServiceAccounts(agentsStore, store?.account_bindings, {
+    available: hasConfig && supportsManaged,
+    service: "orca",
+  });
 
   if (!store) return null;
 
@@ -279,73 +242,103 @@ export function OrcaSettingsCard({
     }
   };
 
-  const toggleEnabled = (checked) => {
+  const confirmInterruption = () => !store.running || onConfirm?.({
+    title: "保存设置并断开 Orca 连接？",
+    body: "地址变更或关闭接入会断开当前 Orca 连接。保存后可按需重新启动服务或配对。",
+    confirm: "保存设置",
+  });
+
+  const registrationAccounts = (accountOptions.codex || []).filter(a => a.nativeCodex && a.status === "ready");
+  const registration = registrationAccounts.find(a => a.id === registrationID);
+  const registerAccount = async () => {
+    if (!registration) return;
+    const name = registration.label || registration.email || registration.id;
+    if (!(await onConfirm?.({
+      title: `将「${name}」登记到客机 Orca？`,
+      body: "Orca 将在这台客机的当前系统用户下保存一份 Codex 登录资料。登记完成后，可在 Orca 的账号菜单中选择它。",
+      confirm: "登记账号",
+    }))) return;
+    await runAction("register-codex", () => store.registerCodexAccount(registration.id), `「${name}」已登记到 Orca。`);
+  };
+
+  const toggleEnabled = async (checked) => {
     if (!supportsManaged && checked) return;
+    if (!checked && !(await confirmInterruption())) return;
     void runAction("toggle", () => store.saveConfig({ enabled: checked }));
   };
 
   const saveNetworkSettings = async (e) => {
     e.preventDefault();
-    const gp = Number.parseInt(guestPortInput, 10);
+    if (busy || !dirty) return;
+    setSavedNotice("");
+    const gp = Number(guestPortInput);
     if (!Number.isInteger(gp) || gp < 1024 || gp > 65535) {
       setActionError("客机端口须为 1024 到 65535 之间的整数");
       return;
     }
     let hp = 0;
     if (hostPortInput.trim() !== "") {
-      hp = Number.parseInt(hostPortInput, 10);
+      hp = Number(hostPortInput);
       if (!Number.isInteger(hp) || hp < 1024 || hp > 65535) {
         setActionError("本机隧道端口须留空（自动分配）或为 1024 到 65535 之间的整数");
         return;
       }
     }
-    await runAction(
+    if ((gp !== store.guest_port || hp !== store.host_tunnel_port) && !(await confirmInterruption())) return;
+    const next = await runAction(
       "save",
       () => store.saveConfig({
-        server_name: serverName.trim(),
-        guest_port: gp,
-        host_tunnel_port: hp,
-        terminal_memory_max: memLimitInput.trim().toUpperCase(),
+        ...(serverName !== savedName ? { server_name: serverName.trim() } : {}),
+        ...(guestPortInput !== savedGuestPort ? { guest_port: gp } : {}),
+        ...(hostPortInput !== savedHostPort ? { host_tunnel_port: hp } : {}),
+        ...(memLimitInput !== savedMemLimit ? { terminal_memory_max: memLimitInput.trim().toUpperCase() } : {}),
       }),
       "Orca Server 设置已保存",
     );
+    if (next) setDraft({});
+  };
+
+  const saveBindMode = async (bind_mode) => {
+    if (bind_mode === store.bind_mode || !(await confirmInterruption())) return;
+    void runAction("bind-mode", () => store.saveConfig({ bind_mode }), "监听模式已保存");
   };
 
   const changeBinding = (agentId, value) => {
     const next = { ...(store.account_bindings || {}), [agentId]: value };
     void runAction(`bind:${agentId}`, async () => {
       const res = await store.saveConfig({ account_bindings: next });
-      if (res && store.running && value !== "auto") {
-        setBindingRestartHint(true);
-      } else {
-        setBindingRestartHint(false);
-      }
+      if (res && store.running && !magpieTakeover) setBindingRestartHint(true);
       return res;
-    }, value === "auto" ? "已切换为动态自动调度（即时生效）" : "账号固定绑定已保存");
+    }, "账号绑定已保存");
   };
 
   const doUninstall = async () => {
-    const ok = onConfirm
-      ? await onConfirm({
+    const ok = await onConfirm?.({
           title: "卸载客机中的 Orca Server？",
           body: "将停止托管的 Orca Server 并删除程序文件，历史会话、工作区记录与配置数据会安全保留。",
           confirm: "确认卸载",
-        })
-      : true;
+        });
     if (!ok) return;
     await runAction("uninstall", () => store.uninstall({ purgeData: false, removePaired: false }));
   };
 
   const doResetIdentity = async () => {
-    const ok = onConfirm
-      ? await onConfirm({
+    const ok = await onConfirm?.({
           title: "重置 Orca Server 配对身份？",
           body: "将生成全新的服务端加密身份并作废所有已配对的电脑/手机凭证。重置后需重新一键连接或扫码配对。",
           confirm: "确认重置身份",
-        })
-      : true;
+        });
     if (!ok) return;
     await runAction("reset-id", () => store.resetIdentity(), "已重置 Orca 配对身份");
+  };
+
+  const repairPairing = async () => {
+    const ok = await onConfirm?.({
+      title: "重新配对本机 Orca？",
+      body: "原有的本机 Orca 连接将被替换，新连接会使用当前保存的服务器名称。",
+      confirm: "重新配对",
+    });
+    if (ok) await runAction("repair", () => store.open({ force_repair: true }), "已重新配对本机 Orca 客户端");
   };
 
   const desktopVer = store.local_desktop?.version;
@@ -399,11 +392,20 @@ export function OrcaSettingsCard({
             role="switch"
             aria-label="启用 Orca Server 服务端接入"
             checked={store.enabled}
-            disabled={busy || (!supportsManaged && !store.enabled)}
-            onChange={(e) => toggleEnabled(e.target.checked)}
+            disabled={busy || !store.data || (!supportsManaged && !store.enabled)}
+            onChange={(e) => void toggleEnabled(e.target.checked)}
           />
         </label>
       </div>
+
+      {(actionError || jobError || store.error || store.serverError) && (
+        <div className="error-message" role="alert">{actionError || jobError || store.error || store.serverError}</div>
+      )}
+      {store.loading && !store.data && <p className="field-help" role="status">正在读取 Orca Server 设置…</p>}
+      <button type="button" disabled={busy || store.loading}
+        onClick={() => { setActionError(""); void store.refresh(); }}>
+        <RefreshCw size={14} />刷新 Orca Server 状态
+      </button>
 
       {!supportsManaged && (
         <div className="inline-info t3code-info-banner">
@@ -411,7 +413,9 @@ export function OrcaSettingsCard({
         </div>
       )}
 
-      {store.enabled && supportsManaged && (
+      {supportsManaged && !store.is_macos_guest && <GuestOrcaRecovery ready={envReady} />}
+
+      {store.data && supportsManaged && (
         <div className="t3code-card-body">
           <div className="orca-security-strip">
             <ShieldCheck size={14} aria-hidden="true" />
@@ -420,7 +424,7 @@ export function OrcaSettingsCard({
             </span>
           </div>
 
-          <div className="t3code-quick-actions">
+          {store.enabled && <div className="t3code-quick-actions">
             {!store.installed ? (
               <button
                 type="button"
@@ -552,9 +556,9 @@ export function OrcaSettingsCard({
                 )}
               </>
             )}
-          </div>
+          </div>}
 
-          {!store.can_auto_pair && !store.local_desktop?.installed && (
+          {store.enabled && !store.can_auto_pair && !store.local_desktop?.installed && (
             <div className="inline-info t3code-info-banner">
               <span>
                 未在本机检测到 Orca 桌面客户端。可先安装官方客户端（<code>{store.download_url}</code>）享受一键免密连接，或直接点击「配对码」在其他设备的 Orca 中添加此服务器。
@@ -579,7 +583,7 @@ export function OrcaSettingsCard({
                 aria-checked={store.bind_mode !== "tailscale"}
                 className={`t3code-mode-btn ${store.bind_mode !== "tailscale" ? "selected" : ""}`}
                 disabled={busy}
-                onClick={() => void runAction("bind-loopback", () => store.saveConfig({ bind_mode: "loopback" }), "已切换为仅本机回环隧道模式")}
+                onClick={() => void saveBindMode("loopback")}
               >
                 仅本机回环隧道（最安全）
               </button>
@@ -589,7 +593,7 @@ export function OrcaSettingsCard({
                 aria-checked={store.bind_mode === "tailscale"}
                 className={`t3code-mode-btn ${store.bind_mode === "tailscale" ? "selected" : ""}`}
                 disabled={busy}
-                onClick={() => void runAction("bind-ts", () => store.saveConfig({ bind_mode: "tailscale" }), "已切换为 Tailscale 私有网络模式")}
+                onClick={() => void saveBindMode("tailscale")}
               >
                 Tailscale 私有网络{store.tailscale_ip ? ` (${store.tailscale_ip})` : ""}
               </button>
@@ -601,14 +605,15 @@ export function OrcaSettingsCard({
             </p>
           </div>
 
-          <form className="t3code-config-grid" onSubmit={saveNetworkSettings}>
+          <form className="t3code-config-grid orca-network-form" onSubmit={saveNetworkSettings} noValidate>
             <label>
-              <span className="t3code-field-label">在 Orca 中显示的服务器名称</span>
+              <span className="t3code-field-label">配对时使用的服务器名称</span>
               <input
                 type="text"
                 value={serverName}
-                onChange={(e) => setServerName(e.target.value)}
+                onChange={(e) => edit("name", e.target.value, savedName)}
                 placeholder="Super Cage"
+                maxLength={64}
                 disabled={busy}
               />
             </label>
@@ -619,7 +624,7 @@ export function OrcaSettingsCard({
                 min={1024}
                 max={65535}
                 value={guestPortInput}
-                onChange={(e) => setGuestPortInput(e.target.value)}
+                onChange={(e) => edit("guestPort", e.target.value, savedGuestPort)}
                 disabled={busy}
               />
             </label>
@@ -630,8 +635,8 @@ export function OrcaSettingsCard({
                 min={1024}
                 max={65535}
                 value={hostPortInput}
-                onChange={(e) => setHostPortInput(e.target.value)}
-                placeholder="自动分配（16768+）"
+                onChange={(e) => edit("hostPort", e.target.value, savedHostPort)}
+                placeholder={store.host_tunnel_port === 0 && store.tunnel_port ? `自动分配（${store.tunnel_port}）` : "自动分配"}
                 disabled={busy}
               />
             </label>
@@ -641,12 +646,13 @@ export function OrcaSettingsCard({
                 <input
                   type="text"
                   value={memLimitInput}
-                  onChange={(e) => setMemLimitInput(e.target.value)}
+                  onChange={(e) => edit("memory", e.target.value, savedMemLimit)}
                   placeholder="例如 2G（留空不限）"
                   disabled={busy}
                 />
               </label>
-              <button type="submit" disabled={busy}>
+              {dirty && <button type="button" disabled={busy} onClick={() => { setDraft({}); setActionError(""); setSavedNotice(""); }}>放弃修改</button>}
+              <button type="submit" disabled={busy || !dirty}>
                 {submitting === "save" ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
                 保存
               </button>
@@ -679,6 +685,10 @@ export function OrcaSettingsCard({
                   ? "当前已启用 Magpie，账号调度与绑定已自动暂停并由 Magpie 统一接管；关闭 Magpie 后自动恢复下方配置。"
                   : "默认「跟随 Cage 自动调度」会在 Orca 的结构化对话、终端与子 Agent 中实时动态调度健康账号（额度耗尽或限流冷却自动避让，无需重启 Orca）。"}
               </small>
+              {bindableAgents.some(entry => !entry.runtime?.installed) && (
+                <small>可以预先保存绑定，安装对应 CLI 后使用。 {onOpenAgentSettings && <button type="button" className="text-button" onClick={onOpenAgentSettings}>前往 Agent CLI</button>}</small>
+              )}
+              {Object.keys(accountErrors).length > 0 && <button type="button" disabled={accountsLoading} onClick={retryAccounts}>重试账号列表</button>}
             </div>
 
             {magpieTakeover && (
@@ -689,7 +699,7 @@ export function OrcaSettingsCard({
 
             {bindingRestartHint && !magpieTakeover && (
               <div className="inline-info t3code-restart-hint">
-                <span>固定指定具体账号的变更需重启 Orca Server 后对新会话生效。</span>
+                <span>重启 Orca Server 后会使用最新保存的账号绑定。</span>
                 <button
                   type="button"
                   className="text-button"
@@ -708,8 +718,8 @@ export function OrcaSettingsCard({
             <div className="t3code-bindings-list">
               {bindableAgents.map((entry) => {
                 const id = entry.spec.id;
-                const currentVal = store.account_bindings?.[id] || "auto";
-                const accounts = (accountOptions[id] || []).filter((a) => a.status === "ready" || a.ready);
+                const currentVal = Object.hasOwn(store.account_bindings, id) ? store.account_bindings[id] : "auto";
+                const accounts = accountOptions[id] || [];
                 const activeLabel = magpieTakeover ? "Magpie 接管" : store.active_bindings?.[id];
                 return (
                   <div key={id} className="t3code-binding-row">
@@ -725,24 +735,39 @@ export function OrcaSettingsCard({
                     <InlineSelect
                       aria-label={`${entry.spec.name} 账号绑定`}
                       value={currentVal}
-                      disabled={busy || magpieTakeover}
+                      disabled={busy}
                       onValueChange={(val) => changeBinding(id, val)}
                     >
                       <option value="auto">跟随 Cage 自动调度（推荐）</option>
                       <option value="default">使用客机默认环境登录</option>
+                      {currentVal !== "auto" && currentVal !== "default" && !accounts.some(acc => acc.id === currentVal) && (
+                        <option value={currentVal} disabled>已保存的固定账号（当前不可用）</option>
+                      )}
                       {accounts.map((acc) => (
                         <option key={acc.id} value={acc.id}>
                           固定账号：{acc.label || acc.email || acc.username || acc.key_hint || acc.id.slice(0, 8)}
                         </option>
                       ))}
                     </InlineSelect>
+                    {id === "codex" && currentVal === "auto" && !magpieTakeover &&
+                      <CodexSyncStatus bridge={store.data?.codex_bridge} accounts={accounts} />}
+                    {accountErrors[id] && <small className="field-help t3code-binding-error" role="status">{accountErrors[id]}</small>}
                   </div>
                 );
               })}
             </div>
           </div>
 
-          <details className="orca-advanced">
+          {store.data?.codex_registration_supported && registrationAccounts.length > 0 && <div className="t3code-bindings">
+            <label>登记 Codex 账号到 Orca
+              <InlineSelect aria-label="登记 Codex 账号到 Orca" value={registration?.id || ""} onValueChange={setRegistrationID} disabled={busy}>
+                <option value="" disabled>选择 Cage 账号</option>
+                {registrationAccounts.map(a => <option key={a.id} value={a.id}>{a.label || a.email || a.id}</option>)}
+              </InlineSelect>
+            </label>
+            <button type="button" disabled={busy || !registration || !vmRunning} onClick={() => void registerAccount()}>登记到 Orca</button>
+          </div>}
+          {store.enabled && store.installed && <details className="orca-advanced">
             <summary>高级维护与重置选项</summary>
             <div className="orca-advanced-body">
               <div className="t3code-quick-actions">
@@ -750,7 +775,7 @@ export function OrcaSettingsCard({
                   <button
                     type="button"
                     disabled={busy || !vmRunning || !envReady}
-                    onClick={() => void runAction("repair", () => store.open({ force_repair: true }), "已重新配对本机 Orca 客户端")}
+                    onClick={() => void repairPairing()}
                   >
                     <RefreshCw size={14} />
                     重新配对本机 Orca
@@ -780,13 +805,7 @@ export function OrcaSettingsCard({
                 )}
               </div>
             </div>
-          </details>
-
-          {(actionError || store.serverError || store.error) && (
-            <div className="error-message" role="alert">
-              {actionError || store.serverError || store.error}
-            </div>
-          )}
+          </details>}
           {savedNotice && (
             <div className="inline-info t3code-info-banner" role="status">
               <Check size={14} />

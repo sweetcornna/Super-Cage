@@ -83,9 +83,9 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
         >
           <AgentIcon
             agentId={entry.spec.id}
-            glyph={entry.spec.glyph}
             accentColor={entry.spec.accent_color}
             size={17}
+            decorative
           />
           <span className="terminal-menu-label">{entry.spec.short_name} 终端</span>
           {entry.accounts?.ready > 0 && (
@@ -95,7 +95,7 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
       ))}
       {herdr?.enabled && herdr?.installed && (
         <button role="menuitem" disabled={busy} title="打开 Herdr 的终端选择器" onClick={() => onSelect("herdr")}>
-          <AgentIcon agentId="herdr" size={17} />
+          <AgentIcon agentId="herdr" size={17} decorative />
           <span className="terminal-menu-label">Herdr 终端</span>
           {herdr.takeover_terminals && (
             <small className="terminal-menu-badge" aria-hidden="true">接管</small>
@@ -104,7 +104,7 @@ export function TerminalMenu({ choice, busy, codex = false, codexLabel = "Codex 
       )}
       {magpie?.enabled && magpie?.installed && (
         <button role="menuitem" disabled={busy} onClick={() => onSelect("magpie-tui")}>
-          <AgentIcon agentId="magpie" size={17} />
+          <AgentIcon agentId="magpie" size={17} decorative />
           <span className="terminal-menu-label">Magpie TUI</span>
         </button>
       )}

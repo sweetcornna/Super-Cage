@@ -49,6 +49,7 @@ func (s *Server) saveNetworkIntentLocked(paused bool) error {
 	defer func() {
 		if s.networkPaused {
 			s.entry.registry.cutAll(errEntryPaused)
+			s.pauseWorkbenchRuntimeNetworkLocked()
 		}
 	}()
 	if err := writePrivate(filepath.Join(s.profile, "network-intent.json"), networkIntent{Version: 1, Paused: paused, PauseVersion: s.safety.pauseVersion}); err != nil {
@@ -56,8 +57,13 @@ func (s *Server) saveNetworkIntentLocked(paused bool) error {
 		s.networkIntentError = "无法保存网络暂停状态，外网保持关闭；请解决配置写入问题后重试。"
 		return fmt.Errorf("无法保存网络暂停状态，当前外网保持关闭；请解决配置写入问题后重试：%w", err)
 	}
+	wasPaused := s.networkPaused
 	s.networkPaused = paused
 	s.networkIntentError = ""
+	if wasPaused && !paused {
+		s.runtimeRestore.waitNetwork = 0
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
+	}
 	return nil
 }
 

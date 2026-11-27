@@ -18,12 +18,12 @@ var (
 )
 
 type codexAccountInput struct {
-	Action     string            `json:"action"`
-	ID         string            `json:"id"`
-	Label      string            `json:"label"`
-	Enabled    *bool             `json:"enabled"`
-	Scheduling *claudeScheduling `json:"scheduling"`
-	Order      []string          `json:"order"`
+	Action     string                 `json:"action"`
+	ID         string                 `json:"id"`
+	Label      string                 `json:"label"`
+	Enabled    *bool                  `json:"enabled"`
+	Scheduling *claudeSchedulingInput `json:"scheduling"`
+	Order      []string               `json:"order"`
 }
 
 // The environment's own ~/.codex login is shown for orientation. New Codex
@@ -38,6 +38,7 @@ type codexDetected struct {
 
 type codexPanel struct {
 	Scheduling             claudeScheduling `json:"scheduling"`
+	SchedulingAPI          int              `json:"scheduling_api"`
 	UsagePanelRunning      bool             `json:"usage_panel_running"`
 	UsageUnavailableReason string           `json:"usage_unavailable_reason,omitempty"`
 	Accounts               []codexAccount   `json:"accounts"`
@@ -95,6 +96,8 @@ func (s *Server) mutateCodexAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	case "refresh":
 		err = s.refreshCodexUsage(r.Context(), input.ID)
+	case "select":
+		err = s.setCodexSchedulingAccount(input.ID)
 	case "update", "scheduling":
 		s.op.Lock()
 		defer s.op.Unlock()
@@ -122,8 +125,15 @@ func (s *Server) mutateCodexAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 func (list *codexAccountList) reschedule(input codexAccountInput) error {
-	if input.Scheduling == nil || !input.Scheduling.valid() {
+	if input.Scheduling == nil {
+		return errors.New("缺少调度策略配置")
+	}
+	sched := input.Scheduling.apply(list.Scheduling, input.Order != nil, false)
+	if !sched.valid() {
 		return errors.New("请选择有效的调度模式和切换授权")
+	}
+	if id := input.Scheduling.SelectedAccountID; id != nil && *id != "" && list.find(*id) == nil {
+		return errSchedulingAccountMissing
 	}
 	if input.Order != nil {
 		if len(input.Order) != len(list.Accounts) {
@@ -141,7 +151,7 @@ func (list *codexAccountList) reschedule(input codexAccountInput) error {
 		}
 		list.Accounts = ordered
 	}
-	list.Scheduling = *input.Scheduling
+	list.Scheduling = sched
 	return nil
 }
 
@@ -150,7 +160,7 @@ func (s *Server) codexPanelView(ctx context.Context) (codexPanel, codexAccountLi
 	ready, update := s.ready, s.guestUpdateRequired
 	s.mu.Unlock()
 	supported := s.codexGuestSupported()
-	view := codexPanel{DetectionStatus: "offline", GuestSupported: supported, MagpieTakeover: s.magpieTakesOverScheduling()}
+	view := codexPanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI, GuestSupported: supported, MagpieTakeover: s.magpieTakesOverScheduling()}
 	if unavailable := s.usageAvailability(); unavailable != nil {
 		view.UsageUnavailableReason = unavailable.Error()
 	}
@@ -524,6 +534,9 @@ func (s *Server) removeCodexAccount(id string) error {
 		return errors.New("环境正在处理其他操作，请稍后重试")
 	}
 	defer s.op.Unlock()
+	if s.activeServiceAccounts("codex")[id] > 0 {
+		return errors.New("请先停止使用此账号的托管服务，再移除账号")
+	}
 	m := &s.codexAccounts
 	m.mu.Lock()
 	defer m.mu.Unlock()

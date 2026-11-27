@@ -1,5 +1,9 @@
 /* Orca Server optional integration card and pairing modal (shares t3code.css tokens). */
 
+.orca-network-form .t3code-port-form {
+  grid-column: 1 / -1;
+}
+
 .orca-security-strip {
   display: flex;
   flex-wrap: wrap;

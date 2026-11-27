@@ -206,7 +206,7 @@ export function HerdrSettingsCard({
             role="switch"
             aria-label="启用 Herdr"
             checked={Boolean(store.enabled)}
-            disabled={busy || !supportsManaged}
+            disabled={busy || !store.data || (!supportsManaged && !store.enabled)}
             onChange={(e) => toggleEnabled(e.target.checked)}
           />
         </label>
@@ -233,10 +233,13 @@ export function HerdrSettingsCard({
         </div>
       )}
 
-      {expanded && (
+      {!store.data && <button type="button" disabled={busy || store.loading} onClick={() => void store.refresh()}>
+        <RefreshCw size={14} />刷新 Herdr 状态
+      </button>}
+      {store.data && supportsManaged && (
         <div className="t3code-card-body">
           <div className="t3code-quick-actions">
-            {store.installed && onOpenHerdr && (
+            {expanded && store.installed && onOpenHerdr && (
               <button
                 type="button"
                 className="primary"
@@ -248,7 +251,7 @@ export function HerdrSettingsCard({
                 打开 Herdr
               </button>
             )}
-            {store.installed && (
+            {expanded && store.installed && (
               store.server_running ? (
                 <>
                   <button
@@ -293,7 +296,7 @@ export function HerdrSettingsCard({
             )}
           </div>
 
-          <div className="herdr-install-row">
+          {expanded && <div className="herdr-install-row">
             <div className="herdr-install-actions">
               <button
                 type="button"
@@ -325,7 +328,7 @@ export function HerdrSettingsCard({
               )}
             </p>
             {store.data?.legacy_installed && <HerdrLegacyLine busy={busy} onConfirm={onConfirm} />}
-          </div>
+          </div>}
 
           <label
             className="toggle-row herdr-takeover-row"
@@ -334,7 +337,7 @@ export function HerdrSettingsCard({
             <span>
               <strong>新建终端都放进 Herdr</strong>
               <small>
-                普通终端、Claude、Codex 和各 Agent CLI 终端都在 Herdr 里运行，关掉标签才会结束；账号登录终端仍然直连。
+                启用 Herdr 后，普通终端、Claude、Codex 和各 Agent CLI 终端都在 Herdr 里运行。账号登录终端仍然直连。
               </small>
             </span>
             <input

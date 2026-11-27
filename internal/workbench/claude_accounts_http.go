@@ -25,24 +25,36 @@ type claudeAccountInput struct {
 // claudeSchedulingInput leaves a field the client did not send as stored, so
 // a client that knows only mode and switch_policy keeps the standing answers.
 type claudeSchedulingInput struct {
-	Mode             string  `json:"mode"`
-	SwitchPolicy     string  `json:"switch_policy"`
-	SwitchAnswered   *bool   `json:"switch_answered"`
-	UngroupedHandoff *bool   `json:"ungrouped_handoff"`
-	Preferred        *string `json:"preferred"`
+	Mode                    *string `json:"mode"`
+	SwitchPolicy            *string `json:"switch_policy"`
+	SwitchAnswered          *bool   `json:"switch_answered"`
+	UngroupedHandoff        *bool   `json:"ungrouped_handoff"`
+	Preferred               *string `json:"preferred"`
+	SelectedAccountID       *string `json:"selected_account_id"`
+	SelectedAccountRevision string  `json:"selected_account_revision"` // Read-only, accepted on round trips.
 }
 
-func (input claudeSchedulingInput) apply(p claudeScheduling) claudeScheduling {
-	// Choosing a rule in 调度设置 is a standing answer.
-	p.SwitchAnswered = p.answered() || input.SwitchPolicy != p.SwitchPolicy
-	// Consent for accounts without a 接续分组 is given only by its own control
-	// (ungrouped_handoff); the rule alone never implies it.
-	p.Mode, p.SwitchPolicy = input.Mode, input.SwitchPolicy
+func (input claudeSchedulingInput) apply(p claudeScheduling, orderChanged, recordStandingAnswer bool) claudeScheduling {
+	if orderChanged || input.Mode != nil && *input.Mode != p.Mode || input.SelectedAccountID != nil || input.Preferred != nil && *input.Preferred != p.Preferred {
+		p.SelectedAccountRevision = newSchedulingRevision()
+	}
+	if input.Mode != nil {
+		p.Mode = *input.Mode
+	}
+	if input.SwitchPolicy != nil {
+		if recordStandingAnswer {
+			p.SwitchAnswered = p.answered() || *input.SwitchPolicy != p.SwitchPolicy
+		}
+		p.SwitchPolicy = *input.SwitchPolicy
+	}
 	if input.SwitchAnswered != nil {
 		p.SwitchAnswered = *input.SwitchAnswered
 	}
 	if input.UngroupedHandoff != nil {
 		p.UngroupedHandoff = *input.UngroupedHandoff
+	}
+	if input.SelectedAccountID != nil {
+		p.SelectedAccountID, p.Preferred = *input.SelectedAccountID, ""
 	}
 	if input.Preferred != nil {
 		p.Preferred = *input.Preferred
@@ -94,6 +106,8 @@ func (s *Server) mutateClaudeAccounts(w http.ResponseWriter, r *http.Request) {
 		return
 	case "refresh", "refresh_default":
 		err = s.refreshClaudeUsage(r.Context(), input)
+	case "select":
+		err = s.setClaudeSchedulingAccount(input.ID)
 	case "update", "scheduling", "prefer":
 		s.op.Lock()
 		defer s.op.Unlock()
@@ -108,13 +122,18 @@ func (s *Server) mutateClaudeAccounts(w http.ResponseWriter, r *http.Request) {
 			if a := list.find(input.ID); input.ID != "" && a == nil {
 				err = errors.New("未找到 Claude 账号，请刷新面板")
 			} else {
-				list.Scheduling.Preferred = input.ID
+				list.Scheduling.Preferred, list.Scheduling.SelectedAccountID = input.ID, ""
+				list.Scheduling.SelectedAccountRevision = newSchedulingRevision()
 			}
 		} else if err == nil && input.Action == "scheduling" {
-			if input.Scheduling == nil || !input.Scheduling.apply(list.Scheduling).valid() {
+			if input.Scheduling == nil {
+				err = errors.New("缺少调度策略配置")
+			} else if id := input.Scheduling.SelectedAccountID; id != nil && *id != "" && list.find(*id) == nil {
+				err = errSchedulingAccountMissing
+			} else if sched := input.Scheduling.apply(list.Scheduling, input.Order != nil, true); !sched.valid() {
 				err = errors.New("请选择有效的调度模式和切换授权")
 			} else {
-				list.Scheduling = input.Scheduling.apply(list.Scheduling)
+				list.Scheduling = sched
 			}
 			if err == nil && input.Order != nil {
 				if len(input.Order) != len(list.Accounts) {
@@ -498,8 +517,8 @@ func (s *Server) recoverClaudeLogin(ctx context.Context, accountID, target, sour
 		return claudeGuestSnapshot{}, errTerminalBusy
 	}
 	defer s.op.Unlock()
-	if s.mobileCLI.activeAccounts()[accountID] > 0 {
-		return claudeGuestSnapshot{}, errors.New("请先结束该账号正在执行的移动 CLI 轮次，再重新登录")
+	if active, _ := s.claudeAccountLoad(); active[accountID] > 0 {
+		return claudeGuestSnapshot{}, errors.New("请先结束该账号正在运行的会话，再重新登录")
 	}
 	if login, err := s.terminals.existingClaudeLogin(accountID, true); err != nil {
 		return claudeGuestSnapshot{}, err

@@ -271,15 +271,17 @@ export function MagpieSettingsCard({
   onConfirm,
   onOpenMagpie,
   onOpenMagpieTUI,
+  onDirty,
 }) {
   const supportsManaged = isMagpieManagedSupported(store, status);
   const directAvailable = isMagpieDirectAvailable(store);
-  const [draftMode, setDraftMode] = useState(() =>
-    supportsManaged ? (store?.mode || "managed") : "external",
-  );
+  const savedMode = supportsManaged ? (store?.mode || "managed") : "external";
+  const savedUrl = store?.external_url || "";
+  const savedPort = String(store?.port || DEFAULT_WEB_PORT);
+  const [draftMode, setDraftMode] = useState(savedMode);
   const [pendingEnable, setPendingEnable] = useState(false);
-  const [externalUrl, setExternalUrl] = useState(store?.external_url || "");
-  const [portInput, setPortInput] = useState(String(store?.port || DEFAULT_WEB_PORT));
+  const [externalUrl, setExternalUrl] = useState(savedUrl);
+  const [portInput, setPortInput] = useState(savedPort);
   const [submitting, setSubmitting] = useState("");
   const [actionError, setActionError] = useState("");
   const [savedNotice, setSavedNotice] = useState("");
@@ -295,25 +297,23 @@ export function MagpieSettingsCard({
   const gatewayPort = Number(store?.gateway_port) || DEFAULT_GATEWAY_PORT;
   const gatewayUrl = store?.gateway_url || `http://127.0.0.1:${gatewayPort}`;
 
-  useEffect(() => {
-    if (!supportsManaged) {
-      setDraftMode("external");
-    } else if (store?.mode) {
-      setDraftMode(store.mode);
-    }
-  }, [store?.mode, supportsManaged]);
+  useEffect(() => { setDraftMode(savedMode); }, [savedMode]);
 
   useEffect(() => {
     if (store?.enabled) setPendingEnable(false);
   }, [store?.enabled]);
 
   useEffect(() => {
-    setExternalUrl(store?.external_url || "");
-  }, [store?.external_url]);
+    setExternalUrl(savedUrl);
+  }, [savedUrl]);
 
   useEffect(() => {
-    if (store?.port) setPortInput(String(store.port));
-  }, [store?.port]);
+    setPortInput(savedPort);
+  }, [savedPort]);
+
+  const dirty = pendingEnable || draftMode !== savedMode || externalUrl !== savedUrl || portInput !== savedPort;
+  useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
 
   if (!store) return null;
 
@@ -358,6 +358,7 @@ export function MagpieSettingsCard({
           mode: "external",
           external_url: cleaned,
         });
+        setExternalUrl(res.external_url || "");
         setPendingEnable(false);
         return res;
       }, "外部地址已保存并接入");
@@ -388,7 +389,6 @@ export function MagpieSettingsCard({
   };
 
   const saveOpenMode = (open_mode) => {
-    if (!directAvailable && open_mode === "direct") return;
     void runAction("open-mode", () => store.saveConfig({ open_mode }), "默认打开方式已保存");
   };
 
@@ -407,7 +407,8 @@ export function MagpieSettingsCard({
   const saveExternalUrl = (e) => {
     e.preventDefault();
     const cleaned = externalUrl.trim();
-    if (!cleaned) {
+    const enabled = store.enabled || pendingEnable;
+    if (!cleaned && enabled) {
       setActionError("请输入有效的外部 Magpie 网页地址（例如 http://127.0.0.1:3430）。");
       externalUrlRef.current?.focus();
       return;
@@ -416,11 +417,12 @@ export function MagpieSettingsCard({
       const res = await store.saveConfig({
         mode: "external",
         external_url: cleaned,
-        enabled: true,
+        ...(pendingEnable ? { enabled: true } : {}),
       });
+      setExternalUrl(res.external_url || "");
       setPendingEnable(false);
       return res;
-    }, "外部地址已保存并接入");
+    }, enabled ? "外部地址已保存并接入" : "外部地址已保存");
   };
 
   const savePort = (e) => {
@@ -437,7 +439,11 @@ export function MagpieSettingsCard({
     const wasRunning = store.running && store.mode === "managed";
     void runAction(
       "port",
-      () => store.saveConfig({ port }),
+      async () => {
+        const result = await store.saveConfig({ port });
+        setPortInput(String(result.port));
+        return result;
+      },
       wasRunning ? "Web 服务端口已保存，原运行中的 Magpie 已停止" : "Web 服务端口已保存",
     );
   };
@@ -462,10 +468,7 @@ export function MagpieSettingsCard({
       ? Boolean(store.external_url)
       : (supportsManaged && vmRunning && store.installed)
   );
-  const externalUnchanged =
-    store.enabled &&
-    store.mode === "external" &&
-    externalUrl.trim() === (store.external_url || "");
+  const externalUnchanged = !pendingEnable && store.mode === "external" && externalUrl === savedUrl;
 
   return (
     <section className="t3code-card magpie-card" aria-label="Magpie 模型路由与本地网关">
@@ -524,7 +527,7 @@ export function MagpieSettingsCard({
             role="switch"
             aria-label="启用 Magpie 集成"
             checked={expanded}
-            disabled={busy}
+            disabled={busy || !store.data}
             onChange={(e) => toggleEnabled(e.target.checked)}
           />
         </label>
@@ -546,7 +549,10 @@ export function MagpieSettingsCard({
         </div>
       )}
 
-      {expanded && (
+      {!store.data && <button type="button" disabled={busy || store.loading} onClick={() => void store.refresh()}>
+        <RefreshCw size={14} />刷新 Magpie 状态
+      </button>}
+      {store.data && (
         <div className="t3code-card-body">
           <div className="t3code-quick-actions">
             {canLaunch && (
@@ -657,7 +663,7 @@ export function MagpieSettingsCard({
 
           {!directAvailable && (
             <div className="inline-info t3code-info-banner" role="status">
-              <span>当前通过远程客户端或桌面内嵌视图访问 Cage，本机回环直连窗口不可用，将自动使用 Cage 工作台内置沉浸视图打开 Magpie。</span>
+              <span>这个窗口只能在 Cage 工作台内打开 Magpie。默认打开方式会保留供支持直连的窗口使用。</span>
             </div>
           )}
 
@@ -695,14 +701,12 @@ export function MagpieSettingsCard({
               默认打开方式
               <InlineSelect
                 aria-label="Magpie 默认打开方式"
-                value={effectiveOpenMode}
-                disabled={busy || !directAvailable}
+                value={store.open_mode}
+                disabled={busy}
                 onValueChange={saveOpenMode}
               >
                 <option value="workbench">工作台沉浸网页（可分屏）</option>
-                {directAvailable && (
-                  <option value="direct">原生极速直连窗口（0 VNC 延迟）</option>
-                )}
+                <option value="direct">原生极速直连窗口（0 VNC 延迟）</option>
               </InlineSelect>
             </label>
           </div>
@@ -714,7 +718,7 @@ export function MagpieSettingsCard({
                   <button
                     type="button"
                     className={store.installed ? "" : "primary"}
-                    disabled={!envReady || busy}
+                    disabled={!store.enabled || !envReady || busy}
                     onClick={() => void runAction("install", () => store.install())}
                   >
                     {submitting === "install" ? <LoaderCircle size={14} className="spin" /> : <Download size={14} />}
@@ -738,7 +742,7 @@ export function MagpieSettingsCard({
               </div>
 
               <div className="magpie-port-gateway-grid">
-                <form className="t3code-port-form" onSubmit={savePort}>
+                <form className="t3code-port-form" onSubmit={savePort} noValidate>
                   <label>
                     Magpie Web 端口
                     <input
@@ -750,6 +754,7 @@ export function MagpieSettingsCard({
                       onChange={(e) => setPortInput(e.target.value)}
                     />
                   </label>
+                  {portInput !== savedPort && <button type="button" disabled={busy} onClick={() => { setPortInput(savedPort); setActionError(""); }}>放弃修改</button>}
                   <button
                     type="submit"
                     disabled={busy || Number(portInput) === Number(store.port || DEFAULT_WEB_PORT)}
@@ -777,7 +782,7 @@ export function MagpieSettingsCard({
                   <input
                     ref={externalUrlRef}
                     type="url"
-                    required
+                    required={expanded}
                     value={externalUrl}
                     disabled={busy}
                     onChange={(e) => setExternalUrl(e.target.value)}
@@ -785,18 +790,26 @@ export function MagpieSettingsCard({
                     spellCheck="false"
                   />
                 </label>
+                {(pendingEnable || externalUrl !== savedUrl || draftMode !== savedMode) && (
+                  <button type="button" disabled={busy} onClick={() => {
+                    setPendingEnable(false);
+                    setExternalUrl(savedUrl);
+                    setDraftMode(savedMode);
+                    setActionError("");
+                  }}>放弃修改</button>
+                )}
                 <button
                   type="submit"
                   className="primary"
                   disabled={busy || externalUnchanged}
                 >
                   {submitting === "ext-url" && <LoaderCircle size={14} className="spin" />}
-                  保存地址并接入
+                  {expanded ? "保存地址并接入" : "保存外部地址"}
                 </button>
               </div>
               {(store.mode !== "external" || !store.enabled) && (
                 <p className="t3code-mode-hint">
-                  填写已有 Magpie 实例的 HTTP(S) 网页地址后，点击「保存地址并接入」即可一次性保存并启用外部实例模式。
+                  填写已有 Magpie 实例的地址。非回环地址须使用 HTTPS。
                 </p>
               )}
             </form>

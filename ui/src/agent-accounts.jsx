@@ -23,6 +23,7 @@ import {
 import { api } from "./api";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
+import { LaunchAccountPolicy, launchModeLabel } from "./launch-account-policy";
 import { agentAccountsPath, createAgentAccountsSequencer } from "./agent-accounts-state.mjs";
 import { projectName } from "./workspace-state.mjs";
 import { useWindowVisibility } from "./window-visibility";
@@ -559,6 +560,7 @@ export function AgentAccountsPanel({
   const spec = state?.agent;
   const accounts = state?.accounts || [];
   const scheduling = state?.scheduling || { mode: "smart", project_affinity_minutes: 120, auto_cooldown: true, project_pins: {} };
+  const schedulingBase = state?.scheduling_api >= 1 ? {} : scheduling;
   const preview = state?.schedule_preview;
   const busy = environmentBusy || submitting;
 
@@ -575,7 +577,7 @@ export function AgentAccountsPanel({
     const target = index + delta;
     if (target < 0 || target >= next.length) return;
     [next[index], next[target]] = [next[target], next[index]];
-    await mutate({ action: "scheduling", scheduling, order: next });
+    await mutate({ action: "scheduling", scheduling: schedulingBase, order: next });
   };
 
   if (loading && !state) {
@@ -780,21 +782,10 @@ export function AgentAccountsPanel({
       )}
 
       <details className="claude-scheduling">
-        <summary>智能调度引擎设置（当前：{STRATEGY_LABELS[scheduling.mode]?.split("（")[0] || scheduling.mode}）</summary>
+        <summary>调度设置 · {launchModeLabel(scheduling.mode, STRATEGY_LABELS)}</summary>
         <div className="agent-scheduling-grid">
-          <label>
-            自动调度策略
-            <InlineSelect
-              aria-label="自动调度策略"
-              value={scheduling.mode}
-              disabled={busy}
-              onValueChange={(mode) => mutate({ action: "scheduling", scheduling: { ...scheduling, mode } })}
-            >
-              {Object.entries(STRATEGY_LABELS).map(([id, text]) => (
-                <option key={id} value={id}>{text}</option>
-              ))}
-            </InlineSelect>
-          </label>
+          <LaunchAccountPolicy scheduling={scheduling} accounts={accounts} enabled={state.scheduling_api >= 1}
+            busy={busy} label="自动调度策略" legacyModes={STRATEGY_LABELS} change={body => mutate(body).catch(() => {})} />
           <label>
             同项目缓存亲和窗口
             <InlineSelect
@@ -803,7 +794,7 @@ export function AgentAccountsPanel({
               disabled={busy}
               onValueChange={(val) => mutate({
                 action: "scheduling",
-                scheduling: { ...scheduling, project_affinity_minutes: Number(val) },
+                scheduling: { ...schedulingBase, project_affinity_minutes: Number(val) },
               })}
             >
               <option value="0">关闭项目亲和</option>
@@ -823,7 +814,7 @@ export function AgentAccountsPanel({
             disabled={busy}
             onChange={(e) => mutate({
               action: "scheduling",
-              scheduling: { ...scheduling, auto_cooldown: e.target.checked },
+              scheduling: { ...schedulingBase, auto_cooldown: e.target.checked },
             })}
           />
           启用自动熔断冷却保护（限流/异常账号自动避让，指数退避后半开探测恢复）

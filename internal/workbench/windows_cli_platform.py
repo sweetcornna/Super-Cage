@@ -122,32 +122,45 @@ def launch_cli(args, request, connection, state_file):
     # Keep the ConPTY owner alive; state owns the actual native Claude PID.
     import runpy
     import subprocess
-    account = runpy.run_path(_controller_context["CAGE_CLI_ACCOUNT_HELPER"])
-    base = account["profile"](request.get("account") or "default")
-    env = account["cli_environment"](base)
-    account["shared_profile_resources"](base)
-    args = [args[0], *account["shared_launch_arguments"](base, args[1:], None)]
-    if request.get("subject"):
-        reading = account["identity"](args[0], env, Path.cwd(), account["settings_flags"](args[1:]))
-        if account["subject"](reading) != request["subject"]:
-            raise ValueError("项目与所选 Claude 账号身份不一致")
-    child = CliProcess([account['_runtime']['path'](args[0]), *args[1:]], env)
-    with state_file(connection) as state:
-        state["pid"] = child.pid
+    child = None
     try:
+        account_id = request["account"]
+        subject = request.get("subject", "")
+        if account_id != "default" and not subject:
+            raise ValueError("所选 Claude 账号缺少已核验的身份")
+        account = runpy.run_path(_controller_context["CAGE_CLI_ACCOUNT_HELPER"])
+        base = account["profile"](account_id)
+        env = account["cli_environment"](base)
+        account["shared_profile_resources"](base)
+        args = [args[0], *account["shared_launch_arguments"](base, args[1:], None)]
+        if subject:
+            reading = account["identity"](args[0], env, Path.cwd(), account["settings_flags"](args[1:]))
+            if account["subject"](reading) != subject:
+                raise ValueError("项目与所选 Claude 账号身份不一致")
+        child = CliProcess([account["_runtime"]["path"](args[0]), *args[1:]], env)
+        with state_file(connection) as state:
+            state["pid"] = child.pid
         code = child.wait()
     finally:
-        child.close()
+        if child is not None:
+            child.close()
         with state_file(connection) as state:
             state["closed"] = True
             state["busy"] = False
     shell = _controller_context.get("CAGE_CLI_SHELL")
     if not shell:
         return code
-    # As on other guests, exiting Claude keeps the existing terminal usable.
-    # The fixed function scopes later invocations to the same verified account.
+    if not subject:
+        return subprocess.call([shell, "-NoLogo"], env=env)
+    # Keep subsequent invocations bound to the verified account. Reuse the
+    # sanitized CLI environment and pass controller metadata only to the shell.
+    shell_env = dict(env, CAGE_CLAUDE_SUBJECT=subject, CAGE_CLAUDE_ACCOUNT_ID=account_id)
+    for key in ("CAGE_CLI_PYTHON", "CAGE_CLI_ACCOUNT_HELPER", "CAGE_CLI_ACCOUNT_ROOT",
+                "CAGE_CLI_SHARED_ROOT", "CAGE_CLI_BINARY", "CAGE_REMOTE_APP_CONTAINER"):
+        if key in _controller_context:
+            shell_env[key] = _controller_context[key]
     setup = 'function global:claude { & $env:CAGE_CLI_PYTHON -X utf8 -I $env:CAGE_CLI_ACCOUNT_HELPER run $env:CAGE_CLAUDE_ACCOUNT_ID @args }'
-    return subprocess.call([shell, "-NoLogo", "-NoExit", "-Command", setup], env={**os.environ, **env})
+    return subprocess.call([shell, "-NoLogo", "-NoProfile", "-NoExit", "-Command", setup], env=shell_env)
 
 
 class CliProcess:

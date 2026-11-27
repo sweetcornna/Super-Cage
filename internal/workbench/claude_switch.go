@@ -161,7 +161,7 @@ func manualSwitchTargets(list claudeAccountList, record *mobileRecord, now time.
 func automaticSwitchTargets(list claudeAccountList, record *mobileRecord, implicit bool, now time.Time) []claudeSwitchOption {
 	options := []claudeSwitchOption{}
 	source := claudeSwitchSource(list, record)
-	if source == nil || source.HandoffGroup == "" && !implicit {
+	if list.Scheduling.Mode == "manual" || source == nil || source.HandoffGroup == "" && !implicit {
 		return options
 	}
 	for _, a := range list.Accounts {
@@ -191,6 +191,9 @@ func bestClaudeTarget(list claudeAccountList, options []claudeSwitchOption, acti
 // reads only stored state: no query runs while nothing is limited.
 func claudeHandoffState(list claudeAccountList, record *mobileRecord, now time.Time) claudeHandoffView {
 	policy := record.switchPolicy(list)
+	if list.Scheduling.Mode == "manual" {
+		policy = "wait"
+	}
 	view := claudeHandoffView{Automatic: policy == "allow"}
 	source := claudeSwitchSource(list, record)
 	if source == nil || record.AccountFailure != "rate_limit" || record.Switch != nil && record.Switch.Phase != "completed" {
@@ -898,6 +901,7 @@ func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
 		return err
 	}
 	record.CustomTitle, record.Pinned, record.Archived, record.Deleted = current.CustomTitle, current.Pinned, current.Archived, current.Deleted
+	record.TerminalClosed = current.TerminalClosed
 	record.SwitchPolicy, record.SwitchPolicySet, record.UngroupedHandoff = current.SwitchPolicy, current.SwitchPolicySet, current.UngroupedHandoff
 	record.Revision = current.Revision
 	record.changed()
@@ -1033,16 +1037,8 @@ func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monito
 	if record.switchPolicy(list) != "allow" || now.Unix() < record.HandoffWait {
 		return // nothing moves before the person said yes, or while they wait
 	}
-	active, logins := s.mobileCLI.activeAccounts(), map[string]bool{}
-	for _, terminal := range s.terminals.snapshot() {
-		if account, _ := terminal["claude_account_id"].(string); terminal["closed"] != true {
-			if terminal["kind"] == "claude-login" {
-				logins[account] = true
-			} else {
-				active[account]++
-			}
-		}
-	}
+	active, logins := s.claudeAccountLoad()
+	list.applyDefaultServiceUsage(active)
 	s.claudeAccounts.mu.Lock()
 	last := s.claudeAccounts.lastPick
 	s.claudeAccounts.mu.Unlock()

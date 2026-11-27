@@ -165,6 +165,9 @@ func (s *Server) setSessionArchivedLocked(id string, archived bool, requestConte
 		return "", nil, errors.New("永久删除尚未完成，请先重试删除")
 	}
 	record.Archived = archived
+	if archived {
+		record.TerminalClosed = true
+	}
 	record.changed()
 	if err := writePrivate(mobileRecordPath(s.profile, id), record); err != nil {
 		*record = previous

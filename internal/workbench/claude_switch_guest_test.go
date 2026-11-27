@@ -21,6 +21,10 @@ func claudeSwitchGuest(t *testing.T, script string) (*Server, string, *mobileRec
 	s.ready = true
 	home := t.TempDir()
 	mobileTestSSH(t, s, home, []string{"HOME=" + home, "PATH=/usr/bin:/bin:/usr/local/bin"})
+	t.Cleanup(func() {
+		s.beginClose()
+		s.activities.Wait()
+	})
 	helper := filepath.Join(home, ".local/share/cage/cli-channel-code", cliChannelVersion+".py")
 	if err := os.MkdirAll(filepath.Dir(helper), 0700); err != nil {
 		t.Fatal(err)

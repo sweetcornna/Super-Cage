@@ -185,8 +185,8 @@ func TestClaudeQuotaWireFormat(t *testing.T) {
 func TestClaudeProjectAffinityYieldsToAvailabilityAndLoad(t *testing.T) {
 	s := testServer(t)
 	list := claudeAccountList{Accounts: []claudeAccount{
-		{ID: strings.Repeat("a", 24), Enabled: true, Status: "ready"},
-		{ID: strings.Repeat("b", 24), Enabled: true, Status: "ready"},
+		{ID: strings.Repeat("a", 24), Enabled: true, Status: "ready", Email: "a@example.test"},
+		{ID: strings.Repeat("b", 24), Enabled: true, Status: "ready", Email: "b@example.test"},
 	}}
 	if err := s.saveClaudeAccounts(list); err != nil {
 		t.Fatal(err)

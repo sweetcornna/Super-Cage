@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,7 +15,6 @@ import (
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/sylvinus/agent-vm/internal/agentcatalog"
@@ -89,24 +89,55 @@ type agentSelection struct {
 }
 
 type agentAccountMutation struct {
-	Action          string           `json:"action"`
-	ID              string           `json:"id"`
-	Label           string           `json:"label"`
-	Enabled         *bool            `json:"enabled"`
-	Weight          *int             `json:"weight"`
-	MaxConcurrency  *int             `json:"max_concurrency"`
-	HandoffGroup    *string          `json:"handoff_group"`
-	APIKey          string           `json:"api_key"`
-	EnvVar          string           `json:"env_var"`
-	BaseURL         string           `json:"base_url"`
-	Model           string           `json:"model"`
-	Provider        string           `json:"provider"`
-	Scheduling      *agentScheduling `json:"scheduling"`
-	Order           []string         `json:"order"`
-	CooldownSeconds int64            `json:"cooldown_seconds"`
-	ErrorKind       string           `json:"error_kind"`
-	Workspace       string           `json:"workspace"`
-	PinTarget       string           `json:"pin_target"`
+	Action          string                `json:"action"`
+	ID              string                `json:"id"`
+	Label           string                `json:"label"`
+	Enabled         *bool                 `json:"enabled"`
+	Weight          *int                  `json:"weight"`
+	MaxConcurrency  *int                  `json:"max_concurrency"`
+	HandoffGroup    *string               `json:"handoff_group"`
+	APIKey          string                `json:"api_key"`
+	EnvVar          string                `json:"env_var"`
+	BaseURL         string                `json:"base_url"`
+	Model           string                `json:"model"`
+	Provider        string                `json:"provider"`
+	Scheduling      *agentSchedulingInput `json:"scheduling"`
+	Order           []string              `json:"order"`
+	CooldownSeconds int64                 `json:"cooldown_seconds"`
+	ErrorKind       string                `json:"error_kind"`
+	Workspace       string                `json:"workspace"`
+	PinTarget       string                `json:"pin_target"`
+}
+
+type agentSchedulingInput struct {
+	Mode                    *string           `json:"mode"`
+	SelectedAccountID       *string           `json:"selected_account_id"`
+	SelectedAccountRevision string            `json:"selected_account_revision"` // Read-only, accepted on round trips.
+	ProjectAffinityMinutes  *int              `json:"project_affinity_minutes"`
+	AutoCooldown            *bool             `json:"auto_cooldown"`
+	ProjectPins             map[string]string `json:"project_pins"`
+}
+
+func (in agentSchedulingInput) apply(sched agentScheduling, orderChanged bool) agentScheduling {
+	if orderChanged || in.Mode != nil && *in.Mode != sched.Mode || in.SelectedAccountID != nil {
+		sched.SelectedAccountRevision = newSchedulingRevision()
+	}
+	if in.Mode != nil {
+		sched.Mode = *in.Mode
+	}
+	if in.SelectedAccountID != nil {
+		sched.SelectedAccountID = *in.SelectedAccountID
+	}
+	if in.ProjectAffinityMinutes != nil {
+		sched.ProjectAffinityMinutes = *in.ProjectAffinityMinutes
+	}
+	if in.AutoCooldown != nil {
+		sched.AutoCooldown = *in.AutoCooldown
+	}
+	if in.ProjectPins != nil {
+		sched.ProjectPins = maps.Clone(in.ProjectPins)
+	}
+	return sched
 }
 
 func (s *Server) loadAgentPoolsLocked() (map[string]*agentAccountPool, error) {
@@ -149,13 +180,16 @@ func cloneAgentPools(pools map[string]*agentAccountPool) map[string]*agentAccoun
 	return out
 }
 
+// Isolate roster edits from the active pool until the write succeeds.
+func editAgentPool(pools map[string]*agentAccountPool, agentID string) (map[string]*agentAccountPool, *agentAccountPool) {
+	next := maps.Clone(pools)
+	pool := cloneAgentPool(pools[agentID])
+	next[agentID] = &pool
+	return next, &pool
+}
+
 func (s *Server) saveAgentPoolsLocked(pools map[string]*agentAccountPool) error {
-	if s.agentCLIs.flushTimer != nil {
-		s.agentCLIs.flushTimer.Stop()
-		s.agentCLIs.flushTimer = nil
-	}
-	s.agentCLIs.poolsGen++
-	gen := s.agentCLIs.poolsGen
+	gen := s.agentCLIs.poolsGen + 1
 	s.agentCLIs.flushMu.Lock()
 	err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools)
 	if err == nil && gen > s.agentCLIs.lastWrittenGen {
@@ -165,6 +199,11 @@ func (s *Server) saveAgentPoolsLocked(pools map[string]*agentAccountPool) error 
 	if err != nil {
 		return errors.New("Agent 账号配置未能保存，请检查磁盘空间和权限")
 	}
+	if s.agentCLIs.flushTimer != nil {
+		s.agentCLIs.flushTimer.Stop()
+		s.agentCLIs.flushTimer = nil
+	}
+	s.agentCLIs.poolsGen = gen
 	s.agentCLIs.pools = pools
 	s.agentCLIs.poolsLoaded = true
 	s.agentCLIs.poolsDirty = false
@@ -181,16 +220,26 @@ func (s *Server) scheduleAgentPoolsFlushLocked() {
 	}
 	s.agentCLIs.poolsGen++
 	s.agentCLIs.poolsDirty = true
-	if s.agentCLIs.flushTimer != nil {
+	s.armAgentPoolsFlushLocked()
+}
+
+func (s *Server) armAgentPoolsFlushLocked() {
+	if s.agentCLIs.closed || s.agentCLIs.flushTimer != nil {
 		return
 	}
+	s.agentCLIs.flushTicket++
+	ticket := s.agentCLIs.flushTicket
 	s.agentCLIs.flushTimer = time.AfterFunc(agentFlushDelay, func() {
-		s.flushAgentPools()
+		s.flushAgentPools(ticket)
 	})
 }
 
-func (s *Server) flushAgentPools() {
+func (s *Server) flushAgentPools(ticket ...uint64) {
 	s.agentCLIs.mu.Lock()
+	if len(ticket) > 0 && (s.agentCLIs.flushTimer == nil || s.agentCLIs.flushTicket != ticket[0]) {
+		s.agentCLIs.mu.Unlock()
+		return
+	}
 	if s.agentCLIs.flushTimer != nil {
 		s.agentCLIs.flushTimer.Stop()
 		s.agentCLIs.flushTimer = nil
@@ -215,12 +264,15 @@ func (s *Server) flushAgentPools() {
 	}
 	s.agentCLIs.flushMu.Unlock()
 
+	s.agentCLIs.mu.Lock()
+	if writeErr == nil && s.agentCLIs.poolsGen == gen {
+		s.agentCLIs.poolsDirty = false
+	}
+	if s.agentCLIs.poolsDirty {
+		s.armAgentPoolsFlushLocked()
+	}
+	s.agentCLIs.mu.Unlock()
 	if writeErr == nil {
-		s.agentCLIs.mu.Lock()
-		if s.agentCLIs.poolsGen == gen {
-			s.agentCLIs.poolsDirty = false
-		}
-		s.agentCLIs.mu.Unlock()
 		s.kickAgentLaunchSchedule()
 	}
 }
@@ -278,6 +330,32 @@ func (s *Server) activeAgentTerminals(agentID string) (map[string]int, map[strin
 	return s.terminals.agentCounts(agentID)
 }
 
+// agentAccountUsageLocked includes pending login observations and folds unlabelled
+// uses of the guest default onto the joined roster entry, if there is one.
+func (s *Server) agentAccountUsageLocked(agentID string, pool *agentAccountPool, external map[string]int) (map[string]int, map[string]bool) {
+	active, logins := s.activeAgentTerminals(agentID)
+	for id, count := range external {
+		if count > 0 {
+			if id == "default" {
+				id = "" // T3 was bound to an unregistered guest default.
+			}
+			active[id] += count
+		}
+	}
+	for key := range s.agentCLIs.confirmInflight {
+		if id, ok := strings.CutPrefix(key, agentID+":"); ok {
+			logins[id] = true
+		}
+	}
+	if count := active[""]; count > 0 {
+		if a := pool.defaultAccount(); a != nil {
+			active[a.ID] += count
+			delete(active, "")
+		}
+	}
+	return active, logins
+}
+
 func (s *Server) probeAgentProfile(ctx context.Context, spec agentcatalog.AgentSpec, accountID string) (agentGuestSnapshot, error) {
 	var snap agentGuestSnapshot
 	err := s.runAgentRuntime(ctx, "snapshot", map[string]any{"spec": spec, "account_id": accountID}, &snap)
@@ -309,13 +387,13 @@ func (s *Server) inspectAgentDefault(parent context.Context, spec agentcatalog.A
 			case <-parent.Done():
 				return agentGuestSnapshot{}, time.Time{}, parent.Err()
 			case <-call.done:
-				if force {
+				if force && !call.forced {
 					continue
 				}
-				return call.snap, time.Now(), call.err
+				return call.snap, call.checkedAt, call.err
 			}
 		}
-		call := &agentDefaultProbeCall{done: make(chan struct{})}
+		call := &agentDefaultProbeCall{done: make(chan struct{}), forced: force}
 		entry.inflight = call
 		m.mu.Unlock()
 
@@ -325,7 +403,10 @@ func (s *Server) inspectAgentDefault(parent context.Context, spec agentcatalog.A
 		now := time.Now()
 
 		m.mu.Lock()
-		call.snap, call.err = snap, err
+		if err == nil && m.defaultCache[spec.ID] != entry {
+			err = errors.New("Agent 登录环境已变化，请重新检查")
+		}
+		call.snap, call.checkedAt, call.err = snap, now, err
 		entry.snap, entry.checkedAt, entry.err = snap, now, err
 		if entry.inflight == call {
 			entry.inflight = nil
@@ -338,20 +419,14 @@ func (s *Server) inspectAgentDefault(parent context.Context, spec agentcatalog.A
 
 func (s *Server) invalidateAgentDefaultCache(agentID string) {
 	s.agentCLIs.mu.Lock()
-	if s.agentCLIs.defaultCache != nil {
-		if entry := s.agentCLIs.defaultCache[agentID]; entry != nil {
-			entry.checkedAt = time.Time{}
-		}
-	}
+	delete(s.agentCLIs.defaultCache, agentID)
 	s.agentCLIs.mu.Unlock()
 }
 
 func applySnapshotToAccount(a *agentAccount, snap agentGuestSnapshot, now time.Time) {
 	a.CheckedAt = now.Unix()
 	if !snap.LoggedIn {
-		if a.Source != "api_key" {
-			a.Status = "signed_out"
-		}
+		a.Status = "signed_out"
 		return
 	}
 	a.Status = "ready"
@@ -396,6 +471,46 @@ func applySnapshotToAccount(a *agentAccount, snap agentGuestSnapshot, now time.T
 	}
 }
 
+// compareAgentIdentity returns whether the observations have comparable
+// account identifiers and whether those identifiers match. A provider name
+// alone can describe many different accounts.
+func compareAgentIdentity(a *agentAccount, snap agentGuestSnapshot) (known, same bool) {
+	if a.AuthMode != "" && snap.AuthMode != "" && a.AuthMode != snap.AuthMode {
+		return true, false
+	}
+	if a.KeyFingerprint != "" && snap.KeyFingerprint != "" {
+		return true, a.KeyFingerprint == snap.KeyFingerprint && a.BaseURL == snap.BaseURL
+	}
+	email, observedEmail := strings.TrimSpace(a.Email), strings.TrimSpace(snap.Email)
+	user, observedUser := strings.TrimSpace(a.Username), strings.TrimSpace(snap.Username)
+	org, observedOrg := strings.TrimSpace(a.Organization), strings.TrimSpace(snap.Organization)
+	orgMatches := org == "" || observedOrg == "" || strings.EqualFold(org, observedOrg)
+	if email != "" && observedEmail != "" {
+		return true, strings.EqualFold(email, observedEmail) && orgMatches
+	}
+	if user != "" && observedUser != "" {
+		return true, strings.EqualFold(user, observedUser) && orgMatches
+	}
+	return false, false
+}
+
+func observeAgentAccount(pool *agentAccountPool, a *agentAccount, snap agentGuestSnapshot, now time.Time) {
+	if snap.LoggedIn {
+		if known, same := compareAgentIdentity(a, snap); known && !same {
+			a.Status, a.CheckedAt = "changed", now.Unix()
+			return
+		}
+		for i := range pool.Accounts {
+			other := &pool.Accounts[i]
+			if _, same := compareAgentIdentity(other, snap); other != a && same {
+				a.Status, a.CheckedAt = "duplicate", now.Unix()
+				return
+			}
+		}
+	}
+	applySnapshotToAccount(a, snap, now)
+}
+
 func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 	agentID := strings.TrimSpace(r.PathValue("id"))
 	spec, cfg, ok := s.lookupAgentSpec(agentID)
@@ -423,9 +538,14 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 	detectionStatus := "offline"
 	detectionError := ""
 	var detected *agentDetected
+	var defaultSnapshot agentGuestSnapshot
+	var defaultCheckedAt time.Time
 
 	if !skipDetect && ready && running && s.windowsGuest == nil && spec.Isolation.Mode != "api_key_only" {
 		snap, checkedAt, err := s.inspectAgentDefault(r.Context(), spec, forceRefresh)
+		if err == nil {
+			defaultSnapshot, defaultCheckedAt = snap, checkedAt
+		}
 		if err != nil {
 			detectionStatus = "unavailable"
 			detectionError = err.Error()
@@ -499,6 +619,7 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	external := s.activeServiceAccounts(spec.ID)
 	s.agentCLIs.mu.Lock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err != nil {
@@ -506,16 +627,18 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		requestError(w, err)
 		return
 	}
-	pool := s.ensureAgentPoolLocked(pools, spec.ID)
-	// Sync fresh default quota/status onto joined default account if present.
-	if detected != nil {
-		for i := range pool.Accounts {
-			if pool.Accounts[i].Source == "default" {
-				if detected.Quota != nil && pool.Accounts[i].mergeQuota(detected.Quota, time.Now()) {
+	pool := pools[spec.ID]
+	if pool != nil && !defaultCheckedAt.IsZero() {
+		if a := pool.defaultAccount(); a != nil {
+			if defaultCheckedAt.Unix() >= a.CheckedAt {
+				previous := *a
+				observeAgentAccount(pool, a, defaultSnapshot, defaultCheckedAt)
+				if *a != previous {
 					s.scheduleAgentPoolsFlushLocked()
 				}
+			}
+			if a.Status == "ready" {
 				detected = nil
-				break
 			}
 		}
 	}
@@ -526,9 +649,9 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		rec = wsMap[workspace]
 	}
 	notice := s.agentCLIs.loginNotice[spec.ID]
+	active, logins := s.agentAccountUsageLocked(spec.ID, &poolCopy, external)
 	s.agentCLIs.mu.Unlock()
 
-	active, logins := s.activeAgentTerminals(spec.ID)
 	magpieTakeover := s.magpieTakesOverScheduling()
 	var preview scheduleDecision
 	if magpieTakeover {
@@ -543,6 +666,7 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		"launch_command":   s.effectiveAgentLaunchCommand(spec, cfg),
 		"accounts":         poolCopy.Accounts,
 		"scheduling":       poolCopy.Scheduling.normalized(),
+		"scheduling_api":   schedulingAPI,
 		"schedule_preview": preview,
 		"active_counts":    active,
 		"detected":         detected,
@@ -579,6 +703,8 @@ func (s *Server) mutateAgentAccountsHTTP(w http.ResponseWriter, r *http.Request)
 		err = s.updateAgentAccount(r.Context(), spec, in)
 	case "scheduling":
 		err = s.updateAgentScheduling(spec.ID, in)
+	case "select":
+		err = s.setAgentSchedulingAccount(spec.ID, in.ID)
 	case "pin_project":
 		err = s.pinAgentProject(spec.ID, in.Workspace, in.PinTarget)
 	case "cooldown":
@@ -610,18 +736,35 @@ func (s *Server) joinAgentDefault(ctx context.Context, spec agentcatalog.AgentSp
 	}
 	s.op.Lock()
 	defer s.op.Unlock()
+	external := s.activeServiceAccounts(spec.ID)
 	s.agentCLIs.mu.Lock()
 	defer s.agentCLIs.mu.Unlock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, spec.ID)
+	next, pool := editAgentPool(pools, spec.ID)
+	defaultAccount := pool.defaultAccount()
 	for i := range pool.Accounts {
-		if pool.Accounts[i].Source == "default" {
-			applySnapshotToAccount(&pool.Accounts[i], snap, time.Now())
-			return s.saveAgentPoolsLocked(pools)
+		a := &pool.Accounts[i]
+		if _, same := compareAgentIdentity(a, snap); a != defaultAccount && same {
+			return errors.New("此登录已在调度池中，请使用现有账号")
 		}
+	}
+	if defaultAccount != nil {
+		if known, same := compareAgentIdentity(defaultAccount, snap); known && !same {
+			active, _ := s.agentAccountUsageLocked(spec.ID, pool, external)
+			if active[defaultAccount.ID] > 0 {
+				return errors.New("请先关闭仍在使用旧默认账号的终端或服务")
+			}
+			defaultAccount.Email, defaultAccount.Username, defaultAccount.Organization = "", "", ""
+			defaultAccount.Plan, defaultAccount.Provider = "", ""
+			defaultAccount.KeyHint, defaultAccount.KeyFingerprint, defaultAccount.EnvVar = "", "", ""
+			defaultAccount.ExpiresAt, defaultAccount.Quota = 0, nil
+			clearAccountCooldown(defaultAccount)
+		}
+		applySnapshotToAccount(defaultAccount, snap, time.Now())
+		return s.saveAgentPoolsLocked(next)
 	}
 	acc := agentAccount{
 		ID:         randomToken()[:24],
@@ -638,8 +781,11 @@ func (s *Server) joinAgentDefault(ctx context.Context, spec agentcatalog.AgentSp
 	}
 	applySnapshotToAccount(&acc, snap, time.Now())
 	pool.Accounts = append(pool.Accounts, acc)
+	if err := s.saveAgentPoolsLocked(next); err != nil {
+		return err
+	}
 	s.setAgentNoticeLocked(spec.ID, "已将普通终端默认登录加入智能调度池")
-	return s.saveAgentPoolsLocked(pools)
+	return nil
 }
 
 func (s *Server) addAgentAPIKeyAccount(ctx context.Context, spec agentcatalog.AgentSpec, in agentAccountMutation) error {
@@ -711,8 +857,15 @@ func (s *Server) addAgentAPIKeyAccount(ctx context.Context, spec agentcatalog.Ag
 			saveErr = loadErr
 			return
 		}
-		nextPools := cloneAgentPools(pools)
-		pool := s.ensureAgentPoolLocked(nextPools, spec.ID)
+		nextPools, pool := editAgentPool(pools, spec.ID)
+		for i := range pool.Accounts {
+			if meta.KeyFingerprint != "" {
+				if _, same := compareAgentIdentity(&pool.Accounts[i], meta); same {
+					saveErr = errors.New("此 API Key 已在调度池中")
+					return
+				}
+			}
+		}
 		acc := agentAccount{
 			ID:             id,
 			Label:          label,
@@ -854,8 +1007,7 @@ func (s *Server) updateAgentAccount(ctx context.Context, spec agentcatalog.Agent
 			saveErr = err
 			return
 		}
-		nextPools := cloneAgentPools(pools)
-		pool := s.ensureAgentPoolLocked(nextPools, spec.ID)
+		nextPools, pool := editAgentPool(pools, spec.ID)
 		a := pool.find(in.ID)
 		if a == nil {
 			saveErr = errors.New("未找到要更新的账号")
@@ -877,6 +1029,9 @@ func (s *Server) updateAgentAccount(ctx context.Context, spec agentcatalog.Agent
 			a.HandoffGroup = strings.TrimSpace(*in.HandoffGroup)
 		}
 		if updatedMeta != nil {
+			if updatedMeta.KeyFingerprint != "" && updatedMeta.KeyFingerprint != a.KeyFingerprint {
+				a.Quota = nil
+			}
 			applySnapshotToAccount(a, *updatedMeta, time.Now())
 			a.BaseURL = updatedMeta.BaseURL
 			a.Model = updatedMeta.Model
@@ -927,10 +1082,6 @@ func (s *Server) updateAgentScheduling(agentID string, in agentAccountMutation) 
 	if in.Scheduling == nil {
 		return errors.New("缺少调度策略配置")
 	}
-	sched := in.Scheduling.normalized()
-	if !sched.valid() {
-		return errors.New("请选择有效的调度模式与项目亲和时长")
-	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	s.agentCLIs.mu.Lock()
@@ -939,9 +1090,18 @@ func (s *Server) updateAgentScheduling(agentID string, in agentAccountMutation) 
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, agentID)
-	if sched.ProjectPins == nil {
-		sched.ProjectPins = pool.Scheduling.ProjectPins
+	next, pool := editAgentPool(pools, agentID)
+	sched := in.Scheduling.apply(pool.Scheduling, in.Order != nil)
+	if !sched.valid() {
+		return errors.New("请选择有效的调度模式与项目亲和时长")
+	}
+	if id := in.Scheduling.SelectedAccountID; id != nil && *id != "" && pool.find(*id) == nil {
+		return errSchedulingAccountMissing
+	}
+	for workspace, target := range in.Scheduling.ProjectPins {
+		if !validAgentProjectPin(pool, workspace, target) {
+			return errors.New("项目路径或绑定目标无效")
+		}
 	}
 	pool.Scheduling = sched
 	if in.Order != nil {
@@ -949,18 +1109,38 @@ func (s *Server) updateAgentScheduling(agentID string, in agentAccountMutation) 
 			return errors.New("账号列表已变化，请刷新后再排序")
 		}
 		ordered := make([]agentAccount, 0, len(in.Order))
-		seen := map[string]bool{}
+		accounts := make(map[string]agentAccount, len(pool.Accounts))
+		for _, a := range pool.Accounts {
+			accounts[a.ID] = a
+		}
 		for _, id := range in.Order {
-			a := pool.find(id)
-			if a == nil || seen[id] {
+			a, ok := accounts[id]
+			if !ok {
 				return errors.New("账号顺序无效")
 			}
-			seen[id] = true
-			ordered = append(ordered, *a)
+			delete(accounts, id)
+			ordered = append(ordered, a)
 		}
 		pool.Accounts = ordered
 	}
-	return s.saveAgentPoolsLocked(pools)
+	return s.saveAgentPoolsLocked(next)
+}
+
+func validAgentProjectPin(pool *agentAccountPool, workspace, target string) bool {
+	if workspace == "" || len(workspace) > 1024 || strings.TrimSpace(workspace) != workspace {
+		return false
+	}
+	kind, value, ok := strings.Cut(target, ":")
+	if !ok || value == "" || strings.TrimSpace(value) != value {
+		return false
+	}
+	switch kind {
+	case "account":
+		return validClaudeID(value) && pool.find(value) != nil
+	case "group":
+		return len(value) <= 64 && strings.IndexFunc(value, unicode.IsControl) < 0
+	}
+	return false
 }
 
 func (s *Server) pinAgentProject(agentID, workspace, target string) error {
@@ -969,9 +1149,6 @@ func (s *Server) pinAgentProject(agentID, workspace, target string) error {
 	if workspace == "" || len(workspace) > 1024 {
 		return errors.New("项目路径无效")
 	}
-	if target != "" && !strings.HasPrefix(target, "account:") && !strings.HasPrefix(target, "group:") {
-		return errors.New("绑定目标须为 account:<ID> 或 group:<分组名>")
-	}
 	s.op.Lock()
 	defer s.op.Unlock()
 	s.agentCLIs.mu.Lock()
@@ -980,19 +1157,19 @@ func (s *Server) pinAgentProject(agentID, workspace, target string) error {
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, agentID)
-	if pool.Scheduling.ProjectPins == nil {
-		pool.Scheduling.ProjectPins = map[string]string{}
-	}
+	next, pool := editAgentPool(pools, agentID)
 	if target == "" {
 		delete(pool.Scheduling.ProjectPins, workspace)
 	} else {
-		if utf8.RuneCountInString(target) > 96 {
-			return errors.New("绑定目标过长")
+		if !validAgentProjectPin(pool, workspace, target) {
+			return errors.New("绑定目标须为现有账号或有效的分组名")
+		}
+		if pool.Scheduling.ProjectPins == nil {
+			pool.Scheduling.ProjectPins = map[string]string{}
 		}
 		pool.Scheduling.ProjectPins[workspace] = target
 	}
-	return s.saveAgentPoolsLocked(pools)
+	return s.saveAgentPoolsLocked(next)
 }
 
 func (s *Server) setAgentAccountCooldown(agentID string, in agentAccountMutation) error {
@@ -1007,19 +1184,24 @@ func (s *Server) setAgentAccountCooldown(agentID string, in agentAccountMutation
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, agentID)
+	next, pool := editAgentPool(pools, agentID)
 	a := pool.find(in.ID)
 	if a == nil {
 		return errors.New("未找到指定的账号")
 	}
+	var notice string
 	if in.CooldownSeconds < 0 {
 		clearAccountCooldown(a)
-		s.setAgentNoticeLocked(agentID, fmt.Sprintf("已恢复「%s」的调度健康状态", a.displayName()))
+		notice = fmt.Sprintf("已恢复「%s」的调度健康状态", a.displayName())
 	} else {
 		applyAccountCooldown(a, in.ErrorKind, in.CooldownSeconds, time.Now())
-		s.setAgentNoticeLocked(agentID, fmt.Sprintf("已将「%s」置入熔断冷却，新建终端将自动路由至其他健康账号", a.displayName()))
+		notice = fmt.Sprintf("已将「%s」置入熔断冷却，新建终端将自动路由至其他健康账号", a.displayName())
 	}
-	return s.saveAgentPoolsLocked(pools)
+	if err := s.saveAgentPoolsLocked(next); err != nil {
+		return err
+	}
+	s.setAgentNoticeLocked(agentID, notice)
+	return nil
 }
 
 // onAgentRateLimit is invoked passively by terminal PTY output scanning when an
@@ -1051,7 +1233,7 @@ func (s *Server) onAgentRateLimit(agentID, accountID, kind string) {
 		return
 	}
 	// Debounce duplicate triggers from the same burst within 20 seconds.
-	if a.LastErrorAt > 0 && now.Unix()-a.LastErrorAt < 20 {
+	if a.LastErrorKind != "" && a.LastErrorAt > 0 && now.Unix()-a.LastErrorAt < 20 {
 		return
 	}
 	applyAccountCooldown(a, kind, 0, now)
@@ -1070,12 +1252,14 @@ func (s *Server) refreshAgentAccount(ctx context.Context, spec agentcatalog.Agen
 	if !validClaudeID(in.ID) {
 		return errors.New("账号 ID 无效")
 	}
-	var guestID string
+	var guestID, fingerprint string
+	started := time.Now()
 	s.agentCLIs.mu.Lock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err == nil {
 		if a := s.ensureAgentPoolLocked(pools, spec.ID).find(in.ID); a != nil {
 			guestID = a.guestID()
+			fingerprint = a.KeyFingerprint
 		} else {
 			err = errors.New("未找到要检查的账号")
 		}
@@ -1088,95 +1272,107 @@ func (s *Server) refreshAgentAccount(ctx context.Context, spec agentcatalog.Agen
 	if err != nil {
 		return err
 	}
+	s.op.Lock()
+	defer s.op.Unlock()
 	s.agentCLIs.mu.Lock()
 	defer s.agentCLIs.mu.Unlock()
 	pools, err = s.loadAgentPoolsLocked()
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, spec.ID)
-	if a := pool.find(in.ID); a != nil {
-		now := time.Now()
-		applySnapshotToAccount(a, snap, now)
-		if snap.LoggedIn && a.CooldownUntil <= now.Unix() {
-			a.ConsecutiveFailures = 0
-			a.HealthEWMA = updateHealthEWMA(a.HealthEWMA, 1.0)
-		}
+	next, pool := editAgentPool(pools, spec.ID)
+	a := pool.find(in.ID)
+	if a == nil || a.guestID() != guestID || a.KeyFingerprint != fingerprint || a.CheckedAt > started.Unix() {
+		return errors.New("账号状态已变化，请重新检查")
 	}
-	return s.saveAgentPoolsLocked(pools)
+	now := time.Now()
+	observeAgentAccount(pool, a, snap, now)
+	return s.saveAgentPoolsLocked(next)
 }
 
 func (s *Server) removeAgentAccount(ctx context.Context, spec agentcatalog.AgentSpec, id string) error {
 	if !validClaudeID(id) {
 		return errors.New("账号 ID 无效")
 	}
-	// Acquire s.op BEFORE checking active terminals so no new terminal can race admission.
+	// Serialize removal with terminal and service admission.
 	s.op.Lock()
 	defer s.op.Unlock()
-	active, logins := s.activeAgentTerminals(spec.ID)
-	if active[id] > 0 || logins[id] {
-		return errors.New("请先关闭仍在使用此账号的终端，再移除账号")
-	}
-
-	var source, authMode, guestID string
-	var notFound bool
-	var prevPools map[string]*agentAccountPool
-	s.agentCLIs.mu.Lock()
-	pools, err := s.loadAgentPoolsLocked()
-	if err == nil {
-		pool := s.ensureAgentPoolLocked(pools, spec.ID)
-		target := pool.find(id)
-		if target == nil {
-			notFound = true
-		} else {
-			source = target.Source
-			authMode = target.AuthMode
-			guestID = target.guestID()
-			prevPools = cloneAgentPools(pools)
-		}
-	}
-	s.agentCLIs.mu.Unlock()
+	external := s.activeServiceAccounts(spec.ID)
+	guest, err := s.agentGuestLaunchLoad(spec.ID, id, true)
 	if err != nil {
 		return err
 	}
-	if notFound {
+	if guest[id] > 0 {
+		return errors.New("请先关闭使用此账号的 SSH 终端，再移除账号")
+	}
+
+	m := &s.agentCLIs
+	m.mu.Lock()
+	pools, err := s.loadAgentPoolsLocked()
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	original := pools[spec.ID]
+	if original == nil {
+		m.mu.Unlock()
 		return nil
 	}
-
-	needClearGuest := (source == "api_key" || authMode == "api_key") && guestID != "default" && s.windowsGuest == nil
-	if needClearGuest && !s.vmRunning() && s.agentCLIs.runtimeHook == nil {
-		return errors.New("请先启动 Cage 环境后再移除 API Key 账号，以确保客机内的隔离密钥被彻底清除")
+	index := slices.IndexFunc(original.Accounts, func(a agentAccount) bool { return a.ID == id })
+	if index < 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	account := original.Accounts[index]
+	active, logins := s.agentAccountUsageLocked(spec.ID, original, external)
+	m.mu.Unlock()
+	if active[id] > 0 || logins[id] {
+		return errors.New("请先关闭仍在使用此账号的终端或服务，再移除账号")
 	}
 
-	// Persist roster deletion FIRST while holding s.op so a disk save failure leaves
-	// guest credentials untouched; if guest credential wipe then fails, restore prevPools.
-	s.agentCLIs.mu.Lock()
-	nextPools := cloneAgentPools(prevPools)
-	pool := s.ensureAgentPoolLocked(nextPools, spec.ID)
-	pool.Accounts = slices.DeleteFunc(pool.Accounts, func(a agentAccount) bool { return a.ID == id })
+	guestID := account.guestID()
+	needClearGuest := (account.Source == "api_key" || account.AuthMode == "api_key") && guestID != "default" && s.windowsGuest == nil
+	if needClearGuest && !s.vmRunning() && m.runtimeHook == nil {
+		return errors.New("请先启动 Cage 环境后再移除 API Key 账号，以确保客机内的隔离密钥被彻底清除")
+	}
+	m.mu.Lock()
+	// Passive health updates may have arrived while checking guest availability.
+	pools, err = s.loadAgentPoolsLocked()
+	if err != nil {
+		m.mu.Unlock()
+		return err
+	}
+	next, pool := editAgentPool(pools, spec.ID)
+	account = pool.Accounts[index]
+	pool.Accounts = slices.Delete(pool.Accounts, index, index+1)
+	removedPins := map[string]string{}
 	for ws, pin := range pool.Scheduling.ProjectPins {
 		if pin == "account:"+id {
+			removedPins[ws] = pin
 			delete(pool.Scheduling.ProjectPins, ws)
 		}
 	}
-	err = s.saveAgentPoolsLocked(nextPools)
-	s.agentCLIs.mu.Unlock()
+	err = s.saveAgentPoolsLocked(next)
+	m.mu.Unlock()
 	if err != nil {
 		return err
 	}
 
 	if needClearGuest {
 		if clearErr := s.runAgentRuntime(ctx, "clear-credentials", map[string]any{"spec": spec, "account_id": guestID}, nil); clearErr != nil {
-			s.agentCLIs.mu.Lock()
-			rbErr := s.saveAgentPoolsLocked(prevPools)
-			s.agentCLIs.mu.Unlock()
+			m.mu.Lock()
+			rollback, current := editAgentPool(m.pools, spec.ID)
+			current.Accounts = slices.Insert(current.Accounts, index, account)
+			maps.Copy(current.Scheduling.ProjectPins, removedPins)
+			rbErr := s.saveAgentPoolsLocked(rollback)
+			m.mu.Unlock()
 			if rbErr != nil {
 				return fmt.Errorf("清除客机中的隔离凭据失败且恢复账号列表失败: %v / %v", clearErr, rbErr)
 			}
 			return fmt.Errorf("清除客机中的隔离凭据失败，已取消移除以防密钥残留: %w", clearErr)
 		}
 	}
-	if source == "default" {
+	if account.Source == "default" {
 		s.invalidateAgentDefaultCache(spec.ID)
 	}
 	return nil
@@ -1189,9 +1385,18 @@ func (s *Server) setAgentNoticeLocked(agentID, notice string) {
 	s.agentCLIs.loginNotice[agentID] = notice
 }
 
-// selectAgentAccount resolves the account for a new Agent terminal in < 1ms
-// from the in-memory pool cache + zero-alloc active terminal counts (zero SSH!).
+// selectAgentAccount resolves admission from host metadata and live usage.
+// Launch callers hold s.op until the new terminal or service binding is published.
 func (s *Server) selectAgentAccount(spec agentcatalog.AgentSpec, requestedID string, login bool, workspace string) (agentSelection, scheduleDecision, error) {
+	return s.selectAgentAccountReplacing(spec, requestedID, login, workspace, "")
+}
+
+// Service restarts replace their seat under the environment operation lock.
+func (s *Server) selectAgentAccountReplacing(spec agentcatalog.AgentSpec, requestedID string, login bool, workspace, replacingID string) (agentSelection, scheduleDecision, error) {
+	return s.selectAgentAccountForServices(spec, requestedID, login, workspace, replacingID, nil)
+}
+
+func (s *Server) selectAgentAccountForServices(spec agentcatalog.AgentSpec, requestedID string, login bool, workspace, replacingT3 string, replacingOrca *string) (agentSelection, scheduleDecision, error) {
 	var empty agentSelection
 	var decision scheduleDecision
 	if !login && s.magpieTakesOverScheduling() {
@@ -1200,96 +1405,146 @@ func (s *Server) selectAgentAccount(spec agentcatalog.AgentSpec, requestedID str
 			GuestID: "default",
 			Label:   magpieTakeoverLabel,
 			Reason:  magpieTakeoverReason,
-		}, scheduleDecision{
-			Strategy: "magpie",
-			Reason:   magpieTakeoverReason,
-		}, nil
+		}, scheduleDecision{Strategy: "magpie", Reason: magpieTakeoverReason}, nil
 	}
-	s.agentCLIs.mu.Lock()
+	m := &s.agentCLIs
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err != nil {
-		s.agentCLIs.mu.Unlock()
 		return empty, decision, err
 	}
-	pool := s.ensureAgentPoolLocked(pools, spec.ID)
-	if login {
-		if requestedID == "" {
-			if pool.PendingLogin == "" {
-				pool.PendingLogin = randomToken()[:24]
-				err = s.saveAgentPoolsLocked(pools)
-			}
-			if err == nil {
-				s.setAgentNoticeLocked(spec.ID, "")
-				delete(s.agentCLIs.pendingAttempted, spec.ID)
-			}
-			requestedID = pool.PendingLogin
-		} else if a := pool.find(requestedID); a == nil || a.Source == "default" {
-			err = errors.New("请在普通终端管理默认环境的登录")
+	pool := pools[spec.ID]
+	auto := requestedID == "" || requestedID == "auto"
+	now := time.Now()
+	var guestCursor guestSchedulingCursor
+	var external map[string]int
+	if login && requestedID != "" || !login && pool.hasLaunchCandidate(requestedID, workspace, now) {
+		sharedCursor := !login && auto && canonicalSchedulingMode(pool.Scheduling.Mode) == "exhaust" &&
+			strings.TrimSpace(pool.Scheduling.ProjectPins[workspace]) == ""
+		m.mu.Unlock()
+		if sharedCursor {
+			guestCursor = s.readGuestSchedulingCursor(spec.ID, false)
 		}
+		external = s.serviceAccountUsage(spec.ID, replacingT3, replacingOrca)
+		raw, err := s.agentGuestLaunchLoad(spec.ID, requestedID, login || auto)
+		m.mu.Lock()
 		if err != nil {
-			s.agentCLIs.mu.Unlock()
 			return empty, decision, err
 		}
-		guestID := requestedID
-		label := spec.ShortName + " 新账号登录"
-		if a := pool.find(requestedID); a != nil {
-			guestID = a.guestID()
-			label = a.displayName()
+		if len(raw) > 0 {
+			if external == nil {
+				external = make(map[string]int)
+			}
+			for id, count := range raw {
+				external[id] += count
+			}
 		}
-		s.agentCLIs.mu.Unlock()
-		return agentSelection{AgentID: spec.ID, ID: requestedID, GuestID: guestID, Label: label, AuthMode: "oauth"}, decision, nil
+		pools, err = s.loadAgentPoolsLocked()
+		if err != nil {
+			return empty, decision, err
+		}
+		pool = pools[spec.ID]
+		now = time.Now()
 	}
-
-	if requestedID != "" && requestedID != "auto" {
+	if login {
+		if requestedID == "" || (pool != nil && requestedID == pool.PendingLogin) {
+			if pool == nil || pool.PendingLogin == "" {
+				nextPools, draft := editAgentPool(pools, spec.ID)
+				draft.PendingLogin = randomToken()[:24]
+				if err := s.saveAgentPoolsLocked(nextPools); err != nil {
+					return empty, decision, err
+				}
+				pool = draft
+			}
+			id := pool.PendingLogin
+			if m.confirmInflight[spec.ID+":"+id] != nil && !s.terminals.liveAgentLogin(spec.ID, id) {
+				return empty, decision, errors.New("正在确认上一次登录，请稍后重试")
+			}
+			s.setAgentNoticeLocked(spec.ID, "")
+			delete(m.pendingAttempted, spec.ID)
+			return agentSelection{AgentID: spec.ID, ID: id, GuestID: id, Label: spec.ShortName + " 新账号登录", AuthMode: "oauth"}, decision, nil
+		}
+		if pool == nil {
+			return empty, decision, errors.New("未找到要重新登录的账号")
+		}
 		a := pool.find(requestedID)
 		if a == nil {
-			s.agentCLIs.mu.Unlock()
-			return empty, decision, errors.New("未找到指定的账号")
+			return empty, decision, errors.New("未找到要重新登录的账号")
 		}
-		sel := agentSelection{
-			AgentID:  spec.ID,
-			ID:       a.ID,
-			GuestID:  a.guestID(),
-			Label:    a.displayName(),
-			AuthMode: a.AuthMode,
-			Reason:   "手动指定账号",
+		if a.Source == "default" {
+			return empty, decision, errors.New("请在普通终端管理默认环境的登录")
 		}
-		s.agentCLIs.mu.Unlock()
-		return sel, scheduleDecision{AccountID: a.ID, Label: a.displayName(), Strategy: "manual", Reason: "手动指定账号"}, nil
+		if a.Source == "api_key" || a.AuthMode == "api_key" {
+			return empty, decision, errors.New("请在账号管理中更新 API Key")
+		}
+		active, logins := s.agentAccountUsageLocked(spec.ID, pool, external)
+		if active[a.ID] > 0 {
+			return empty, decision, errors.New("请先结束此账号正在运行的终端或服务，再更改登录身份")
+		}
+		if logins[a.ID] && !s.terminals.liveAgentLogin(spec.ID, a.ID) {
+			return empty, decision, errors.New("正在确认上一次登录，请稍后重试")
+		}
+		return agentSelection{AgentID: spec.ID, ID: a.ID, GuestID: a.guestID(), Label: a.displayName(), AuthMode: "oauth"}, decision, nil
 	}
 
-	if len(pool.Accounts) == 0 {
-		s.agentCLIs.mu.Unlock()
+	if pool == nil {
+		pool = &agentAccountPool{Scheduling: defaultAgentScheduling()}
+	}
+	if !auto {
+		var a *agentAccount
+		if requestedID == "default" {
+			a = pool.defaultAccount()
+			if a == nil {
+				return agentSelection{AgentID: spec.ID, GuestID: "default", Label: "默认环境", Reason: "手动指定默认环境"},
+					scheduleDecision{Strategy: "manual", Reason: "手动指定默认环境"}, nil
+			}
+		} else {
+			a = pool.find(requestedID)
+			if a == nil {
+				return empty, decision, errors.New("未找到指定的账号")
+			}
+		}
+		active, logins := s.agentAccountUsageLocked(spec.ID, pool, external)
+		count := active[a.ID]
+		if block := agentAccountBlock(a, count, logins[a.ID], a.analyzeQuota(now).eligible, now.Unix()); block != "" {
+			return empty, decision, errors.New(agentAccountBlockReason(block, a, count, now.Unix()))
+		}
+		label := a.displayName()
+		return agentSelection{AgentID: spec.ID, ID: a.ID, GuestID: a.guestID(), Label: label, AuthMode: a.AuthMode, Reason: "手动指定账号"},
+			scheduleDecision{AccountID: a.ID, Label: label, Strategy: "manual", Reason: "手动指定账号"}, nil
+	}
+
+	unpinned := strings.TrimSpace(pool.Scheduling.ProjectPins[workspace]) == ""
+	if unpinned && !scheduleManagesLaunches(pool.Scheduling.Mode, pool.Scheduling.SelectedAccountID, len(pool.Accounts)) {
 		return agentSelection{AgentID: spec.ID, GuestID: "default", Label: "默认环境", Reason: "尚未登记多账号，沿用默认环境"},
 			scheduleDecision{Strategy: pool.Scheduling.normalized().Mode, Reason: "默认环境"}, nil
 	}
 
-	poolCopy := cloneAgentPool(pool)
-	last := s.agentCLIs.lastPick[spec.ID]
-	var rec claudeProjectPick
-	if wsMap := s.agentCLIs.recent[spec.ID]; wsMap != nil {
-		rec = wsMap[workspace]
+	active, logins := s.agentAccountUsageLocked(spec.ID, pool, external)
+	recent := m.recent[spec.ID][workspace]
+	view := *pool
+	exhaust := unpinned && canonicalSchedulingMode(pool.Scheduling.Mode) == "exhaust"
+	if exhaust && guestCursor.matches(pool.Scheduling.SelectedAccountID, pool.Scheduling.SelectedAccountRevision) && pool.find(guestCursor.AccountID) != nil {
+		view.Scheduling.SelectedAccountID = guestCursor.AccountID
 	}
-	s.agentCLIs.mu.Unlock()
-
-	active, logins := s.activeAgentTerminals(spec.ID)
-	decision = pickAgentAccount(poolCopy, active, logins, workspace, last, rec.id, rec.at, time.Now())
-	if decision.AccountID == "" {
+	decision, index := chooseAgentAccount(view, active, logins, workspace, m.lastPick[spec.ID], recent.id, recent.at, now, false)
+	if index < 0 {
 		return empty, decision, errors.New(decision.Reason)
 	}
-	a := poolCopy.find(decision.AccountID)
-	return agentSelection{
-		AgentID:  spec.ID,
-		ID:       a.ID,
-		GuestID:  a.guestID(),
-		Label:    a.displayName(),
-		AuthMode: a.AuthMode,
-		Reason:   decision.Reason,
-	}, decision, nil
+	a := &pool.Accounts[index]
+	if exhaust && a.ID != pool.Scheduling.SelectedAccountID {
+		next, draft := editAgentPool(pools, spec.ID)
+		draft.Scheduling.SelectedAccountID = a.ID
+		draft.Scheduling.SelectedAccountRevision = newSchedulingRevision()
+		if err := s.saveAgentPoolsLocked(next); err != nil {
+			return empty, decision, err
+		}
+	}
+	return agentSelection{AgentID: spec.ID, ID: a.ID, GuestID: a.guestID(), Label: decision.Label, AuthMode: a.AuthMode, Reason: decision.Reason}, decision, nil
 }
 
-// noteAgentSelection records the chosen account in memory (<500ns, zero sync disk I/O)
-// and schedules a coalesced background persistence flush.
+// noteAgentSelection records a successful launch and batches its persistence.
 func (s *Server) noteAgentSelection(agentID, accountID, workspace string) {
 	if agentID == "" || accountID == "" {
 		return
@@ -1297,6 +1552,17 @@ func (s *Server) noteAgentSelection(agentID, accountID, workspace string) {
 	now := time.Now()
 	s.agentCLIs.mu.Lock()
 	defer s.agentCLIs.mu.Unlock()
+	if s.agentCLIs.closed {
+		return
+	}
+	pools, err := s.loadAgentPoolsLocked()
+	if err != nil || pools[agentID] == nil {
+		return
+	}
+	a := pools[agentID].find(accountID)
+	if a == nil {
+		return
+	}
 	if s.agentCLIs.lastPick == nil {
 		s.agentCLIs.lastPick = map[string]string{}
 	}
@@ -1334,13 +1600,9 @@ func (s *Server) noteAgentSelection(agentID, accountID, workspace string) {
 			}
 		}
 	}
-	if pools, err := s.loadAgentPoolsLocked(); err == nil {
-		if a := s.ensureAgentPoolLocked(pools, agentID).find(accountID); a != nil {
-			a.TotalAllocations++
-			a.LastAllocatedAt = now.Unix()
-			s.scheduleAgentPoolsFlushLocked()
-		}
-	}
+	a.TotalAllocations++
+	a.LastAllocatedAt = now.Unix()
+	s.scheduleAgentPoolsFlushLocked()
 }
 
 var (
@@ -1363,6 +1625,7 @@ func (s *Server) confirmAgentLoginWithLockMode(ctx context.Context, agentID, acc
 
 	m := &s.agentCLIs
 	key := spec.ID + ":" + accountID
+	guestID := accountID
 	for {
 		m.mu.Lock()
 		if call := m.confirmInflight[key]; call != nil {
@@ -1376,6 +1639,19 @@ func (s *Server) confirmAgentLoginWithLockMode(ctx context.Context, agentID, acc
 				}
 				return call.err
 			}
+		}
+		pools, loadErr := s.loadAgentPoolsLocked()
+		if loadErr != nil {
+			m.mu.Unlock()
+			return loadErr
+		}
+		pool := pools[spec.ID]
+		if pool == nil || (pool.PendingLogin != accountID && pool.find(accountID) == nil) {
+			m.mu.Unlock()
+			return nil
+		}
+		if a := pool.find(accountID); a != nil {
+			guestID = a.guestID()
 		}
 		if m.confirmInflight == nil {
 			m.confirmInflight = map[string]*agentConfirmCall{}
@@ -1395,7 +1671,7 @@ func (s *Server) confirmAgentLoginWithLockMode(ctx context.Context, agentID, acc
 		break
 	}
 
-	snap, err := s.probeAgentProfile(ctx, spec, accountID)
+	snap, err := s.probeAgentProfile(ctx, spec, guestID)
 	if err != nil {
 		// Surface the runtime/snapshot failure explicitly and keep PendingLogin
 		// intact so a subsequent refresh or retry can still pick up the credentials.
@@ -1432,84 +1708,79 @@ func (s *Server) confirmAgentLoginWithLockMode(ctx context.Context, agentID, acc
 	if _, unlocked := s.account.access(); !unlocked {
 		return errors.New("Cage 已锁定")
 	}
+	external := s.activeServiceAccounts(spec.ID)
 	s.agentCLIs.mu.Lock()
 	defer s.agentCLIs.mu.Unlock()
 	pools, err := s.loadAgentPoolsLocked()
 	if err != nil {
 		return err
 	}
-	pool := s.ensureAgentPoolLocked(pools, spec.ID)
-	if accountID == pool.PendingLogin {
-		if snap.LoggedIn {
-			identity := snap.identityKey(spec.ID)
+	next, pool := editAgentPool(pools, spec.ID)
+	now := time.Now()
+	var notice string
+	pending := accountID == pool.PendingLogin
+	if pending {
+		if !snap.LoggedIn {
+			if s.terminals.liveAgentLogin(spec.ID, accountID) {
+				return nil
+			}
+			notice = "登录终端已关闭，未检测到新登录凭据"
+		} else {
 			var existing *agentAccount
 			for i := range pool.Accounts {
 				a := &pool.Accounts[i]
-				sameEmail := a.Email != "" && snap.Email != "" &&
-					strings.EqualFold(a.Email, snap.Email) &&
-					strings.EqualFold(strings.TrimSpace(a.Organization), strings.TrimSpace(snap.Organization))
-				sameUser := a.Username != "" && snap.Username != "" &&
-					strings.EqualFold(a.Username, snap.Username) &&
-					strings.EqualFold(strings.TrimSpace(a.Organization), strings.TrimSpace(snap.Organization))
-				sameProviderOnly := a.Email == "" && snap.Email == "" && a.Username == "" && snap.Username == "" &&
-					a.Provider != "" && snap.Provider != "" && strings.EqualFold(a.Provider, snap.Provider)
-				sameKey := identity != "" && a.KeyFingerprint != "" && identity == "key:"+a.KeyFingerprint
-				if sameEmail || sameUser || sameProviderOnly || sameKey {
+				if _, same := compareAgentIdentity(a, snap); same {
 					existing = a
 					break
 				}
 			}
 			if existing != nil {
-				if existing.Source == "default" {
+				active, logins := s.agentAccountUsageLocked(spec.ID, pool, external)
+				switch {
+				case active[existing.ID] > 0 || logins[existing.ID]:
+					notice = fmt.Sprintf("「%s」当前有活跃终端或服务，未覆盖旧目录；请关闭后重新登录", existing.displayName())
+				case existing.Source == "api_key":
+					notice = fmt.Sprintf("「%s」已在调度池中，请在账号管理中更新 API Key", existing.displayName())
+				default:
 					existing.Source, existing.ProfileID = "managed", accountID
-					applySnapshotToAccount(existing, snap, time.Now())
+					applySnapshotToAccount(existing, snap, now)
 					clearAccountCooldown(existing)
-					s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("已为「%s」升级为独立隔离登录目录", existing.displayName()))
-				} else {
-					active, _ := s.activeAgentTerminals(spec.ID)
-					if active[existing.ID] == 0 {
-						existing.ProfileID = accountID
-						applySnapshotToAccount(existing, snap, time.Now())
-						clearAccountCooldown(existing)
-						s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("「%s」已在调度池中，已刷新其登录状态", existing.displayName()))
-					} else {
-						s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("「%s」当前有活跃终端，未覆盖旧目录；请关闭旧终端后重新登录", existing.displayName()))
-					}
+					notice = fmt.Sprintf("「%s」已在调度池中，已刷新其隔离登录目录", existing.displayName())
 				}
 			} else {
 				acc := agentAccount{
-					ID:         accountID,
-					Label:      snap.suggestedLabel(spec.ShortName + " 账号"),
-					Source:     "managed",
-					AuthMode:   "oauth",
-					Enabled:    true,
-					Status:     "ready",
-					Weight:     10,
-					HealthEWMA: 1.0,
+					ID: accountID, Label: snap.suggestedLabel(spec.ShortName + " 账号"),
+					Source: "managed", AuthMode: "oauth", Enabled: true, Status: "ready", Weight: 10, HealthEWMA: 1.0,
 				}
-				applySnapshotToAccount(&acc, snap, time.Now())
+				applySnapshotToAccount(&acc, snap, now)
 				pool.Accounts = append(pool.Accounts, acc)
-				s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("已将「%s」加入 %s 智能调度池", acc.displayName(), spec.Name))
+				notice = fmt.Sprintf("已将「%s」加入 %s 智能调度池", acc.displayName(), spec.Name)
 			}
-			pool.PendingLogin = ""
-			delete(m.pendingAttempted, spec.ID)
-		} else {
-			_, logins := s.activeAgentTerminals(spec.ID)
-			if logins[accountID] {
-				return nil
-			}
-			s.setAgentNoticeLocked(spec.ID, "登录终端已关闭，未检测到新登录凭据")
-			pool.PendingLogin = ""
-			delete(m.pendingAttempted, spec.ID)
 		}
-	} else if a := pool.find(accountID); a != nil {
-		applySnapshotToAccount(a, snap, time.Now())
-		if snap.LoggedIn {
+		pool.PendingLogin = ""
+	} else {
+		a := pool.find(accountID)
+		if a == nil || a.guestID() != guestID {
+			return nil
+		}
+		observeAgentAccount(pool, a, snap, now)
+		if a.Status == "ready" {
 			clearAccountCooldown(a)
-			s.setAgentNoticeLocked(spec.ID, fmt.Sprintf("已重新确认「%s」的登录状态", a.displayName()))
+			notice = fmt.Sprintf("已重新确认「%s」的登录状态", a.displayName())
+		} else if a.Status == "changed" || a.Status == "duplicate" {
+			notice = fmt.Sprintf("「%s」当前登录身份与原账号不匹配或已在池中，请重新登录", a.displayName())
 		}
 	}
-	return s.saveAgentPoolsLocked(pools)
+	if err := s.saveAgentPoolsLocked(next); err != nil {
+		return err
+	}
+	if pending {
+		delete(m.pendingAttempted, spec.ID)
+	}
+	if notice != "" {
+		s.setAgentNoticeLocked(spec.ID, notice)
+	}
+	return nil
 }
 
 func agentPrepHash(spec agentcatalog.AgentSpec, accountID string) string {
@@ -1525,14 +1796,14 @@ func agentPrepHash(spec agentcatalog.AgentSpec, accountID string) string {
 
 // managedAgentTerminalScript builds the ultra-low-latency isolated guest shell
 // script:
-// - Uses a deterministic prep_hash stamp (.prepared-<hash>) so any spec or
-//   runtime upgrade invalidates stale stamps/shims automatically while warm
-//   opens skip Python completely (<1ms!).
-// - Sources 0600 shlex-quoted profile.env inside a scoped subshell for the
-//   agent command ONLY: absolute-path / npx invocations get full isolation dirs,
-//   OAuth env unsets, and API keys with zero shell interpolation injection, while
-//   the fallback interactive shell never holds raw API keys in its environment.
-// - Supports both Linux (/bin/bash) and macOS (/bin/zsh + bundled python3).
+//   - Uses a deterministic prep_hash stamp (.prepared-<hash>) so any spec or
+//     runtime upgrade invalidates stale stamps/shims automatically while warm
+//     opens skip Python completely (<1ms!).
+//   - Sources 0600 shlex-quoted profile.env inside a scoped subshell for the
+//     agent command ONLY: absolute-path / npx invocations get full isolation dirs,
+//     OAuth env unsets, and API keys with zero shell interpolation injection, while
+//     the fallback interactive shell never holds raw API keys in its environment.
+//   - Supports both Linux (/bin/bash) and macOS (/bin/zsh + bundled python3).
 func managedAgentTerminalScript(workspace string, spec agentcatalog.AgentSpec, launchCommand, accountID, loginMode string, login, macos bool) string {
 	pythonBin := "python3"
 	if macos {
@@ -1544,7 +1815,11 @@ func managedAgentTerminalScript(workspace string, spec agentcatalog.AgentSpec, l
 			"account_id": accountID,
 			"login_mode": loginMode,
 		})
-		return `cd "$HOME" && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 CAGE_CLI_LOGIN_JSON=` +
+		prerequisite := ""
+		if macos {
+			prerequisite = `[ -x /usr/local/libexec/cage-cli/bin/cage-open ] || { echo "客机登录浏览器辅助程序缺失，请同步 macOS 环境组件后重试。" >&2; exit 1; }; `
+		}
+		return prerequisite + `cd "$HOME" && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 CAGE_CLI_LOGIN_JSON=` +
 			shellescape.Quote(string(payload)) + " " + agentRuntimeCommandWithPython(pythonBin, "login")
 	}
 	if accountID == "" {

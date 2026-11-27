@@ -59,7 +59,8 @@ type codexGuestSnapshot struct {
 
 type codexGuestQuota struct {
 	codexQuota
-	Identity string `json:"identity"`
+	Identity      string `json:"identity"`
+	PlainLaunches int    `json:"plain_launches,omitempty"`
 }
 
 // Scheduling uses the same modes and switch policies as Claude, stored
@@ -249,7 +250,10 @@ func (a *codexAccount) mergeQuota(q *codexQuota, now time.Time) bool {
 		if window.ObservedAt == 0 {
 			window.ObservedAt = q.ObservedAt
 		}
-		if window.ObservedAt < 0 || window.ObservedAt > q.ObservedAt || old != nil && old.ObservedAt > window.ObservedAt {
+		if window.ObservedAt < 0 || window.ObservedAt > q.ObservedAt {
+			return old
+		}
+		if old != nil && schedulingObservationTime(old.ObservedAt, next.ObservedAt, now.Unix()) > window.ObservedAt {
 			return old
 		}
 		if old != nil && window == *old {
@@ -261,6 +265,20 @@ func (a *codexAccount) mergeQuota(q *codexQuota, now time.Time) bool {
 	next.Secondary = merge(next.Secondary, q.Secondary)
 	if next.Primary == nil && next.Secondary == nil || a.Quota != nil && next == *a.Quota {
 		return false
+	}
+	// Keep older windows tied to their own observation while the snapshot
+	// timestamp advances for a newer reading from the other window.
+	for _, window := range []**codexWindow{&next.Primary, &next.Secondary} {
+		if *window == nil || (*window).ObservedAt != 0 {
+			continue
+		}
+		if next.ObservedAt <= 0 {
+			*window = nil
+			continue
+		}
+		reading := **window
+		reading.ObservedAt = next.ObservedAt
+		*window = &reading
 	}
 	next.ObservedAt = max(next.ObservedAt, q.ObservedAt)
 	a.Quota = &next
@@ -278,7 +296,11 @@ func (a codexAccount) headroom(now time.Time) (float64, bool) {
 		if !validCodexWindow(w) || w.ResetsAt > 0 && w.ResetsAt <= now.Unix() {
 			continue
 		}
-		fresh := now.Sub(time.Unix(w.ObservedAt, 0)) <= claudeQuotaFresh
+		obs := schedulingObservationTime(w.ObservedAt, a.Quota.ObservedAt, now.Unix())
+		if obs == 0 {
+			continue
+		}
+		fresh := now.Unix()-obs <= int64(claudeQuotaFresh/time.Second)
 		if w.UsedPercentage >= 100 && (w.ResetsAt > now.Unix() || fresh) {
 			return 0, false
 		}
@@ -342,7 +364,7 @@ func (s *Server) selectCodexAccount(requestedID string, login bool, workspace st
 	if login {
 		return codexSelection{ID: requestedID, GuestID: requestedID}, nil
 	}
-	if len(list.Accounts) == 0 {
+	if !scheduleManagesLaunches(list.Scheduling.Mode, list.Scheduling.SelectedAccountID, len(list.Accounts)) {
 		return empty, nil
 	}
 	return s.allocateCodexAccount(list, workspace, s.readCodexGuestQuotas)
@@ -370,25 +392,38 @@ func (s *Server) readCodexGuestQuotas(ctx context.Context, ids []string) (map[st
 // The guest reads only small local files: the last usage report and the
 // newest rate-limit event recorded by the account's own sessions.
 func (s *Server) allocateCodexAccount(previous codexAccountList, workspace string, read func(context.Context, []string) (map[string]codexGuestQuota, error)) (codexSelection, error) {
+	const unavailable = "暂无可分配的 Codex 账号。请在 Codex 账号面板检查登录、参与状态和额度重置时间"
 	var empty codexSelection
 	epoch, unlocked := s.account.access()
 	if !unlocked {
 		return empty, errors.New("Cage 已锁定，请先解锁")
 	}
 	var ids []string
+	mode := canonicalSchedulingMode(previous.Scheduling.Mode)
+	manualCandidate := false
 	for _, a := range previous.Accounts {
-		if a.Enabled && a.Status == "ready" {
+		if a.Enabled && a.Status == "ready" && a.Email != "" {
 			ids = append(ids, a.ID)
+			manualCandidate = manualCandidate || a.ID == previous.Scheduling.SelectedAccountID
 		}
 	}
-	var readings map[string]codexGuestQuota
-	if len(ids) > 0 {
-		ctx, cancel := context.WithTimeout(epoch, 4*time.Second)
-		readings, _ = read(ctx, ids) // Retain the last snapshot when SSH is unavailable.
-		cancel()
+	if mode == "manual" && !manualCandidate {
+		return empty, manualSchedulingError("Codex")
 	}
-	// A phone turn of a Codex session uses its account as a terminal would.
-	phone := s.mobileCLI.codexPhoneLoad()
+	if len(ids) == 0 {
+		return empty, errors.New(unavailable)
+	}
+	ctx, cancel := context.WithTimeout(epoch, 4*time.Second)
+	readings, _ := read(ctx, ids) // Retain the last snapshot when SSH is unavailable.
+	cancel()
+	var guestCursor guestSchedulingCursor
+	if mode == "exhaust" {
+		guestCursor = s.readGuestSchedulingCursor("codex", true)
+	}
+	active, logins := s.codexAccountLoad()
+	for id, reading := range readings {
+		active[id] += max(0, reading.PlainLaunches)
+	}
 	m := &s.codexAccounts
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -408,12 +443,44 @@ func (s *Server) allocateCodexAccount(previous codexAccountList, workspace strin
 			updated = true
 		}
 	}
+	preferred := ""
+	if recent := m.recent[workspace]; now.Sub(recent.at) < claudeProjectAffinity {
+		preferred = recent.id
+	}
+	view := list
+	mode = canonicalSchedulingMode(list.Scheduling.Mode)
+	configured := list.Scheduling.SelectedAccountID
+	if mode == "exhaust" && guestCursor.matches(configured, list.Scheduling.SelectedAccountRevision) && list.find(guestCursor.AccountID) != nil {
+		view.Scheduling.SelectedAccountID = guestCursor.AccountID
+	}
+	selected := pickCodexAccount(view, active, logins, m.lastPick, preferred, now)
+	if mode == "exhaust" && selected != "" && selected != configured {
+		list.Scheduling.SelectedAccountID = selected
+		list.Scheduling.SelectedAccountRevision = newSchedulingRevision()
+		updated = true
+	}
 	if updated {
 		if err = s.saveCodexAccounts(list); err != nil {
 			return empty, err
 		}
 	}
-	active := make(map[string]int)
+	if selected == "" {
+		if mode == "manual" {
+			return empty, manualSchedulingError("Codex")
+		}
+		return empty, errors.New(unavailable)
+	}
+	a := list.find(selected)
+	return codexSelection{ID: selected, GuestID: selected, Subject: a.subject()}, nil
+}
+
+func (s *Server) codexAccountLoad() (map[string]int, map[string]bool) {
+	active := s.mobileCLI.codexPhoneLoad()
+	for id, count := range s.activeServiceAccounts("codex") {
+		if id != "" {
+			active[id] += count
+		}
+	}
 	logins := make(map[string]bool)
 	for _, session := range s.terminals.snapshot() {
 		id, _ := session["codex_account_id"].(string)
@@ -426,23 +493,11 @@ func (s *Server) allocateCodexAccount(previous codexAccountList, workspace strin
 			active[id]++
 		}
 	}
-	for id, count := range phone {
-		active[id] += count
-	}
-	preferred := ""
-	if recent := m.recent[workspace]; now.Sub(recent.at) < claudeProjectAffinity {
-		preferred = recent.id
-	}
-	selected := pickCodexAccount(list, active, logins, m.lastPick, preferred, now)
-	if selected == "" {
-		return empty, errors.New("暂无可分配的 Codex 账号。请在 Codex 账号面板检查登录、参与状态和额度重置时间")
-	}
-	a := list.find(selected)
-	return codexSelection{ID: selected, GuestID: selected, Subject: a.subject()}, nil
+	return active, logins
 }
 
 func (a codexAccount) eligible(logins map[string]bool, now time.Time) (float64, bool) {
-	if !a.Enabled || a.Status != "ready" || logins[a.ID] {
+	if !a.Enabled || a.Status != "ready" || a.Email == "" || logins[a.ID] {
 		return 0, false
 	}
 	return a.headroom(now)
@@ -452,11 +507,13 @@ func (a codexAccount) eligible(logins map[string]bool, now time.Time) (float64, 
 // mode starts after the last allocation and prefers fewer live terminals,
 // then the largest known remaining minimum window.
 func pickCodexAccount(list codexAccountList, active map[string]int, logins map[string]bool, last, preferred string, now time.Time) string {
-	if list.Scheduling.Mode == "sequential" {
-		for _, a := range list.Accounts {
-			if _, ok := a.eligible(logins, now); ok {
-				return a.ID
-			}
+	if mode := canonicalSchedulingMode(list.Scheduling.Mode); mode != "smart" {
+		idx := orderedAccountIndex(list.Accounts, mode, list.Scheduling.SelectedAccountID, func(a codexAccount) string { return a.ID }, func(a codexAccount) bool {
+			_, eligible := a.eligible(logins, now)
+			return eligible
+		})
+		if idx >= 0 {
+			return list.Accounts[idx].ID
 		}
 		return ""
 	}

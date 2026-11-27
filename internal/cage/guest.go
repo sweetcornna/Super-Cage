@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/sylvinus/agent-vm/internal/agentcatalog"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/version"
 )
@@ -48,8 +49,29 @@ func clientRuntimeScript() string {
 	return "sudo tee /usr/local/bin/client_runtime.py >/dev/null <<'CLIENT_RUNTIME'\n" + ClientRuntimeHelper + "\nCLIENT_RUNTIME\nsudo chmod 0644 /usr/local/bin/client_runtime.py\n"
 }
 
+// The selectable CLI catalog travels with provisioning, separately from the
+// guest component revision. A catalog edit alone must not close the network gate.
+func guestUpgradeCatalogScript() string {
+	catalog, err := json.Marshal(agentcatalog.BuiltIn())
+	if err != nil {
+		panic(err)
+	}
+	return "sudo install -d -m 0755 /usr/local/share/cage\nsudo tee /usr/local/share/cage/cli-upgrades.json >/dev/null <<'CAGE_UPGRADE_CATALOG'\n" + string(catalog) + "\nCAGE_UPGRADE_CATALOG\n"
+}
+
 func agentRuntimeScript() string {
-	return "sudo tee /usr/local/bin/cage-agent-runtime >/dev/null <<'CAGE_CLI_RUNTIME'\n" + AgentRuntimeHelper + "\nCAGE_CLI_RUNTIME\nsudo chmod 0755 /usr/local/bin/cage-agent-runtime\n"
+	return "sudo tee /usr/local/bin/cage-agent-runtime >/dev/null <<'CAGE_CLI_RUNTIME'\n" + AgentRuntimeHelper + "\nCAGE_CLI_RUNTIME\nsudo chmod 0755 /usr/local/bin/cage-agent-runtime\n" +
+		"sudo install -d -m 0755 /usr/local/share/cage\nsudo tee /usr/local/share/cage/upgrade-claude.sh >/dev/null <<'CAGE_UPGRADE_CLAUDE'\nset -euo pipefail\n" + toolInstallFunctions() + "\ncage_install_tool claude\nCAGE_UPGRADE_CLAUDE\n" +
+		`sudo tee /usr/local/bin/cage-agent >/dev/null <<'CAGE_UPGRADE_MENU'
+#!/bin/sh
+case "$1" in
+  upgrade) exec /usr/local/bin/cage-agent-runtime "$@" ;;
+  ''|help|-h|--help) echo 'Usage: cage-agent upgrade [agent-id]' ;;
+  *) echo 'Usage: cage-agent upgrade [agent-id]' >&2; exit 2 ;;
+esac
+CAGE_UPGRADE_MENU
+sudo chmod 0755 /usr/local/bin/cage-agent
+`
 }
 
 func claudeAccountScript() string {
@@ -65,7 +87,13 @@ sudo tee /etc/profile.d/cage-claude.sh >/dev/null <<'CAGE_CLAUDE_FUNCTION'
 # A plain claude typed in any guest shell (Herdr included) starts on the
 # account Super Cage schedules for new sessions; see cage-claude-account auto.
 claude() {
-  if [ ! -f "$HOME/.local/share/cage/magpie/takeover" ] && [ -z "${CAGE_CLAUDE_ACCOUNT_ID:-}" ] && [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -r "$HOME/.local/share/cage/claude-accounts/launch.json" ] && [ -x /usr/local/bin/cage-claude-account ]; then
+  if [ -n "${CAGE_CLAUDE_ACCOUNT_ID:-}" ]; then
+    command claude "$@"
+  elif [ -n "${CAGE_ORCA_SHIM_DIR:-}" ] && [ -x "$CAGE_ORCA_SHIM_DIR/claude" ]; then
+    "$CAGE_ORCA_SHIM_DIR/claude" "$@"
+  elif [ -x "$HOME/.local/share/cage/auto-shims/claude" ]; then
+    "$HOME/.local/share/cage/auto-shims/claude" "$@"
+  elif [ -e "$HOME/.local/share/cage/claude-accounts/launch.json" ]; then
     /usr/local/bin/cage-claude-account auto "$@"
   else
     command claude "$@"
@@ -95,7 +123,13 @@ sudo tee /etc/profile.d/cage-codex.sh >/dev/null <<'CAGE_CODEX_FUNCTION'
 # A plain codex typed in any guest shell (Herdr/Orca included) starts on the
 # account Super Cage schedules for new sessions; see cage-codex-account auto.
 codex() {
-  if [ ! -f "$HOME/.local/share/cage/magpie/takeover" ] && [ -z "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ -z "${CODEX_HOME:-}" ] && [ -r "$HOME/.local/share/cage/codex-accounts/launch.json" ] && [ -x /usr/local/bin/cage-codex-account ]; then
+  if [ -n "${CAGE_CODEX_ACCOUNT_ID:-}" ]; then
+    command codex "$@"
+  elif [ -n "${CAGE_ORCA_SHIM_DIR:-}" ] && [ -x "$CAGE_ORCA_SHIM_DIR/codex" ]; then
+    "$CAGE_ORCA_SHIM_DIR/codex" "$@"
+  elif [ -x "$HOME/.local/share/cage/auto-shims/codex" ]; then
+    "$HOME/.local/share/cage/auto-shims/codex" "$@"
+  elif [ -e "$HOME/.local/share/cage/codex-accounts/launch.json" ]; then
     /usr/local/bin/cage-codex-account auto "$@"
   else
     command codex "$@"
@@ -444,14 +478,14 @@ func (c Config) EnvironmentScript() string {
 }
 
 func (c Config) StartScript() string {
-	body := c.EnvironmentScript() + "\n" + componentStartScript()
+	body := c.EnvironmentScript() + "\n" + componentStartScript() + "\n" + guestUpgradeCatalogScript()
 	return c.GuestProfile.Linux(markGuestStart(body))
 }
 
 func (c Config) SetupScript() string { return c.GuestProfile.Linux(GuestSetup) }
 
 func componentStartScript() string {
-	return APTBootstrapScript + "\n" + claudeAccountScript() + codexAccountScript() + browserServices() + "\nsudo tee /etc/claude-cage/editor-theme.json >/dev/null <<'CAGE_EDITOR_THEME'\n" + editorTheme + "\nCAGE_EDITOR_THEME\nif systemctl is-active --quiet cage-editor.service; then sudo systemctl stop cage-editor.service; fi\n" + guestStart
+	return APTBootstrapScript + "\n" + claudeAccountScript() + codexAccountScript() + dshSSHScript() + browserServices() + "\nsudo tee /etc/claude-cage/editor-theme.json >/dev/null <<'CAGE_EDITOR_THEME'\n" + editorTheme + "\nCAGE_EDITOR_THEME\nif systemctl is-active --quiet cage-editor.service; then sudo systemctl stop cage-editor.service; fi\n" + guestStart
 }
 
 func markGuestStart(body string) string {

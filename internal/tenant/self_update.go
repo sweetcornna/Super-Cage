@@ -791,13 +791,18 @@ func (s *Server) runSelfUpdateJob(requestedVersion string, force bool) {
 
 func (s *Server) dropWorkspaceConnection(id string) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.replacements[id]++
+	// Retain a retired workspace so a request with a live owner grant can
+	// trigger re-preparation. Its cookie also identifies the old generation.
 	ws := s.workspaces[id]
-	delete(s.workspaces, id)
-	s.deleteWorkspaceTickets(id)
-	s.mu.Unlock()
-	if ws != nil {
-		ws.close()
+	if ws == nil {
+		s.deleteWorkspaceTickets(id)
+		return
 	}
+	s.markWorkspaceUnready(id, ws)
+	ws.nextProbe = time.Time{}
+	ws.close()
 }
 
 func sortVMRecords(list []vmRecord) {

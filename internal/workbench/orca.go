@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +20,8 @@ import (
 )
 
 const (
-	orcaStatusTTL   = 10 * time.Second
-	orcaOpenMinGap  = 1500 * time.Millisecond
+	orcaStatusTTL  = 10 * time.Second
+	orcaOpenMinGap = 1500 * time.Millisecond
 )
 
 var (
@@ -35,12 +36,14 @@ type orcaConfig struct {
 	Enabled           bool              `json:"enabled"`
 	GuestPort         int               `json:"guest_port"`
 	HostTunnelPort    int               `json:"host_tunnel_port,omitempty"`
+	AutoTunnelPort    int               `json:"auto_tunnel_port,omitempty"`
 	BindMode          string            `json:"bind_mode"` // loopback | tailscale
 	ServerName        string            `json:"server_name,omitempty"`
 	AutoSyncProjects  bool              `json:"auto_sync_projects"`
 	TerminalMemoryMax string            `json:"terminal_memory_max,omitempty"`
 	AccountBindings   map[string]string `json:"account_bindings,omitempty"`
 	PairedEnvID       string            `json:"paired_env_id,omitempty"`
+	RunIntent         *orcaRunIntent    `json:"run_intent,omitempty"`
 }
 
 func defaultOrcaServerName(profileDir string) string {
@@ -89,6 +92,9 @@ func (c orcaConfig) normalized(profileDir string) orcaConfig {
 	if c.HostTunnelPort != 0 && (c.HostTunnelPort < 1024 || c.HostTunnelPort > 65535) {
 		c.HostTunnelPort = 0
 	}
+	if c.AutoTunnelPort < 1024 || c.AutoTunnelPort > 65535 {
+		c.AutoTunnelPort = 0
+	}
 	if c.BindMode != "loopback" && c.BindMode != "tailscale" {
 		c.BindMode = "loopback"
 	}
@@ -101,43 +107,56 @@ func (c orcaConfig) normalized(profileDir string) orcaConfig {
 	return c
 }
 
+func (c orcaConfig) effectiveTunnelPort() int {
+	if c.HostTunnelPort != 0 {
+		return c.HostTunnelPort
+	}
+	return c.AutoTunnelPort
+}
+
 type orcaGuestStatus struct {
-	Installed   bool   `json:"installed"`
-	BinaryPath  string `json:"binary_path,omitempty"`
-	Version     string `json:"version,omitempty"`
-	Running     bool   `json:"running"`
-	PID         int    `json:"pid,omitempty"`
-	Port        int    `json:"port,omitempty"`
-	BindIP      string `json:"bind_ip,omitempty"`
-	BindMode    string `json:"bind_mode,omitempty"`
-	HasRollback bool   `json:"has_rollback,omitempty"`
-	TailscaleIP string `json:"tailscale_ip,omitempty"`
-	Platform    string `json:"platform,omitempty"`
+	Installed   bool              `json:"installed"`
+	BinaryPath  string            `json:"binary_path,omitempty"`
+	Version     string            `json:"version,omitempty"`
+	Running     bool              `json:"running"`
+	PID         int               `json:"pid,omitempty"`
+	Port        int               `json:"port,omitempty"`
+	BindIP      string            `json:"bind_ip,omitempty"`
+	BindMode    string            `json:"bind_mode,omitempty"`
+	HasRollback bool              `json:"has_rollback,omitempty"`
+	TailscaleIP string            `json:"tailscale_ip,omitempty"`
+	Platform    string            `json:"platform,omitempty"`
+	Accounts    map[string]string `json:"accounts,omitempty"`
+	ConfigKey   string            `json:"config_key,omitempty"`
 }
 
 type orcaProbeCall struct {
-	done   chan struct{}
-	port   int
-	forced bool
-	status orcaGuestStatus
-	err    error
+	done       chan struct{}
+	port       int
+	forced     bool
+	generation uint64
+	status     orcaGuestStatus
+	err        error
 }
 
 type orcaManager struct {
-	opMu           sync.Mutex
-	mu             sync.Mutex
-	configLoaded   bool
-	config         orcaConfig
-	statusCache    orcaGuestStatus
-	statusAt       time.Time
-	probeInflight  *orcaProbeCall
-	activeBindings map[string]string
-	tunnel         *orcaTunnel
-	lastOpenAt     time.Time
+	opMu             sync.Mutex
+	mu               sync.Mutex
+	configLoaded     bool
+	config           orcaConfig
+	statusCache      orcaGuestStatus
+	statusAt         time.Time
+	statusGeneration uint64
+	probeInflight    *orcaProbeCall
+	activeBindings   map[string]string
+	codexBridge      *orcaCodexBridge
+	tunnel           *orcaTunnel
+	lastOpenAt       time.Time
 	// Test seams (nil in production).
-	localDetect    func() localorca.Installation
-	localClient    *localorca.Client
-	tunnelDialHook func(ctx context.Context, guestPort int) (string, error)
+	localDetect      func() localorca.Installation
+	localClient      *localorca.Client
+	tunnelDialHook   func(ctx context.Context, guestPort int) (string, error)
+	restorePortProbe func(ctx context.Context, address string, port int) (bool, error)
 }
 
 func (s *Server) detectLocalOrca() localorca.Installation {
@@ -188,12 +207,17 @@ func (s *Server) saveOrcaConfigLocked(cfg orcaConfig) error {
 	}
 	s.orca.config = clean
 	s.orca.configLoaded = true
+	if bridge := s.orca.codexBridge; bridge != nil && !orcaCodexBridgeEnabled(clean) {
+		bridge.cancel()
+		s.orca.codexBridge = nil
+	}
 	return nil
 }
 
 func (s *Server) invalidateOrcaStatus() {
 	s.orca.mu.Lock()
 	s.orca.statusAt = time.Time{}
+	s.orca.statusGeneration++
 	s.orca.mu.Unlock()
 }
 
@@ -216,7 +240,7 @@ func (s *Server) orcaLocalDesktopAllowed(r *http.Request) bool {
 }
 
 func (s *Server) ensureOrcaHostTunnelPort(ctx context.Context, cfg *orcaConfig) bool {
-	if cfg.HostTunnelPort >= 1024 && cfg.HostTunnelPort <= 65535 {
+	if cfg.effectiveTunnelPort() != 0 {
 		return false
 	}
 	reserved := map[int]bool{}
@@ -225,7 +249,7 @@ func (s *Server) ensureOrcaHostTunnelPort(ctx context.Context, cfg *orcaConfig) 
 		reserved = s.localOrcaClient(inst).UsedLoopbackPorts(scanCtx)
 		cancel()
 	}
-	cfg.HostTunnelPort = pickFreeOrcaTunnelPort(defaultOrcaPort, reserved)
+	cfg.AutoTunnelPort = pickFreeOrcaTunnelPort(defaultOrcaPort, reserved)
 	return true
 }
 
@@ -261,7 +285,7 @@ func (s *Server) probeOrcaStatus(ctx context.Context, port int, force bool) (orc
 			m.mu.Unlock()
 			return cached, nil
 		}
-		if call := m.probeInflight; call != nil && call.port == port {
+		if call := m.probeInflight; call != nil && call.port == port && call.generation == m.statusGeneration {
 			if !force || call.forced {
 				m.mu.Unlock()
 				select {
@@ -279,7 +303,7 @@ func (s *Server) probeOrcaStatus(ctx context.Context, port int, force bool) (orc
 				continue
 			}
 		}
-		call := &orcaProbeCall{done: make(chan struct{}), port: port, forced: force}
+		call := &orcaProbeCall{done: make(chan struct{}), port: port, forced: force, generation: m.statusGeneration}
 		m.probeInflight = call
 		m.mu.Unlock()
 
@@ -296,7 +320,11 @@ func (s *Server) probeOrcaStatus(ctx context.Context, port int, force bool) (orc
 			st.Port = port
 		}
 		m.mu.Lock()
-		if err == nil {
+		changed := false
+		if m.statusGeneration != call.generation {
+			st, err = orcaGuestStatus{}, errors.New("Orca Server 状态已变化，请重试")
+		} else if err == nil && m.probeInflight == call {
+			changed = !maps.Equal(m.statusCache.Accounts, st.Accounts)
 			m.statusCache = st
 			m.statusAt = time.Now()
 		}
@@ -306,6 +334,9 @@ func (s *Server) probeOrcaStatus(ctx context.Context, port int, force bool) (orc
 		}
 		close(call.done)
 		m.mu.Unlock()
+		if changed {
+			s.kickAllLaunchSchedules()
+		}
 		return st, err
 	}
 }
@@ -351,7 +382,7 @@ func (s *Server) orcaStatusPayload(r *http.Request, force bool) (map[string]any,
 	}
 
 	tunnelActive, tunnelPort := s.orcaTunnelSnapshot()
-	effectiveTunnelPort := cfg.HostTunnelPort
+	effectiveTunnelPort := cfg.effectiveTunnelPort()
 	if tunnelPort > 0 {
 		effectiveTunnelPort = tunnelPort
 	}
@@ -373,36 +404,39 @@ func (s *Server) orcaStatusPayload(r *http.Request, force bool) (map[string]any,
 		cancel()
 	}
 
+	bridge := s.orcaCodexBridgeView()
 	return map[string]any{
-		"enabled":             cfg.Enabled,
-		"guest_port":          cfg.GuestPort,
-		"host_tunnel_port":    cfg.HostTunnelPort,
-		"bind_mode":           cfg.BindMode,
-		"server_name":         cfg.ServerName,
-		"auto_sync_projects":  cfg.AutoSyncProjects,
-		"terminal_memory_max": cfg.TerminalMemoryMax,
-		"account_bindings":    cfg.AccountBindings,
-		"installed":           st.Installed,
-		"version":             st.Version,
-		"running":             st.Running,
-		"bind_ip":             st.BindIP,
-		"tailscale_ip":        st.TailscaleIP,
-		"has_rollback":        st.HasRollback,
-		"tunnel_active":       tunnelActive,
-		"tunnel_port":         effectiveTunnelPort,
-		"tunnel_endpoint":     tunnelEndpoint,
-		"paired":              paired,
-		"paired_name":         pairedName,
-		"local_desktop":       localInst,
-		"can_auto_pair":       canAutoPair,
-		"download_url":        localorca.DownloadURL,
-		"active_bindings":     activeBindings,
-		"magpie_takeover":     s.magpieTakesOverScheduling(),
-		"error":               probeErr,
-		"vm_running":          runningVM,
-		"ready":               ready,
-		"supports_managed":    supportsManaged,
-		"is_macos_guest":      s.macosGuest != nil,
+		"enabled":                      cfg.Enabled,
+		"guest_port":                   cfg.GuestPort,
+		"host_tunnel_port":             cfg.HostTunnelPort,
+		"bind_mode":                    cfg.BindMode,
+		"server_name":                  cfg.ServerName,
+		"auto_sync_projects":           cfg.AutoSyncProjects,
+		"terminal_memory_max":          cfg.TerminalMemoryMax,
+		"account_bindings":             cfg.AccountBindings,
+		"installed":                    st.Installed,
+		"version":                      st.Version,
+		"running":                      st.Running,
+		"bind_ip":                      st.BindIP,
+		"tailscale_ip":                 st.TailscaleIP,
+		"has_rollback":                 st.HasRollback,
+		"tunnel_active":                tunnelActive,
+		"tunnel_port":                  effectiveTunnelPort,
+		"tunnel_endpoint":              tunnelEndpoint,
+		"paired":                       paired,
+		"paired_name":                  pairedName,
+		"local_desktop":                localInst,
+		"can_auto_pair":                canAutoPair,
+		"download_url":                 localorca.DownloadURL,
+		"active_bindings":              activeBindings,
+		"codex_bridge":                 bridge,
+		"codex_registration_supported": bridge.RegistrationSupported && orcaCodexBridgeEnabled(cfg) && !s.magpieTakesOverScheduling(),
+		"magpie_takeover":              s.magpieTakesOverScheduling(),
+		"error":                        probeErr,
+		"vm_running":                   runningVM,
+		"ready":                        ready,
+		"supports_managed":             supportsManaged,
+		"is_macos_guest":               s.macosGuest != nil,
 	}, nil
 }
 
@@ -514,19 +548,17 @@ func (s *Server) orcaConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		requestError(w, errors.New("当前 Windows 原生客机暂不支持托管 Orca Server"))
 		return
 	}
-	if cfg.Enabled && cfg.HostTunnelPort == 0 {
+	if cfg.Enabled {
 		s.ensureOrcaHostTunnelPort(r.Context(), &cfg)
 	}
 
-	needStopGuest := (prevEnabled && !cfg.Enabled) || cfg.GuestPort != prevGuestPort || cfg.BindMode != prevBind
-	if needStopGuest && s.vmRunning() && s.windowsGuest == nil {
-		stopCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		stopErr := s.runAgentRuntime(stopCtx, "orca-stop", map[string]any{"port": prevGuestPort}, nil)
-		cancel()
-		if stopErr != nil {
+	needStopGuest := prevEnabled && (!cfg.Enabled || cfg.GuestPort != prevGuestPort || cfg.BindMode != prevBind)
+	if needStopGuest {
+		if stopErr := s.stopManagedOrca(r.Context(), prevGuestPort, "orca-stop"); stopErr != nil {
 			http.Error(w, fmt.Sprintf("停止原托管 Orca Server 失败，配置未变更: %v", stopErr), http.StatusConflict)
 			return
 		}
+		cfg.RunIntent = &orcaRunIntent{}
 	}
 
 	s.orca.mu.Lock()
@@ -543,6 +575,7 @@ func (s *Server) orcaConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		s.closeOrcaTunnel()
 	}
 	s.invalidateOrcaStatus()
+	s.watchOrcaCodex()
 	payload, err := s.orcaStatusPayload(r, false)
 	if err != nil {
 		requestError(w, err)
@@ -606,17 +639,19 @@ func (s *Server) orcaInstallHTTP(w http.ResponseWriter, r *http.Request) {
 			return errors.New("安装 Orca Server 失败，请查看操作详情排查网络或校验信息")
 		}
 		s.orca.mu.Lock()
-		if cfg, err := s.loadOrcaConfigLocked(); err == nil {
-			cfg.Enabled = true
-			if cfg.HostTunnelPort == 0 {
-				s.orca.mu.Unlock()
-				s.ensureOrcaHostTunnelPort(s.operationContext(), &cfg)
-				s.orca.mu.Lock()
-			}
-			_ = s.saveOrcaConfigLocked(cfg)
-		}
-		s.orca.statusAt = time.Time{}
+		cfg, err := s.loadOrcaConfigLocked()
 		s.orca.mu.Unlock()
+		if err == nil {
+			cfg.Enabled = true
+			s.ensureOrcaHostTunnelPort(s.operationContext(), &cfg)
+			s.orca.mu.Lock()
+			err = s.saveOrcaConfigLocked(cfg)
+			s.orca.mu.Unlock()
+		}
+		s.invalidateOrcaStatus()
+		if err != nil {
+			return err
+		}
 		s.setMessage("Orca Server 安装完成，正在验证状态…")
 		return nil
 	})
@@ -624,8 +659,8 @@ func (s *Server) orcaInstallHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) orcaUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		PurgeData     bool `json:"purge_data"`
-		RemovePaired  bool `json:"remove_paired"`
+		PurgeData    bool `json:"purge_data"`
+		RemovePaired bool `json:"remove_paired"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -647,6 +682,9 @@ func (s *Server) orcaUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 	s.launch(w, "orca-uninstall", func() error {
 		s.orca.opMu.Lock()
 		defer s.orca.opMu.Unlock()
+		if err := s.forgetOrcaService(); err != nil {
+			return err
+		}
 		s.closeOrcaTunnel()
 		if in.PurgeData {
 			s.setMessage("正在停止并彻底卸载 Orca Server（含服务端数据）…")
@@ -654,6 +692,7 @@ func (s *Server) orcaUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 			s.setMessage("正在卸载 Orca Server（保留历史数据与配置）…")
 		}
 		if err := s.runAgentRuntimeJob(s.operationContext(), "orca-uninstall", map[string]any{"purge_data": in.PurgeData}); err != nil {
+			s.invalidateOrcaStatus()
 			return errors.New("卸载 Orca Server 失败，请查看操作详情")
 		}
 		var pairedEnvID string
@@ -667,8 +706,11 @@ func (s *Server) orcaUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 			_ = s.saveOrcaConfigLocked(cfg)
 		}
 		s.orca.activeBindings = nil
+		s.orca.statusCache = orcaGuestStatus{}
 		s.orca.statusAt = time.Time{}
+		s.orca.statusGeneration++
 		s.orca.mu.Unlock()
+		s.kickAllLaunchSchedules()
 
 		if in.RemovePaired && localAllowed && pairedEnvID != "" {
 			if inst := s.detectLocalOrca(); inst.Installed && inst.CLIPath != "" {
@@ -687,7 +729,7 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 		return cfg, orcaGuestStatus{}, err
 	}
 	if !cfg.Enabled {
-		return cfg, orcaGuestStatus{}, errors.New("请先在「设置 → Agent CLI」中启用 Orca Server 后再启动服务")
+		return cfg, orcaGuestStatus{}, errors.New("请先在「设置 → Orca Server」中启用接入后再启动服务")
 	}
 	if !s.vmRunning() && s.agentCLIs.runtimeHook == nil {
 		return cfg, orcaGuestStatus{}, errors.New("请先启动 Cage 环境后再运行 Orca Server")
@@ -695,17 +737,71 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 	if s.windowsGuest != nil {
 		return cfg, orcaGuestStatus{}, errors.New("当前 Windows 原生客机暂不支持托管 Orca Server")
 	}
-	if cfg.HostTunnelPort == 0 {
-		s.ensureOrcaHostTunnelPort(ctx, &cfg)
+	if s.ensureOrcaHostTunnelPort(ctx, &cfg) {
 		s.orca.mu.Lock()
-		_ = s.saveOrcaConfigLocked(cfg)
+		err = s.saveOrcaConfigLocked(cfg)
 		s.orca.mu.Unlock()
+		if err != nil {
+			return cfg, orcaGuestStatus{}, err
+		}
+	}
+	if !s.lockProjectOperation(ctx) {
+		return cfg, orcaGuestStatus{}, errTerminalBusy
+	}
+	defer s.op.Unlock()
+	s.mu.Lock()
+	sealed, closing := s.appUpdateSealed, s.closing
+	s.mu.Unlock()
+	if sealed {
+		return cfg, orcaGuestStatus{}, errAppUpdateSealed
+	}
+	if closing || s.busy() {
+		return cfg, orcaGuestStatus{}, errTerminalNotReady
+	}
+	if !s.vmRunning() && s.agentCLIs.runtimeHook == nil {
+		return cfg, orcaGuestStatus{}, errTerminalNotReady
+	}
+	epoch, unlocked := s.account.access()
+	if !unlocked {
+		return cfg, orcaGuestStatus{}, errClaudeAccessLost
+	}
+	if requestedEpoch, ok := ctx.Value(accountEpochKey{}).(context.Context); ok && requestedEpoch != epoch {
+		return cfg, orcaGuestStatus{}, errClaudeAccessLost
+	}
+	s.noteAppUpdateActivity()
+
+	magpie := s.magpieTakesOverScheduling()
+	cfgJSON, _ := json.Marshal([]any{cfg.BindMode, cfg.TerminalMemoryMax, cfg.AccountBindings, magpie})
+	configKey := fmt.Sprintf("%x", sha256.Sum256(cfgJSON))
+	probeCtx, cancelProbe := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
+	previous, err := s.probeOrcaStatus(probeCtx, cfg.GuestPort, restart)
+	cancelProbe()
+	if err != nil {
+		return cfg, previous, err
+	}
+	// A legacy guest process has no config key or account metadata. Keep its
+	// existing session on open; an explicit restart adopts recorded bindings.
+	if !restart && previous.Running && (previous.ConfigKey == configKey || previous.ConfigKey == "" && !magpie) {
+		if cfg.AutoSyncProjects {
+			if projects := s.orcaProjectGuestPaths(); len(projects) > 0 {
+				syncCtx, cancelSync := context.WithTimeout(ctx, 15*time.Second)
+				_ = s.runAgentRuntime(syncCtx, "orca-sync-repos", map[string]any{"projects": projects}, nil)
+				cancelSync()
+			}
+		}
+		err := s.rememberOrcaService(&cfg, false)
+		return cfg, previous, err
 	}
 
 	if workspace == "" {
 		workspace = s.workspace()
+	} else {
+		workspace, err = s.projectWorkspace(workspace)
+		if err != nil {
+			return cfg, orcaGuestStatus{}, err
+		}
 	}
-	guestBindings, labels, err := s.resolveToolAccountBindings(cfg.AccountBindings, workspace, "Orca Server")
+	guestBindings, labels, err := s.resolveToolAccountBindingsReplacing(cfg.AccountBindings, workspace, "Orca Server", previous.Accounts)
 	if err != nil {
 		return cfg, orcaGuestStatus{}, err
 	}
@@ -721,6 +817,11 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 	}
 	startCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+	stopOnLock := context.AfterFunc(epoch, cancel)
+	defer stopOnLock()
+	if epoch.Err() != nil {
+		return cfg, orcaGuestStatus{}, errClaudeAccessLost
+	}
 	var st orcaGuestStatus
 	err = s.runAgentRuntime(startCtx, subcmd, map[string]any{
 		"port":                cfg.GuestPort,
@@ -729,18 +830,96 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 		"bindings":            guestBindings,
 		"projects":            projects,
 		"terminal_memory_max": cfg.TerminalMemoryMax,
+		"config_key":          configKey,
 	}, &st)
-	if err != nil {
+	if err != nil || !st.Running || st.PID <= 0 {
+		s.invalidateOrcaStatus()
+		s.kickAllLaunchSchedules()
+		if err == nil {
+			err = errors.New("Orca Server 未报告服务已就绪")
+		}
 		return cfg, st, err
 	}
 	st.Port = cfg.GuestPort
 	st.Installed = true
+	bindingsMatch := maps.Equal(st.Accounts, orcaFixedAccounts(guestBindings))
 	s.orca.mu.Lock()
 	s.orca.statusCache = st
 	s.orca.statusAt = time.Now()
-	s.orca.activeBindings = labels
+	s.orca.statusGeneration++
+	if bindingsMatch {
+		s.orca.activeBindings = labels
+	} else {
+		s.orca.activeBindings = nil
+	}
 	s.orca.mu.Unlock()
-	return cfg, st, nil
+	if !bindingsMatch {
+		s.kickAllLaunchSchedules()
+		return cfg, st, errors.New("Orca Server 服务绑定与所选账号不一致，请重启服务")
+	}
+	if st.PID != previous.PID {
+		for agentID, id := range st.Accounts {
+			if id == "" {
+				continue
+			}
+			switch agentID {
+			case "claude":
+				s.noteClaudeSelection(id, workspace)
+			case "codex":
+				if binding, ok := guestBindings[agentID].(map[string]any); ok && binding["codex_native"] == true {
+					s.noteCodexSelection(id, workspace)
+				} else {
+					s.noteAgentSelection(agentID, id, workspace)
+				}
+			default:
+				s.noteAgentSelection(agentID, id, workspace)
+			}
+		}
+	}
+	if !maps.Equal(previous.Accounts, st.Accounts) {
+		s.kickAllLaunchSchedules()
+	}
+	s.watchOrcaCodex()
+	err = s.rememberOrcaService(&cfg, false)
+	return cfg, st, err
+}
+
+func (s *Server) stopManagedOrca(ctx context.Context, port int, subcommand string) error {
+	if !s.lockProjectOperation(ctx) {
+		return errTerminalBusy
+	}
+	defer s.op.Unlock()
+	if err := s.forgetOrcaService(); err != nil {
+		return err
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	var result struct {
+		SkippedPortMismatch bool `json:"skipped_port_mismatch"`
+		Running             bool `json:"running"`
+	}
+	if (s.vmRunning() || s.agentCLIs.runtimeHook != nil) && s.windowsGuest == nil {
+		if err := s.runAgentRuntime(stopCtx, subcommand, map[string]any{"port": port}, &result); err != nil {
+			s.invalidateOrcaStatus()
+			return err
+		}
+	}
+	if result.SkippedPortMismatch {
+		s.invalidateOrcaStatus()
+		return errors.New("Orca Server 运行端口已变化，请重试")
+	}
+	if result.Running {
+		s.invalidateOrcaStatus()
+		return errors.New("Orca Server 仍在运行，请重试")
+	}
+	s.orca.mu.Lock()
+	s.orca.statusCache = orcaGuestStatus{Port: port}
+	s.orca.statusAt = time.Time{}
+	s.orca.statusGeneration++
+	s.orca.activeBindings = nil
+	s.orca.mu.Unlock()
+	s.kickAllLaunchSchedules()
+	return nil
 }
 
 func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
@@ -779,7 +958,7 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	tun, err := s.ensureOrcaTunnel(r.Context(), cfg.HostTunnelPort, cfg.GuestPort)
+	tun, err := s.ensureRememberedOrcaTunnel(r.Context(), &cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -854,6 +1033,10 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var guestWorkspace string
+	if in.Workspace != "" {
+		guestWorkspace = s.cliWorkspace(in.Workspace)
+	}
 	jsonReply(w, map[string]any{
 		"opened":           true,
 		"paired":           true,
@@ -862,6 +1045,7 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		"environment_name": envName,
 		"endpoint":         endpoint,
 		"tunnel_port":      tun.hostPort,
+		"guest_workspace":  guestWorkspace,
 	})
 }
 
@@ -894,7 +1078,7 @@ func (s *Server) orcaPairHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if addr == "" {
-			tun, tunErr := s.ensureOrcaTunnel(r.Context(), cfg.HostTunnelPort, cfg.GuestPort)
+			tun, tunErr := s.ensureRememberedOrcaTunnel(r.Context(), &cfg)
 			if tunErr != nil {
 				http.Error(w, tunErr.Error(), http.StatusBadGateway)
 				return
@@ -902,7 +1086,7 @@ func (s *Server) orcaPairHTTP(w http.ResponseWriter, r *http.Request) {
 			addr = fmt.Sprintf("127.0.0.1:%d", tun.hostPort)
 		}
 	} else if strings.HasPrefix(addr, "127.0.0.1:") || strings.HasPrefix(addr, "localhost:") {
-		if _, tunErr := s.ensureOrcaTunnel(r.Context(), cfg.HostTunnelPort, cfg.GuestPort); tunErr != nil {
+		if _, tunErr := s.ensureRememberedOrcaTunnel(r.Context(), &cfg); tunErr != nil {
 			http.Error(w, tunErr.Error(), http.StatusBadGateway)
 			return
 		}
@@ -951,6 +1135,8 @@ func (s *Server) orcaActionHTTP(w http.ResponseWriter, r *http.Request) {
 	s.orca.opMu.Lock()
 	defer s.orca.opMu.Unlock()
 	switch action {
+	case "register_codex_account":
+		s.registerOrcaCodexHTTP(w, r)
 	case "start", "restart":
 		cfg, _, err := s.ensureManagedOrcaRunning(r.Context(), action == "restart", s.workspace())
 		if err != nil {
@@ -960,8 +1146,11 @@ func (s *Server) orcaActionHTTP(w http.ResponseWriter, r *http.Request) {
 		if action == "restart" {
 			s.closeOrcaTunnel()
 		}
-		if cfg.BindMode == "loopback" && s.orcaLocalDesktopAllowed(r) {
-			_, _ = s.ensureOrcaTunnel(r.Context(), cfg.HostTunnelPort, cfg.GuestPort)
+		if s.orcaLocalDesktopAllowed(r) && (cfg.BindMode == "loopback" || cfg.RunIntent != nil && cfg.RunIntent.Tunnel) {
+			if _, err := s.ensureRememberedOrcaTunnel(r.Context(), &cfg); err != nil {
+				http.Error(w, err.Error(), http.StatusBadGateway)
+				return
+			}
 		}
 		payload, err := s.orcaStatusPayload(r, false)
 		if err != nil {
@@ -974,19 +1163,10 @@ func (s *Server) orcaActionHTTP(w http.ResponseWriter, r *http.Request) {
 		s.orca.mu.Lock()
 		cfg, _ := s.loadOrcaConfigLocked()
 		s.orca.mu.Unlock()
-		if (s.vmRunning() || s.agentCLIs.runtimeHook != nil) && s.windowsGuest == nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-			err := s.runAgentRuntime(ctx, "orca-stop", map[string]any{"port": cfg.GuestPort}, nil)
-			cancel()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
-				return
-			}
+		if err := s.stopManagedOrca(r.Context(), cfg.GuestPort, "orca-stop"); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
 		}
-		s.orca.mu.Lock()
-		s.orca.activeBindings = nil
-		s.orca.statusAt = time.Time{}
-		s.orca.mu.Unlock()
 		payload, err := s.orcaStatusPayload(r, true)
 		if err != nil {
 			requestError(w, err)
@@ -995,22 +1175,18 @@ func (s *Server) orcaActionHTTP(w http.ResponseWriter, r *http.Request) {
 		jsonReply(w, payload)
 	case "reset-identity":
 		s.closeOrcaTunnel()
-		if (s.vmRunning() || s.agentCLIs.runtimeHook != nil) && s.windowsGuest == nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-			err := s.runAgentRuntime(ctx, "orca-reset-identity", map[string]any{}, nil)
-			cancel()
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusConflict)
-				return
-			}
+		s.orca.mu.Lock()
+		cfg, _ := s.loadOrcaConfigLocked()
+		s.orca.mu.Unlock()
+		if err := s.stopManagedOrca(r.Context(), cfg.GuestPort, "orca-reset-identity"); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
 		}
 		s.orca.mu.Lock()
 		if cfg, err := s.loadOrcaConfigLocked(); err == nil {
 			cfg.PairedEnvID = ""
 			_ = s.saveOrcaConfigLocked(cfg)
 		}
-		s.orca.activeBindings = nil
-		s.orca.statusAt = time.Time{}
 		s.orca.mu.Unlock()
 		payload, err := s.orcaStatusPayload(r, true)
 		if err != nil {

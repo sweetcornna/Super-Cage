@@ -28,6 +28,9 @@ import "./settings.css";
 import { SafetyMessage } from "./safety-message";
 import { AppearanceSettings } from "./appearance-settings";
 import { AgentSettings } from "./agent-settings";
+import { AgentIcon } from "./agent-icon";
+import { OrcaSettingsCard } from "./orca-panel";
+import { T3CodeSettingsCard } from "./t3code-panel";
 import { ProxySettings } from "./proxy-settings";
 import { ExitPolicyFields } from "./exit-policy";
 import { canonicalExitPolicy } from "./safety-state.mjs";
@@ -52,12 +55,16 @@ const DevicesPage = lazy(() => import("./devices-page.jsx"));
 // 其他客户端: its code loads when the section opens; the row itself only exists
 // when something can be added (other-clients-row.js).
 const OtherClientsSection = lazy(() => import("./other-clients-section.jsx"));
+const ExternalSessionRestore = lazy(() => import("./external_session_restore.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
   ["archived-sessions", "已归档会话", Archive],
   ["keyboard", "通用", Settings],
   ["agents", "Agent CLI", Bot],
+  ["orca", "Orca Server"],
+  ["external-session-restore", "原应用会话恢复", RotateCcw],
+  ["t3code", "T3 Code"],
   ["appearance", "外观", Palette],
   ["devices", "设备", MonitorSmartphone],
   ["local-terminal", "本机终端", SquareTerminal],
@@ -99,10 +106,15 @@ export function SettingsPanel({
   const [proxyDirty, setProxyDirty] = useState(false);
   const [resourceDirty, setResourceDirty] = useState(false);
   const [localTerminalDirty, setLocalTerminalDirty] = useState(false);
+  const [clientConfigDirty, setClientConfigDirty] = useState(false);
   // 本机终端: choosing the application belongs to the desktop app, the ssh
   // entry to a window on the environment's own computer.
   const showOtherClients = useOtherClientsRow();
-  const shownSections = sections.filter(([id]) => (id !== "local-terminal" || vmContext.desktop_gateway || localEntryAvailable) && (id !== "other-clients" || showOtherClients));
+  const shownSections = sections.filter(([id]) =>
+    (id !== "local-terminal" || vmContext.desktop_gateway || localEntryAvailable) &&
+    (id !== "other-clients" || showOtherClients) &&
+    (id !== "orca" || orca) && (id !== "t3code" || t3code),
+  );
   const [draft, setDraft] = useState({ ...current }),
     [section, setSection] = useState(initialSection),
     [probe, setProbe] = useState(null),
@@ -152,22 +164,35 @@ export function SettingsPanel({
     if (["dns_url"].includes(key)) setProbe(null);
     setError("");
   };
+  const confirmDiscard = () =>
+    (!changed && !accountDirty && !proxyDirty && !resourceDirty && !localTerminalDirty && !clientConfigDirty) ||
+    onConfirm({
+      title: "放弃尚未保存的修改？",
+      body: "离开设置会丢弃这次表单修改。",
+      confirm: "放弃修改",
+    });
   const close = async () => {
-    if (submitting) return;
-    if (status.job?.running && jobId) {
-      onClose();
-      return;
-    }
-    if (
-      (!changed && !accountDirty && !proxyDirty && !resourceDirty && !localTerminalDirty) ||
-      (await onConfirm({
-        title: "放弃尚未保存的修改？",
-        body: "当前环境不会改变。关闭后会丢弃这次表单修改。",
-        confirm: "放弃修改",
-      }))
-    )
-      onClose();
+    if (submitting || (!(status.job?.running && jobId) && !(await confirmDiscard()))) return false;
+    onClose();
+    return true;
   };
+  const changeSection = async (id) => {
+    if (id === section) return;
+    if (accountDirty && !(await onConfirm({ title: "放弃尚未保存的修改？", body: "已保存的资料和密码保持不变。", confirm: "放弃修改" }))) return;
+    if (proxyDirty && !(await onConfirm({ title: "放弃尚未应用的代理修改？", body: "当前代理仍按已应用的链路运行。离开会丢弃这次节点选择。", confirm: "放弃修改" }))) return;
+    if (localTerminalDirty && !(await onConfirm({ title: "放弃尚未保存的本机终端设置？", body: "已保存的选择保持不变。", confirm: "放弃修改" }))) return;
+    if (clientConfigDirty && !(await onConfirm({ title: "放弃尚未保存的客户端设置？", body: "离开会丢弃这次表单修改。", confirm: "放弃修改" }))) return;
+    setSection(id);
+  };
+  useEffect(() => {
+    if (section === "orca") void orca?.refresh();
+    if (section === "t3code") void t3code?.refresh();
+    if (section === "agents") {
+      void agents?.refresh();
+      void magpie?.refresh();
+      void herdr?.refresh();
+    }
+  }, [section, orca?.refresh, t3code?.refresh, agents?.refresh, magpie?.refresh, herdr?.refresh]);
   useEffect(() => {
     if (jobId && status.job?.id === jobId && !status.job.running) {
       setJobId("");
@@ -281,14 +306,9 @@ export function SettingsPanel({
               key={id}
               className={section === id ? "selected" : ""}
               aria-current={section === id ? "page" : undefined}
-              onClick={async () => {
-                if (id !== section && accountDirty && !(await onConfirm({ title: "放弃尚未保存的修改？", body: "已保存的资料和密码保持不变。", confirm: "放弃修改" }))) return;
-                if (id !== section && proxyDirty && !(await onConfirm({ title: "放弃尚未应用的代理修改？", body: "当前代理仍按已应用的链路运行。离开会丢弃这次节点选择。", confirm: "放弃修改" }))) return;
-                if (id !== section && localTerminalDirty && !(await onConfirm({ title: "放弃尚未保存的本机终端设置？", body: "已保存的选择保持不变。", confirm: "放弃修改" }))) return;
-                setSection(id);
-              }}
+              onClick={() => void changeSection(id)}
             >
-              <Icon size={17} />
+              {Icon ? <Icon size={17} /> : <AgentIcon agentId={id} size={17} decorative />}
               {label}
             </button>
           ))}
@@ -300,43 +320,53 @@ export function SettingsPanel({
           {section === "agents" && agents && (
             <AgentSettings
               store={agents}
-              t3code={t3code}
               magpie={magpie}
               herdr={herdr}
-              orca={orca}
               status={status}
               onConfirm={onConfirm}
-              onOpenAccounts={(id) => {
-                onClose();
-                onOpenAgentAccounts?.(id);
+              onDirty={setClientConfigDirty}
+              onOpenT3CodeSettings={t3code ? () => changeSection("t3code") : undefined}
+              onOpenOrcaSettings={orca ? () => changeSection("orca") : undefined}
+              onOpenAccounts={async (id) => {
+                if (await close()) onOpenAgentAccounts?.(id);
               }}
-              onLaunchAgent={(id) => {
-                onClose();
-                onLaunchAgent?.(id);
-              }}
-              onOpenT3Code={async (forceMode, page) => {
-                const opened = await onOpenT3Code?.(forceMode, page);
-                if (opened?.mode === "workbench") onClose();
-                return opened;
+              onLaunchAgent={async (id) => {
+                if (await close()) onLaunchAgent?.(id);
               }}
               onOpenMagpie={async (forceMode, page) => {
+                if (!(await confirmDiscard())) return;
                 const opened = await onOpenMagpie?.(forceMode, page);
                 if (opened?.mode === "workbench") onClose();
                 return opened;
               }}
               onOpenMagpieTUI={async () => {
-                onClose();
-                return await onOpenMagpieTUI?.();
+                if (await close()) return await onOpenMagpieTUI?.();
               }}
               onOpenHerdr={async () => {
-                onClose();
-                return await onOpenHerdr?.();
+                if (await close()) return await onOpenHerdr?.();
               }}
-              onOpenOrca={onOpenOrca}
-              onShowOrcaPair={onShowOrcaPair}
               onSavedClaudeCommand={onSaved}
             />
           )}
+          {section === "orca" && orca && <OrcaSettingsCard
+            store={orca} agentsStore={agents} status={status} magpieEnabled={Boolean(magpie?.enabled)}
+            onConfirm={onConfirm} onOpenOrca={onOpenOrca} onShowPairModal={onShowOrcaPair} onDirty={setClientConfigDirty}
+            onOpenAgentSettings={() => changeSection("agents")}
+          />}
+          {section === "external-session-restore" && <Suspense fallback={<p className="field-help">正在加载原应用会话…</p>}>
+            <ExternalSessionRestore workspace={current.workspace} />
+          </Suspense>}
+          {section === "t3code" && t3code && <T3CodeSettingsCard
+            store={t3code} agentsStore={agents} status={status} magpieEnabled={Boolean(magpie?.enabled)}
+            onConfirm={onConfirm} onDirty={setClientConfigDirty}
+            onOpenAgentSettings={() => changeSection("agents")}
+            onOpenT3Code={async (forceMode, page) => {
+              if (!(await confirmDiscard())) return;
+              const opened = await onOpenT3Code?.(forceMode, page);
+              if (opened?.mode === "workbench") onClose();
+              return opened;
+            }}
+          />}
           {section === "about" && <AboutSettings />}
           {section === "local-terminal" && (vmContext.desktop_gateway || localEntryAvailable) && <Suspense fallback={<p className="field-help">正在加载…</p>}>
             <LocalTerminalPage opener={Boolean(vmContext.desktop_gateway)} entry={localEntryAvailable} onDirty={setLocalTerminalDirty} onConfirm={onConfirm} environmentReady={status.ready} />

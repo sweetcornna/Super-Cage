@@ -75,13 +75,6 @@ func stopLinuxProcess(record linuxCoreRecord, core string) error {
 	if strings.TrimSpace(string(bootID)) != record.BootID {
 		return nil // A process from a previous boot cannot still own the proxy.
 	}
-	resolved, err := filepath.EvalSymlinks(core)
-	if err != nil {
-		return err
-	}
-	if resolved != record.Executable {
-		return errors.New("Super Cage 代理进程不属于当前安装目录")
-	}
 	fd, err := unix.PidfdOpen(record.PID, 0)
 	if errors.Is(err, unix.ESRCH) {
 		return nil
@@ -98,6 +91,15 @@ func stopLinuxProcess(record linuxCoreRecord, core string) error {
 	}
 	if err != nil {
 		return err
+	}
+	// An exited process can leave a record from an older installation.
+	// Verify the executable before signaling a still-live matching PID.
+	resolved, err := filepath.EvalSymlinks(core)
+	if err != nil {
+		return err
+	}
+	if resolved != record.Executable {
+		return errors.New("Super Cage 代理进程不属于当前安装目录")
 	}
 	current, err := identifyLinuxCore(record.PID)
 	if os.IsNotExist(err) {

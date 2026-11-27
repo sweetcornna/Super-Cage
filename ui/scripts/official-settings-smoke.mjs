@@ -43,7 +43,7 @@ try {
   await page.reload();
   await page.getByRole("button", { name: "启动 Super Cage 环境", exact: true }).click();
   await page.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByRole("button", { name: "Agent CLI", exact: true }).click();
+  await page.getByRole("button", { name: "T3 Code", exact: true }).click();
 
   // T3 Code and Magpie: one request each for their settings page.
   await page.getByRole("button", { name: "T3 Code 官方设置", exact: true }).click();

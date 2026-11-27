@@ -308,6 +308,9 @@ func (s *Server) attachWindowsGuestContext(parent context.Context) error {
 	s.windowsState = state
 	newlyReady := !s.ready && err == nil
 	s.ready = err == nil
+	if err == nil && (newlyReady || restartedNetwork) {
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
+	}
 	if newlyReady || (!wasRunning && state.Running) {
 		s.wakeMonitorsLocked()
 	}
@@ -442,7 +445,27 @@ func (s *Server) stopWindowsGuest() error {
 	return err
 }
 func (s *Server) createWindowsTerminal(input terminalRequest) (*terminalSession, error) {
-	if s.windowsGuest.Remote() {
+	switch input.Kind {
+	case "agent", "agent-login":
+		return nil, errors.New("Windows 客机目前仅支持 Claude 托管终端")
+	case "":
+		input.Kind = "shell"
+	case "shell", "claude", "claude-login":
+	case "herdr", "magpie-tui":
+		return nil, errors.New("Windows 客机暂不支持此终端类型")
+	default:
+		return nil, errors.New("终端类型无效")
+	}
+	if input.AgentID != "" || input.AccountID != "" || (input.LoginMode != "" && (input.Kind != "claude-login" || input.LoginMode != "oauth")) {
+		return nil, errors.New("此 Windows 终端不支持指定的 Agent 账号或登录方式")
+	}
+	if input.Kind == "shell" && (input.ClaudeAccountID != "" || input.sharedID != "") {
+		return nil, errors.New("普通终端不能指定 Claude 账号或会话")
+	}
+	if input.Kind == "claude-login" && input.sharedID != "" {
+		return nil, errors.New("Claude 登录终端不能打开会话历史")
+	}
+	if s.windowsGuest.Remote() && input.Kind == "shell" {
 		return s.createRemoteWindowsTerminal(input)
 	}
 	return s.createWindowsCLITerminal(input)

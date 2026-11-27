@@ -250,14 +250,16 @@ func fixtureGuest(id string) http.Handler {
 // fixtureAccountGuest models the parts of the workbench account API that the
 // tenant gateway uses, while delegating all other paths to fixtureGuest.
 type fixtureAccountGuest struct {
-	mu       sync.Mutex
-	username string
-	password string
-	exists   bool
-	unlocked bool
-	reads    int
-	creates  int
-	unlocks  int
+	mu                    sync.Mutex
+	username              string
+	password              string
+	exists                bool
+	unlocked              bool
+	requireAuthentication bool
+	omitLockPolicy        bool
+	reads                 int
+	creates               int
+	unlocks               int
 }
 
 func (a *fixtureAccountGuest) handler(id string) http.Handler {
@@ -280,7 +282,11 @@ func (a *fixtureAccountGuest) handler(id string) http.Handler {
 				return
 			}
 			a.reads++
-			jsonReply(w, 200, map[string]any{"exists": a.exists, "unlocked": a.unlocked, "username": a.username})
+			view := map[string]any{"exists": a.exists, "unlocked": a.unlocked, "username": a.username}
+			if !a.omitLockPolicy {
+				view["require_authentication"] = a.requireAuthentication
+			}
+			jsonReply(w, 200, view)
 		case "/api/account/create":
 			var input struct {
 				Username        string `json:"username"`
@@ -311,8 +317,15 @@ func (a *fixtureAccountGuest) handler(id string) http.Handler {
 				http.Error(w, "密码不正确", http.StatusBadRequest)
 				return
 			}
-			a.unlocked = true
+			a.unlocked, a.requireAuthentication = true, false
 			jsonReply(w, 200, map[string]any{"exists": true, "unlocked": true, "username": a.username})
+		case "/api/account/lock", "/api/account/suspend":
+			if r.Method != http.MethodPost || !a.unlocked {
+				w.WriteHeader(http.StatusLocked)
+				return
+			}
+			a.unlocked, a.requireAuthentication = false, r.URL.Path == "/api/account/lock"
+			jsonReply(w, 200, map[string]any{"exists": true, "unlocked": false, "username": a.username, "require_authentication": a.requireAuthentication})
 		default:
 			http.NotFound(w, r)
 		}
@@ -335,6 +348,7 @@ func (a *fixtureAccountGuest) setExistingAccount(username, password string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.username, a.password, a.exists, a.unlocked = username, password, true, false
+	a.requireAuthentication = false
 }
 
 type portalFixture struct {
@@ -1618,6 +1632,16 @@ func TestTenantManagedGuestAccount(t *testing.T) {
 	exists, unlocked, username, password, _, creates, unlocks = guest.snapshot()
 	if !exists || !unlocked || username != defaultGuestAccountUsername || password != derived || creates != 1 || unlocks != 1 {
 		t.Fatalf("restart did not unlock the managed account: exists=%v unlocked=%v creates=%d unlocks=%d", exists, unlocked, creates, unlocks)
+	}
+
+	// A fresh portal session still respects a durable manual guest lock.
+	wantStatus(t, fixture.request("POST", vmOrigin(record.ID), "/api/account/lock", "{}", cookie), http.StatusOK, "")
+	fixture.server.Close()
+	fixture.openServer()
+	alice, _ = fixture.login("login", "alice")
+	cookie = fixture.connect(alice, record.ID)
+	if _, unlocked, _, _, _, _, unlocks := guest.snapshot(); unlocked || unlocks != 1 {
+		t.Fatalf("a fresh portal login reversed a manual guest lock: unlocked=%v unlock attempts=%d", unlocked, unlocks)
 	}
 
 	// An account created before this feature (or with another name) is

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -44,6 +45,9 @@ var cliChannelVersion = fmt.Sprintf("%x", sha256.Sum256([]byte(cliChannelHelper+
 
 var cliChannelEncoded = func() string {
 	bundle := []byte(strings.Join([]string{cliChannelInstalled, cliResumePrompt, claudeAccountResumePrompt}, "\x00"))
+	// Compact Python indentation before deflate to fit the Windows SSH command
+	// budget. 0xff cannot occur in UTF-8 source or prompt text.
+	bundle = bytes.ReplaceAll(bundle, []byte("    "), []byte{0xff})
 	var compressed bytes.Buffer
 	writer, _ := gzip.NewWriterLevel(&compressed, gzip.BestCompression)
 	_, _ = writer.Write(bundle)
@@ -112,7 +116,7 @@ func cliChannelCommand(mode, argument string) string {
 d=pathlib.Path.home()/".local/share/cage/cli-channel-code"
 d.mkdir(parents=True,exist_ok=True,mode=0o700)
 n="%s"
-a=gzip.decompress(base64.b85decode("%s")).decode().split("\0")
+a=gzip.decompress(base64.b85decode("%s")).replace(b"\xff",b"    ").decode().split("\0")
 for s,v in zip((".py",".resume.md",".account-resume.md"),a):
  p=d/(n+s)
  if not p.exists():
@@ -255,10 +259,17 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 	}
 	m := &s.mobileCLI
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	loadChanged := false
+	defer func() {
+		m.mu.Unlock()
+		if loadChanged {
+			s.kickClaudeLaunchSchedule()
+		}
+	}()
 	known := map[string]*mobileRecord{}
 	running := map[string]bool{}
 	desktop := map[string]bool{}
+	shared := map[string]bool{}
 	for id := range m.catalog {
 		record, err := m.record(s.profile, id)
 		if err != nil {
@@ -288,6 +299,9 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 			// The terminal's CLI has a new id without a transcript yet: no
 			// entry for it, and the entry it continues stays running.
 			running[owner.ID] = running[owner.ID] || item.Running
+			if item.Running && item.Connection != "" {
+				shared[owner.ID] = true
+			}
 			continue
 		}
 		if record != nil && (record.Deleted || record.Archived) {
@@ -342,10 +356,15 @@ func (s *Server) discoverTerminalConversations(ctx context.Context, paths []stri
 		m.catalog[record.ID] = record.summary()
 		running[record.ID] = running[record.ID] || item.Running
 		desktop[record.ID] = desktop[record.ID] || item.Running && item.ClaudeDesktop
+		if item.Running && item.Connection != "" && !item.ClaudeDesktop {
+			shared[record.ID] = true
+		}
 		known[record.CLIID] = record
 	}
 	m.running = running
 	m.desktop = desktop
+	loadChanged = !maps.Equal(m.claudeShared, shared)
+	m.claudeShared = shared
 	return nil
 }
 
@@ -582,10 +601,15 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	}
 	if terminal := s.terminals.get(record.TerminalID); terminal != nil && current.Connection != "" && current.Workspace != "" {
 		terminal.mu.Lock()
+		loadChanged := false
 		if terminal.connectionID == current.Connection {
+			loadChanged = terminal.claudeAccountID != "" && terminal.conversationEnded == current.Running
 			terminal.conversationEnded = !current.Running
 		}
 		terminal.mu.Unlock()
+		if loadChanged {
+			s.kickClaudeLaunchSchedule()
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -614,7 +638,12 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	record.GuestConfig, record.Connection = current.Config, current.Connection
 	record.GuestWorkspace = current.Workspace
 	record.Resume = record.Resume || current.HasHistory
-	record.TerminalRunning = current.Running
+	// A view after controller restart must not clear the last active
+	// binding before recovery can examine it. A report from its own live
+	// viewer can still record that Claude exited into the surrounding shell.
+	if terminal != nil && bound != "" && current.Connection == bound {
+		record.TerminalRunning = current.Running
+	}
 	record.Active = current.Active
 	record.Tasks = current.Tasks
 	record.AccountFailure = current.AccountFailure
@@ -647,6 +676,9 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	view := record.snapshot()
 	if record.Resume && !current.HasHistory && !current.NativeHistory && current.Config != "" && record.ResumeTranscript == "" && record.Switch == nil {
 		view.missingHistory = current.Config
+	}
+	if current.NativeHistory && current.HasHistory && current.CLIID == record.CLIID && validCLIUUID(current.CLIID) {
+		view.nativeResumeID = current.CLIID
 	}
 	return view, nil
 }
@@ -782,6 +814,9 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 	if err != nil {
 		return "", nil, err
 	}
+	if s.windowsGuest == nil && record.Terminal && record.Launcher != "" {
+		launcher = record.Launcher
+	}
 	legacyWorkspace := ""
 	if existing != "" {
 		legacyWorkspace = s.macOSLegacyWorkspace(record)
@@ -794,13 +829,14 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return "", nil, err
 	}
 	record.Terminal, record.Account, record.Launcher = true, selection, launcher
+	record.TerminalApplication = "cage"
 	// A new session follows the rule in 调度设置 until the person sets its own.
-	if record.SwitchPolicy == "" {
+	if record.AccountLabel == "" {
 		if a := list.find(selection.ID); a != nil {
 			record.AccountLabel = a.Label
 		}
 	}
-	record.TerminalID, record.TerminalRunning = "", true
+	record.TerminalRunning, record.TerminalClosed = true, false
 	record.Connection = uuid.NewString()
 	if record.ResumeTranscript != "" && record.Switch != nil {
 		record.Connection = record.Switch.ID

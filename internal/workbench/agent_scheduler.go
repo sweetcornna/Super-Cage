@@ -11,10 +11,12 @@ import (
 
 // agentScheduling configures how new terminals for an agent select accounts.
 type agentScheduling struct {
-	Mode                   string            `json:"mode"` // smart, balanced, sequential, sticky_project, quota_first, drain
-	ProjectAffinityMinutes int               `json:"project_affinity_minutes"`
-	AutoCooldown           bool              `json:"auto_cooldown"`
-	ProjectPins            map[string]string `json:"project_pins,omitempty"` // workspace -> "account:<id>" or "group:<name>"
+	Mode                    string            `json:"mode"`
+	SelectedAccountID       string            `json:"selected_account_id,omitempty"`
+	SelectedAccountRevision string            `json:"selected_account_revision,omitempty"`
+	ProjectAffinityMinutes  int               `json:"project_affinity_minutes"`
+	AutoCooldown            bool              `json:"auto_cooldown"`
+	ProjectPins             map[string]string `json:"project_pins,omitempty"` // workspace -> "account:<id>" or "group:<name>"
 }
 
 func defaultAgentScheduling() agentScheduling {
@@ -39,7 +41,7 @@ func (p agentScheduling) normalized() agentScheduling {
 }
 
 func (p agentScheduling) valid() bool {
-	return slices.Contains([]string{"smart", "balanced", "sequential", "sticky_project", "quota_first", "drain"}, p.Mode) &&
+	return slices.Contains([]string{"manual", "exhaust", "smart", "balanced", "sequential", "sticky_project", "quota_first", "drain"}, p.Mode) &&
 		p.ProjectAffinityMinutes >= 0 && p.ProjectAffinityMinutes <= 1440
 }
 
@@ -165,8 +167,17 @@ func (a *agentAccount) mergeQuota(q *claudeQuota, now time.Time) bool {
 		if window.ObservedAt == 0 {
 			window.ObservedAt = q.ObservedAt
 		}
-		if window.ObservedAt < 0 || window.ObservedAt > q.ObservedAt+60 || (old != nil && old.ObservedAt > window.ObservedAt) {
+		if window.ObservedAt < 0 || window.ObservedAt > min(q.ObservedAt+60, now.Unix()+60) {
 			return old
+		}
+		if old != nil {
+			oldObserved := old.ObservedAt
+			if oldObserved == 0 {
+				oldObserved = next.ObservedAt
+			}
+			if oldObserved > window.ObservedAt {
+				return old
+			}
 		}
 		if old != nil && window == *old {
 			return old
@@ -177,6 +188,19 @@ func (a *agentAccount) mergeQuota(q *claudeQuota, now time.Time) bool {
 	next.SevenDay = merge(next.SevenDay, q.SevenDay)
 	if (next.FiveHour == nil && next.SevenDay == nil) || (a.Quota != nil && next == *a.Quota) {
 		return false
+	}
+	// Keep legacy windows tied to their own observation when the other
+	// window advances the overall quota timestamp.
+	for _, window := range []**claudeWindow{&next.FiveHour, &next.SevenDay} {
+		if *window != nil && (*window).ObservedAt == 0 {
+			if next.ObservedAt <= 0 {
+				*window = nil
+				continue
+			}
+			reading := **window
+			reading.ObservedAt = next.ObservedAt
+			*window = &reading
+		}
 	}
 	next.ObservedAt = max(next.ObservedAt, q.ObservedAt)
 	a.Quota = &next
@@ -192,10 +216,10 @@ type quotaTelemetry struct {
 }
 
 // analyzeQuota evaluates 5h and 7d windows together:
-// - Hard-blocks exhausted windows.
-// - Rewards soon-expiring short windows ("use-it-or-lose-it").
-// - Protects scarce 7-day weekly budgets by suppressing drain urgency and
-//   applying a smooth conservation penalty when 7d headroom < 20%.
+//   - Hard-blocks exhausted windows.
+//   - Rewards soon-expiring short windows ("use-it-or-lose-it").
+//   - Protects scarce 7-day weekly budgets by suppressing drain urgency and
+//     applying a smooth conservation penalty when 7d headroom < 20%.
 func (a agentAccount) analyzeQuota(now time.Time) quotaTelemetry {
 	out := quotaTelemetry{headroom: -1, eligible: true}
 	if a.Quota == nil {
@@ -209,19 +233,20 @@ func (a agentAccount) analyzeQuota(now time.Time) quotaTelemetry {
 		if w.ResetsAt > 0 && w.ResetsAt <= nowUnix {
 			return -1, false, false, false, 0
 		}
-		obs := w.ObservedAt
-		if obs <= 0 {
-			obs = a.Quota.ObservedAt
+		obs := schedulingObservationTime(w.ObservedAt, a.Quota.ObservedAt, nowUnix)
+		if obs == 0 {
+			return -1, false, false, false, 0
 		}
-		fresh = obs > 0 && now.Sub(time.Unix(obs, 0)) <= claudeQuotaFresh
+		fresh = nowUnix-obs <= int64(claudeQuotaFresh/time.Second)
 		if w.UsedPercentage >= 100 && (w.ResetsAt > nowUnix || fresh) {
 			return 0, fresh, true, true, max(0, w.ResetsAt-nowUnix)
 		}
 		rem = 100.0 - w.UsedPercentage
-		if w.ResetsAt > nowUnix {
+		if fresh && w.ResetsAt > nowUnix {
 			timeLeft = w.ResetsAt - nowUnix
 		}
-		return rem, fresh, true, false, timeLeft
+		recent := nowUnix-obs <= int64(4*claudeQuotaFresh/time.Second)
+		return rem, fresh, recent, false, timeLeft
 	}
 
 	rem5, fresh5, active5, ex5, left5 := evalWindow(a.Quota.FiveHour)
@@ -326,6 +351,43 @@ func (p agentAccountPool) find(id string) *agentAccount {
 	return nil
 }
 
+func (p agentAccountPool) defaultAccount() *agentAccount {
+	for i := range p.Accounts {
+		if p.Accounts[i].Source == "default" {
+			return &p.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// Guest usage can only disqualify accounts that are otherwise launchable.
+func (p *agentAccountPool) hasLaunchCandidate(requestedID, workspace string, now time.Time) bool {
+	if p == nil {
+		return false
+	}
+	eligible := func(a *agentAccount) bool {
+		return a != nil && agentAccountBlock(a, 0, false, a.analyzeQuota(now).eligible, now.Unix()) == ""
+	}
+	switch requestedID {
+	case "default":
+		return eligible(p.defaultAccount())
+	case "", "auto":
+	default:
+		return eligible(p.find(requestedID))
+	}
+	pin := strings.TrimSpace(p.Scheduling.ProjectPins[workspace])
+	if pin == "" && canonicalSchedulingMode(p.Scheduling.Mode) == "manual" {
+		return eligible(p.find(p.Scheduling.SelectedAccountID))
+	}
+	for i := range p.Accounts {
+		a := &p.Accounts[i]
+		if (pin == "" || matchesAgentPin(a, pin)) && eligible(a) {
+			return true
+		}
+	}
+	return false
+}
+
 type scheduleCandidate struct {
 	AccountID        string  `json:"account_id"`
 	Label            string  `json:"label"`
@@ -405,8 +467,7 @@ func probationPenalty(a agentAccount, now time.Time) float64 {
 	return -base * (1.0 - elapsed/900.0)
 }
 
-// pickAgentAccount runs the O(N) deterministic multi-factor scheduler and returns
-// both the winning account and a full explainable decision trace.
+// pickAgentAccount returns the full explainable decision for previews and manifests.
 func pickAgentAccount(
 	pool agentAccountPool,
 	active map[string]int,
@@ -415,272 +476,324 @@ func pickAgentAccount(
 	recentAt time.Time,
 	now time.Time,
 ) scheduleDecision {
-	sched := pool.Scheduling.normalized()
-	decision := scheduleDecision{Strategy: sched.Mode}
-	if len(pool.Accounts) == 0 {
-		decision.Reason = "尚未加入调度账号，将沿用默认环境登录"
-		return decision
-	}
-
-	pin := ""
-	if workspace != "" && len(sched.ProjectPins) > 0 {
-		pin = strings.TrimSpace(sched.ProjectPins[workspace])
-	}
-	affinityTTL := time.Duration(sched.ProjectAffinityMinutes) * time.Minute
-	preferred := ""
-	if recentAccountID != "" && affinityTTL > 0 && !recentAt.IsZero() && now.Sub(recentAt) < affinityTTL {
-		preferred = recentAccountID
-	}
-
-	start := slices.IndexFunc(pool.Accounts, func(a agentAccount) bool { return a.ID == lastPick }) + 1
-	if start >= len(pool.Accounts) {
-		start = 0
-	}
-
-	candidates := make([]scheduleCandidate, 0, len(pool.Accounts))
-	telemetries := make([]quotaTelemetry, len(pool.Accounts))
-	var eligible []int
-
-	for idx, a := range pool.Accounts {
-		weight := a.effectiveWeight()
-		act := active[a.ID]
-		qt := a.analyzeQuota(now)
-		telemetries[idx] = qt
-		health := a.effectiveHealth(now)
-		cand := scheduleCandidate{
-			AccountID:       a.ID,
-			Label:           a.displayName(),
-			ActiveSessions:  act,
-			EffectiveWeight: weight,
-			Headroom:        qt.headroom,
-			HealthScore:     math.Round(health * 100),
-		}
-		switch {
-		case !a.Enabled:
-			cand.IneligibleReason = "已暂停参与调度"
-		case a.Status != "ready":
-			cand.IneligibleReason = "账号未就绪（" + a.Status + "）"
-		case logins[a.ID]:
-			cand.IneligibleReason = "正在执行交互登录"
-		case a.CooldownUntil > now.Unix():
-			rem := a.CooldownUntil - now.Unix()
-			cand.IneligibleReason = fmt.Sprintf("限流冷却中（剩余 %ds）", rem)
-		case !qt.eligible:
-			cand.IneligibleReason = "配额窗口已耗尽"
-		case a.MaxConcurrency > 0 && act >= a.MaxConcurrency:
-			cand.IneligibleReason = fmt.Sprintf("已达并发上限（%d/%d）", act, a.MaxConcurrency)
-		case strings.HasPrefix(pin, "account:") && a.ID != strings.TrimPrefix(pin, "account:"):
-			cand.IneligibleReason = "当前项目已绑定其他账号"
-		case strings.HasPrefix(pin, "group:") && a.HandoffGroup != strings.TrimPrefix(pin, "group:"):
-			cand.IneligibleReason = "不属于当前项目绑定的账号分组"
-		default:
-			cand.Eligible = true
-			eligible = append(eligible, idx)
-		}
-		candidates = append(candidates, cand)
-	}
-
-	decision.Candidates = candidates
-	if len(eligible) == 0 {
-		if pin != "" {
-			decision.Reason = "当前项目绑定的账号或分组暂无可用成员，请检查冷却、并发或登录状态"
-		} else {
-			decision.Reason = "暂无可分配的健康账号，请检查账号状态、并发上限或冷却时间"
-		}
-		return decision
-	}
-
-	rrBonus := func(idx int) float64 {
-		dist := (idx - start + len(pool.Accounts)) % len(pool.Accounts)
-		return 0.5 * (1.0 - float64(dist)/float64(max(1, len(pool.Accounts))))
-	}
-
-	bestIdx := -1
-	bestScore := math.Inf(-1)
-	bestReason := ""
-
-	switch sched.Mode {
-	case "sequential":
-		bestIdx = eligible[0]
-		a := pool.Accounts[bestIdx]
-		bestScore = 100
-		if bestIdx == 0 {
-			bestReason = fmt.Sprintf("顺序优先 · 首选账号（活跃 %d）", active[a.ID])
-		} else {
-			bestReason = fmt.Sprintf("顺序优先 · 前序不可用已自动故障转移至 #%d", bestIdx+1)
-		}
-		candidates[bestIdx].Score = bestScore
-		candidates[bestIdx].Reason = bestReason
-
-	case "sticky_project":
-		if preferred != "" {
-			for _, idx := range eligible {
-				if pool.Accounts[idx].ID == preferred {
-					bestIdx = idx
-					bestScore = 120
-					bestReason = fmt.Sprintf("项目亲和 · 沿用同项目近期账号（活跃 %d）", active[pool.Accounts[idx].ID])
-					candidates[idx].Score = bestScore
-					candidates[idx].Reason = bestReason
-					break
-				}
-			}
-		}
-		if bestIdx < 0 {
-			bestIdx, bestScore, bestReason = scoreSmartCandidates(pool.Accounts, eligible, candidates, telemetries, preferred, now, rrBonus)
-			if preferred != "" {
-				bestReason = "原项目账号暂不可用 · " + bestReason
-			}
-		}
-
-	case "balanced":
-		for _, idx := range eligible {
-			a := pool.Accounts[idx]
-			c := &candidates[idx]
-			qt := telemetries[idx]
-			loadRatio := float64(c.ActiveSessions) / float64(c.EffectiveWeight)
-			effRoom := c.Headroom
-			if effRoom < 0 {
-				effRoom = 65
-			}
-			score := 100.0/(1.0+loadRatio*10.0) + effRoom*0.25 + a.effectiveHealth(now)*8.0 - qt.longPenalty*0.5 + rrBonus(idx)
-			if a.ID == preferred {
-				score += 4.0
-			}
-			c.Score = math.Round(score*100) / 100
-			c.Reason = fmt.Sprintf("均衡负载 · 活跃 %d / 权重 %d", c.ActiveSessions, c.EffectiveWeight)
-			if score > bestScore {
-				bestScore, bestIdx, bestReason = score, idx, c.Reason
-			}
-		}
-
-	case "quota_first":
-		for _, idx := range eligible {
-			a := pool.Accounts[idx]
-			c := &candidates[idx]
-			qt := telemetries[idx]
-			effRoom := c.Headroom
-			if effRoom < 0 {
-				effRoom = 50
-			}
-			loadRatio := float64(c.ActiveSessions) / float64(c.EffectiveWeight)
-			score := effRoom + qt.resetUrgency*1.2 - qt.longPenalty + 25.0/(1.0+loadRatio*6.0) + a.effectiveHealth(now)*6.0 + rrBonus(idx)
-			c.Score = math.Round(score*100) / 100
-			if qt.resetUrgency >= 2.0 {
-				c.Reason = fmt.Sprintf("余量与重置优先 · 剩余 %.0f%% · 临近重置", c.Headroom)
-			} else if c.Headroom >= 0 {
-				c.Reason = fmt.Sprintf("余量优先 · 剩余 %.0f%% · 活跃 %d", c.Headroom, c.ActiveSessions)
-			} else {
-				c.Reason = fmt.Sprintf("余量优先 · 活跃 %d / 权重 %d", c.ActiveSessions, c.EffectiveWeight)
-			}
-			if score > bestScore {
-				bestScore, bestIdx, bestReason = score, idx, c.Reason
-			}
-		}
-
-	case "drain":
-		bestSoonest := int64(math.MaxInt64)
-		for _, idx := range eligible {
-			a := pool.Accounts[idx]
-			c := &candidates[idx]
-			qt := telemetries[idx]
-			effRoom := c.Headroom
-			if effRoom < 0 {
-				effRoom = 55
-			}
-			loadRatio := float64(c.ActiveSessions) / float64(c.EffectiveWeight)
-			urgency := 0.0
-			if qt.soonestResetSec > 0 && qt.longPenalty == 0 {
-				urgency = 70.0 / (1.0 + float64(qt.soonestResetSec)/3600.0)
-			}
-			score := urgency + effRoom*0.3 + 20.0/(1.0+loadRatio*4.0) - qt.longPenalty + a.effectiveHealth(now)*8.0 + rrBonus(idx)
-			c.Score = math.Round(score*100) / 100
-			if qt.soonestResetSec > 0 && qt.longPenalty == 0 {
-				c.Reason = fmt.Sprintf("即将重置优先 · 约 %d 分钟后重置 · 剩余 %.0f%%", max(1, (qt.soonestResetSec+59)/60), effRoom)
-			} else {
-				c.Reason = fmt.Sprintf("即将重置优先 · 活跃 %d / 权重 %d", c.ActiveSessions, c.EffectiveWeight)
-			}
-			soonest := qt.soonestResetSec
-			if soonest <= 0 || qt.longPenalty > 0 {
-				soonest = math.MaxInt64 / 2
-			}
-			if bestIdx < 0 || (soonest < bestSoonest && qt.longPenalty == 0) || (soonest == bestSoonest && score > bestScore) {
-				bestIdx, bestScore, bestReason, bestSoonest = idx, score, c.Reason, soonest
-			}
-		}
-
-	default: // "smart"
-		bestIdx, bestScore, bestReason = scoreSmartCandidates(pool.Accounts, eligible, candidates, telemetries, preferred, now, rrBonus)
-	}
-
-	winner := pool.Accounts[bestIdx]
-	decision.AccountID = winner.ID
-	decision.Label = winner.displayName()
-	decision.Score = math.Round(bestScore*100) / 100
-	decision.Reason = bestReason
+	decision, _ := chooseAgentAccount(pool, active, logins, workspace, lastPick, recentAccountID, recentAt, now, true)
 	return decision
 }
 
-func scoreSmartCandidates(
-	accounts []agentAccount,
-	eligible []int,
-	candidates []scheduleCandidate,
-	telemetries []quotaTelemetry,
-	preferred string,
+func chooseAgentAccount(
+	pool agentAccountPool,
+	active map[string]int,
+	logins map[string]bool,
+	workspace, lastPick, recentAccountID string,
+	recentAt time.Time,
 	now time.Time,
-	rrBonus func(int) float64,
-) (int, float64, string) {
-	bestIdx := eligible[0]
-	bestScore := math.Inf(-1)
-	bestReason := ""
-	for _, idx := range eligible {
-		a := accounts[idx]
-		c := &candidates[idx]
-		qt := telemetries[idx]
-		loadRatio := float64(c.ActiveSessions) / float64(c.EffectiveWeight)
-		concurrencyScore := 100.0 / (1.0 + loadRatio*4.0)
-		effRoom := c.Headroom
-		if effRoom < 0 {
-			effRoom = 65.0
+	explain bool,
+) (scheduleDecision, int) {
+	sched := pool.Scheduling.normalized()
+	decision := scheduleDecision{Strategy: sched.Mode}
+	pin := strings.TrimSpace(sched.ProjectPins[workspace])
+	mode := canonicalSchedulingMode(sched.Mode)
+	manual := mode == "manual" && pin == ""
+	ordered := mode == "exhaust" || mode == "manual"
+	if len(pool.Accounts) == 0 {
+		switch {
+		case pin != "":
+			decision.Reason = "当前项目绑定的账号或分组暂无可用成员，请检查冷却、并发或登录状态"
+		case manual:
+			decision.Reason = manualSchedulingError("Agent").Error()
+		case mode == "exhaust" && sched.SelectedAccountID != "":
+			decision.Reason = "已选账号不在账号池内，请检查账号面板"
+		default:
+			decision.Reason = "尚未加入调度账号，将沿用默认环境登录"
 		}
-		headroomScore := effRoom * 0.65
-		health := a.effectiveHealth(now)
-		healthScore := health * 15.0
-		urgency := qt.resetUrgency
-		affinity := 0.0
-		if a.ID == preferred && health >= 0.7 && (a.MaxConcurrency == 0 || c.ActiveSessions < a.MaxConcurrency) {
-			affinity = 12.0
-		}
-		probation := probationPenalty(a, now)
-		burstPenalty := 0.0
-		if a.LastAllocatedAt > 0 && now.Unix()-a.LastAllocatedAt < 15 && len(eligible) > 1 {
-			burstPenalty = -6.0
-		}
-		score := concurrencyScore + headroomScore + healthScore + urgency - qt.longPenalty + affinity + probation + burstPenalty + rrBonus(idx)
-		c.Score = math.Round(score*100) / 100
+		return decision, -1
+	}
 
-		var parts []string
-		parts = append(parts, "智能调度")
-		if affinity > 0 {
-			parts = append(parts, "项目亲和")
-		}
-		if urgency >= 2.0 {
-			parts = append(parts, "临近重置优先消耗")
-		}
-		if c.Headroom >= 0 {
-			parts = append(parts, fmt.Sprintf("余量 %.0f%%", c.Headroom))
-		}
-		parts = append(parts, fmt.Sprintf("活跃 %d · 权重 %d", c.ActiveSessions, c.EffectiveWeight))
-		if health < 0.85 {
-			parts = append(parts, fmt.Sprintf("健康 %.0f%%", health*100))
-		}
-		if probation < -1.0 {
-			parts = append(parts, "冷却恢复观察中")
-		}
-		c.Reason = strings.Join(parts, " · ")
+	preferred := ""
+	affinityTTL := time.Duration(sched.ProjectAffinityMinutes) * time.Minute
+	if age := now.Sub(recentAt); affinityTTL > 0 && age >= 0 && age < affinityTTL && !recentAt.IsZero() {
+		preferred = recentAccountID
+	}
+	start := 0
+	switch {
+	case ordered && pin == "":
+		start = max(0, slices.IndexFunc(pool.Accounts, func(a agentAccount) bool { return a.ID == sched.SelectedAccountID }))
+	case !ordered && lastPick != "":
+		start = (slices.IndexFunc(pool.Accounts, func(a agentAccount) bool { return a.ID == lastPick }) + 1) % len(pool.Accounts)
+	}
+	if explain {
+		decision.Candidates = make([]scheduleCandidate, len(pool.Accounts))
+	}
 
-		if score > bestScore {
-			bestScore, bestIdx, bestReason = score, idx, c.Reason
+	nowUnix := now.Unix()
+	bestIdx, eligible := -1, 0
+	var best rankedAgentAccount
+	var sticky bool
+	for offset := range pool.Accounts {
+		idx := offset
+		if ordered {
+			idx = (start + offset) % len(pool.Accounts)
+		}
+		a := &pool.Accounts[idx]
+		count := active[a.ID]
+		quota := a.analyzeQuota(now)
+		block := agentAccountBlock(a, count, logins[a.ID], quota.eligible, nowUnix)
+		if block == "" && manual && a.ID != sched.SelectedAccountID {
+			block = "手动调度已锁定其他账号"
+		}
+		if block == "" && pin != "" && !matchesAgentPin(a, pin) {
+			block = "不属于当前项目绑定的账号或分组"
+		}
+		ranked := rankedAgentAccount{
+			quota: quota, health: a.effectiveHealth(now), active: count, weight: a.effectiveWeight(),
+		}
+		if explain {
+			decision.Candidates[idx] = scheduleCandidate{
+				AccountID: a.ID, Label: a.displayName(), Eligible: block == "",
+				ActiveSessions: count, EffectiveWeight: ranked.weight,
+				Headroom: quota.headroom, HealthScore: math.Round(ranked.health * 100),
+				IneligibleReason: agentAccountBlockReason(block, a, count, nowUnix),
+			}
+		}
+		if block != "" {
+			continue
+		}
+		eligible++
+		distance := idx - start
+		if distance < 0 {
+			distance += len(pool.Accounts)
+		}
+		roundRobin := 0.5 * (1 - float64(distance)/float64(len(pool.Accounts)))
+		isSticky := sched.Mode == "sticky_project" && a.ID == preferred
+		switch {
+		case isSticky:
+			ranked.score = 120
+		case ordered:
+			ranked.score = 100
+		default:
+			ranked.scoreAccount(a, sched.Mode, a.ID == preferred, now, roundRobin)
+		}
+		if explain && (!ordered || bestIdx < 0) {
+			candidate := &decision.Candidates[idx]
+			candidate.Score = roundAgentScore(ranked.score)
+			candidate.Reason = ranked.reason(sched.Mode, idx, isSticky)
+		}
+		if bestIdx < 0 || isSticky || (!sticky && !ordered && ranked.betterThan(best)) {
+			bestIdx, best, sticky = idx, ranked, isSticky
+			if !explain && (sticky || ordered) {
+				break
+			}
 		}
 	}
-	return bestIdx, bestScore, bestReason
+
+	if bestIdx < 0 {
+		decision.Reason = "暂无可分配的健康账号，请检查账号状态、并发上限或冷却时间"
+		if pin != "" {
+			decision.Reason = "当前项目绑定的账号或分组暂无可用成员，请检查冷却、并发或登录状态"
+		} else if manual {
+			decision.Reason = manualSchedulingError("Agent").Error()
+			if explain && sched.SelectedAccountID != "" {
+				for _, candidate := range decision.Candidates {
+					if candidate.AccountID == sched.SelectedAccountID && candidate.IneligibleReason != "" {
+						decision.Reason += " · " + candidate.IneligibleReason
+						break
+					}
+				}
+			}
+		}
+		return decision, -1
+	}
+	if eligible == 1 && best.burstPenalty != 0 {
+		best.score -= best.burstPenalty
+		if explain {
+			decision.Candidates[bestIdx].Score = roundAgentScore(best.score)
+		}
+	}
+	if explain && sticky {
+		for i := range decision.Candidates {
+			if i != bestIdx {
+				decision.Candidates[i].Score = 0
+				decision.Candidates[i].Reason = ""
+			}
+		}
+	}
+	winner := &pool.Accounts[bestIdx]
+	decision.AccountID, decision.Label = winner.ID, winner.displayName()
+	decision.Score = roundAgentScore(best.score)
+	if explain {
+		decision.Reason = decision.Candidates[bestIdx].Reason
+	} else {
+		decision.Reason = best.reason(sched.Mode, bestIdx, sticky)
+	}
+	if sched.Mode == "sticky_project" && preferred != "" && !sticky {
+		decision.Reason = "原项目账号暂不可用 · " + decision.Reason
+	}
+	return decision, bestIdx
+}
+
+// matchesAgentPin tests the configured ID/group and treats malformed legacy pins as unavailable.
+func matchesAgentPin(a *agentAccount, pin string) bool {
+	kind, value, ok := strings.Cut(pin, ":")
+	if !ok || value == "" {
+		return false
+	}
+	switch kind {
+	case "account":
+		return a.ID == value
+	case "group":
+		return a.HandoffGroup == value
+	}
+	return false
+}
+
+func agentAccountBlock(a *agentAccount, active int, login, quotaAvailable bool, now int64) string {
+	switch {
+	case a.ID == "":
+		return "账号 ID 无效"
+	case !a.Enabled:
+		return "已暂停参与调度"
+	case a.Status != "ready":
+		return "not_ready"
+	case login:
+		return "正在执行交互登录"
+	case a.CooldownUntil > now:
+		return "cooldown"
+	case !quotaAvailable:
+		return "配额窗口已耗尽"
+	case a.MaxConcurrency > 0 && active >= a.MaxConcurrency:
+		return "capacity"
+	}
+	return ""
+}
+
+func agentAccountBlockReason(block string, a *agentAccount, active int, now int64) string {
+	switch block {
+	case "not_ready":
+		return "账号未就绪（" + a.Status + "）"
+	case "cooldown":
+		return fmt.Sprintf("限流冷却中（剩余 %ds）", a.CooldownUntil-now)
+	case "capacity":
+		return fmt.Sprintf("已达并发上限（%d/%d）", active, a.MaxConcurrency)
+	default:
+		return block
+	}
+}
+
+type rankedAgentAccount struct {
+	quota        quotaTelemetry
+	health       float64
+	active       int
+	weight       int
+	score        float64
+	reset        int64
+	affinity     float64
+	probation    float64
+	burstPenalty float64
+}
+
+func (r *rankedAgentAccount) scoreAccount(a *agentAccount, mode string, preferred bool, now time.Time, roundRobin float64) {
+	load := float64(r.active) / float64(r.weight)
+	room := r.quota.headroom
+	switch mode {
+	case "balanced":
+		if room < 0 {
+			room = 65
+		}
+		if preferred {
+			r.affinity = 4
+		}
+		r.score = 100/(1+load*10) + room*0.25 + r.health*8 - r.quota.longPenalty*0.5 + roundRobin + r.affinity
+	case "quota_first":
+		if room < 0 {
+			room = 50
+		}
+		r.score = room + r.quota.resetUrgency*1.2 - r.quota.longPenalty + 25/(1+load*6) + r.health*6 + roundRobin
+	case "drain":
+		if room < 0 {
+			room = 55
+		}
+		var urgency float64
+		r.reset = math.MaxInt64
+		if r.quota.soonestResetSec > 0 && r.quota.longPenalty == 0 {
+			r.reset = r.quota.soonestResetSec
+			urgency = 70 / (1 + float64(r.reset)/3600)
+		}
+		r.score = urgency + room*0.3 + 20/(1+load*4) - r.quota.longPenalty + r.health*8 + roundRobin
+	default:
+		if room < 0 {
+			room = 65
+		}
+		if preferred && r.health >= 0.7 {
+			r.affinity = 12
+		}
+		r.probation = probationPenalty(*a, now)
+		if age := now.Unix() - a.LastAllocatedAt; a.LastAllocatedAt > 0 && age >= 0 && age < 15 {
+			r.burstPenalty = -6
+		}
+		r.score = 100/(1+load*4) + room*0.65 + r.health*15 + r.quota.resetUrgency - r.quota.longPenalty + r.affinity + r.probation + r.burstPenalty + roundRobin
+	}
+}
+
+func (r rankedAgentAccount) betterThan(other rankedAgentAccount) bool {
+	return r.reset < other.reset || r.reset == other.reset && r.score > other.score
+}
+
+func roundAgentScore(score float64) float64 {
+	return math.Round(score*100) / 100
+}
+
+func (r rankedAgentAccount) reason(mode string, index int, sticky bool) string {
+	switch mode {
+	case "manual":
+		return fmt.Sprintf("手动调度 · 活跃 %d", r.active)
+	case "exhaust":
+		return fmt.Sprintf("用尽再切换 · 池内第 %d 个账号 · 活跃 %d", index+1, r.active)
+	case "sequential":
+		if index == 0 {
+			return fmt.Sprintf("顺序优先 · 首选账号（活跃 %d）", r.active)
+		}
+		return fmt.Sprintf("顺序优先 · 前序不可用已自动故障转移至 #%d", index+1)
+	case "sticky_project":
+		if sticky {
+			return fmt.Sprintf("项目亲和 · 沿用同项目近期账号（活跃 %d）", r.active)
+		}
+	case "balanced":
+		return fmt.Sprintf("均衡负载 · 活跃 %d / 权重 %d", r.active, r.weight)
+	case "quota_first":
+		if r.quota.resetUrgency >= 2 {
+			return fmt.Sprintf("余量与重置优先 · 剩余 %.0f%% · 临近重置", r.quota.headroom)
+		}
+		if r.quota.headroom >= 0 {
+			return fmt.Sprintf("余量优先 · 剩余 %.0f%% · 活跃 %d", r.quota.headroom, r.active)
+		}
+		return fmt.Sprintf("余量优先 · 活跃 %d / 权重 %d", r.active, r.weight)
+	case "drain":
+		if r.reset < math.MaxInt64 {
+			room := r.quota.headroom
+			if room < 0 {
+				room = 55
+			}
+			return fmt.Sprintf("即将重置优先 · 约 %d 分钟后重置 · 剩余 %.0f%%", (r.reset-1)/60+1, room)
+		}
+		return fmt.Sprintf("即将重置优先 · 活跃 %d / 权重 %d", r.active, r.weight)
+	}
+	reason := make([]byte, 0, 192)
+	reason = append(reason, "智能调度"...)
+	if r.affinity > 0 {
+		reason = append(reason, " · 项目亲和"...)
+	}
+	if r.quota.resetUrgency >= 2 {
+		reason = append(reason, " · 临近重置优先消耗"...)
+	}
+	if r.quota.headroom >= 0 {
+		reason = fmt.Appendf(reason, " · 余量 %.0f%%", r.quota.headroom)
+	}
+	reason = fmt.Appendf(reason, " · 活跃 %d · 权重 %d", r.active, r.weight)
+	if r.health < 0.85 {
+		reason = fmt.Appendf(reason, " · 健康 %.0f%%", r.health*100)
+	}
+	if r.probation < -1 {
+		reason = append(reason, " · 冷却恢复观察中"...)
+	}
+	return string(reason)
 }

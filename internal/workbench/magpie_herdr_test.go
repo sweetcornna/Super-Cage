@@ -22,6 +22,14 @@ import (
 
 func TestMagpieConfigLifecycleAndSecurityBoundaries(t *testing.T) {
 	s := testServer(t)
+	var openURLCalls atomic.Int32
+	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
+		if subcmd == "magpie-open-url" {
+			openURLCalls.Add(1)
+			return json.Unmarshal([]byte(`{"url":"http://127.0.0.1:3430/?k=secret-magpie-key"}`), output)
+		}
+		return nil
+	}
 	s.ready = true
 
 	// Disabled by default with port 3430 and gateway port 3425.
@@ -101,14 +109,6 @@ func TestMagpieConfigLifecycleAndSecurityBoundaries(t *testing.T) {
 	}
 
 	// Verify workbench mode reuses ONLY exact-origin tab and does NOT consume auth URL when reusing.
-	var openURLCalls atomic.Int32
-	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
-		if subcmd == "magpie-open-url" {
-			openURLCalls.Add(1)
-			return json.Unmarshal([]byte(`{"url":"http://127.0.0.1:3430/?k=secret-magpie-key"}`), output)
-		}
-		return nil
-	}
 	var activatedID, createdURL string
 	guest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -198,9 +198,8 @@ func TestMagpieConfigLifecycleAndSecurityBoundaries(t *testing.T) {
 		!strings.Contains(linuxScript, shellescape.Quote("/proj/my 'app'")) {
 		t.Fatalf("unexpected Linux magpieTUIScript: %s", linuxScript)
 	}
-	s.macosGuest = &guestos.MacOSProfile{User: "cage"}
-	macScript := s.magpieTUIScript("/Users/cage/work")
-	s.macosGuest = nil
+	mac := &Server{macosGuest: &guestos.MacOSProfile{User: "cage"}}
+	macScript := mac.magpieTUIScript("/Users/cage/work")
 	if !strings.Contains(macScript, "/bin/zsh -lic") || !strings.Contains(macScript, "exec /bin/zsh -il") {
 		t.Fatalf("unexpected macOS magpieTUIScript: %s", macScript)
 	}

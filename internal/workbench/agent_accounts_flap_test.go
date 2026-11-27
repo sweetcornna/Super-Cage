@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -73,7 +74,7 @@ func TestAgentAccountEnabledStableWhenRuntimeFails(t *testing.T) {
 		Weight:     10,
 		HealthEWMA: 1.0,
 	}}
-	if err := s.saveAgentPoolsLocked(pools); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools); err != nil {
 		s.agentCLIs.mu.Unlock()
 		t.Fatal(err)
 	}
@@ -152,15 +153,24 @@ func TestConfirmAgentLoginErrorSurfacesNoticeAndPreservesPendingLogin(t *testing
 	}
 	pool := s.ensureAgentPoolLocked(pools, "antigravity")
 	pool.PendingLogin = pendingID
-	if err := s.saveAgentPoolsLocked(pools); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools); err != nil {
 		s.agentCLIs.mu.Unlock()
 		t.Fatal(err)
 	}
 	s.agentCLIs.mu.Unlock()
 
-	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, _ any, _ any) error {
-		if subcmd == "snapshot" {
+	var recovered atomic.Bool
+	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
+		if subcmd != "snapshot" {
+			return nil
+		}
+		if !recovered.Load() {
 			return errors.New("CreateProcess: command line too long")
+		}
+		if input.(map[string]any)["account_id"] == pendingID {
+			*output.(*agentGuestSnapshot) = agentGuestSnapshot{
+				LoggedIn: true, AuthMode: "oauth", Email: "dev@example.com", Plan: "Google OAuth",
+			}
 		}
 		return nil
 	}
@@ -187,23 +197,7 @@ func TestConfirmAgentLoginErrorSurfacesNoticeAndPreservesPendingLogin(t *testing
 	}
 
 	// Once runAgentRuntime succeeds again, refreshing recovers the PendingLogin!
-	s.agentCLIs.runtimeHook = func(_ context.Context, subcmd string, input any, output any) error {
-		if subcmd == "snapshot" {
-			m, _ := input.(map[string]any)
-			if m["account_id"] == pendingID {
-				data, _ := json.Marshal(agentGuestSnapshot{
-					LoggedIn: true,
-					AuthMode: "oauth",
-					Email:    "dev@example.com",
-					Plan:     "Google OAuth",
-				})
-				return json.Unmarshal(data, output)
-			}
-			data, _ := json.Marshal(agentGuestSnapshot{LoggedIn: false})
-			return json.Unmarshal(data, output)
-		}
-		return nil
-	}
+	recovered.Store(true)
 
 	w = request(s, "GET", "/api/agent-clis/antigravity/accounts?refresh=1", "", "", true)
 	resp = decodeAgentAccountsResp(t, w.Code, w.Body.Bytes())
@@ -230,7 +224,7 @@ func TestListAgentAccountsWaitsForInflightConfirmLogin(t *testing.T) {
 	pools, _ := s.loadAgentPoolsLocked()
 	pool := s.ensureAgentPoolLocked(pools, "antigravity")
 	pool.PendingLogin = pendingID
-	if err := s.saveAgentPoolsLocked(pools); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools); err != nil {
 		s.agentCLIs.mu.Unlock()
 		t.Fatal(err)
 	}
@@ -298,7 +292,7 @@ func TestConfirmAgentLoginDoesNotClearPendingWhileLoginTerminalActive(t *testing
 	pools, _ := s.loadAgentPoolsLocked()
 	pool := s.ensureAgentPoolLocked(pools, "antigravity")
 	pool.PendingLogin = pendingID
-	if err := s.saveAgentPoolsLocked(pools); err != nil {
+	if err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools); err != nil {
 		s.agentCLIs.mu.Unlock()
 		t.Fatal(err)
 	}
@@ -369,7 +363,7 @@ func TestListAgentAccountsDoesNotBlockOnOpLock(t *testing.T) {
 		}
 		pool := s.ensureAgentPoolLocked(pools, "antigravity")
 		pool.PendingLogin = pendingID
-		if err := s.saveAgentPoolsLocked(pools); err != nil {
+		if err := writePrivate(filepath.Join(s.profile, "agent-accounts.json"), pools); err != nil {
 			s.agentCLIs.mu.Unlock()
 			t.Fatal(err)
 		}

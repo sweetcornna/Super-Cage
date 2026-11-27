@@ -4,6 +4,8 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import runpy
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -389,6 +391,42 @@ clientSecret = "camel-client-secret"
                     self.fail("entered a session for another Codex home")
             self.assertIsNotNone(server.process.returncode)
 
+    def test_resume_routes_rollouts_to_original_profile(self):
+        self.login(FIRST)
+        thread = "19b38927-d608-49d6-b690-870ef502e802"
+        archive = "703d578a-20a5-4d67-924f-ad942e63221f"
+        home = self.base(FIRST) / "home"
+        session = home / "sessions/2026/10/03" / f"rollout-2026-10-03T07-09-01-{thread}_c88ebbc8-9649-4339-9f10-f6255aa748a8.jsonl"
+        archived = home / "archived_sessions" / f"rollout-2026-10-03T07-09-01-{archive}.jsonl"
+        for path, identifier in [(session, thread), (archived, archive)]:
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"type": "session_meta", "timestamp": "2026-10-03T07:09:01.000Z",
+                                        "payload": {"id": identifier, "cwd": "/previous/project", "source": "cli"}}) + "\n")
+        schedule = self.base(FIRST).parent / "launch.json"
+        old = {"id": FIRST, "subject": self.subject}
+        new = {"id": SECOND, "subject": self.subject}
+        schedule.write_text(json.dumps({"managed": True, "accounts": [new], "history_accounts": [old, new]}))
+        env = {key: value for key, value in self.env.items() if key not in ("CODEX_HOME", "OPENAI_API_KEY", "CAGE_CODEX_SUBJECT")}
+        for args in [("resume", "--all", thread), ("exec", "resume", "-c", "history.persistence='save-all'", thread),
+                     ("resume", archive), ("unarchive", archive), ("resume", "--all"), ("resume", "--last")]:
+            result = self.run_helper("auto", *args, env=env)
+            self.assertEqual(result.returncode, 0)
+            seen = json.loads(self.capture.read_text())
+            self.assertEqual(Path(seen["env"]["CODEX_HOME"]), home)
+            self.assertEqual(seen["argv"][-len(args):], list(args))
+        other_path = self.base(SECOND) / "home/sessions/2026/10/03" / session.name
+        other_path.parent.mkdir(parents=True)
+        other_path.symlink_to(session)
+        self.run_helper("auto", "resume", thread, env=env)
+        self.assertEqual(Path(json.loads(self.capture.read_text())["env"]["CODEX_HOME"]), home)
+        other_path.unlink()
+        other_path.write_bytes(session.read_bytes())
+        self.capture.unlink()
+        ambiguous = self.run_helper("auto", "resume", thread, env=env, check=False)
+        self.assertEqual(ambiguous.returncode, 78)
+        self.assertFalse(self.capture.exists())
+        self.assertIn('"cwd": "/previous/project"', archived.read_text())
+
     def test_auto_schedules_codex_skipping_exhausted_and_respecting_explicit_env(self):
         # Log in two distinct Codex accounts.
         self.login(FIRST)
@@ -474,6 +512,155 @@ clientSecret = "camel-client-secret"
         seen3 = json.loads(self.capture.read_text())
         self.assertNotEqual(seen3["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"))
         self.assertEqual(seen3["argv"][-2:], ["--search", "magpie"])
+
+    def orca_fixture(self):
+        second_email = "second@example.test"
+        second_subject = hashlib.sha256(f"{second_email}\nworkspace-1".encode()).hexdigest()
+        self.login(FIRST)
+        self.login(SECOND, env={**self.env, "TEST_EMAIL": second_email})
+        self.run_helper("snapshot", FIRST)
+        self.run_helper("snapshot", SECOND)
+        data = self.home / ("Library/Application Support/orca" if sys.platform == "darwin" else ".config/orca")
+        data.mkdir(parents=True, mode=0o700)
+        native = []
+        for guest_id, native_id in [(FIRST, "a14932ad-2140-42d1-a7d3-1206468de483"),
+                                    (SECOND, "fd72af98-76e7-4601-b301-a05d207b248a")]:
+            codex = data / "codex-accounts" / native_id / "home"
+            codex.mkdir(parents=True, mode=0o700)
+            codex.parent.chmod(0o775)
+            codex.parent.parent.chmod(0o775)
+            (codex / ".orca-managed-home").write_text(native_id + "\n")
+            auth = codex / "auth.json"
+            auth.write_bytes((self.base(guest_id) / "home/auth.json").read_bytes())
+            auth.chmod(0o600)
+            native.append(codex)
+        env = {name: value for name, value in self.env.items() if name not in ("OPENAI_API_KEY", "CAGE_CODEX_SUBJECT")}
+        env.update(TERM_PROGRAM="Orca", ORCA_USER_DATA_PATH=str(data), CODEX_HOME=str(native[0]))
+        roster = [{"id": FIRST, "subject": self.subject}, {"id": SECOND, "subject": second_subject}]
+        (self.base(FIRST).parent / "launch.json").write_text(json.dumps({"managed": True, "accounts": roster}))
+        executable = self.home / ".local/bin/cage-codex-account"
+        executable.write_text("#!/bin/sh\nexec " + shlex.join([sys.executable, str(source.resolve())]) + ' "$@"\n')
+        executable.chmod(0o700)
+        with patch.dict(os.environ, env, clear=True):
+            runtime = runpy.run_path(str(source.with_name("agent-runtime.py")))
+            sync = runtime["sync_auto_shims"]
+            mask = os.umask(0o077)
+            try:
+                with patch.dict(sync.__globals__, {"_codex_account_helper": lambda: str(executable)}):
+                    published = sync()
+            finally:
+                os.umask(mask)
+        self.assertIn("codex", published["shims"])
+        env["PATH"] = f"{published['dir']}{os.pathsep}{env['PATH']}"
+        return env, native, roster
+
+    def run_orca_codex(self, env, *args):
+        return subprocess.run(["codex", *args], env=env, cwd=self.home,
+                              text=True, capture_output=True, check=True, timeout=15)
+
+    def orca_launch(self, env, *args):
+        self.capture.unlink(missing_ok=True)
+        self.run_orca_codex(env, *args)
+        return json.loads(self.capture.read_text())
+
+    def test_orca_injected_profile_obeys_native_launch_policy(self):
+        env, native, roster = self.orca_fixture()
+        schedule = self.base(FIRST).parent / "launch.json"
+        choices = {"managed": True, "history_accounts": roster}
+        schedule.write_text(json.dumps({**choices, "mode": "manual", "selected_account_id": SECOND,
+                                        "accounts": [roster[1]]}))
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+
+        now = int(time.time())
+        quota = self.base(FIRST) / "quota.json"
+        def usage(percent):
+            quota.write_text(json.dumps({"identity": self.subject, "observed_at": now,
+                                        "primary": {"used_percentage": percent, "resets_at": now + 3600,
+                                                    "window_minutes": 300, "observed_at": now}}))
+
+        usage(100)
+        schedule.write_text(json.dumps({**choices, "mode": "exhaust", "selected_account_id": FIRST,
+                                        "selected_account_revision": "new-selection", "accounts": roster}))
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+        usage(20)
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+
+        schedule.write_text(json.dumps({**choices, "mode": "smart", "accounts": roster, "active": {FIRST: 1}}))
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+        for args in [("login",), ("logout",), ("--remote", "ws://127.0.0.1", "prompt")]:
+            self.assertEqual(self.orca_launch(env, *args)["env"]["CODEX_HOME"], str(native[0]))
+        status = self.run_orca_codex(env, "login", "status")
+        self.assertIn("Logged in using ChatGPT", status.stderr)
+        self.run_orca_codex({**env, "TEST_EMAIL": "reauth@example.test"}, "login", "--device-auth")
+        self.assertEqual(helper.token_claims(native[0])["email"], "reauth@example.test")
+        self.assertEqual(helper.token_claims(self.base(FIRST) / "home")["email"], self.email)
+
+    def test_orca_profile_matching_preserves_explicit_and_unlinked_homes(self):
+        env, native, roster = self.orca_fixture()
+        schedule = self.base(FIRST).parent / "launch.json"
+        settings = {"managed": True, "mode": "manual", "selected_account_id": SECOND,
+                    "accounts": [roster[1]], "history_accounts": roster}
+        schedule.write_text(json.dumps(settings))
+        for extra in ({"TERM_PROGRAM": ""}, {"ORCA_USER_DATA_PATH": str(self.home / "another-orca")},
+                      {"CODEX_HOME": str(self.home / "custom-home")}, {"OPENAI_BASE_URL": "https://proxy.example.test"},
+                      {"CODEX_API_KEY": "synthetic-proxy-key"}, {"CAGE_CODEX_ACCOUNT_ID": "default"},
+                      {"CAGE_CLI_ACCOUNT_CODEX": "default"}, {"CAGE_ACCOUNT_SCHEDULING": "off"}):
+            with self.subTest(extra=extra):
+                seen = self.orca_launch({**env, **extra}, "prompt")["env"]
+                self.assertEqual(seen["CODEX_HOME"], extra.get("CODEX_HOME", str(native[0])))
+        fixed = {**env, "CAGE_CODEX_ACCOUNT_ID": FIRST, "CAGE_CODEX_SUBJECT": self.subject}
+        self.assertEqual(self.orca_launch(fixed, "prompt")["env"]["CODEX_HOME"], str(self.base(FIRST) / "home"))
+
+        for history in ([roster[1]], [*roster, {"id": "3" * 24, "subject": self.subject}]):
+            schedule.write_text(json.dumps({**settings, "history_accounts": history}))
+            self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        schedule.write_text(json.dumps(settings))
+        marker = native[0] / ".orca-managed-home"
+        marker.write_text("unknown")
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        marker.write_text(native[0].parent.name + "\n")
+
+        auth = native[0] / "auth.json"
+        original = auth.read_bytes()
+        other_tenant = json.loads(original)
+        claims = {"email": self.email, "https://api.openai.com/auth": {"chatgpt_account_id": "other-tenant"}}
+        part = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+        other_tenant["tokens"]["id_token"] = f"header.{part}.signature"
+        auth.write_text(json.dumps(other_tenant))
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        auth.write_bytes(original)
+        auth.chmod(0o644)
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        auth.chmod(0o600)
+        alias = native[0].parent.parent / "6f86468c-eaf6-4931-b1c8-617f02166907" / "home"
+        alias.parent.mkdir()
+        alias.symlink_to(native[0], target_is_directory=True)
+        self.assertEqual(self.orca_launch({**env, "CODEX_HOME": str(alias)}, "prompt")["env"]["CODEX_HOME"], str(alias))
+        takeover = self.home / ".local/share/cage/magpie/takeover"
+        takeover.parent.mkdir()
+        takeover.write_text("1")
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+
+    def test_orca_resume_keeps_rollouts_in_their_original_native_or_cage_home(self):
+        env, native, roster = self.orca_fixture()
+        schedule = self.base(FIRST).parent / "launch.json"
+        schedule.write_text(json.dumps({"managed": True, "mode": "manual", "selected_account_id": FIRST,
+                                        "accounts": [roster[0]], "history_accounts": roster}))
+        cases = [
+            ("0efd8832-fd5b-46bc-9991-7611c98d875f", native[0], "sessions/2026/10/04", ("resume",)),
+            ("f39fe4c2-791a-4553-9a0c-0851eebe17b0", native[1], "archived_sessions", ("unarchive",)),
+            ("6e673a4f-84f7-45a3-8ada-6ed47fa42be6", self.base(SECOND) / "home", "sessions/2026/10/04", ("exec", "resume")),
+        ]
+        for thread, home, directory, _ in cases:
+            path = home / directory / f"rollout-2026-10-04T07-09-01-{thread}.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text("{}\n")
+        for thread, home, directory, args in cases:
+            with self.subTest(thread=thread):
+                seen = self.orca_launch(env, *args, thread)
+                self.assertEqual(seen["env"]["CODEX_HOME"], str(home))
+                self.assertEqual(seen["argv"][-len(args)-1:], [*args, thread])
+                self.assertTrue((home / directory / f"rollout-2026-10-04T07-09-01-{thread}.jsonl").exists())
 
 
 if __name__ == "__main__":

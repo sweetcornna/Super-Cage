@@ -303,6 +303,9 @@ func pickFreeOrcaTunnelPort(preferred int, reserved map[int]bool) int {
 }
 
 func (s *Server) ensureOrcaTunnel(ctx context.Context, hostPort, guestPort int) (*orcaTunnel, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if s.windowsGuest != nil {
 		return nil, errors.New("Windows 原生客机暂不支持托管 Orca Server 本地隧道")
 	}
@@ -316,8 +319,11 @@ func (s *Server) ensureOrcaTunnel(ctx context.Context, hostPort, guestPort int) 
 		if !unlocked {
 			return nil, errors.New("Cage 已锁定，请先解锁工作台")
 		}
+		if requested, _ := ctx.Value(accountEpochKey{}).(context.Context); requested != nil && requested != epoch {
+			return nil, errClaudeAccessLost
+		}
 	}
-	targetKey := fmt.Sprintf("%d->%d", hostPort, guestPort)
+	targetKey := fmt.Sprintf("%s:%d->%d", s.sshTarget(), hostPort, guestPort)
 
 	s.orca.mu.Lock()
 	if cur := s.orca.tunnel; cur != nil && cur.targetKey == targetKey && !cur.isClosed() && (cur.epoch == nil || cur.epoch == epoch) {
@@ -378,6 +384,11 @@ func (s *Server) ensureOrcaTunnel(ctx context.Context, hostPort, guestPort int) 
 
 	var displaced *orcaTunnel
 	s.orca.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		s.orca.mu.Unlock()
+		tun.close()
+		return nil, err
+	}
 	if tun.isClosed() || (epoch != nil && epoch.Err() != nil) {
 		s.orca.mu.Unlock()
 		tun.close()

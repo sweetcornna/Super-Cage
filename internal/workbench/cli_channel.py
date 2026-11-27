@@ -808,7 +808,15 @@ def launch(request):
     # Managed account wrappers need their private launch state until they reach
     # the official executable; the ordinary direct launch crosses that boundary here.
     managed = len(request["prefix"]) == 5 and request["prefix"][3] == "run"
-    os.execvpe(args[0], args, os.environ if managed else _runtime["environment"](os.environ))
+    env = os.environ.copy()
+    if prefix == ["claude"]:
+        # The controller already chose the default/legacy binding for this
+        # conversation. Guest auto-shims must not assign it a different account.
+        cage = Path.home().resolve() / ".local/share/cage"
+        shims = {Path("/usr/local/lib/cage-claude-bin"), cage / "auto-shims", cage / "orca/shims", cage / "t3code/shims"}
+        env["PATH"] = os.pathsep.join(part for part in env.get("PATH", os.defpath).split(os.pathsep)
+                                      if part and Path(part).resolve() not in shims)
+    os.execvpe(args[0], args, env if managed else _runtime["environment"](env))
 
 
 def rpc(request):

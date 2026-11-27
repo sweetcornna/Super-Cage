@@ -40,6 +40,8 @@ type entryConn struct {
 	flush entryFlush
 	// stalled: a write to the client waited entryWriteTimeout (R3-4).
 	stalled atomic.Bool
+	// lost: the transport vanished without a normal WebSocket close.
+	lost atomic.Bool
 	// What the connection runs now, for the status line.
 	shells, execs, sftps atomic.Int32
 	channels             atomic.Int32

@@ -175,7 +175,7 @@ func writePrivate(path string, v any) error {
 	if closeErr != nil {
 		return closeErr
 	}
-	return os.Rename(f.Name(), path)
+	return cage.CommitSyncedFile(f.Name(), path)
 }
 func settingsView(c cage.Config, p Preferences) Settings {
 	if p.MobileRelay == mobilelink.OfficialRelay {

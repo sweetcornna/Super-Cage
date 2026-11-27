@@ -37,6 +37,9 @@ func (s *Server) submitJobLocked(kind string, run func() error) (job Job, intent
 		afterSuccess = func() error { return s.account.lockAccess(true) }
 	}
 	job, err = s.jobs.submit(&s.op, kind, s.safety.pauseVersion, func() error {
+		if kind == "stop" {
+			s.cancelWorkbenchRuntimeRestoreLocked()
+		}
 		if kind == "safety" || (s.macosGuest == nil && (kind == "start" || kind == "restart" || kind == "restore")) {
 			if err := s.saveNetworkIntentLocked(false); err != nil {
 				intentFailed = true

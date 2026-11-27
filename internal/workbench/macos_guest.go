@@ -303,6 +303,7 @@ func (s *Server) attachMacOSGuest() error {
 	checkAfterReconnect := newlyReady && !s.closing && !s.networkPaused && !s.jobs.snapshot().Running
 	s.ready = err == nil
 	if newlyReady {
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
 		s.wakeMonitorsLocked()
 	}
 	s.guestUpdateError = ""

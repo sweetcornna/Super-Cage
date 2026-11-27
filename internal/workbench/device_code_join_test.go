@@ -49,11 +49,17 @@ func hostInviteForTest(t *testing.T, host *Server, wait string) hostInviteView {
 // dialog it reads at once, then holds a read only while it is still waiting.
 func hostRequestForTest(t *testing.T, host *Server) hostInviteView {
 	t.Helper()
+	view := hostInviteForTest(t, host, "0")
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
-		if view := hostInviteForTest(t, host, "0"); view.State != "waiting" {
+		if view.Request != nil {
 			return view
 		}
-		hostInviteForTest(t, host, "5")
+		if view.State != "waiting" {
+			t.Fatalf("host left the waiting state without a request: %s", view.State)
+		}
+		// The test approval expires in three seconds. Consume the held
+		// read, including when the transition happens between requests.
+		view = hostInviteForTest(t, host, "1")
 	}
 	t.Fatal("the host never showed a request")
 	return hostInviteView{}

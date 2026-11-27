@@ -28,13 +28,14 @@ const (
 // magpieConfig persists the user's opt-in Magpie (yetone/magpie) integration preferences.
 // Disabled by default (zero overhead until enabled).
 type magpieConfig struct {
-	Enabled     bool   `json:"enabled"`
-	Mode        string `json:"mode"`                   // managed | external
-	ExternalURL string `json:"external_url,omitempty"` // when Mode == "external"
-	Port        int    `json:"port"`                   // managed web UI port (default 3430)
-	GatewayOnly bool   `json:"gateway_only"`           // pass --gateway to magpie web
-	OpenMode    string `json:"open_mode"`              // workbench | direct
-	FocusChrome bool   `json:"focus_chrome"`           // 36px distraction-free header
+	Enabled      bool    `json:"enabled"`
+	Mode         string  `json:"mode"`                    // managed | external
+	ExternalURL  string  `json:"external_url,omitempty"`  // when Mode == "external"
+	Port         int     `json:"port"`                    // managed web UI port (default 3430)
+	GatewayOnly  bool    `json:"gateway_only"`            // pass --gateway to magpie web
+	OpenMode     string  `json:"open_mode"`               // workbench | direct
+	FocusChrome  bool    `json:"focus_chrome"`            // 36px distraction-free header
+	RunWorkspace *string `json:"run_workspace,omitempty"` // nil until a managed instance is used
 }
 
 func defaultMagpieConfig() magpieConfig {
@@ -126,23 +127,25 @@ type magpieGuestStatus struct {
 }
 
 type magpieProbeCall struct {
-	done   chan struct{}
-	port   int
-	forced bool
-	status magpieGuestStatus
-	err    error
+	done       chan struct{}
+	port       int
+	forced     bool
+	generation uint64
+	status     magpieGuestStatus
+	err        error
 }
 
 type magpieManager struct {
-	opMu          sync.Mutex
-	syncMu        sync.Mutex
-	mu            sync.Mutex
-	configLoaded  bool
-	config        magpieConfig
-	statusCache   magpieGuestStatus
-	statusAt      time.Time
-	probeInflight *magpieProbeCall
-	proxy         *t3CodeProxy
+	opMu             sync.Mutex
+	syncMu           sync.Mutex
+	mu               sync.Mutex
+	configLoaded     bool
+	config           magpieConfig
+	statusCache      magpieGuestStatus
+	statusAt         time.Time
+	statusGeneration uint64
+	probeInflight    *magpieProbeCall
+	proxy            *t3CodeProxy
 }
 
 // magpieTakesOverScheduling reports whether Magpie integration is enabled.
@@ -150,6 +153,11 @@ type magpieManager struct {
 // scheduling across all harnesses (Claude, Codex, Agent CLIs, shells, Herdr,
 // T3 Code, Orca Server) so Magpie's native config takeover works seamlessly.
 func (s *Server) magpieTakesOverScheduling() bool {
+	// An external Magpie can open on Windows, where the native Claude relay
+	// keeps ownership of account scheduling.
+	if s.windowsGuest != nil {
+		return false
+	}
 	s.magpie.mu.Lock()
 	cfg, err := s.loadMagpieConfigLocked()
 	s.magpie.mu.Unlock()
@@ -390,6 +398,7 @@ func (s *Server) closeMagpieProxy() {
 func (s *Server) invalidateMagpieStatus() {
 	s.magpie.mu.Lock()
 	s.magpie.statusAt = time.Time{}
+	s.magpie.statusGeneration++
 	s.magpie.mu.Unlock()
 }
 
@@ -413,7 +422,7 @@ func (s *Server) probeMagpieStatus(ctx context.Context, port int, force bool) (m
 			m.mu.Unlock()
 			return cached, nil
 		}
-		if call := m.probeInflight; call != nil && call.port == port {
+		if call := m.probeInflight; call != nil && call.port == port && call.generation == m.statusGeneration {
 			if !force || call.forced {
 				m.mu.Unlock()
 				select {
@@ -431,7 +440,7 @@ func (s *Server) probeMagpieStatus(ctx context.Context, port int, force bool) (m
 				continue
 			}
 		}
-		call := &magpieProbeCall{done: make(chan struct{}), port: port, forced: force}
+		call := &magpieProbeCall{done: make(chan struct{}), port: port, forced: force, generation: m.statusGeneration}
 		m.probeInflight = call
 		m.mu.Unlock()
 
@@ -456,7 +465,7 @@ func (s *Server) probeMagpieStatus(ctx context.Context, port int, force bool) (m
 			}
 		}
 		m.mu.Lock()
-		if err == nil {
+		if err == nil && call.generation == m.statusGeneration {
 			m.statusCache = st
 			m.statusAt = time.Now()
 		}
@@ -519,23 +528,23 @@ func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]an
 		"enabled":             cfg.Enabled,
 		"scheduling_disabled": cfg.Enabled,
 		"mode":                cfg.Mode,
-		"external_url":     cfg.ExternalURL,
-		"port":             cfg.Port,
-		"gateway_port":     gatewayPort,
-		"gateway_only":     cfg.GatewayOnly,
-		"open_mode":        cfg.OpenMode,
-		"focus_chrome":     cfg.FocusChrome,
-		"installed":        st.Installed,
-		"version":          st.Version,
-		"running":          st.Running,
-		"gateway_running":  st.GatewayRunning,
-		"url":              displayURL,
-		"gateway_url":      gatewayURL,
-		"error":            probeErr,
-		"vm_running":       runningVM,
-		"ready":            ready,
-		"supports_managed": supportsManaged,
-		"direct_available": directAvailable,
+		"external_url":        cfg.ExternalURL,
+		"port":                cfg.Port,
+		"gateway_port":        gatewayPort,
+		"gateway_only":        cfg.GatewayOnly,
+		"open_mode":           cfg.OpenMode,
+		"focus_chrome":        cfg.FocusChrome,
+		"installed":           st.Installed,
+		"version":             st.Version,
+		"running":             st.Running,
+		"gateway_running":     st.GatewayRunning,
+		"url":                 displayURL,
+		"gateway_url":         gatewayURL,
+		"error":               probeErr,
+		"vm_running":          runningVM,
+		"ready":               ready,
+		"supports_managed":    supportsManaged,
+		"direct_available":    directAvailable,
 	}, nil
 }
 
@@ -643,11 +652,12 @@ func (s *Server) magpieConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	needStopManaged := prevMode == "managed" && ((prevEnabled && !cfg.Enabled) || cfg.Mode != "managed" || cfg.Port != prevPort || cfg.GatewayOnly != prevGatewayOnly)
+	needStopManaged := prevEnabled && prevMode == "managed" && (!cfg.Enabled || cfg.Mode != "managed" || cfg.Port != prevPort || cfg.GatewayOnly != prevGatewayOnly)
+	if !cfg.Enabled || cfg.Mode != "managed" || needStopManaged {
+		cfg.RunWorkspace = nil
+	}
 	if needStopManaged && s.vmRunning() && s.windowsGuest == nil {
-		stopCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-		stopErr := s.runAgentRuntime(stopCtx, "magpie-stop", map[string]any{"port": prevPort}, nil)
-		cancel()
+		stopErr := s.stopManagedMagpie(r.Context(), prevPort)
 		if stopErr != nil {
 			http.Error(w, fmt.Sprintf("停止原托管 Magpie 服务失败，配置未变更: %v", stopErr), http.StatusConflict)
 			return
@@ -722,18 +732,22 @@ func (s *Server) magpieInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		// Automatically enable managed Magpie after a successful install.
 		var becameEnabled bool
 		s.magpie.mu.Lock()
-		if cfg, err := s.loadMagpieConfigLocked(); err == nil {
+		cfg, err := s.loadMagpieConfigLocked()
+		if err == nil && cfg.Mode == "managed" {
 			becameEnabled = !cfg.Enabled
 			cfg.Enabled = true
-			cfg.Mode = "managed"
-			_ = s.saveMagpieConfigLocked(cfg)
+			err = s.saveMagpieConfigLocked(cfg)
 		}
 		s.magpie.statusAt = time.Time{}
+		s.magpie.statusGeneration++
 		s.magpie.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		if becameEnabled {
 			s.syncSchedulingForMagpieTransition(s.operationContext(), true)
 		}
-		s.setMessage("Magpie 安装完成，已自动关闭账号调度并交由 Magpie 接管…")
+		s.setMessage("Magpie 安装完成")
 		return nil
 	})
 }
@@ -772,18 +786,24 @@ func (s *Server) magpieUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.closeMagpieProxy()
 		var becameDisabled bool
 		s.magpie.mu.Lock()
-		if cfg, err := s.loadMagpieConfigLocked(); err == nil {
+		cfg, err := s.loadMagpieConfigLocked()
+		if err == nil && cfg.Mode == "managed" {
 			becameDisabled = cfg.Enabled
 			cfg.Enabled = false
-			_ = s.saveMagpieConfigLocked(cfg)
+			cfg.RunWorkspace = nil
+			err = s.saveMagpieConfigLocked(cfg)
 		}
 		s.magpie.statusCache = magpieGuestStatus{}
 		s.magpie.statusAt = time.Time{}
+		s.magpie.statusGeneration++
 		s.magpie.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		if becameDisabled {
 			s.syncSchedulingForMagpieTransition(s.operationContext(), false)
 		}
-		s.setMessage("Magpie 已卸载，已恢复 Super Cage 账号调度")
+		s.setMessage("Magpie 已卸载")
 		return nil
 	})
 }
@@ -807,19 +827,43 @@ func (s *Server) ensureManagedMagpieRunning(ctx context.Context, restart bool, w
 	if s.windowsGuest != nil {
 		return cfg, magpieGuestStatus{}, errors.New("Windows 原生客机请切换到外部地址模式接入 Magpie")
 	}
+	if !s.lockProjectOperation(ctx) {
+		return cfg, magpieGuestStatus{}, errTerminalBusy
+	}
+	defer s.op.Unlock()
+	ctx, finish, err := s.workbenchToolContext(ctx)
+	if err != nil {
+		return cfg, magpieGuestStatus{}, err
+	}
+	defer finish()
+	if !s.vmRunning() || s.busy() {
+		return cfg, magpieGuestStatus{}, errTerminalNotReady
+	}
 
 	// Ensure guest-side Cage scheduling manifests & shims are cleared even if
 	// Magpie was enabled while the VM was stopped or before a controller restart.
 	s.disableGuestAccountScheduling(ctx, false)
 
+	if !restart && cfg.RunWorkspace != nil {
+		workspace = *cfg.RunWorkspace
+	}
+	if workspace == "" && (restart || cfg.RunWorkspace == nil) {
+		workspace = s.workspace()
+	}
 	if !restart {
-		if st, err := s.probeMagpieStatus(ctx, cfg.Port, false); err == nil && st.Running && st.GatewayOnly == cfg.GatewayOnly {
-			return cfg, st, nil
+		st, probeErr := s.probeMagpieStatus(ctx, cfg.Port, false)
+		if probeErr != nil {
+			return cfg, st, probeErr
+		}
+		if st.Running && st.GatewayOnly == cfg.GatewayOnly {
+			return cfg, st, s.rememberMagpieRun(cfg, workspace)
 		}
 	}
-
-	if workspace == "" {
-		workspace = s.workspace()
+	if workspace != "" {
+		workspace, err = s.connectProject(workspace, false)
+		if err != nil {
+			return cfg, magpieGuestStatus{}, err
+		}
 	}
 	subcmd := "magpie-start"
 	if restart {
@@ -834,7 +878,11 @@ func (s *Server) ensureManagedMagpieRunning(ctx context.Context, restart bool, w
 		"gateway_only": cfg.GatewayOnly,
 		"workspace":    s.cliWorkspace(workspace),
 	}, &st)
-	if err != nil {
+	if err != nil || !st.Running {
+		s.invalidateMagpieStatus()
+		if err == nil {
+			err = errors.New("Magpie 未报告服务已就绪")
+		}
 		return cfg, st, err
 	}
 	if st.Port == 0 {
@@ -847,8 +895,46 @@ func (s *Server) ensureManagedMagpieRunning(ctx context.Context, restart bool, w
 	s.magpie.mu.Lock()
 	s.magpie.statusCache = st
 	s.magpie.statusAt = time.Now()
+	s.magpie.statusGeneration++
 	s.magpie.mu.Unlock()
-	return cfg, st, nil
+	if restart {
+		cfg.RunWorkspace = nil
+	}
+	return cfg, st, s.rememberMagpieRun(cfg, workspace)
+}
+
+func (s *Server) rememberMagpieRun(cfg magpieConfig, workspace string) error {
+	if cfg.RunWorkspace != nil {
+		return nil
+	}
+	cfg.RunWorkspace = &workspace
+	s.magpie.mu.Lock()
+	defer s.magpie.mu.Unlock()
+	return s.saveMagpieConfigLocked(cfg)
+}
+
+func (s *Server) stopManagedMagpie(ctx context.Context, port int) error {
+	if !s.lockProjectOperation(ctx) {
+		return errTerminalBusy
+	}
+	defer s.op.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return s.runAgentRuntime(ctx, "magpie-stop", map[string]any{"port": port}, nil)
+}
+
+func (s *Server) restoreMagpie(ctx context.Context) error {
+	s.magpie.opMu.Lock()
+	defer s.magpie.opMu.Unlock()
+	s.magpie.mu.Lock()
+	cfg, err := s.loadMagpieConfigLocked()
+	s.magpie.mu.Unlock()
+	if err != nil || !cfg.Enabled || cfg.Mode != "managed" || cfg.RunWorkspace == nil {
+		return err
+	}
+	s.invalidateMagpieStatus()
+	_, _, err = s.ensureManagedMagpieRunning(ctx, false, *cfg.RunWorkspace)
+	return err
 }
 
 func (s *Server) magpieActionHTTP(w http.ResponseWriter, r *http.Request) {
@@ -872,22 +958,34 @@ func (s *Server) magpieActionHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonReply(w, payload)
 	case "stop":
-		s.closeMagpieProxy()
 		s.magpie.mu.Lock()
-		cfg, _ := s.loadMagpieConfigLocked()
+		cfg, err := s.loadMagpieConfigLocked()
 		s.magpie.mu.Unlock()
+		if err != nil {
+			requestError(w, err)
+			return
+		}
 		if cfg.Mode == "managed" && s.vmRunning() && s.windowsGuest == nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			err := s.runAgentRuntime(ctx, "magpie-stop", map[string]any{"port": cfg.Port}, nil)
-			cancel()
+			err := s.stopManagedMagpie(r.Context(), cfg.Port)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
 		}
 		s.magpie.mu.Lock()
+		if cfg.RunWorkspace != nil {
+			cfg.RunWorkspace = nil
+			err = s.saveMagpieConfigLocked(cfg)
+		}
+		s.magpie.statusCache = magpieGuestStatus{}
 		s.magpie.statusAt = time.Time{}
+		s.magpie.statusGeneration++
 		s.magpie.mu.Unlock()
+		s.closeMagpieProxy()
+		if err != nil {
+			requestError(w, err)
+			return
+		}
 		payload, err := s.magpieStatusPayload(r, true)
 		if err != nil {
 			requestError(w, err)

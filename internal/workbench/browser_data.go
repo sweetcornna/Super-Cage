@@ -1024,6 +1024,7 @@ func (s *Server) reattachBrowser(ctx context.Context, token string) error {
 	newlyReady := !s.ready
 	s.ready = true
 	if newlyReady {
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
 		s.wakeMonitorsLocked()
 	}
 	s.mu.Unlock()

@@ -69,6 +69,12 @@ func TestAttachReadsSnapshotOverSharedSessionAndSkipsSeparateHealth(t *testing.T
 	if !environmentReady(s) || s.credentials.Token != "attach-token" {
 		t.Fatal("attach did not publish the guest connection")
 	}
+	s.mu.Lock()
+	restorePending := s.runtimeRestore.pending
+	s.mu.Unlock()
+	if restorePending != restoreRuntimeAll {
+		t.Fatalf("production attach queued restoration %b, want %b", restorePending, restoreRuntimeAll)
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	homepage := 0

@@ -184,6 +184,14 @@ class CodexSessionTests(unittest.TestCase):
         self.assertEqual(turns[0]["id"], sessions.turn_id(thread, turns[0]["_offset"]))
         self.assertEqual(uuid.UUID(turns[0]["id"]).version, 4)
 
+    def test_recovery_requires_a_native_rollout_for_the_exact_id(self):
+        thread, path = self.rollout(self.turn_rows("old prompt", "old reply"))
+        self.assertTrue(sessions.view({"thread": thread})["history_found"])
+        other = str(uuid.uuid4())
+        path.rename(path.with_name(path.name.replace(thread, other)))
+        self.assertFalse(sessions.view({"thread": thread})["history_found"])
+        self.assertFalse(sessions.view({"thread": other})["history_found"])
+
     def test_tail_is_bounded_and_history_is_trimmed(self):
         rows = []
         for number in range(40):

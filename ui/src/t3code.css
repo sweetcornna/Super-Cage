@@ -94,7 +94,7 @@
 
 .t3code-config-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
   gap: 12px;
   align-items: end;
 }
@@ -187,6 +187,16 @@
   min-width: 0;
 }
 
+.t3code-port-form,
+.t3code-external-form {
+  flex-wrap: wrap;
+}
+
+.t3code-port-form > label,
+.t3code-external-form > label {
+  flex-basis: 140px;
+}
+
 .t3code-install-box > button,
 .t3code-port-form > button,
 .t3code-external-form > button {
@@ -241,6 +251,11 @@
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--chrome);
+}
+
+.t3code-binding-row .t3code-binding-error {
+  grid-column: 1 / -1;
+  margin: 0;
 }
 
 .t3code-binding-agent {

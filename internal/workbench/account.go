@@ -187,6 +187,10 @@ func (s *Server) accountAction(w http.ResponseWriter, r *http.Request) {
 		// durable pending state, rather than reporting that the old Cage password works.
 		_ = s.syncMacGuestPassword(r.Context())
 	}
+	switch action {
+	case "create", "unlock", "device-unlock", "prepare-macos", "recovery-reset":
+		s.requestWorkbenchRuntimeRestore()
+	}
 	if recoveryKey != "" {
 		jsonReply(w, struct {
 			accountView

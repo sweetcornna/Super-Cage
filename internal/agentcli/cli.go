@@ -73,6 +73,9 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 		args = args[1:]
 	}
 	operand := ""
+	if command == "upgrade" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		operand, args = args[0], args[1:]
+	}
 	if command == "call" || command == "job" || command == "request" || command == "socket" {
 		if len(args) == 0 {
 			return bad("call needs NAME; job needs ID; request needs METHOD /api/PATH; socket needs /api/PATH.")
@@ -91,7 +94,11 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 	config := flags.String("config", os.Getenv(cage.ConfigEnv), "")
 	input := flags.String("input", "", "")
 	output := flags.String("output", "", "")
-	wait := flags.Duration("wait", 0, "")
+	defaultWait := time.Duration(0)
+	if command == "upgrade" {
+		defaultWait = 10 * time.Minute
+	}
+	wait := flags.Duration("wait", defaultWait, "")
 	defaultScope := "local"
 	if clientOnly {
 		defaultScope = "client"
@@ -100,8 +107,15 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 	connection := flags.String("connection", "", "")
 	contentType := flags.String("content-type", "application/json", "")
 	_ = flags.Bool("json", true, "")
-	if flags.Parse(args) != nil || flags.NArg() != 0 {
-		return bad("Usage: cage agent capabilities|doctor|init|service.start|host.inspect|call NAME|request METHOD /api/PATH|socket /api/PATH|routes|job ID|diagnostics [--config PATH] [--input -|FILE] [--wait 5m] [--output PATH]")
+	parseErr := flags.Parse(args)
+	if command == "upgrade" && errors.Is(parseErr, flag.ErrHelp) {
+		return finish(map[string]string{
+			"usage":     "cage agent upgrade [AGENT_ID] [--scope SCOPE] [--connection ID] [--config PATH] [--wait 10m]",
+			"selection": "省略 AGENT_ID 可从已安装的 Agent 中选择，回车取消。",
+		}, nil)
+	}
+	if parseErr != nil || flags.NArg() != 0 {
+		return bad("Usage: cage agent capabilities|doctor|init|service.start|host.inspect|upgrade [AGENT_ID]|call NAME|request METHOD /api/PATH|socket /api/PATH|routes|job ID|diagnostics [--config PATH] [--input -|FILE] [--wait 5m] [--output PATH]")
 	}
 	if *wait < 0 || *wait > 24*time.Hour {
 		return bad("--wait must be between 0 and 24h.")
@@ -109,8 +123,8 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 	if *scope != "local" && *scope != "client" && *scope != "desktop" && *scope != "selected" {
 		return bad("scope must be local, client, desktop or selected")
 	}
-	if command != "call" && command != "request" && command != "socket" && command != "job" && command != "routes" && command != "doctor" && command != "diagnostics" && (*scope != defaultScope || *connection != "") {
-		return bad("scope and connection apply to call, request, socket, job, routes, doctor and diagnostics")
+	if command != "upgrade" && command != "call" && command != "request" && command != "socket" && command != "job" && command != "routes" && command != "doctor" && command != "diagnostics" && (*scope != defaultScope || *connection != "") {
+		return bad("scope and connection apply to upgrade, call, request, socket, job, routes, doctor and diagnostics")
 	}
 	if *input != "" && command != "call" && command != "request" {
 		return bad("--input is valid only for call and request.")
@@ -118,8 +132,8 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 	if *output != "" && command != "diagnostics" && command != "request" {
 		return bad("--output is valid only for diagnostics and request.")
 	}
-	if *wait != 0 && command != "call" && command != "job" {
-		return bad("--wait is valid only for call and job.")
+	if *wait != 0 && command != "call" && command != "job" && command != "upgrade" {
+		return bad("--wait is valid for upgrade, call and job.")
 	}
 	if *config == "" {
 		home, err := os.UserHomeDir()
@@ -143,7 +157,7 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 		response, err := workbench.AgentRequest(ctx, path, workbench.AgentTarget{Scope: *scope, Connection: *connection}, "GET", "/api/agent/routes", nil, "", "")
 		return finish(response.Data, err)
 	case "help", "--help", "capabilities":
-		return finish(map[string]any{"platform": runtime.GOOS, "arch": runtime.GOARCH, "commands": []string{"capabilities", "doctor", "init", "service.start", "host.inspect", "call NAME", "request METHOD /api/PATH", "socket /api/PATH", "routes", "job ID", "diagnostics"}, "operations": workbench.AgentOperations(), "routes": "agent routes reads the actual registered routes from the chosen live listener; request GET /api/agent/routes?access=1 adds what each allows agents and why", "access": workbench.AgentAccess(), "exit_codes": map[string]int{"completed_or_accepted": 0, "operation_failed": 1, "invalid_input": 2, "user_action_required": 3, "wait_timeout": 4}, "guide": "https://claude-cage.com/docs/agent/", "scope": "local: owning workload; desktop: client configuration; selected: explicit desktop connection generation; client: lightweight client listener", "request": map[string]any{"methods": []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}, "path": "relative /api/ endpoint from the UI", "binary": "--input FILE --content-type application/octet-stream; --output ABSOLUTE_NEW_FILE", "native": "call native.submit --scope desktop; request GET /api/agent/native/ID --scope desktop; use the same native action and connection_id as the open window; only the actions and requests listed in access.native are queued"}, "job_retention": "only the latest job; query promptly and never resubmit an unknown mutation automatically"}, nil)
+		return finish(map[string]any{"platform": runtime.GOOS, "arch": runtime.GOARCH, "commands": []string{"capabilities", "doctor", "init", "service.start", "host.inspect", "upgrade [AGENT_ID]", "call NAME", "request METHOD /api/PATH", "socket /api/PATH", "routes", "job ID", "diagnostics"}, "operations": workbench.AgentOperations(), "routes": "agent routes reads the actual registered routes from the chosen live listener; request GET /api/agent/routes?access=1 adds what each allows agents and why", "access": workbench.AgentAccess(), "exit_codes": map[string]int{"completed_or_accepted": 0, "operation_failed": 1, "invalid_input": 2, "user_action_required": 3, "wait_timeout": 4}, "guide": "https://claude-cage.com/docs/agent/", "scope": "local: owning workload; desktop: client configuration; selected: explicit desktop connection generation; client: lightweight client listener", "request": map[string]any{"methods": []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}, "path": "relative /api/ endpoint from the UI", "binary": "--input FILE --content-type application/octet-stream; --output ABSOLUTE_NEW_FILE", "native": "call native.submit --scope desktop; request GET /api/agent/native/ID --scope desktop; use the same native action and connection_id as the open window; only the actions and requests listed in access.native are queued"}, "job_retention": "only the latest job; query promptly and never resubmit an unknown mutation automatically"}, nil)
 	case "init":
 		if _, err := os.Stat(path); err == nil {
 			if _, err := cage.Load(path); err != nil {
@@ -254,9 +268,24 @@ func runAgent(args []string, stdin io.Reader, stdout io.Writer, clientOnly bool)
 			reply.Status = "accepted"
 		}
 		return finish(result, err)
-	case "call", "job":
+	case "upgrade", "call", "job":
 		var data json.RawMessage
-		if command == "call" {
+		if command == "upgrade" {
+			target := workbench.AgentTarget{Scope: *scope, Connection: *connection}
+			response, err := workbench.AgentRequest(ctx, path, target, "GET", "/api/agent-clis?force=1", nil, "", "")
+			if err != nil {
+				return finish(nil, err)
+			}
+			body, err := selectUpgrade(response.Data, operand, stdin, os.Stderr)
+			if err != nil || body == nil {
+				return finish(nil, err)
+			}
+			result, callErr := workbench.AgentCallTarget(ctx, path, target, "agent-clis.install", body)
+			data = result
+			if callErr != nil {
+				return finish(nil, callErr)
+			}
+		} else if command == "call" {
 			body := []byte("{}")
 			if *input != "" {
 				reader := stdin

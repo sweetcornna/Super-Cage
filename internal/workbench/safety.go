@@ -195,6 +195,9 @@ func (s *Server) publishGate(state cage.GateStatus) {
 			s.safety.monitorError = ""
 			s.exitProbeError = ""
 			s.safety.deferral = monitorDeferral{}
+			if !s.networkPaused && s.runtimeRestoreAllowedLocked() {
+				s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeOrca | restoreRuntimeExternal)
+			}
 		}
 	}
 	s.refreshNetworkExplanationLocked(time.Now())

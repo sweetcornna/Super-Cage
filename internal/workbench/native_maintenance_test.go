@@ -24,12 +24,16 @@ import (
 func macMaintenanceKit(t *testing.T) string {
 	t.Helper()
 	kit := filepath.Join(t.TempDir(), "guest-os")
-	for _, name := range []string{"Cage Guest Window.app/Contents/MacOS/CageGuestWindow", "Cage Guest Clipboard.app/Contents/MacOS/CageGuestClipboard", "project/cage-sshfs", "project/cage-macos-terminal", "native-browser/macos-native-browser.mjs", "native-browser/macos-browser-service.mjs", "native-browser/macos-browser-window.mjs", "register-macos-browser.sh", "native-browser/macos-phone-browser.mjs", "macos-cli.py", "cli_channel.py"} {
+	for _, name := range []string{"Cage Guest Window.app/Contents/MacOS/CageGuestWindow", "Cage Guest Clipboard.app/Contents/MacOS/CageGuestClipboard", "project/cage-sshfs", "project/cage-macos-terminal", "native-browser/macos-native-browser.mjs", "native-browser/macos-browser-service.mjs", "native-browser/macos-browser-window.mjs", "register-macos-browser.sh", "native-browser/macos-phone-browser.mjs", "macos-cli.py", "cli_channel.py", "claude-account.py", "client_runtime.py"} {
 		filename := filepath.Join(kit, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(filename), 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filename, []byte("current"), 0600); err != nil {
+		body := "current"
+		if name == "claude-account.py" {
+			body = "#!/usr/bin/python3\npass\n"
+		}
+		if err := os.WriteFile(filename, []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
