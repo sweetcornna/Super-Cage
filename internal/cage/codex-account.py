@@ -13,6 +13,7 @@ import runpy
 import select
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -91,6 +92,7 @@ KNOWN_SECRET = re.compile(r"(?<![A-Za-z0-9])(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A
 ACCOUNT_REFUSED = 78
 PRIVATE_ENV_PREFIXES = ("OPENAI_", "CODEX_", "AZURE_", "ANTHROPIC_", "AWS_", "GOOGLE_", "GEMINI_")
 WINDOWS = ("primary", "secondary")
+ORCA_ACCOUNT_ID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}")
 
 
 class StatusError(ValueError):
@@ -789,13 +791,105 @@ def orca_login_status(directory, schedule, args):
     return 1
 
 
-def from_orca():
+def orca_data_path():
     profile = os.environ.get("ORCA_USER_DATA_PATH")
     if not profile:
-        return os.environ.get("TERM_PROGRAM") == "Orca"
+        return None
     home = Path.home()
     standard = home / ("Library/Application Support/orca" if sys.platform == "darwin" else ".config/orca")
-    return Path(profile) in (standard, home / ".local/share/cage/orca/data")
+    data = Path(profile)
+    return data if data in (standard, home / ".local/share/cage/orca/data") else None
+
+
+def from_orca():
+    if not os.environ.get("ORCA_USER_DATA_PATH"):
+        return os.environ.get("TERM_PROGRAM") == "Orca"
+    return orca_data_path() is not None
+
+
+def orca_profile_owned(data, home):
+    try:
+        folders, ident, kind = home.relative_to(data).parts
+        if folders != "codex-accounts" or kind != "home" or not ORCA_ACCOUNT_ID.fullmatch(ident):
+            return False
+        if home.resolve() != home:
+            return False
+        for directory in (data, data / folders, home.parent, home):
+            info = directory.lstat()
+            if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            # Orca's intermediate directories inherit its umask inside the
+            # private root. The data root and credential home remain private.
+            if directory in (data, home) and info.st_mode & 0o077:
+                return False
+        marker = home / ".orca-managed-home"
+        info = marker.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 40:
+            return False
+        return marker.read_text(encoding="ascii").strip() == ident
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def orca_roster_subjects(schedule):
+    profiles = {}
+    history = schedule.get("history_accounts", [])
+    for item in [*schedule["accounts"], *(history if isinstance(history, list) else [])]:
+        if not isinstance(item, dict):
+            continue
+        ident, digest = item.get("id"), item.get("subject")
+        if isinstance(ident, str) and re.fullmatch("[0-9a-f]{24}", ident) and \
+                isinstance(digest, str) and re.fullmatch("[0-9a-f]{64}", digest):
+            profiles.setdefault(ident, set()).add(digest)
+    digests = {}
+    for ident, subjects in profiles.items():
+        for digest in subjects:
+            digests.setdefault(digest, set()).add(ident)
+    return {digest for digest, ids in digests.items() if len(ids) == 1 and len(profiles[next(iter(ids))]) == 1}
+
+
+def orca_profile_subject(data, home, subjects):
+    if not orca_profile_owned(data, home):
+        return None
+    try:
+        info = (home / "auth.json").lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            return None
+        claims = token_claims(home)
+        if not claims or not claims.get("organization", "").strip():
+            return None
+        digest = subject({**claims, "logged_in": True})
+        if digest in subjects:
+            env = cli_environment(profile(DEFAULT))
+            env["CODEX_HOME"] = str(home)
+            binary = shutil.which("codex", path=env["PATH"])
+            if binary and login_mode(binary, env, Path.cwd(), timeout=3) == "chatgpt":
+                return digest
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        pass
+    return None
+
+
+def orca_history_profiles(data, selected_home, selected_subject, subjects, thread):
+    for entry in _runtime["history_entries"](data / "codex-accounts", directories=True):
+        home = entry / "home"
+        if not orca_profile_owned(data, home) or not _runtime["codex_has_thread"](home, thread):
+            continue
+        digest = selected_subject if home == selected_home else orca_profile_subject(data, home, subjects)
+        if digest:
+            yield home, digest, f"Orca {entry.name[:8]}", home
+
+
+def codex_passthrough(args, home=None):
+    path = os.pathsep.join([str(Path.home() / ".local/bin"), *(
+        p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))])
+    binary = shutil.which("codex", path=path)
+    if not binary:
+        print("未找到 codex 命令。", file=sys.stderr)
+        return 127
+    if home is not None:
+        os.execve(binary, [binary, *args], {**os.environ, "CODEX_HOME": str(home)})
+    os.execv(binary, [binary, *args])
 
 
 def auto(args, *, orca=False):
@@ -807,11 +901,21 @@ def auto(args, *, orca=False):
     if not disabled and pinned not in ("", "auto", DEFAULT):
         return entrypoint(["run", pinned, *args])
     explicit = disabled or pinned == DEFAULT or _runtime["codex_explicit_remote"](args) or any(
-        os.environ.get(name) for name in PRIVATE_ENVIRONMENT)
+        os.environ.get(name) for name in PRIVATE_ENVIRONMENT if name != "CODEX_HOME")
     command = _runtime["codex_subcommand"](args)
-    orca_probe = command == ("login", "status") and (orca or from_orca())
-    if not explicit and (orca_probe or not (command and command[0] in UNSCHEDULED)):
+    configured_home = os.environ.get("CODEX_HOME")
+    # Orca marks native PTYs and supplies its data root. Both are needed before
+    # treating a vendor-managed home as a hint for a scheduled launch.
+    data = orca_data_path() if os.environ.get("TERM_PROGRAM") == "Orca" else None
+    injected_home = Path(configured_home) if configured_home and data else None
+    orca_probe = not configured_home and command == ("login", "status") and (orca or from_orca())
+    if configured_home and os.environ.get("CAGE_CLI_ACCOUNT_CODEX", "") not in ("", "auto"):
+        explicit = True
+    if not explicit and (not configured_home or injected_home is not None) and \
+            (orca_probe or not (command and command[0] in UNSCHEDULED)):
         launch = profile(DEFAULT).parent / "launch.json"
+        injected_subject = None
+
         def read_schedule():
             try:
                 schedule = json.loads(launch.read_text())
@@ -819,23 +923,38 @@ def auto(args, *, orca=False):
                 return None if required else {"managed": False, "accounts": []}
             except (OSError, ValueError):
                 return None
-            return schedule if isinstance(schedule, dict) and isinstance(schedule.get("accounts"), list) else None
+            if not isinstance(schedule, dict) or not isinstance(schedule.get("accounts"), list):
+                return None
+            if injected_subject and injected_subject not in orca_roster_subjects(schedule):
+                return None
+            return schedule
 
         schedule = read_schedule()
+        if injected_home is not None:
+            subjects = orca_roster_subjects(schedule) if schedule is not None else set()
+            injected_subject = orca_profile_subject(data, injected_home, subjects) if subjects else None
+            if not injected_subject:
+                return codex_passthrough(args)
         if schedule is None:
             print("无法读取 Super Cage 的 Codex 调度配置。请同步环境组件后重试。", file=sys.stderr)
             return ACCOUNT_REFUSED
-        if _runtime["native_schedule_managed"](schedule):
+        thread = _runtime["codex_history_request"](args)
+        if _runtime["native_schedule_managed"](schedule) or (injected_home is not None and thread is not None):
             if orca_probe:
                 return orca_login_status(launch.parent, schedule, args)
             mask = os.umask(0)
             os.umask(mask)
-            thread = _runtime["codex_history_request"](args)
             if thread is not None:
                 try:
                     roster = schedule.get("history_accounts", schedule["accounts"])
+                    additional_profiles = ()
+                    if injected_home is not None:
+                        if thread and _runtime["codex_has_thread"](injected_home, thread):
+                            return codex_passthrough(args)
+                        additional_profiles = orca_history_profiles(data, injected_home, injected_subject, subjects, thread)
+                    extras = {"additional_profiles": additional_profiles} if injected_home is not None else {}
                     selected = _runtime["history_account"](roster, lambda account: codex_home(profile(account)),
-                                                           _runtime["codex_history"], thread)
+                                                           _runtime["codex_history"], thread, **extras)
                 except KeyboardInterrupt:
                     return 130
                 except ValueError as error:
@@ -844,6 +963,8 @@ def auto(args, *, orca=False):
                 if selected is None:
                     return 0
                 account, expected = selected
+                if isinstance(account, Path):
+                    return codex_passthrough(args, home=account)
                 _controller_context["CAGE_CODEX_SUBJECT"] = expected
                 try:
                     with _runtime["launch_guard"](profile(account)):
@@ -879,13 +1000,7 @@ def auto(args, *, orca=False):
             else:
                 print("暂无可启动的 Super Cage Codex 账号。请检查登录状态、参与状态和额度后重试。", file=sys.stderr)
             return ACCOUNT_REFUSED
-    path = os.pathsep.join([str(Path.home() / ".local/bin"), *(
-        p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))])
-    binary = shutil.which("codex", path=path)
-    if not binary:
-        print("未找到 codex 命令。", file=sys.stderr)
-        return 127
-    os.execv(binary, [binary, *args])
+    return codex_passthrough(args)
 
 
 def entrypoint(args):

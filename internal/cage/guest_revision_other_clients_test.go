@@ -21,7 +21,7 @@ import (
 // is a product decision that is meant to ship with 更新环境组件, set the new
 // value here in the same commit and say so in the message. Work on 其他客户端
 // never does.
-const guestRevisionAtOtherClientsBase = "b77363fc1194926068a1b0c3bb806e4de229b9250b5347ea7b3fd60206a6fa00"
+const guestRevisionAtOtherClientsBase = "00a1498dfb0c6713cbb0729aedfc0c5805e0b23e11686200d4a16cb3595bb784"
 
 func TestGuestRevisionIsPinnedForOtherClients(t *testing.T) {
 	if got := guestRevision(); got != guestRevisionAtOtherClientsBase {

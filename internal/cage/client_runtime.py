@@ -1,7 +1,7 @@
 """Keep controller state outside the environment passed to external programs."""
 from contextlib import contextmanager
 import hashlib
-from itertools import groupby
+from itertools import chain, groupby
 import json
 import os
 from pathlib import Path
@@ -473,7 +473,7 @@ def codex_has_thread(home, thread):
     return next(codex_history(home, thread), None) is not None
 
 
-def history_account(roster, home_for_account, history, thread):
+def history_account(roster, home_for_account, history, thread, *, additional_profiles=()):
     """Choose one published profile before launching the native resume command."""
     if not isinstance(roster, list):
         raise ValueError("无法读取会话账号配置。请同步环境组件后重试。")
@@ -492,10 +492,9 @@ def history_account(roster, home_for_account, history, thread):
         label = "".join(char for char in label[:64] if char.isprintable()) if isinstance(label, str) else ""
         profiles[account] = (expected, label or account[:8])
     candidates = []
-    for account, (expected, label) in profiles.items():
-        if account in conflicts:
-            continue
-        home = home_for_account(account)
+    published = ((account, expected, label, home_for_account(account))
+                 for account, (expected, label) in profiles.items() if account not in conflicts)
+    for account, expected, label, home in chain(published, additional_profiles):
         # A profile or one of its parents must not redirect history outside
         # the published account's directory.
         try:

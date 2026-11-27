@@ -2068,7 +2068,11 @@ def _write_codex_auto_shim(has_native_codex, has_agent_codex):
     ]
     if has_native_codex:
         parts.extend([
-            f'if [ -z "${{CODEX_HOME:-}}" ] && [ -x {q_helper} ]; then\n',
+            f'if [ -x {q_helper} ] && {{\n',
+            '  [ -z "${CODEX_HOME:-}" ] || {\n',
+            '    [ "${TERM_PROGRAM:-}" = "Orca" ] && [ -n "${ORCA_USER_DATA_PATH:-}" ]\n',
+            '  }\n',
+            '}; then\n',
             f'  CAGE_REQUIRE_CODEX_SCHEDULE=1 exec {q_helper} auto "$@"\n',
             'fi\n',
             'if [ -z "${CODEX_HOME:-}" ] && [ -z "${OPENAI_API_KEY:-}" ] && [ -z "${CODEX_API_KEY:-}" ]; then\n',
