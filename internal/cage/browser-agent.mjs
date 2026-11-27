@@ -132,9 +132,6 @@ const flags = [
   `--load-extension=${splitDirectory}`,
   "--user-data-dir=/home/cage-browser/profile",
   "--remote-debugging-pipe",
-  // The pipe carries user interaction. Set this before any document is created
-  // so normal pages, login popups and private contexts share the native getter.
-  "--disable-blink-features=AutomationControlled",
   // Kiosk mode blocks Chromium's DevTools UI, including F12. Ordinary
   // fullscreen keeps the guest browser chrome hidden while allowing inspection.
   "--start-fullscreen",

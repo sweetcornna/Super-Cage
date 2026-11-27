@@ -14,7 +14,7 @@ export async function playwrightPhonePipe(chromium, binary, args) {
   const filtered = args.filter(arg => !arg.startsWith(prefix) && !["--remote-debugging-pipe", "--headless=new", "about:blank"].includes(arg));
   const context = await chromium.launchPersistentContext(directory, {
     executablePath: binary, headless: true, chromiumSandbox: true,
-    args: filtered, ignoreDefaultArgs: ["--enable-automation"],
+    args: filtered,
   });
   let connection;
   try { connection = await context.browser().newBrowserCDPSession(); }
