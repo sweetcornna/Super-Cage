@@ -1,14 +1,16 @@
 package workbench
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os/exec"
 	"strings"
 	"testing"
 	"unicode/utf16"
 
-	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/guestos"
 )
 
@@ -105,7 +107,8 @@ func TestAgentRuntimeSSHArgvIsShortAndConstant(t *testing.T) {
 		if !strings.Contains(joined, " -I ") {
 			t.Errorf("agent-runtime/%s lost python -I isolated mode: %s", subcommand, joined)
 		}
-		if !strings.Contains(joined, ".local/share/cage/agent-runtime/"+agentRuntimeHash+".py") {
+		if !strings.Contains(joined, `d="$HOME/.local/share/cage/agent-runtime"`) ||
+			!strings.Contains(joined, `exec python3 -I "$d/`+agentRuntimeHash+`.py" `+subcommand) {
 			t.Errorf("agent-runtime/%s lost hash-pinned path: %s", subcommand, joined)
 		}
 	}
@@ -114,9 +117,17 @@ func TestAgentRuntimeSSHArgvIsShortAndConstant(t *testing.T) {
 	install1x := s.guestScriptInstallSSHCommand(ctx, agentRuntimeSpec, s.guestPythonBinary())
 	assertShortSSHArgv(t, "agent-runtime/ensure-install-1x", install1x.Args, 4096)
 
-	// Artificially 10x larger runtime (~1.6 MB) must produce the EXACT same
-	// constant argv length for both execution and installation.
-	bigSpec := newGuestScriptSpec(".local/share/cage/agent-runtime", 0o700, strings.Repeat(cage.AgentRuntimeHelper, 10))
+	// Scale the payload of each file while keeping the same companion paths.
+	// The command checks those paths, so comparing bundles with different
+	// members would also measure the length of the extra file checks.
+	var files []guestScriptFile
+	hash := sha256.New()
+	for _, file := range agentRuntimeSpec.files {
+		content := bytes.Repeat(file.content, 10)
+		files = append(files, guestScriptFile{suffix: file.suffix, content: content})
+		hash.Write(content)
+	}
+	bigSpec := newGuestScriptBundle(agentRuntimeSpec.relDir, fmt.Sprintf("%x", hash.Sum(nil)), agentRuntimeSpec.mode, agentRuntimeSpec.entry, files)
 	exec1x := s.sshCommand(ctx, "-T", s.sshTarget(), "--", s.guestShellScript(agentRuntimeSpec.guardedShellBody(s.guestPythonBinary(), "install")))
 	exec10x := s.sshCommand(ctx, "-T", s.sshTarget(), "--", s.guestShellScript(bigSpec.guardedShellBody(s.guestPythonBinary(), "install")))
 	install10x := s.guestScriptInstallSSHCommand(ctx, bigSpec, s.guestPythonBinary())
