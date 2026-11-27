@@ -2,6 +2,67 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { LoginBrowser } from "./browser-login.mjs";
 
+function loginFixture() {
+  const pages = new Map(), navigations = [], closed = [];
+  let next = 0;
+  const fixture = { pages, navigations, closed, navigationError: "" };
+  fixture.browser = new LoginBrowser(async (method, params, sessionId) => {
+    switch (method) {
+      case "Target.createBrowserContext": return { browserContextId: String(++next) };
+      case "Target.createTarget": {
+        const targetId = "tab-" + params.browserContextId;
+        pages.set(targetId, { targetId, browserContextId: params.browserContextId, type: "page" });
+        return { targetId };
+      }
+      case "Target.getTargets": return { targetInfos: [...pages.values()] };
+      case "Target.disposeBrowserContext":
+        closed.push(params.browserContextId);
+        for (const [id, page] of pages) if (page.browserContextId === params.browserContextId) pages.delete(id);
+        return {};
+      case "Page.navigate":
+        navigations.push(sessionId);
+        return { errorText: fixture.navigationError };
+      default: throw new Error("Unexpected CDP method " + method);
+    }
+  });
+  fixture.open = (login, address, active) =>
+    fixture.browser.open(login.repeat(24), address, async page => page.targetId, [], active);
+  return fixture;
+}
+
+test("reopening one authorization request preserves its current page and popup", async () => {
+  const fixture = loginFixture(), address = "https://claude.ai/oauth/authorize?state=first";
+  const first = await fixture.open("a", address);
+  const other = await fixture.open("b", address);
+  assert.deepEqual(await fixture.open("a", address, other.id), first);
+  fixture.pages.set("popup", { type: "page", targetId: "popup", browserContextId: "1" });
+  assert.deepEqual(await fixture.open("a", address, "popup"), { id: "popup" });
+  assert.deepEqual(fixture.navigations, [first.id, other.id]);
+  assert.deepEqual(fixture.closed, []);
+  const next = await fixture.open("a", address.replace("first", "second"), "popup");
+  assert.notEqual(next.id, first.id);
+  assert.deepEqual(fixture.closed, ["1"]);
+  assert.ok(fixture.pages.has(other.id));
+  fixture.pages.delete(next.id);
+  assert.notEqual((await fixture.open("a", address.replace("first", "second"))).id, next.id);
+  await fixture.browser.finish("a".repeat(24));
+  await fixture.browser.finish("b".repeat(24));
+});
+
+test("an initial navigation error releases the failed context and allows another attempt", async () => {
+  const fixture = loginFixture(), address = "https://claude.ai/oauth/authorize?state=example";
+  fixture.navigationError = "net::ERR_NAME_NOT_RESOLVED";
+  await assert.rejects(fixture.open("a", address), /临时登录页面未能打开/);
+  assert.deepEqual(fixture.closed, ["1"]);
+  fixture.navigationError = "";
+  assert.deepEqual(await fixture.open("a", address), { id: "tab-2" });
+  fixture.navigationError = "net::ERR_ABORTED";
+  const redirected = await fixture.open("b", address);
+  assert.deepEqual(await fixture.open("b", address, redirected.id), redirected);
+  await fixture.browser.finish("a".repeat(24));
+  await fixture.browser.finish("b".repeat(24));
+});
+
 test("login redirects and popups stay private, closing one login leaves the other open", async () => {
   const closed = [];
   let contexts = 0;

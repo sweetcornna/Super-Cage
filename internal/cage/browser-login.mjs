@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 // Official HTTPS OAuth/login hosts for Cage's built-in mainstream Agent CLIs.
 export const BUILTIN_LOGIN_HOSTS = new Set([
   "claude.ai", "claude.com", "console.anthropic.com", "platform.claude.com", "platform.anthropic.com",
@@ -59,7 +61,7 @@ export class LoginBrowser {
     return { ...raw, login: true, url: origin, title: "账号授权" };
   }
 
-  async open(login, address, activate, extraHosts) {
+  async open(login, address, activate, extraHosts, activeId) {
     if (typeof login !== "string" || !/^[a-f0-9-]{16,64}$/.test(login)) throw new Error("登录任务无效");
     if (typeof address !== "string" || address !== address.trim() || /[\x00-\x20\x7f\\]/.test(address) || !/^https:\/\//i.test(address))
       throw new Error("仅可打开官方登录地址");
@@ -69,15 +71,32 @@ export class LoginBrowser {
     const url = new URL(address);
     if (url.protocol !== "https:" || url.port || url.username || url.password || !isAllowedLoginHost(url.hostname, extraHosts))
       throw new Error("仅可打开官方登录地址");
+    // The CLI opener and the terminal link can deliver the same request.
+    // Keep its browser state without retaining the address or its OAuth parameters.
+    const requestKey = createHash("sha256").update(url.href).digest("hex");
+    for (const [id, entry] of this.contexts) {
+      if (entry.login !== login || entry.requestKey !== requestKey) continue;
+      const { targetInfos } = await this.cdp("Target.getTargets");
+      const pages = targetInfos.filter(t => t.type === "page" && t.browserContextId === id);
+      const page = pages.find(t => t.targetId === activeId) ?? pages.find(t => t.targetId === entry.targetId) ?? pages[0];
+      if (page) {
+        await activate(page);
+        return { id: page.targetId };
+      }
+    }
     await this.finish(login);
     const { browserContextId } = await this.cdp("Target.createBrowserContext", { disposeOnDetach: true });
     const expiry = setTimeout(() => this.close(browserContextId).catch(() => {}), 15 * 60_000);
     expiry.unref();
-    this.contexts.set(browserContextId, { login, expiry });
+    const entry = { login, requestKey, expiry, targetId: "" };
+    this.contexts.set(browserContextId, entry);
     try {
       const { targetId } = await this.cdp("Target.createTarget", { browserContextId, url: "about:blank", newWindow: true });
+      entry.targetId = targetId;
       const sessionId = await activate({ targetId, browserContextId, type: "page", url: url.href });
-      await this.cdp("Page.navigate", { url: url.href }, sessionId);
+      const navigation = await this.cdp("Page.navigate", { url: url.href }, sessionId);
+      // A replacement navigation can cancel the initial load while the tab is still in use.
+      if (navigation?.errorText && navigation.errorText !== "net::ERR_ABORTED") throw new Error("授权页导航失败");
       return { id: targetId };
     } catch {
       await this.close(browserContextId);

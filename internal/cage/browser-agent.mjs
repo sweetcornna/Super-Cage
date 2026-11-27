@@ -1084,7 +1084,7 @@ const server = http.createServer(async (req, res) => {
           if (!targets.has(tab.targetId)) targets.set(tab.targetId, loginBrowser.tab(tab));
           await activate(tab.targetId, true);
           return session(tab.targetId);
-        }, input.allowed_hosts);
+        }, input.allowed_hosts, activeId);
       }
       if (req.url === "/login-finish") {
         await loginBrowser.finish(input.login);
