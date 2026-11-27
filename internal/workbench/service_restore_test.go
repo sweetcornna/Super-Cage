@@ -52,22 +52,11 @@ func TestWorkbenchToolRestorePreservesT3AccountAndLiveService(t *testing.T) {
 	t.Cleanup(s.closeAgents)
 	workspace := makeToolRestoreEnvironment(t, s)
 	first, next := strings.Repeat("a", 24), strings.Repeat("b", 24)
-	s.agentCLIs.mu.Lock()
-	err := s.saveAgentPoolsLocked(map[string]*agentAccountPool{"opencode": {
-		Accounts: []agentAccount{
-			{ID: first, Source: "managed", Status: "ready", Enabled: true, MaxConcurrency: 1},
-			{ID: next, Source: "managed", Status: "ready", Enabled: true},
-		},
-	}})
-	s.agentCLIs.mu.Unlock()
-	if err != nil {
-		t.Fatal(err)
-	}
 	cfg := defaultT3CodeConfig()
 	cfg.Enabled = true
 	cfg.AccountBindings["opencode"] = first
 	s.t3code.mu.Lock()
-	err = s.saveT3CodeConfigLocked(cfg)
+	err := s.saveT3CodeConfigLocked(cfg)
 	s.t3code.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
@@ -95,6 +84,17 @@ func TestWorkbenchToolRestorePreservesT3AccountAndLiveService(t *testing.T) {
 			status = t3CodeGuestStatus{Port: cfg.Port}
 		}
 		return nil
+	}
+	s.agentCLIs.mu.Lock()
+	err = s.saveAgentPoolsLocked(map[string]*agentAccountPool{"opencode": {
+		Accounts: []agentAccount{
+			{ID: first, Source: "managed", Status: "ready", Enabled: true, MaxConcurrency: 1},
+			{ID: next, Source: "managed", Status: "ready", Enabled: true},
+		},
+	}})
+	s.agentCLIs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
 	}
 	if w := request(s, "POST", "/api/t3code/start", s.origin, "{}", true); w.Code != http.StatusOK {
 		t.Fatalf("start: %d %s", w.Code, w.Body.String())
