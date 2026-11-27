@@ -247,12 +247,13 @@ type mobileRun struct {
 	pending      *mobileDecision
 }
 type mobileCLIStore struct {
-	mu        sync.Mutex
-	active    map[string]*mobileRun
-	catalog   map[string]mobileSummary
-	running   map[string]bool // Fresh guest process observation, never restored from disk.
-	desktop   map[string]bool // Claude Desktop ownership from the same live observation.
-	codexLive map[string]bool // Codex process observation from the latest Codex discovery.
+	mu           sync.Mutex
+	active       map[string]*mobileRun
+	catalog      map[string]mobileSummary
+	running      map[string]bool // Fresh guest process observation, never restored from disk.
+	desktop      map[string]bool // Claude Desktop ownership from the same live observation.
+	claudeShared map[string]bool // Running workbench channel sessions, including detached ones.
+	codexLive    map[string]bool // Codex process observation from the latest Codex discovery.
 	// codexOwner is the guest's latest owner of each Codex session's thread;
 	// the server's own bound terminals take precedence (codexOwner()).
 	codexOwner map[string]string
@@ -550,6 +551,18 @@ func (m *mobileCLIStore) activeAccounts() map[string]int {
 	for _, run := range m.active {
 		if run.cancel != nil {
 			count[run.record.Account.ID]++
+		}
+	}
+	return count
+}
+
+// Caller holds m.mu. A completed turn whose last write failed remains
+// readable and retryable without consuming another session's execution slot.
+func (m *mobileCLIStore) activeTurnCount() int {
+	count := 0
+	for _, run := range m.active {
+		if run.cancel != nil {
+			count++
 		}
 	}
 	return count

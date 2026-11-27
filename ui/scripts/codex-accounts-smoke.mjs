@@ -13,6 +13,7 @@ for (const system of ["debian-13", "macos"]) {
     { id: "b".repeat(24), label: "备用账号", email: "spare@example.invalid", enabled: true, status: "signed_out" },
   ];
   const posts = [], starts = [];
+  const scheduling = { mode: "balanced", switch_policy: "ask" };
   const { page, state, browser, errors } = await createWorkbench({
     beforeNavigate: async (page, state) => {
       state.account.guest_system = state.status.guest_system = system;
@@ -23,11 +24,13 @@ for (const system of ["debian-13", "macos"]) {
         const body = route.request().postDataJSON();
         if (body) {
           posts.push(body);
-          assert.ok(["update", "scheduling", "refresh", "usage_panel", "remove"].includes(body.action), body.action);
+          assert.ok(["update", "scheduling", "select", "refresh", "usage_panel", "remove"].includes(body.action), body.action);
+          if (body.action === "scheduling") Object.assign(scheduling, body.scheduling);
+          if (body.action === "select") Object.assign(scheduling, { mode: "manual", selected_account_id: body.id });
           if (body.action === "update") Object.assign(accounts.find((a) => a.id === body.id), body.label !== undefined ? { label: body.label } : { enabled: body.enabled });
           if (body.action === "remove") accounts.splice(accounts.findIndex((a) => a.id === body.id), 1);
         }
-        return route.fulfill({ json: { accounts, scheduling: { mode: "balanced", switch_policy: "ask" }, guest_supported: linux,
+        return route.fulfill({ json: { accounts, scheduling, scheduling_api: 1, guest_supported: linux,
           detection_status: linux ? "ready" : "unsupported",
           detected: linux ? { identity: "f".repeat(64), email: "default@example.invalid", plan: "plus", checked_at: now } : undefined } });
       });
@@ -45,12 +48,11 @@ for (const system of ["debian-13", "macos"]) {
   });
   try {
     const nav = page.getByRole("navigation", { name: "主导航" });
-    await nav.getByRole("button", { name: "Codex 账号管理", exact: true }).click();
-    const panel = page.getByRole("main", { name: "Codex 账号管理", exact: true });
+    await nav.getByRole("button", { name: /^账号管理(?:\s*\d+)?$/ }).click();
+    const panel = page.getByRole("main", { name: "账号管理", exact: true });
     await panel.waitFor();
     if (!linux) {
-      await panel.getByText(/Codex 账号目前只支持 Linux 环境/).waitFor();
-      assert.ok(await panel.getByRole("button", { name: "登录新账号" }).isDisabled());
+      assert.equal(await panel.getByRole("region", { name: "Codex 账号管理" }).count(), 0);
       await nav.getByRole("button", { name: "工作台", exact: true }).click();
       await page.getByRole("button", { name: /^在 .* 新建终端$/ }).click();
       await page.getByRole("menuitem", { name: /Claude 终端$/ }).waitFor();
@@ -58,7 +60,29 @@ for (const system of ["debian-13", "macos"]) {
       assert.deepEqual(errors, []);
       continue;
     }
+    await panel.getByRole("tab", { name: /^Codex/ }).click();
     const work = panel.getByRole("article", { name: "工作账号", exact: true });
+    await panel.getByText("调度设置 · 均衡分配", { exact: true }).click();
+    const strategy = panel.getByRole("combobox", { name: "新会话分配" });
+    const account = panel.getByRole("combobox", { name: "切换账号" });
+    await strategy.click();
+    await page.getByRole("option", { name: "手动切换", exact: true }).click();
+    assert.equal(scheduling.mode, "balanced", "choosing manual waits for an account");
+    await account.click();
+    assert.equal(await page.getByRole("option", { name: "备用账号", exact: true }).getAttribute("aria-disabled"), "true");
+    await page.getByRole("option", { name: "工作账号", exact: true }).click();
+    await panel.getByText("调度设置 · 手动切换", { exact: true }).waitFor();
+    assert.equal(scheduling.selected_account_id, accounts[0].id);
+    for (const [name, mode] of [["用完自动切换", "exhaust"], ["智能切换", "smart"]]) {
+      await strategy.click();
+      await page.getByRole("option", { name, exact: true }).click();
+      await panel.getByText("调度设置 · " + name, { exact: true }).waitFor();
+      assert.equal(scheduling.mode, mode);
+    }
+    await account.click();
+    await page.getByRole("option", { name: "工作账号", exact: true }).click();
+    await panel.getByText("调度设置 · 手动切换", { exact: true }).click();
+    assert.ok(posts.some(body => body.action === "select" && body.id === accounts[0].id));
     await work.getByRole("group", { name: "5h 额度" }).getByRole("progressbar").waitFor();
     assert.equal(await work.getByRole("group", { name: "5h 额度" }).getByRole("progressbar").getAttribute("value"), "42");
     await work.getByRole("group", { name: "7d 额度" }).waitFor();

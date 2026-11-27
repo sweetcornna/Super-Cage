@@ -8,6 +8,47 @@ import (
 	"time"
 )
 
+func TestClaudeAccountLoadCountsEachSharedConversationOnce(t *testing.T) {
+	s := testServer(t)
+	account := strings.Repeat("a", 24)
+	login := strings.Repeat("b", 24)
+	live, ended, orphan, desktop := "live", "ended", "orphan", "desktop"
+	s.terminals.sessions = map[string]*terminalSession{
+		live:  {kind: "claude", claudeAccountID: account, sharedID: live},
+		ended: {kind: "claude", claudeAccountID: account, sharedID: ended, conversationEnded: true},
+		login: {kind: "claude-login", claudeAccountID: login},
+	}
+	s.mobileCLI.running = map[string]bool{live: true, ended: true, orphan: true, desktop: true}
+	s.mobileCLI.catalog = make(map[string]mobileSummary)
+	for id := range s.mobileCLI.running {
+		s.mobileCLI.catalog[id] = mobileSummary{AccountID: account}
+	}
+	s.mobileCLI.desktop = map[string]bool{desktop: true}
+	s.mobileCLI.claudeShared = map[string]bool{live: true, ended: true, orphan: true}
+	active, logins := s.claudeAccountLoad()
+	if active[account] != 2 || active[login] != 0 || !logins[login] {
+		t.Fatalf("counted stale/duplicate sessions or missed the orphan: active=%v logins=%v", active, logins)
+	}
+}
+
+func TestBoundClaudeAccountCanResumeWithSchedulingDisabled(t *testing.T) {
+	s := testServer(t)
+	account := claudeAccount{ID: strings.Repeat("a", 24), Email: "owner@example.test", Status: "ready", Enabled: false}
+	selection := claudeSelection{ID: account.ID, GuestID: account.ID, Subject: claudeIdentityHash(account.Email, account.Organization)}
+	list := claudeAccountList{Accounts: []claudeAccount{account}}
+	if err := s.validateBoundClaudeAccount(list, selection); err != nil {
+		t.Fatalf("scheduling pause broke a bound conversation: %v", err)
+	}
+	selection.GuestID = "default"
+	if err := s.validateBoundClaudeAccount(list, selection); err != nil {
+		t.Fatalf("adopting the account broke the original default binding: %v", err)
+	}
+	list.Accounts[0].Email = "different@example.test"
+	if err := s.validateBoundClaudeAccount(list, selection); err == nil {
+		t.Fatal("resumption accepted a different identity")
+	}
+}
+
 func TestClaudeAutomaticSwitchRequiresQuotaAndConsent(t *testing.T) {
 	s, id, _ := metadataFixture(t)
 	s.ready = true

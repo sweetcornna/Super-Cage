@@ -389,6 +389,42 @@ clientSecret = "camel-client-secret"
                     self.fail("entered a session for another Codex home")
             self.assertIsNotNone(server.process.returncode)
 
+    def test_resume_routes_rollouts_to_original_profile(self):
+        self.login(FIRST)
+        thread = "19b38927-d608-49d6-b690-870ef502e802"
+        archive = "703d578a-20a5-4d67-924f-ad942e63221f"
+        home = self.base(FIRST) / "home"
+        session = home / "sessions/2026/10/03" / f"rollout-2026-10-03T07-09-01-{thread}_c88ebbc8-9649-4339-9f10-f6255aa748a8.jsonl"
+        archived = home / "archived_sessions" / f"rollout-2026-10-03T07-09-01-{archive}.jsonl"
+        for path, identifier in [(session, thread), (archived, archive)]:
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"type": "session_meta", "timestamp": "2026-10-03T07:09:01.000Z",
+                                        "payload": {"id": identifier, "cwd": "/previous/project", "source": "cli"}}) + "\n")
+        schedule = self.base(FIRST).parent / "launch.json"
+        old = {"id": FIRST, "subject": self.subject}
+        new = {"id": SECOND, "subject": self.subject}
+        schedule.write_text(json.dumps({"managed": True, "accounts": [new], "history_accounts": [old, new]}))
+        env = {key: value for key, value in self.env.items() if key not in ("CODEX_HOME", "OPENAI_API_KEY", "CAGE_CODEX_SUBJECT")}
+        for args in [("resume", "--all", thread), ("exec", "resume", "-c", "history.persistence='save-all'", thread),
+                     ("resume", archive), ("unarchive", archive), ("resume", "--all"), ("resume", "--last")]:
+            result = self.run_helper("auto", *args, env=env)
+            self.assertEqual(result.returncode, 0)
+            seen = json.loads(self.capture.read_text())
+            self.assertEqual(Path(seen["env"]["CODEX_HOME"]), home)
+            self.assertEqual(seen["argv"][-len(args):], list(args))
+        other_path = self.base(SECOND) / "home/sessions/2026/10/03" / session.name
+        other_path.parent.mkdir(parents=True)
+        other_path.symlink_to(session)
+        self.run_helper("auto", "resume", thread, env=env)
+        self.assertEqual(Path(json.loads(self.capture.read_text())["env"]["CODEX_HOME"]), home)
+        other_path.unlink()
+        other_path.write_bytes(session.read_bytes())
+        self.capture.unlink()
+        ambiguous = self.run_helper("auto", "resume", thread, env=env, check=False)
+        self.assertEqual(ambiguous.returncode, 78)
+        self.assertFalse(self.capture.exists())
+        self.assertIn('"cwd": "/previous/project"', archived.read_text())
+
     def test_auto_schedules_codex_skipping_exhausted_and_respecting_explicit_env(self):
         # Log in two distinct Codex accounts.
         self.login(FIRST)

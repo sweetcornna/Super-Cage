@@ -341,6 +341,16 @@ class ChannelTests(unittest.TestCase):
         self.assertNotIn("cage", json.dumps(settings).lower())
         self.assertFalse(any(key.upper().startswith("CAGE_") for key in execute.call_args.args[2]))
 
+    @unittest.skipIf(os.name == "nt", "POSIX guest launcher")
+    def test_default_shared_launch_ignores_guest_auto_shims(self):
+        cage = self.home / ".local/share/cage"
+        default_bin = self.home / "default-bin"
+        shims = [cage / "auto-shims", cage / "orca/shims", cage / "t3code/shims"]
+        with patch.dict(os.environ, {"PATH": os.pathsep.join(str(path) for path in [*shims, default_bin])}), \
+                patch.object(channel, "migrate_cage_policy"), patch.object(channel.os, "execvpe") as execute:
+            channel.launch({"id": str(uuid.uuid4()), "prefix": ["claude"]})
+        self.assertEqual(execute.call_args.args[2]["PATH"], str(default_bin))
+
     def test_launch_adds_bound_directories_as_literal_arguments(self):
         directory = self.home / "backend ' $literal"
         directory.mkdir()

@@ -287,6 +287,13 @@ def resolve(prefix, args, id_index, snapshot):
     return resolve_actual_context(binary, prefix, args, env, settings, snapshot)
 
 
+def disable_default_account_shims():
+    cage = Path.home().resolve() / ".local/share/cage"
+    shims = {Path("/usr/local/lib/cage-claude-bin"), cage / "auto-shims", cage / "orca/shims", cage / "t3code/shims"}
+    os.environ["PATH"] = os.pathsep.join(part for part in os.environ.get("PATH", os.defpath).split(os.pathsep)
+                                         if part and Path(part).resolve() not in shims)
+
+
 def resolve_actual_context(binary, prefix, args, env, settings, snapshot):
     config, settings, route_env, route_settings, flags, policies = freeze_settings(env, settings, snapshot)
     env = {key: value for key, value in env.items() if not key.upper().startswith("CAGE_")}
@@ -401,6 +408,8 @@ def bind(session_id, resume, material):
 def main():
     prefix_len = {"ccs": 2, "official": 3}.get(sys.argv[1], 1)
     prefix, args = sys.argv[1:1 + prefix_len], sys.argv[1 + prefix_len:]
+    if prefix == ["claude"] and os.name != "nt":
+        disable_default_account_shims()
     verify_only = "--cage-verify" in args
     if verify_only:
         args.remove("--cage-verify")

@@ -1098,7 +1098,8 @@ func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, comma
 // entryCommandScript is terminalScript for "ssh -t host command": the
 // command runs in the same environment as a terminal's shell.
 func entryCommandScript(workspace, command string) string {
-	return "cd " + shellescape.Quote(workspace) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lc " + shellescape.Quote(command)
+	return "cd " + shellescape.Quote(workspace) + " && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 bash -lc " +
+		shellescape.Quote(`export PATH="$HOME/.local/share/cage/auto-shims:$PATH"; `+command)
 }
 
 // entryTerminalView is the client's window and, once chosen, the terminal a

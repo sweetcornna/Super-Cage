@@ -179,19 +179,6 @@
     min-height: 1.8571rem;
     margin-right: 4px;
   }
-  /* claude.ai shortcut: quiet at rest, its own clay only under the pointer. */
-  .sidebar-claude-shortcut img {
-    filter: grayscale(1);
-    opacity: 0.6;
-    transition: filter var(--dur-fast) var(--ease-out), opacity var(--dur-fast) var(--ease-out);
-  }
-  .sidebar-claude-shortcut:is(:hover, :focus-visible, :active):not(:disabled) img {
-    filter: none;
-    opacity: 1;
-  }
-  .sidebar-claude-shortcut:disabled img {
-    opacity: 0.35;
-  }
   .sidebar-link kbd,
   .shortcut-hint {
     margin-left: auto;
@@ -392,33 +379,13 @@
   .sidebar-tab.active > :is(button[role="tab"], .sidebar-session) svg {
     color: var(--strong);
   }
-  /* Provider slot: 16 px square; the account pill hangs off its corner and
-     is ringed in the row's own background so it reads as cut out. */
+  /* Match a session's account badge ring to the surrounding row. */
   .provider-mark {
     --provider-ring: var(--chrome);
     position: relative;
     display: inline-flex;
     flex: none;
     color: var(--muted);
-  }
-  .provider-mark > svg {
-    display: block;
-  }
-  .provider-mark[data-number]::after {
-    content: attr(data-number);
-    position: absolute;
-    right: -3px;
-    bottom: -4px;
-    min-width: 11px;
-    height: 11px;
-    padding: 0 2px;
-    border-radius: var(--r-pill);
-    background: var(--muted);
-    box-shadow: 0 0 0 1.5px var(--provider-ring);
-    color: var(--surface);
-    font: 700 9px/11px var(--font-sans);
-    font-variant-numeric: tabular-nums;
-    text-align: center;
   }
   .sidebar-tab:hover .provider-mark {
     --provider-ring: var(--hover);

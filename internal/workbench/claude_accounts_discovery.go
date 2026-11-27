@@ -23,6 +23,7 @@ type claudeDetected struct {
 
 type claudePanel struct {
 	Scheduling             claudeScheduling `json:"scheduling"`
+	SchedulingAPI          int              `json:"scheduling_api"`
 	UsagePanelRunning      bool             `json:"usage_panel_running"`
 	UsageUnavailableReason string           `json:"usage_unavailable_reason,omitempty"`
 	Accounts               []claudeAccount  `json:"accounts"`
@@ -189,7 +190,7 @@ func (s *Server) claudePanelView(ctx context.Context) (claudePanel, claudeAccoun
 	s.mu.Lock()
 	ready, update := s.ready, s.guestUpdateRequired
 	s.mu.Unlock()
-	view := claudePanel{DetectionStatus: "offline", MagpieTakeover: s.magpieTakesOverScheduling()}
+	view := claudePanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI, MagpieTakeover: s.magpieTakesOverScheduling()}
 	if unavailable := s.usageAvailability(); unavailable != nil {
 		view.UsageUnavailableReason = unavailable.Error()
 	}
@@ -230,6 +231,7 @@ func (s *Server) claudePanelView(ctx context.Context) (claudePanel, claudeAccoun
 	defer m.mu.Unlock()
 	view.Accounts, view.LoginNotice = list.Accounts, m.loginNotice
 	view.Scheduling, view.HandoffAPI = list.Scheduling, 2
+	view.Scheduling.SelectedAccountID = list.Scheduling.claudeSelectedAccountID()
 	view.Scheduling.SwitchAnswered = list.Scheduling.answered()
 	view.UsagePanelRunning = m.panelRunning
 	if subject := reading.subject(); view.DetectionStatus == "ready" && list.bySubject(subject) == nil {

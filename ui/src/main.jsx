@@ -2004,7 +2004,7 @@ function App() {
         onRestart={() => restartT3Code(tab)}
         onToggleBrowserBar={() => toggleT3CodeBrowserBar(tab.id, true)}
         onOfficialSettings={() => { void openT3Code("", "settings").catch(() => {}); }}
-        onSettings={() => openSettings("agents")}
+        onSettings={() => openSettings("t3code")}
         onClose={() => closeTab(tab)}
         menu={terminalMenuAt(split ? `heading-${tab.id}` : "heading")}
       />;

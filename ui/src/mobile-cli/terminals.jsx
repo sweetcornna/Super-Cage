@@ -1,5 +1,6 @@
 import React, { Suspense, lazy, useEffect, useState } from "react";
-import { Bot, ChevronRight, FolderOpen, LoaderCircle, Sparkles, SquareTerminal } from "lucide-react";
+import { ChevronRight, FolderOpen, LoaderCircle, SquareTerminal } from "lucide-react";
+import { ProviderMark } from "../provider-mark";
 import { Doodle } from "./doodles";
 import { InlineSelect } from "./inline-select";
 import { terminals } from "./services.mjs";
@@ -10,9 +11,17 @@ import { haptic } from "./device-navigation.mjs";
 const TerminalScreen = lazy(() => import("./terminal-screen"));
 export const kindInfo = {
   shell: { label: "Shell", name: "终端", icon: SquareTerminal, hint: "Linux 命令行" },
-  claude: { label: "Claude", name: "Claude 终端", icon: Sparkles, hint: "Claude Code 界面" },
-  codex: { label: "Codex", name: "Codex 终端", icon: Bot, hint: "Codex 界面" },
+  claude: { label: "Claude", name: "Claude 终端", icon: ClaudeMark, hint: "Claude Code 界面" },
+  codex: { label: "Codex", name: "Codex 终端", icon: CodexMark, hint: "Codex 界面" },
 };
+
+function ClaudeMark({ size }) {
+  return <ProviderMark provider="claude" size={size} decorative />;
+}
+
+function CodexMark({ size }) {
+  return <ProviderMark provider="codex" size={size} decorative />;
+}
 
 export function TerminalsView({ catalog, project, onProject, terminalID, onOpen, onBack, onDenied, visible }) {
   const [data, setData] = useState(null);

@@ -24,7 +24,6 @@ import {
 } from "lucide-react";
 import { EnvironmentShield } from "./environment-shield";
 import { BrandMark } from "./brand";
-import claudeLogo from "./claude-logo.svg";
 import { projectName } from "./workspace-state.mjs";
 import { WorkspaceTabs } from "./workspace-tabs";
 import { sessionKey } from "./session-order.mjs";
@@ -36,7 +35,9 @@ import { GuestSystemIcon } from "./guest-system-icon";
 import { getClientContext, isCloudWorkbench, isRemoteClient } from "./client-context.mjs";
 import { VirtualMachines } from "./virtual-machines";
 import { AgentIcon } from "./agent-icon";
+import { ProviderMark } from "./provider-mark";
 import { isMagpieDirectAvailable } from "./magpie-panel";
+import { isT3CodeDirectAvailable, isT3CodeManagedSupported } from "./t3code-panel";
 
 const SESSION_PREVIEW_LIMIT = 5;
 
@@ -174,30 +175,29 @@ export function WorkspaceSidebar({
               aria-label="claude.ai"
               title="打开 claude.ai"
             >
-              <img src={claudeLogo} width="18" height="18" alt="" />
+              <ProviderMark provider="claude" size={18} decorative />
             </button>
           </div>
           {t3code?.enabled && (() => {
-            const t3DirectAvailable =
-              t3code.direct_available !== false &&
-              t3code.data?.direct_available !== false &&
-              !isRemoteClient();
+            const t3DirectAvailable = isT3CodeDirectAvailable(t3code);
             const t3UsesWorkbench = !t3DirectAvailable || t3code.open_mode !== "direct";
+            const needsSetup = t3code.mode === "external" ? !t3code.external_url :
+              !t3code.installed || !isT3CodeManagedSupported(t3code, { guest_system: guestSystem });
             return (
               <div className={`sidebar-browser-row sidebar-t3code-row ${t3codeActive ? "selected" : ""}`}>
                 <button
                   className="sidebar-link"
-                  onClick={() => onOpenT3Code?.()}
-                  disabled={busy || (!running && t3code.mode === "managed") || (t3UsesWorkbench && (!ready || !browserAvailable))}
+                  onClick={() => needsSetup ? onSettings("t3code") : onOpenT3Code?.()}
+                  disabled={!needsSetup && (busy || (!running && t3code.mode === "managed") || (t3UsesWorkbench && (!ready || !browserAvailable)))}
                   aria-current={t3codeActive ? "page" : undefined}
-                  aria-label="打开 T3 Code"
-                  title={t3code.running ? "打开 T3 Code（运行中）" : "打开 T3 Code"}
+                  aria-label={needsSetup ? "配置 T3 Code" : "打开 T3 Code"}
+                  title={needsSetup ? "配置 T3 Code" : t3code.running ? "打开 T3 Code（运行中）" : "打开 T3 Code"}
                 >
-                  <AgentIcon agentId="t3code" size={17} />
+                  <AgentIcon agentId="t3code" size={17} decorative />
                   <span className="sidebar-t3code-label">T3 Code</span>
                   {t3code.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
                 </button>
-                {t3DirectAvailable && (
+                {t3DirectAvailable && !needsSetup && (
                   <button
                     className="icon-button sidebar-claude-shortcut"
                     onClick={() => onOpenT3Code?.("direct")}
@@ -208,6 +208,10 @@ export function WorkspaceSidebar({
                     <Zap size={14} />
                   </button>
                 )}
+                <button type="button" className="icon-button sidebar-claude-shortcut"
+                  onClick={() => onSettings("t3code")} aria-label="T3 Code 设置" title="T3 Code 设置">
+                  <Settings size={14} />
+                </button>
               </div>
             );
           })()}
@@ -224,7 +228,7 @@ export function WorkspaceSidebar({
                   aria-label="打开 Magpie"
                   title={magpie.running ? "打开 Magpie（运行中）" : "打开 Magpie"}
                 >
-                  <AgentIcon agentId="magpie" size={17} />
+                  <AgentIcon agentId="magpie" size={17} decorative />
                   <span className="sidebar-t3code-label">Magpie</span>
                   {magpie.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
                 </button>
@@ -253,7 +257,7 @@ export function WorkspaceSidebar({
                 ? (herdr.server_running ? `打开 Herdr 的终端选择器（${herdr.terminals_count} 个终端在运行）` : "打开 Herdr 的终端选择器")
                 : "尚未在客机中安装 Herdr，请前往设置安装"}
             >
-              <AgentIcon agentId="herdr" size={17} />
+              <AgentIcon agentId="herdr" size={17} decorative />
               <span className="sidebar-t3code-label">Herdr</span>
               {herdr.server_running ? (
                 <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />
@@ -264,16 +268,16 @@ export function WorkspaceSidebar({
             <div className="sidebar-browser-row sidebar-t3code-row">
               <button
                 className="sidebar-link"
-                onClick={() => onOpenOrca?.()}
-                disabled={busy || !running || !orca.installed}
-                aria-label="在 Orca 中打开"
+                onClick={() => orca.installed ? onOpenOrca?.() : onSettings("orca")}
+                disabled={orca.installed && (busy || !running)}
+                aria-label={orca.installed ? "在 Orca 中打开" : "配置 Orca Server"}
                 title={orca.installed
                   ? (orca.can_auto_pair
                       ? (orca.running ? "唤醒本机 Orca 客户端（服务端运行中）" : "启动 Orca Server 并自动连接本机 Orca 客户端")
                       : "查看 Orca Server 配对码 / 二维码")
                   : "尚未安装 Orca Server，请前往设置一键安装"}
               >
-                <AgentIcon agentId="orca" size={17} />
+                <AgentIcon agentId="orca" size={17} decorative />
                 <span className="sidebar-t3code-label">Orca</span>
                 {orca.running && <i className="sidebar-t3code-dot" aria-hidden="true" title="运行中" />}
               </button>
@@ -288,6 +292,10 @@ export function WorkspaceSidebar({
                   <QrCode size={14} />
                 </button>
               )}
+              <button type="button" className="icon-button sidebar-claude-shortcut"
+                onClick={() => onSettings("orca")} aria-label="Orca Server 设置" title="Orca Server 设置">
+                <Settings size={14} />
+              </button>
             </div>
           )}
           <button className={`sidebar-link ${desktopOpen ? "selected" : ""}`} onClick={onClaudeDesktop} disabled={!running || busy} title="安装或打开 Claude Desktop"><Monitor size={17} />Claude Desktop</button>

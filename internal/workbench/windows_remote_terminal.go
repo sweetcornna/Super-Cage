@@ -12,17 +12,14 @@ import (
 // The remote adapter starts only a fixed home PowerShell in the paired ordinary
 // account's AppContainer. It does not expose an administrative host terminal.
 func (s *Server) createRemoteWindowsTerminal(input terminalRequest) (*terminalSession, error) {
-	if input.Kind == "claude" || input.Kind == "claude-login" || ((input.Kind == "agent" || input.Kind == "agent-login") && input.AgentID == "claude") {
-		return s.createWindowsCLITerminal(input)
-	}
-	if input.Kind != "" && input.Kind != "shell" || input.ClaudeAccountID != "" || input.sharedID != "" {
-		return nil, errors.New("普通 PowerShell 终端不能指定 Claude 账号、会话或其他终端类型")
-	}
 	s.mu.Lock()
-	ready, closing := s.ready, s.closing
+	ready, closing, sealed := s.ready, s.closing, s.appUpdateSealed
 	s.mu.Unlock()
 	if closing {
 		return nil, errTerminalsClosed
+	}
+	if sealed {
+		return nil, errAppUpdateSealed
 	}
 	if !ready {
 		return nil, errTerminalNotReady
@@ -35,7 +32,7 @@ func (s *Server) createRemoteWindowsTerminal(input terminalRequest) (*terminalSe
 	}
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 10*time.Second)
 	defer cancel()
-	state, err := s.windowsStatus(ctx)
+	state, err := windowsGuestStatus(s, ctx)
 	if err != nil {
 		return nil, err
 	}

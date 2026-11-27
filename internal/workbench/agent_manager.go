@@ -3,6 +3,7 @@ package workbench
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,9 +78,11 @@ type agentDefaultProbeEntry struct {
 }
 
 type agentDefaultProbeCall struct {
-	done chan struct{}
-	snap agentGuestSnapshot
-	err  error
+	done      chan struct{}
+	forced    bool
+	checkedAt time.Time
+	snap      agentGuestSnapshot
+	err       error
 }
 
 type agentConfirmCall struct {
@@ -99,6 +102,7 @@ type agentManager struct {
 	lastWrittenGen   uint64
 	closed           bool
 	flushTimer       *time.Timer
+	flushTicket      uint64
 	probeCache       agentProbeSnapshot
 	probeAt          time.Time
 	probeGen         uint64
@@ -119,7 +123,13 @@ type agentManager struct {
 	runtimeHook func(context.Context, string, any, any) error
 }
 
-var agentRuntimeSpec = newGuestScriptSpec(".local/share/cage/agent-runtime", 0o700, cage.AgentRuntimeHelper)
+var agentRuntimeSpec = func() *guestScriptSpec {
+	sum := sha256.Sum256([]byte(cage.AgentRuntimeHelper + "\x00" + cage.OrcaCodexBridgeHelper))
+	return newGuestScriptBundle(".local/share/cage/agent-runtime", fmt.Sprintf("%x", sum), 0o700, ".py", []guestScriptFile{
+		{suffix: ".py", content: []byte(cage.AgentRuntimeHelper)},
+		{suffix: ".orca-codex-bridge.py", content: []byte(cage.OrcaCodexBridgeHelper)},
+	})
+}()
 
 var agentRuntimeHash = agentRuntimeSpec.hash
 
@@ -220,9 +230,16 @@ func cloneAgentProbeSnapshot(snap agentProbeSnapshot) agentProbeSnapshot {
 }
 
 func (s *Server) loadAgentStoreLocked() (agentStoreData, error) {
+	store, err := s.readAgentStoreLocked()
+	return cloneAgentStore(store), err
+}
+
+// readAgentStoreLocked returns the immutable cached store. Callers that edit
+// the store use loadAgentStoreLocked to get their own copy.
+func (s *Server) readAgentStoreLocked() (agentStoreData, error) {
 	m := &s.agentCLIs
 	if m.storeLoaded {
-		return cloneAgentStore(m.store), nil
+		return m.store, nil
 	}
 	store := agentStoreData{
 		CustomSpecs: []agentcatalog.AgentSpec{},
@@ -231,7 +248,7 @@ func (s *Server) loadAgentStoreLocked() (agentStoreData, error) {
 	}
 	data, err := os.ReadFile(filepath.Join(s.profile, "agents.json"))
 	if os.IsNotExist(err) {
-		m.store, m.storeLoaded = cloneAgentStore(store), true
+		m.store, m.storeLoaded = store, true
 		return store, nil
 	}
 	if err != nil || json.Unmarshal(data, &store) != nil {
@@ -246,8 +263,8 @@ func (s *Server) loadAgentStoreLocked() (agentStoreData, error) {
 	if store.LastProbe == nil {
 		store.LastProbe = map[string]agentRuntimeState{}
 	}
-	m.store, m.storeLoaded = cloneAgentStore(store), true
-	return cloneAgentStore(store), nil
+	m.store, m.storeLoaded = store, true
+	return store, nil
 }
 
 func (s *Server) saveAgentStoreLocked(store agentStoreData) error {
@@ -262,7 +279,7 @@ func (s *Server) saveAgentStoreLocked(store agentStoreData) error {
 
 func (s *Server) lookupAgentSpec(id string) (agentcatalog.AgentSpec, agentConfig, bool) {
 	s.agentCLIs.mu.Lock()
-	store, err := s.loadAgentStoreLocked()
+	store, err := s.readAgentStoreLocked()
 	s.agentCLIs.mu.Unlock()
 	if err != nil {
 		spec, ok := agentcatalog.Lookup(id, nil)
@@ -274,7 +291,7 @@ func (s *Server) lookupAgentSpec(id string) (agentcatalog.AgentSpec, agentConfig
 
 func (s *Server) allAgentOAuthDomains() []string {
 	s.agentCLIs.mu.Lock()
-	store, _ := s.loadAgentStoreLocked()
+	store, _ := s.readAgentStoreLocked()
 	s.agentCLIs.mu.Unlock()
 	return agentcatalog.AllOAuthDomains(store.CustomSpecs)
 }
@@ -298,7 +315,7 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 
 func agentRuntimeUsesSharedSession(subcommand string) bool {
 	switch subcommand {
-	case "probe-all", "snapshot", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "orca-status":
+	case "probe-all", "snapshot", "plain-launches", "schedule-cursor", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "orca-status", "orca-codex-accounts":
 		return true
 	default:
 		return false
@@ -541,6 +558,7 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	ready := s.ready && !s.closing
 	claudeCmd := claudeTerminalCommand(s.preferences)
+	windowsCLIInstalled := s.windowsState.Components["cli"].Installed
 	s.mu.Unlock()
 
 	var probe agentProbeSnapshot
@@ -607,6 +625,11 @@ func (s *Server) listAgents(w http.ResponseWriter, r *http.Request) {
 		rt := store.LastProbe[spec.ID]
 		if live, ok := probe.Agents[spec.ID]; ok {
 			rt = live
+		}
+		if s.windowsGuest != nil {
+			// The saved probe describes the POSIX helper. Windows can only
+			// report the Claude installation from its own paired relay.
+			rt = agentRuntimeState{Installed: spec.ID == "claude" && windowsCLIInstalled}
 		}
 		cfg := store.Configs[spec.ID]
 		if spec.ID == "claude" {
@@ -679,7 +702,9 @@ func (s *Server) installAgentHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "网络已暂停，请先恢复网络连接后再安装或更新 Agent CLI", http.StatusConflict)
 		return
 	}
-	if ch.Kind == "builtin" && spec.ID == "claude" {
+	// Native guests install their signed CLI kit through component maintenance.
+	// The Linux guest can verify and update just the selected Claude executable.
+	if ch.Kind == "builtin" && spec.ID == "claude" && (s.macosGuest != nil || s.windowsGuest != nil) {
 		s.updateEnvironmentTools(w, r)
 		return
 	}
@@ -762,13 +787,13 @@ func (s *Server) uninstallAgentHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updateAgentConfigHTTP(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		AgentID          string `json:"agent_id"`
-		LaunchCommand    string `json:"launch_command"`
-		ExtraArgs        string `json:"extra_args"`
-		PreferredChannel string `json:"preferred_channel"`
-		ImagePaste       *bool  `json:"image_paste"`
-		ShiftEnterMode   string `json:"shift_enter_mode"`
-		HiddenInMenu     *bool  `json:"hidden_in_menu"`
+		AgentID          string  `json:"agent_id"`
+		LaunchCommand    *string `json:"launch_command"`
+		ExtraArgs        *string `json:"extra_args"`
+		PreferredChannel string  `json:"preferred_channel"`
+		ImagePaste       *bool   `json:"image_paste"`
+		ShiftEnterMode   string  `json:"shift_enter_mode"`
+		HiddenInMenu     *bool   `json:"hidden_in_menu"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -778,13 +803,13 @@ func (s *Server) updateAgentConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "未找到指定的 Agent CLI", http.StatusNotFound)
 		return
 	}
-	if err := agentcatalog.ValidateLaunchCommand(in.LaunchCommand); err != nil {
-		requestError(w, err)
-		return
-	}
-	if err := agentcatalog.ValidateLaunchCommand(in.ExtraArgs); err != nil {
-		requestError(w, err)
-		return
+	for _, value := range []*string{in.LaunchCommand, in.ExtraArgs} {
+		if value != nil {
+			if err := agentcatalog.ValidateLaunchCommand(*value); err != nil {
+				requestError(w, err)
+				return
+			}
+		}
 	}
 	if in.ShiftEnterMode != "" && !slices.Contains([]string{"bracketed_newline", "csi_u", "plain"}, in.ShiftEnterMode) {
 		http.Error(w, "无效的 Shift+Enter 模式", http.StatusBadRequest)
@@ -802,10 +827,10 @@ func (s *Server) updateAgentConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		s.op.Lock()
 		defer s.op.Unlock()
 
-		if spec.ID == "claude" {
+		if spec.ID == "claude" && in.LaunchCommand != nil {
 			s.mu.Lock()
 			nextPrefs := s.preferences
-			nextPrefs.ClaudeTerminalCommand = strings.TrimSpace(in.LaunchCommand)
+			nextPrefs.ClaudeTerminalCommand = strings.TrimSpace(*in.LaunchCommand)
 			if nextPrefs.ClaudeTerminalCommand == "" {
 				nextPrefs.ClaudeTerminalCommand = "claude"
 			}
@@ -827,8 +852,12 @@ func (s *Server) updateAgentConfigHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg := store.Configs[spec.ID]
-		cfg.LaunchCommand = strings.TrimSpace(in.LaunchCommand)
-		cfg.ExtraArgs = strings.TrimSpace(in.ExtraArgs)
+		if in.LaunchCommand != nil {
+			cfg.LaunchCommand = strings.TrimSpace(*in.LaunchCommand)
+		}
+		if in.ExtraArgs != nil {
+			cfg.ExtraArgs = strings.TrimSpace(*in.ExtraArgs)
+		}
 		if in.PreferredChannel != "" {
 			cfg.PreferredChannel = in.PreferredChannel
 		}

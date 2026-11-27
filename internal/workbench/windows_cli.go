@@ -159,33 +159,15 @@ func cliWorkspaceWithin(path, root string, windows bool) bool {
 }
 func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSession, error) {
 	kind := input.Kind
-	if kind == "" {
-		kind = "shell"
-	}
-	if (kind == "agent" || kind == "agent-login") && input.AgentID == "claude" {
-		if kind == "agent-login" {
-			kind = "claude-login"
-		} else {
-			kind = "claude"
-		}
-		if input.AccountID != "" && input.ClaudeAccountID == "" {
-			input.ClaudeAccountID = input.AccountID
-		}
-	}
-	if kind == "agent" || kind == "agent-login" {
-		return nil, errors.New("当前 Windows 原生客机暂未支持独立 Agent 终端包装，请在 PowerShell 终端中运行")
-	}
-	if kind != "shell" && kind != "claude" && kind != "claude-login" {
-		return nil, errors.New("终端类型无效")
-	}
-	if kind == "shell" && (input.ClaudeAccountID != "" || input.sharedID != "") {
-		return nil, errors.New("普通终端不能指定 Claude 账号或会话")
-	}
 	s.mu.Lock()
-	ready, closing, command := s.ready, s.closing, claudeTerminalCommand(s.preferences)
+	ready, closing, sealed, componentUpdate := s.ready, s.closing, s.appUpdateSealed, s.guestUpdateRequired
+	command := claudeTerminalCommand(s.preferences)
 	s.mu.Unlock()
 	if closing {
 		return nil, errTerminalsClosed
+	}
+	if sealed {
+		return nil, errAppUpdateSealed
 	}
 	if !ready || s.busy() {
 		return nil, errTerminalNotReady
@@ -199,6 +181,9 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 			return nil, err
 		}
 		record = found
+		if record.codex() {
+			return nil, errors.New("此会话不是 Claude 会话")
+		}
 		if record.Switch != nil && record.Switch.Phase == "preparing" {
 			return nil, errors.New("账号交接尚未完成，请先重试或取消交接")
 		}
@@ -221,6 +206,11 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 	}
 	if kind == "claude" && (!sharedCLILauncher(command) || record != nil && record.Launcher != "" && record.Launcher != command) {
 		return nil, errors.New("Windows 原生共享会话支持 claude 或 ccs 配置名启动命令")
+	}
+	launcher, _ := mobileLaunchArgs(command, claudeSelection{})
+	isCCS := len(launcher) == 2 && launcher[0] == "ccs"
+	if kind == "claude" && isCCS && s.windowsGuest.Remote() {
+		return nil, errors.New("Windows 云端沙箱暂不支持 CCS 终端")
 	}
 	workspace := s.workspace()
 	var project *windowsProjectBinding
@@ -254,11 +244,17 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 			return nil, err
 		}
 		if selection.ID != "" {
+			if componentUpdate {
+				return nil, errGuestUpdateRequired
+			}
 			if !validClaudeID(selection.ID) || !validClaudeGuestID(selection.GuestID) || login && selection.GuestID == "default" {
 				return nil, errors.New("Claude 账号 ID 无效")
 			}
 			if login && s.mobileCLI.activeAccounts()[selection.ID] > 0 {
 				return nil, errors.New("请先结束该账号正在执行的移动 CLI 轮次，再重新登录")
+			}
+			if login && s.activeT3CodeAccounts("claude")[selection.ID] > 0 {
+				return nil, errors.New("请先停止使用该账号的 T3 Code，再重新登录")
 			}
 			if existing, conflict := s.terminals.existingClaudeLogin(selection.ID, login); existing != nil || conflict != nil {
 				return existing, conflict
@@ -285,9 +281,8 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 		}
 		request = map[string]any{"action": "terminal", "profile": windowsCLIProfileID(s.profile), "kind": kind, "cols": 100, "rows": 30, "account": account, "subject": selection.Subject}
 		if kind == "claude" {
-			parts, _ := mobileLaunchArgs(command, selection)
-			if len(parts) == 2 && parts[0] == "ccs" {
-				request["ccs_profile"] = parts[1]
+			if isCCS {
+				request["ccs_profile"] = launcher[1]
 			}
 			payload, found, err := s.prepareTerminalConversation(workspace, selection, input.sharedID)
 			if err != nil {

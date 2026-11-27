@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/agentcatalog"
+	"github.com/sylvinus/agent-vm/internal/controlclient"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
 	"github.com/sylvinus/agent-vm/internal/remotehost"
 )
@@ -109,9 +109,9 @@ func AgentOperations() []AgentOperation {
 	post("proxy.delay", "Measure one proxy node", "/api/proxy/delay", object(map[string]string{"node_id": "string"}))
 	add("guest.reselect", "Clear only the same unstarted installation the UI can reselect", "DELETE", "/api/environment/guest-systems", object(map[string]string{"id": "string"}))
 	get("claude-accounts.get", "Read account roster, quotas and scheduling", "/api/claude-accounts")
-	post("claude-accounts.change", "Apply the same join, cancel, update, scheduling, refresh and removal actions as the UI", "/api/claude-accounts", from(claudeAccountInput{}))
+	post("claude-accounts.change", "Apply the same join, cancel, update, scheduling, select, refresh and removal actions as the UI", "/api/claude-accounts", from(claudeAccountInput{}))
 	get("codex-accounts.get", "Read Codex account roster, quotas and scheduling (Linux guests)", "/api/codex-accounts")
-	post("codex-accounts.change", "Apply the same update, scheduling, refresh and remove actions as the Codex account panel; log in through a codex-login terminal", "/api/codex-accounts", from(codexAccountInput{}))
+	post("codex-accounts.change", "Apply the same update, scheduling, select, refresh and remove actions as the Codex account panel; log in through a codex-login terminal", "/api/codex-accounts", from(codexAccountInput{}))
 	get("agent-clis.list", "List built-in and custom Agent CLIs, installation status, prerequisites and account summaries", "/api/agent-clis")
 	post("agent-clis.install", "Install or update an Agent CLI through its official channel", "/api/agent-clis/install", object(map[string]string{"agent_id": "string", "channel": "string"}))
 	post("agent-clis.uninstall", "Uninstall a non-core Agent CLI package while preserving accounts and project files", "/api/agent-clis/uninstall", object(map[string]string{"agent_id": "string", "channel": "string"}))
@@ -173,7 +173,7 @@ func AgentOperations() []AgentOperation {
 	get("favorites.get", "Read bookmarks and folders", "/api/favorites")
 	post("favorites.change", "Save, move, reorder or delete using the same collection owner", "/api/favorites", from(favoriteChange{}))
 	get("terminals.get", "Read terminal sessions", "/api/terminals")
-	post("terminals.create", "Create the same shell/Claude terminal as the UI", "/api/terminals", from(terminalRequest{}))
+	post("terminals.create", "Create a workbench terminal using the same terminal types and account rules as the UI", "/api/terminals", from(terminalRequest{}))
 	get("client.context", "Read the desktop connection generation; use desktop scope", "/api/client/context")
 	get("client.hosts", "Read saved SSH hosts; use desktop scope", "/api/client/hosts")
 	post("client.hosts.create", "Save an SSH host through the desktop store", "/api/client/hosts", from(remotehost.HostProfile{}))

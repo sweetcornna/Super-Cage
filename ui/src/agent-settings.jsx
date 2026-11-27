@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Check,
   Download,
@@ -13,10 +13,8 @@ import {
 } from "lucide-react";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
-import { T3CodeSettingsCard } from "./t3code-panel";
 import { MagpieSettingsCard } from "./magpie-panel";
 import { HerdrSettingsCard } from "./herdr-panel";
-import { OrcaSettingsCard } from "./orca-panel";
 import "./agent-settings.css";
 
 const CATEGORY_LABELS = {
@@ -114,41 +112,39 @@ function splitCSV(text) {
     .filter(Boolean);
 }
 
-function AgentConfigEditor({ entry, busy, onSave }) {
+function AgentConfigEditor({ entry, busy, onSave, onDraftChange }) {
   const { spec, config = {} } = entry;
-  const [launchCommand, setLaunchCommand] = useState(config.launch_command || spec.default_launch_command || spec.binary);
-  const [extraArgs, setExtraArgs] = useState(config.extra_args || "");
-  const [imagePaste, setImagePaste] = useState(
-    typeof config.image_paste === "boolean" ? config.image_paste : spec.terminal?.image_paste_shortcut !== false,
-  );
-  const [shiftEnterMode, setShiftEnterMode] = useState(
-    config.shift_enter_mode || spec.terminal?.shift_enter_mode || "bracketed_newline",
-  );
-  const [hiddenInMenu, setHiddenInMenu] = useState(Boolean(config.hidden_in_menu));
+  const channels = spec.channels || [];
+  const savedCommand = config.launch_command || spec.default_launch_command || spec.binary;
+  const savedArgs = config.extra_args || "";
+  const savedImagePaste = config.image_paste ?? (spec.terminal?.image_paste_shortcut !== false);
+  const savedShiftEnter = config.shift_enter_mode || spec.terminal?.shift_enter_mode || "bracketed_newline";
+  const savedHidden = Boolean(config.hidden_in_menu);
+  const savedChannel = channels.some(ch => ch.id === config.preferred_channel)
+    ? config.preferred_channel : channels[0]?.id || "";
+  const [launchCommand, setLaunchCommand] = useState(savedCommand);
+  const [extraArgs, setExtraArgs] = useState(savedArgs);
+  const [imagePaste, setImagePaste] = useState(savedImagePaste);
+  const [shiftEnterMode, setShiftEnterMode] = useState(savedShiftEnter);
+  const [hiddenInMenu, setHiddenInMenu] = useState(savedHidden);
+  const [preferredChannel, setPreferredChannel] = useState(savedChannel);
   const [saving, setSaving] = useState(false);
   const [savedMsg, setSavedMsg] = useState("");
   const [err, setErr] = useState("");
 
-  useEffect(() => {
-    setLaunchCommand(config.launch_command || spec.default_launch_command || spec.binary);
-    setExtraArgs(config.extra_args || "");
-    setImagePaste(
-      typeof config.image_paste === "boolean" ? config.image_paste : spec.terminal?.image_paste_shortcut !== false,
-    );
-    setShiftEnterMode(config.shift_enter_mode || spec.terminal?.shift_enter_mode || "bracketed_newline");
-    setHiddenInMenu(Boolean(config.hidden_in_menu));
-  }, [
-    spec.id,
-    spec.default_launch_command,
-    spec.binary,
-    spec.terminal?.image_paste_shortcut,
-    spec.terminal?.shift_enter_mode,
-    config.launch_command,
-    config.extra_args,
-    config.image_paste,
-    config.shift_enter_mode,
-    config.hidden_in_menu,
-  ]);
+  const resetDraft = useCallback(() => {
+    setLaunchCommand(savedCommand);
+    setExtraArgs(savedArgs);
+    setImagePaste(savedImagePaste);
+    setShiftEnterMode(savedShiftEnter);
+    setHiddenInMenu(savedHidden);
+    setPreferredChannel(savedChannel);
+  }, [savedCommand, savedArgs, savedImagePaste, savedShiftEnter, savedHidden, savedChannel]);
+  useEffect(resetDraft, [resetDraft]);
+  const dirty = launchCommand !== savedCommand || extraArgs !== savedArgs || imagePaste !== savedImagePaste ||
+    shiftEnterMode !== savedShiftEnter || hiddenInMenu !== savedHidden || preferredChannel !== savedChannel;
+  useEffect(() => { onDraftChange(spec.id, dirty); }, [onDraftChange, spec.id, dirty]);
+  useEffect(() => () => onDraftChange(spec.id, false), [onDraftChange, spec.id]);
 
   const togglePreset = (flag) => {
     const parts = extraArgs.trim() ? extraArgs.trim().split(/\s+/) : [];
@@ -164,18 +160,24 @@ function AgentConfigEditor({ entry, busy, onSave }) {
 
   const submit = async (e) => {
     e.preventDefault();
+    if (busy || saving || !dirty) return;
     setSaving(true);
     setErr("");
     setSavedMsg("");
     try {
-      await onSave({
+      const result = await onSave({
         agent_id: spec.id,
         launch_command: launchCommand.trim(),
-        extra_args: extraArgs.trim(),
         image_paste: imagePaste,
         shift_enter_mode: shiftEnterMode,
-        hidden_in_menu: hiddenInMenu,
+        ...(spec.id === "claude" ? {} : { extra_args: extraArgs.trim(), hidden_in_menu: hiddenInMenu }),
+        ...(preferredChannel !== savedChannel ? { preferred_channel: preferredChannel } : {}),
       });
+      const next = result?.agents?.find(agent => agent.spec.id === spec.id)?.config;
+      if (next) {
+        setLaunchCommand(next.launch_command || spec.default_launch_command || spec.binary);
+        setExtraArgs(next.extra_args || "");
+      }
       setSavedMsg("已保存，将应用于新建终端");
     } catch (error) {
       setErr(error.message);
@@ -186,92 +188,104 @@ function AgentConfigEditor({ entry, busy, onSave }) {
 
   return (
     <form className="agent-config-panel" onSubmit={submit}>
-      <div className="agent-config-grid">
-        <label>
-          启动命令
-          <input
-            value={launchCommand}
-            onChange={(e) => { setLaunchCommand(e.target.value); setSavedMsg(""); }}
-            placeholder={spec.default_launch_command || spec.binary}
-            spellCheck="false"
-            autoComplete="off"
-          />
-        </label>
-        {spec.id !== "claude" && (
+      <fieldset className="settings-fields" disabled={busy || saving}>
+        <div className="agent-config-grid">
           <label>
-            附加默认参数
+            启动命令
             <input
-              value={extraArgs}
-              onChange={(e) => { setExtraArgs(e.target.value); setSavedMsg(""); }}
-              placeholder="例如 --model o3"
+              value={launchCommand}
+              onChange={(e) => { setLaunchCommand(e.target.value); setSavedMsg(""); }}
+              placeholder={spec.default_launch_command || spec.binary}
               spellCheck="false"
               autoComplete="off"
             />
           </label>
-        )}
-        <label>
-          Shift+Enter 换行行为
-          <InlineSelect
-            aria-label="Shift+Enter 换行行为"
-            value={shiftEnterMode}
-            onValueChange={(value) => { setShiftEnterMode(value); setSavedMsg(""); }}
-          >
-            <option value="bracketed_newline">智能换行（括号粘贴 / CSI-u）</option>
-            <option value="csi_u">始终发送 CSI-u Shift+Enter</option>
-            <option value="plain">普通换行符</option>
-          </InlineSelect>
-        </label>
-      </div>
-
-      {spec.id !== "claude" && spec.terminal?.preset_flags?.length > 0 && (
-        <div className="agent-presets">
-          <span>常用启动参数：</span>
-          {spec.terminal.preset_flags.map((flag) => (
-            <button
-              type="button"
-              key={flag}
-              className="agent-preset-chip"
-              data-active={extraArgs.includes(flag)}
-              onClick={() => togglePreset(flag)}
+          {spec.id !== "claude" && (
+            <label>
+              附加默认参数
+              <input
+                value={extraArgs}
+                onChange={(e) => { setExtraArgs(e.target.value); setSavedMsg(""); }}
+                placeholder="例如 --model o3"
+                spellCheck="false"
+                autoComplete="off"
+              />
+            </label>
+          )}
+          {spec.id !== "claude" && channels.length > 1 && (
+            <label>
+              默认安装渠道
+              <InlineSelect value={preferredChannel} aria-label="默认安装渠道"
+                onValueChange={value => { setPreferredChannel(value); setSavedMsg(""); }}>
+                {channels.map(ch => <option key={ch.id} value={ch.id}>{ch.label}</option>)}
+              </InlineSelect>
+            </label>
+          )}
+          <label>
+            Shift+Enter 换行行为
+            <InlineSelect
+              aria-label="Shift+Enter 换行行为"
+              value={shiftEnterMode}
+              onValueChange={(value) => { setShiftEnterMode(value); setSavedMsg(""); }}
             >
-              {flag}
-            </button>
-          ))}
+              <option value="bracketed_newline">智能换行（括号粘贴 / CSI-u）</option>
+              <option value="csi_u">始终发送 CSI-u Shift+Enter</option>
+              <option value="plain">普通换行符</option>
+            </InlineSelect>
+          </label>
         </div>
-      )}
 
-      <label className="toggle-row">
-        <span>
-          <strong>启用 Ctrl+V 图片粘贴到终端</strong>
-          <small>允许在终端内直接粘贴截图或图片文件，自动上传并插入客机路径。</small>
-        </span>
-        <input
-          type="checkbox"
-          role="switch"
-          checked={imagePaste}
-          onChange={(e) => { setImagePaste(e.target.checked); setSavedMsg(""); }}
-        />
-      </label>
+        {spec.id !== "claude" && spec.terminal?.preset_flags?.length > 0 && (
+          <div className="agent-presets">
+            <span>常用启动参数：</span>
+            {spec.terminal.preset_flags.map((flag) => (
+              <button
+                type="button"
+                key={flag}
+                className="agent-preset-chip"
+                data-active={extraArgs.includes(flag)}
+                onClick={() => togglePreset(flag)}
+              >
+                {flag}
+              </button>
+            ))}
+          </div>
+        )}
 
-      {spec.id !== "claude" && (
         <label className="toggle-row">
           <span>
-            <strong>在“新建终端”菜单中隐藏</strong>
-            <small>保留已安装程序和账号配置，但不在新建终端快捷菜单中显示。</small>
+            <strong>启用 Ctrl+V 图片粘贴到终端</strong>
+            <small>允许在终端内直接粘贴截图或图片文件，自动上传并插入客机路径。</small>
           </span>
           <input
             type="checkbox"
             role="switch"
-            checked={hiddenInMenu}
-            onChange={(e) => { setHiddenInMenu(e.target.checked); setSavedMsg(""); }}
+            checked={imagePaste}
+            onChange={(e) => { setImagePaste(e.target.checked); setSavedMsg(""); }}
           />
         </label>
-      )}
 
+        {spec.id !== "claude" && (
+          <label className="toggle-row">
+            <span>
+              <strong>在“新建终端”菜单中隐藏</strong>
+              <small>保留已安装程序和账号配置，但不在新建终端快捷菜单中显示。</small>
+            </span>
+            <input
+              type="checkbox"
+              role="switch"
+              checked={hiddenInMenu}
+              onChange={(e) => { setHiddenInMenu(e.target.checked); setSavedMsg(""); }}
+            />
+          </label>
+        )}
+
+      </fieldset>
       {err && <div className="error-message" role="alert">{err}</div>}
       <div className="agent-custom-actions">
         {savedMsg && <span className="agent-pill agent-pill--ok"><Check size={13} />{savedMsg}</span>}
-        <button type="submit" className="primary" disabled={busy || saving}>
+        {dirty && <button type="button" disabled={saving} onClick={() => { resetDraft(); setErr(""); setSavedMsg(""); }}>放弃修改</button>}
+        <button type="submit" className="primary" disabled={busy || saving || !dirty}>
           {saving ? <LoaderCircle size={14} className="spin" /> : <Check size={14} />}
           保存终端设置
         </button>
@@ -282,28 +296,29 @@ function AgentConfigEditor({ entry, busy, onSave }) {
 
 export function AgentSettings({
   store,
-  t3code,
   magpie,
   herdr,
-  orca,
   status,
   onConfirm,
   onOpenAccounts,
   onLaunchAgent,
-  onOpenT3Code,
+  onOpenT3CodeSettings,
   onOpenMagpie,
   onOpenMagpieTUI,
   onOpenHerdr,
-  onOpenOrca,
-  onShowOrcaPair,
+  onOpenOrcaSettings,
   onSavedClaudeCommand,
+  onDirty,
 }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("all");
   const [selectedChannels, setSelectedChannels] = useState({});
   const [expandedConfig, setExpandedConfig] = useState({});
+  const [dirtyEditors, setDirtyEditors] = useState({});
   const [showCustomForm, setShowCustomForm] = useState(false);
   const [customForm, setCustomForm] = useState(emptyCustomForm);
+  const [savedCustomForm, setSavedCustomForm] = useState(emptyCustomForm);
+  const [magpieDirty, setMagpieDirty] = useState(false);
   const [actionError, setActionError] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -312,6 +327,21 @@ export function AgentSettings({
   const jobRunning = Boolean(status?.job?.running);
   const isAgentJob = jobRunning && (status?.job?.kind === "agent-install" || status?.job?.kind === "agent-uninstall");
   const busy = jobRunning || submitting;
+  const markEditorDirty = useCallback((id, dirty) => {
+    setDirtyEditors(previous => previous[id] === dirty ? previous : { ...previous, [id]: dirty });
+  }, []);
+  const customDirty = showCustomForm && JSON.stringify(customForm) !== JSON.stringify(savedCustomForm);
+  const dirty = magpieDirty || customDirty || Object.values(dirtyEditors).some(Boolean);
+  useEffect(() => { onDirty?.(dirty); }, [onDirty, dirty]);
+  useEffect(() => () => onDirty?.(false), [onDirty]);
+  const toggleConfig = async (id) => {
+    if (expandedConfig[id] && dirtyEditors[id] && !(await onConfirm({
+      title: "放弃尚未保存的终端设置？",
+      body: "收起编辑器会丢弃这次表单修改。",
+      confirm: "放弃修改",
+    }))) return;
+    setExpandedConfig(previous => ({ ...previous, [id]: !previous[id] }));
+  };
 
   const installed = useMemo(
     () => store.agents.filter((entry) => entry.spec.id === "claude" || entry.runtime?.installed),
@@ -366,14 +396,20 @@ export function AgentSettings({
   };
 
   const saveConfig = async (patch) => {
-    await store.saveConfig(patch);
+    const result = await store.saveConfig(patch);
+    if (patch.preferred_channel) {
+      setSelectedChannels(previous => ({ ...previous, [patch.agent_id]: undefined }));
+    }
     if (patch.agent_id === "claude") {
       onSavedClaudeCommand?.();
     }
+    return result;
   };
 
   const editCustom = (spec) => {
-    setCustomForm(formFromSpec(spec));
+    const form = formFromSpec(spec);
+    setCustomForm(form);
+    setSavedCustomForm(form);
     setShowCustomForm(true);
   };
 
@@ -528,15 +564,10 @@ export function AgentSettings({
         </div>
       )}
 
-      {t3code && (
-        <T3CodeSettingsCard
-          store={t3code}
-          agentsStore={store}
-          status={status}
-          magpieEnabled={Boolean(magpie?.enabled)}
-          onOpenT3Code={onOpenT3Code}
-        />
-      )}
+      {(onOpenOrcaSettings || onOpenT3CodeSettings) && <div className="t3code-quick-actions">
+        {onOpenOrcaSettings && <button type="button" onClick={onOpenOrcaSettings}>Orca Server 设置</button>}
+        {onOpenT3CodeSettings && <button type="button" onClick={onOpenT3CodeSettings}>T3 Code 设置</button>}
+      </div>}
 
       {magpie && (
         <MagpieSettingsCard
@@ -545,6 +576,7 @@ export function AgentSettings({
           onConfirm={onConfirm}
           onOpenMagpie={onOpenMagpie}
           onOpenMagpieTUI={onOpenMagpieTUI}
+          onDirty={setMagpieDirty}
         />
       )}
 
@@ -554,18 +586,6 @@ export function AgentSettings({
           status={status}
           onConfirm={onConfirm}
           onOpenHerdr={onOpenHerdr}
-        />
-      )}
-
-      {orca && (
-        <OrcaSettingsCard
-          store={orca}
-          agentsStore={store}
-          status={status}
-          magpieEnabled={Boolean(magpie?.enabled)}
-          onConfirm={onConfirm}
-          onOpenOrca={onOpenOrca}
-          onShowPairModal={onShowOrcaPair}
         />
       )}
 
@@ -633,7 +653,7 @@ export function AgentSettings({
                 <button
                   type="button"
                   aria-expanded={openCfg}
-                  onClick={() => setExpandedConfig((prev) => ({ ...prev, [spec.id]: !prev[spec.id] }))}
+                  onClick={() => void toggleConfig(spec.id)}
                 >
                   <SlidersHorizontal size={14} />
                   {openCfg ? "收起终端设置" : "终端优化与启动设置"}
@@ -680,6 +700,7 @@ export function AgentSettings({
                   entry={entry}
                   busy={busy}
                   onSave={saveConfig}
+                  onDraftChange={markEditorDirty}
                 />
               )}
             </article>
@@ -692,12 +713,10 @@ export function AgentSettings({
         <button
           type="button"
           onClick={() => {
-            if (showCustomForm && customForm.editing) {
-              setCustomForm(emptyCustomForm());
-            } else {
-              setShowCustomForm((v) => !v);
-              setCustomForm(emptyCustomForm());
-            }
+            const empty = emptyCustomForm();
+            setShowCustomForm(v => !v);
+            setCustomForm(empty);
+            setSavedCustomForm(empty);
           }}
         >
           <Plus size={14} />
@@ -1045,6 +1064,13 @@ export function AgentSettings({
                     账号管理
                   </button>
                 )}
+                {!isInstalled && (
+                  <button type="button" aria-expanded={Boolean(expandedConfig[spec.id])}
+                    onClick={() => void toggleConfig(spec.id)}>
+                    <SlidersHorizontal size={14} />
+                    {expandedConfig[spec.id] ? "收起终端设置" : "终端优化与启动设置"}
+                  </button>
+                )}
                 {isCustom && (
                   <>
                     <button type="button" onClick={() => editCustom(spec)}>
@@ -1062,6 +1088,9 @@ export function AgentSettings({
                   </>
                 )}
               </div>
+              {!isInstalled && expandedConfig[spec.id] && (
+                <AgentConfigEditor entry={entry} busy={busy} onSave={saveConfig} onDraftChange={markEditorDirty} />
+              )}
             </article>
           );
         })}

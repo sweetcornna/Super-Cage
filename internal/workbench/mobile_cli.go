@@ -112,22 +112,24 @@ func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, str
 	selection, launcher := record.Account, record.Launcher
 	if launcher == "" {
 		launcher = configured
-		var err error
-		selection, err = s.selectTerminalClaudeAccount(launcher, "", false, record.Workspace)
-		if err != nil {
-			return selection, "", empty, err
-		}
-		// An existing default subscription can use the same guest-side subject
-		// check as a registered account, without enrolling it in scheduling.
-		if launcher == "claude" && selection.ID == "" && !update && !s.magpieTakesOverScheduling() {
-			if epoch, ok := s.account.access(); ok {
-				if status, _, err := s.inspectClaudeDefault(epoch, true); err == nil && status.subject() != "" {
-					selection = claudeSelection{GuestID: "default", Subject: status.subject()}
+		// A legacy resume must verify the account it used before the
+		// launcher field was introduced; never assign it a new identity.
+		if !record.Resume && selection == (claudeSelection{}) {
+			var err error
+			selection, err = s.selectTerminalClaudeAccount(launcher, "", false, record.Workspace)
+			if err != nil {
+				return selection, "", empty, err
+			}
+			// An existing default subscription can use the same guest-side subject
+			// check as a registered account, without enrolling it in scheduling.
+			if launcher == "claude" && selection.ID == "" && !update && !s.magpieTakesOverScheduling() {
+				if epoch, ok := s.account.access(); ok {
+					if status, _, err := s.inspectClaudeDefault(epoch, true); err == nil && status.subject() != "" {
+						selection = claudeSelection{GuestID: "default", Subject: status.subject()}
+					}
 				}
 			}
 		}
-	} else if launcher != configured {
-		return selection, "", empty, errors.New("主机已更改 Claude 启动命令。请恢复原配置或新建会话")
 	}
 	if selection.ID != "" {
 		if update {
@@ -139,11 +141,7 @@ func (s *Server) prepareMobileLaunch(record *mobileRecord) (claudeSelection, str
 		if err != nil {
 			return selection, "", empty, err
 		}
-		account := list.find(selection.ID)
-		if account == nil || !account.Enabled || account.Status != "ready" || account.guestID() != selection.GuestID || claudeIdentityHash(account.Email, account.Organization) != selection.Subject {
-			return selection, "", empty, errors.New("原会话的 Claude 账号已停用或发生变化")
-		}
-		if _, err = s.terminals.existingClaudeLogin(selection.ID, false); err != nil {
+		if err = s.validateBoundClaudeAccount(list, selection); err != nil {
 			return selection, "", empty, err
 		}
 	}
@@ -188,7 +186,7 @@ func (s *Server) submitMobileTurn(ctx context.Context, id, requestID, prompt str
 		}
 		return view, nil
 	}
-	if m.active[id] != nil || len(m.active) >= 4 {
+	if m.active[id] != nil || m.activeTurnCount() >= 4 {
 		m.mu.Unlock()
 		return empty, errors.New("已有轮次在运行，请等待或停止后重试")
 	}
@@ -243,6 +241,7 @@ func (s *Server) admitMobileTurn(request context.Context, record *mobileRecord, 
 		return empty, errMobileLocked
 	}
 	m.mu.Lock()
+	newBinding := record.Launcher == "" && !record.Resume && record.Account == (claudeSelection{})
 	record.Account, record.Launcher = selection, launcher
 	resume := record.Resume
 	// If the service exits before receiving a result, only try resuming the
@@ -269,13 +268,19 @@ func (s *Server) admitMobileTurn(request context.Context, record *mobileRecord, 
 	view := record.snapshot()
 	m.mu.Unlock()
 	s.account.mu.Unlock()
-	if selection.ID != "" {
+	if newBinding && selection.ID != "" {
 		s.noteClaudeSelection(selection.ID, record.Workspace)
+	}
+	if selection.ID != "" {
+		s.kickClaudeLaunchSchedule()
 	}
 	go func() {
 		defer finish()
 		defer close(run.done)
 		defer cancel()
+		if selection.ID != "" {
+			defer s.kickClaudeLaunchSchedule()
+		}
 		turn := &record.Turns[len(record.Turns)-1]
 		runner.Approve = func(ctx context.Context, request cliconversation.PermissionRequest) bool {
 			return m.awaitMobileDecision(ctx, run, turn, request)

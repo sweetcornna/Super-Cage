@@ -99,14 +99,17 @@ func TestOrcaConfigLifecycleAutoPairAndSecurityBoundaries(t *testing.T) {
 		}
 	}
 
-	// 3. Enabling auto-allocates host_tunnel_port skipping already-registered 16768!
+	// 3. Enabling in automatic mode skips already-registered port 16768.
 	w = request(s, "POST", "/api/orca/config", s.origin, `{"enabled":true,"server_name":"My Cage Orca","terminal_memory_max":"2G"}`, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("valid orca config rejected: %d %s", w.Code, w.Body.String())
 	}
 	var enabledSt map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &enabledSt)
-	allocatedPort := int(enabledSt["host_tunnel_port"].(float64))
+	allocatedPort := int(enabledSt["tunnel_port"].(float64))
+	if enabledSt["host_tunnel_port"] != float64(0) {
+		t.Fatalf("auto-allocation overwrote the configured port: %+v", enabledSt)
+	}
 	if allocatedPort == 16768 || allocatedPort < 16768 || allocatedPort > 16868 {
 		t.Fatalf("expected auto-allocated port to skip registered 16768 and land in [16769..16868], got %d", allocatedPort)
 	}
@@ -152,7 +155,7 @@ func TestOrcaConfigLifecycleAutoPairAndSecurityBoundaries(t *testing.T) {
 		return echoLn.Addr().String(), nil
 	}
 
-	// Update host_tunnel_port to 16769 (or use allocatedPort) so mock list matches.
+	// Opening uses the allocated port even though the configured port is zero.
 	w = request(s, "POST", "/api/orca/open", s.origin, `{}`, true)
 	if w.Code != http.StatusOK {
 		t.Fatalf("POST /api/orca/open failed: %d %s", w.Code, w.Body.String())

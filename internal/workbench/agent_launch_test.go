@@ -1,19 +1,64 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/sylvinus/agent-vm/internal/agentcatalog"
 )
 
+func TestAgentAdmissionCountsFiniteCapacityGuestLaunches(t *testing.T) {
+	s := testServer(t)
+	spec, _, ok := s.lookupAgentSpec("opencode")
+	if !ok {
+		t.Fatal("fixture agent is unavailable")
+	}
+	first, second, guest := strings.Repeat("a", 24), strings.Repeat("b", 24), strings.Repeat("c", 24)
+	pool := &agentAccountPool{Accounts: []agentAccount{
+		{ID: first, ProfileID: guest, Enabled: true, Status: "ready", MaxConcurrency: 1},
+		{ID: second, Enabled: true, Status: "ready", MaxConcurrency: 1},
+	}}
+	var probeUnavailable atomic.Bool
+	s.agentCLIs.runtimeHook = func(_ context.Context, command string, _ any, output any) error {
+		if command == "plain-launches" {
+			if probeUnavailable.Load() {
+				return errors.New("guest unavailable")
+			}
+			*output.(*map[string]int) = map[string]int{guest: 1}
+		}
+		return nil
+	}
+	s.agentCLIs.mu.Lock()
+	err := s.saveAgentPoolsLocked(map[string]*agentAccountPool{spec.ID: pool})
+	s.agentCLIs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if selection, _, err := s.selectAgentAccount(spec, "auto", false, ""); err != nil || selection.ID != second {
+		t.Fatalf("guest SSH seat did not block its typed alternative: %+v %v", selection, err)
+	}
+	if _, _, err := s.selectAgentAccount(spec, first, false, ""); err == nil {
+		t.Fatal("explicit typed launch bypassed the guest seat")
+	}
+	if err := s.removeAgentAccount(context.Background(), spec, first); err == nil {
+		t.Fatal("removed an account with a live SSH lease")
+	}
+	probeUnavailable.Store(true)
+	if _, _, err := s.selectAgentAccount(spec, second, false, ""); err == nil {
+		t.Fatal("admitted a capped account without a guest lease reading")
+	}
+}
+
 func TestCodexAndAgentLaunchScheduleFollowsSchedulerRanking(t *testing.T) {
 	id := func(c byte) string { return strings.Repeat(string(c), 24) }
 	now := time.Now()
 
-	// 1. Native Linux Codex schedule matches Claude preferred-first ordering.
+	// Codex ignores Claude's preferred-account override and excludes paused accounts.
 	codexList := codexAccountList{
 		Scheduling: claudeScheduling{Mode: "balanced", Preferred: id('2')},
 		Accounts: []codexAccount{
@@ -24,18 +69,15 @@ func TestCodexAndAgentLaunchScheduleFollowsSchedulerRanking(t *testing.T) {
 		},
 	}
 	codexSched := codexLaunchScheduleOf(codexList)
-	if codexSched.Mode != "balanced" || len(codexSched.Accounts) != 3 {
+	if codexSched.Mode != "smart" || !codexSched.Managed || len(codexSched.Accounts) != 2 {
 		t.Fatalf("unexpected codex schedule: %+v", codexSched)
 	}
-	if codexSched.Accounts[0].ID != id('2') || !codexSched.Accounts[0].Preferred {
-		t.Fatalf("preferred codex account not placed first: %+v", codexSched.Accounts)
-	}
-	if codexSched.Accounts[1].ID != id('1') || codexSched.Accounts[2].ID != id('4') {
+	if codexSched.Accounts[0].ID != id('1') || codexSched.Accounts[0].Preferred || codexSched.Accounts[1].ID != id('4') {
 		t.Fatalf("unexpected codex candidate order: %+v", codexSched.Accounts)
 	}
 
 	// 2. Universal Agent CLI schedule ranks by multi-factor score, excludes
-	// disabled/signed-out/exhausted accounts, and maps project pins to guest paths.
+	// disabled/signed-out accounts and preserves quota and mapped project pins.
 	pools := map[string]*agentAccountPool{
 		"opencode": {
 			Scheduling: agentScheduling{
@@ -76,10 +118,25 @@ func TestCodexAndAgentLaunchScheduleFollowsSchedulerRanking(t *testing.T) {
 	if !ok {
 		t.Fatalf("opencode missing from schedule: %+v", sched)
 	}
-	if len(entry.Candidates) != 2 {
-		t.Fatalf("expected 2 eligible opencode candidates, got %+v", entry.Candidates)
+	if len(entry.Candidates) != 3 {
+		t.Fatalf("expected 3 ready opencode profiles, got %+v", entry.Candidates)
 	}
-	if entry.Candidates[0].ID != id('b') || entry.Candidates[1].ID != id('a') {
+	var quota *claudeQuota
+	for _, c := range entry.Candidates {
+		if c.ID == id('c') {
+			quota = c.Quota
+		}
+	}
+	if quota == nil || quota.FiveHour.UsedPercentage != 100 {
+		t.Fatalf("missing quota for time-sensitive guest admission: %+v", entry.Candidates)
+	}
+	var readyOrder []string
+	for _, c := range entry.Candidates {
+		if c.ID != id('c') {
+			readyOrder = append(readyOrder, c.ID)
+		}
+	}
+	if readyOrder[0] != id('b') || readyOrder[1] != id('a') {
 		t.Fatalf("expected Healthy ranked ahead of LowHealth, got %+v", entry.Candidates)
 	}
 	if entry.ProjectPins["/workspace/proj"] != "account:"+id('a') {

@@ -51,6 +51,9 @@ type terminalManager struct {
 	sequence int
 	closed   bool
 	workers  sync.WaitGroup
+	// Retain a login reservation while its closing callback verifies the
+	// guest profile, even if the ended terminal has already been removed.
+	agentLoginReservations map[agentLoginReservation]struct{}
 	// kept are the ssh terminals kept past their connection (entryKeep),
 	// which have their own cap instead of the shared limit.
 	kept map[string]bool
@@ -58,6 +61,11 @@ type terminalManager struct {
 	// (herdr_terminals.go): their own cap too, so terminals the user opens
 	// from another client never block new Cage terminals.
 	imported map[string]bool
+}
+
+type agentLoginReservation struct {
+	agentID   string
+	accountID string
 }
 
 func (m *terminalManager) startSession(cmd *exec.Cmd, workspace, kind string, selection claudeSelection, finished func()) (*terminalSession, error) {
@@ -157,9 +165,24 @@ func (m *terminalManager) startSessionAdmitted(imported bool, cmd *exec.Cmd, wor
 		}
 		m.imported[session.id] = true
 	}
+	key := agentLoginReservation{agentID: session.agentID, accountID: session.accountID}
+	reservedLogin := kind == "agent-login" && finished != nil && key.agentID != "" && key.accountID != ""
+	if reservedLogin {
+		if m.agentLoginReservations == nil {
+			m.agentLoginReservations = make(map[agentLoginReservation]struct{})
+		}
+		m.agentLoginReservations[key] = struct{}{}
+	}
 	m.workers.Add(1)
 	go func() {
 		defer m.workers.Done()
+		if reservedLogin {
+			defer func() {
+				m.mu.Lock()
+				delete(m.agentLoginReservations, key)
+				m.mu.Unlock()
+			}()
+		}
 		session.run()
 		if finished != nil {
 			finished(session)
@@ -389,7 +412,7 @@ func (m *terminalManager) agentCounts(agentID string) (map[string]int, map[strin
 	active := map[string]int{}
 	logins := map[string]bool{}
 	for _, session := range m.sessions {
-		if session.agentID != agentID || session.accountID == "" {
+		if session.agentID != agentID {
 			continue
 		}
 		select {
@@ -398,12 +421,34 @@ func (m *terminalManager) agentCounts(agentID string) (map[string]int, map[strin
 		default:
 		}
 		if session.kind == "agent-login" {
-			logins[session.accountID] = true
-		} else {
+			if session.accountID != "" {
+				logins[session.accountID] = true
+			}
+		} else if session.kind == "agent" || session.accountID != "" {
 			active[session.accountID]++
 		}
 	}
+	for key := range m.agentLoginReservations {
+		if key.agentID == agentID {
+			logins[key.accountID] = true
+		}
+	}
 	return active, logins
+}
+
+func (m *terminalManager) liveAgentLogin(agentID, accountID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.sessions {
+		if session.kind == "agent-login" && session.agentID == agentID && session.accountID == accountID {
+			select {
+			case <-session.done:
+			default:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (m *terminalManager) existingAgentLogin(agentID, accountID string, login bool) (*terminalSession, error) {
@@ -427,6 +472,9 @@ func (m *terminalManager) existingAgentLogin(agentID, accountID string, login bo
 		if login || session.kind == "agent-login" {
 			return nil, errors.New("请先结束此账号的登录或运行中的终端，再更改登录身份")
 		}
+	}
+	if _, settling := m.agentLoginReservations[agentLoginReservation{agentID: agentID, accountID: accountID}]; settling {
+		return nil, errors.New("正在确认上一次登录，请稍后重试")
 	}
 	return nil, nil
 }
@@ -495,6 +543,25 @@ func (s *Server) createTerminal(input terminalRequest) (*terminalSession, error)
 
 // Caller holds the environment operation lock through PTY publication.
 func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, error) {
+	// The Agent CLI catalog uses the same native Claude account and launch
+	// rules as the legacy terminal kind on every guest.
+	if input.AgentID == "claude" && (input.Kind == "agent" || input.Kind == "agent-login") {
+		if input.AccountID != "" {
+			if input.ClaudeAccountID != "" && input.ClaudeAccountID != input.AccountID {
+				return nil, errors.New("Claude 账号参数不一致")
+			}
+			input.ClaudeAccountID = input.AccountID
+		}
+		if input.LoginMode != "" && (input.Kind != "agent-login" || input.LoginMode != "oauth") {
+			return nil, errors.New("Claude 终端不支持指定的登录方式")
+		}
+		if input.Kind == "agent-login" {
+			input.Kind = "claude-login"
+		} else {
+			input.Kind = "claude"
+		}
+		input.AgentID, input.AccountID, input.LoginMode = "", "", ""
+	}
 	if input.Kind == "codex" || input.Kind == "codex-login" {
 		return s.createCodexTerminalLocked(input)
 	}
@@ -513,6 +580,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			return nil, err
 		}
 		sharedRecord = record
+		if record.codex() {
+			return nil, errors.New("该会话需要通过 Codex 终端打开")
+		}
 		if record.Switch != nil && record.Switch.Phase == "preparing" {
 			return nil, errors.New("账号交接尚未完成，请先重试或取消交接")
 		}
@@ -539,8 +609,11 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if sealed {
 		return nil, errAppUpdateSealed
 	}
-	if sharedRecord != nil && (!sharedCLILauncher(command) || sharedRecord.Launcher != "" && sharedRecord.Launcher != command) {
-		return nil, errors.New("主机启动命令与原会话不一致，请恢复原配置后重试")
+	if sharedRecord != nil && sharedRecord.Launcher != "" {
+		command = sharedRecord.Launcher
+	}
+	if sharedRecord != nil && !sharedCLILauncher(command) {
+		return nil, errors.New("原会话的 Claude 启动命令不支持共享终端")
 	}
 	if s.macosGuest != nil {
 		if input.Kind == "claude" && !sharedCLILauncher(command) {
@@ -555,18 +628,6 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	}
 	if !s.vmRunning() || s.busy() {
 		return nil, errTerminalNotReady
-	}
-	// Route Claude requests sent via the universal agent terminal API to Claude's native stack.
-	if (input.Kind == "agent" || input.Kind == "agent-login") && input.AgentID == "claude" {
-		if input.Kind == "agent-login" {
-			input.Kind = "claude-login"
-		} else {
-			input.Kind = "claude"
-		}
-		if input.AccountID != "" && input.ClaudeAccountID == "" {
-			input.ClaudeAccountID = input.AccountID
-		}
-		input.AgentID = ""
 	}
 	// Reject a full manager before opening project shares. start checks again
 	// atomically with process publication because shutdown can race this work.
@@ -682,6 +743,15 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		login := input.Kind == "claude-login"
 		if sharedRecord != nil && sharedRecord.Terminal {
 			selection = sharedRecord.Account
+			if selection.ID != "" {
+				s.claudeAccounts.mu.Lock()
+				list, loadErr := s.loadClaudeAccounts()
+				s.claudeAccounts.mu.Unlock()
+				if loadErr != nil {
+					return nil, loadErr
+				}
+				err = s.validateBoundClaudeAccount(list, selection)
+			}
 		} else if !selected {
 			selection, err = s.selectTerminalClaudeAccount(command, input.ClaudeAccountID, login, workspace)
 		}
@@ -695,8 +765,10 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			if !validClaudeID(selection.ID) || !validClaudeGuestID(selection.GuestID) || (login && selection.GuestID == "default") {
 				return nil, errors.New("Claude 账号 ID 无效")
 			}
-			if login && s.mobileCLI.activeAccounts()[selection.ID] > 0 {
-				return nil, errors.New("请先结束该账号正在执行的移动 CLI 轮次，再重新登录")
+			if login {
+				if active, _ := s.claudeAccountLoad(); active[selection.ID] > 0 {
+					return nil, errors.New("请先结束该账号正在运行的会话，再重新登录")
+				}
 			}
 			if existing, conflict := s.terminals.existingClaudeLogin(selection.ID, login); existing != nil || conflict != nil {
 				return existing, conflict
@@ -779,6 +851,24 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 			return nil, errEnsureAgentRuntimeNeeded
 		}
 	}
+	if selection.ID != "" {
+		settle := finished
+		finished = func() {
+			defer s.kickClaudeLaunchSchedule()
+			if settle != nil {
+				settle()
+			}
+		}
+	}
+	if agentSel.ID != "" {
+		settle := finished
+		finished = func() {
+			defer s.kickAgentLaunchSchedule()
+			if settle != nil {
+				settle()
+			}
+		}
+	}
 	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
 	if input.requestContext != nil {
 		s.account.mu.Lock()
@@ -824,6 +914,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if err == nil && isAgentKind && input.Kind == "agent" && agentSel.ID != "" {
 		s.noteAgentSelection(agentSel.AgentID, agentSel.ID, workspace)
 	}
+	if err == nil && agentSel.ID != "" {
+		s.kickAgentLaunchSchedule()
+	}
 	if err == nil && herdrID != "" {
 		s.rememberHerdrSession(session, herdrKind)
 	}
@@ -845,8 +938,11 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		s.prepareCLIConnection(session, conversation.ID)
 		s.monitorClaudeAccount(session, conversation.ID)
 	}
-	if err == nil && input.Kind == "claude" && selection.ID != "" {
+	if err == nil && input.Kind == "claude" && selection.ID != "" && (sharedRecord == nil || !sharedRecord.Terminal) {
 		s.noteClaudeSelection(selection.ID, workspace)
+	}
+	if err == nil && selection.ID != "" {
+		s.kickClaudeLaunchSchedule()
 	}
 	return session, err
 }
@@ -949,6 +1045,7 @@ func managedClaudeTerminalScript(workspace, command, accountID, subject string, 
 		env += `export CLAUDE_CONFIG_DIR="$HOME/.local/share/cage/claude-accounts/$CAGE_CLAUDE_ACCOUNT_ID/config"; `
 	}
 	env += `export PATH="/usr/local/lib/cage-claude-bin:$PATH"; `
+	env += `unalias claude 2>/dev/null || :; claude() { command /usr/local/bin/cage-claude-account run "$CAGE_CLAUDE_ACCOUNT_ID" "$@"; }; `
 	body := env + `eval "$CAGE_TERMINAL_COMMAND"; unset CAGE_TERMINAL_COMMAND; exec bash -i`
 	return "cd " + shellescape.Quote(workspace) +
 		" && exec env TERM=xterm-256color COLORTERM=truecolor CAGE_WORKBENCH=1 CAGE_TERMINAL_COMMAND=" +
@@ -962,7 +1059,8 @@ func terminalScript(workspace, kind, command string) string {
 	if kind != "claude" {
 		return prefix + "bash -l"
 	}
-	return prefix + "CAGE_TERMINAL_COMMAND=" + shellescape.Quote(command) + " bash -lic " + shellescape.Quote("eval \"$CAGE_TERMINAL_COMMAND\"; unset CAGE_TERMINAL_COMMAND; exec bash -il")
+	return prefix + "CAGE_TERMINAL_COMMAND=" + shellescape.Quote(command) + " bash -lic " + shellescape.Quote(
+		"export CAGE_CLAUDE_ACCOUNT_ID=default CAGE_ACCOUNT_SCHEDULING=off; eval \"$CAGE_TERMINAL_COMMAND\"; unset CAGE_TERMINAL_COMMAND CAGE_CLAUDE_ACCOUNT_ID CAGE_ACCOUNT_SCHEDULING; exec bash -il")
 }
 
 func herdrProjectLabel(workspace string) string {

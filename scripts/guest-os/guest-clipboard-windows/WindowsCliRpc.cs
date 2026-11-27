@@ -13,8 +13,8 @@ namespace Cage.GuestClipboard;
 internal static class WindowsCliRpc
 {
     private static readonly Regex ProfileID = new("^[a-f0-9]{16}$",RegexOptions.CultureInvariant);
-    private static readonly Regex AccountID = new("^(default|[a-f0-9]{24})$",RegexOptions.CultureInvariant);
-    private static readonly Regex Subject = new("^[a-f0-9]{64}$",RegexOptions.CultureInvariant);
+    private static readonly Regex AccountID = new(@"\A(default|[a-f0-9]{24})\z",RegexOptions.CultureInvariant);
+    private static readonly Regex Subject = new(@"\A[a-f0-9]{64}\z",RegexOptions.CultureInvariant);
     private static readonly Regex CCSProfile = new("^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",RegexOptions.CultureInvariant);
     private static readonly HashSet<string> Modes=["discover","view","rpc","active","handoff","purge","account-switch","account-switch-cancel"];
     private static readonly object Gate=new();
@@ -66,15 +66,16 @@ internal static class WindowsCliRpc
                 var additional=new JsonArray();
                 if(request["additional_projects"] is JsonArray projects)
                 {
-                    if(projects.Count>31)throw new InvalidDataException("cli_projects_invalid");
+                    if(projects.Count>31||sandbox is not null&&projects.Count!=0)throw new InvalidDataException("cli_projects_invalid");
                     foreach(var project in projects)
                         additional.Add(ProjectRpc.Resolve(project?["id"]?.GetValue<string>()??"",project?["grant"]?.GetValue<string>()??""));
                 }
                 payload["additional_directories"]=additional;
                 var subject=request["subject"]?.GetValue<string>()??"";
-                if(subject!=""&&!Subject.IsMatch(subject))throw new InvalidDataException("cli_identity_invalid");
+                if(subject==""?account!="default":!Subject.IsMatch(subject))throw new InvalidDataException("cli_identity_invalid");
                 payload["account"]=account;payload["subject"]=subject;payload["prefix"]=new JsonArray(layout.Tools.Claude);
-                if(request["ccs_profile"] is JsonValue c&&c.TryGetValue<string>(out var ccs)&&ccs!="")
+                var ccs=request["ccs_profile"]?.GetValue<string>()??"";
+                if(ccs!="")
                 {
                     if(sandbox is not null)throw new InvalidDataException("headless_ccs_not_installed");
                     if(!CCSProfile.IsMatch(ccs)||account!="default"||subject!="")throw new InvalidDataException("ccs_profile_invalid");
@@ -228,6 +229,7 @@ internal static class WindowsCliRpc
         env["CAGE_CLI_ACCOUNT_HELPER"]=Path.Combine(layout.Code,"cage-claude-account.py");env["CLAUDE_CODE_GIT_BASH_PATH"]=layout.Tools.Bash;
         env["CAGE_CLI_IDENTITY_HELPER"]=Path.Combine(layout.Code,"mobile_cli_identity.py");
         env["CAGE_CLI_PYTHON"]=layout.Tools.Python;env["CAGE_CLI_SHELL"]=layout.Sandbox is null?TerminalRpc.PowerShellPath():RemoteSandbox.ShellPath();env["CAGE_CLAUDE_ACCOUNT_ID"]=account;
+        env.Remove("CAGE_CLAUDE_SUBJECT");
         if(layout.Sandbox is not null)env["CAGE_REMOTE_APP_CONTAINER"]="1";
         AddToolPath(env,layout.Tools);
         if(account!="default")env["CLAUDE_CONFIG_DIR"]=Path.Combine(layout.Accounts,account,"config");
@@ -261,6 +263,7 @@ internal static class WindowsCliRpc
         if(layout.Sandbox is not null)return await InvokeHeadless(layout,account,script,args,input,token);
         var start=new ProcessStartInfo(layout.Tools.Python){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
         foreach(var arg in new[]{"-X","utf8","-I",script}.Concat(args))start.ArgumentList.Add(arg);
+        start.Environment.Clear();
         foreach(var pair in EnvironmentFor(layout,account))start.Environment[pair.Key]=pair.Value;
         start.WorkingDirectory=layout.Root;
         using var child=Process.Start(start)??throw new InvalidDataException("cli_process_failed");

@@ -36,6 +36,11 @@ export function operationName(path = "", method = "GET") {
   if (path.startsWith("/t3code/open")) return "打开 T3 Code";
   if (path.startsWith("/t3code/config")) return "保存 T3 Code 设置";
   if (path.startsWith("/t3code")) return reading ? "读取 T3 Code 状态" : "操作 T3 Code";
+  if (path === "/orca/config") return "保存 Orca Server 设置";
+  if (path.startsWith("/orca")) return reading ? "读取 Orca Server 状态" : "操作 Orca Server";
+  if (path === "/magpie/config") return "保存 Magpie 设置";
+  if (path === "/herdr/config") return "保存 Herdr 设置";
+  if (path.startsWith("/client/local-terminal")) return reading ? "读取本机终端设置" : "保存本机终端设置";
   if (path.startsWith("/claude-desktop")) return "操作 Claude Desktop";
   if (path.startsWith("/claude-science")) return reading ? "读取 Claude Science 状态" : "操作 Claude Science";
   if (path.startsWith("/terminals")) return "连接终端";

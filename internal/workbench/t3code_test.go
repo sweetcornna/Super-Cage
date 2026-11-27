@@ -10,12 +10,203 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/cage"
 )
+
+func TestT3CodeAccountsStayBoundAndReleaseOnStop(t *testing.T) {
+	t.Run("managed auto", func(t *testing.T) {
+		testT3CodeAccountsStayBoundAndReleaseOnStop(t, "managed", "auto")
+	})
+	t.Run("registered explicit default", func(t *testing.T) {
+		testT3CodeAccountsStayBoundAndReleaseOnStop(t, "default", "default")
+	})
+}
+
+func testT3CodeAccountsStayBoundAndReleaseOnStop(t *testing.T, source, choice string) {
+	t.Helper()
+	s := testServer(t)
+	workspace := t.TempDir()
+	if err := writePrivate(filepath.Join(s.profile, "environment.json"), cage.EnvironmentRecord{Directory: workspace}); err != nil {
+		t.Fatal(err)
+	}
+	instance := filepath.Join(s.profile, "state", "lima", cage.InstanceName(s.profile, workspace))
+	if err := os.MkdirAll(instance, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writePrivate(filepath.Join(instance, "cage-running.json"), map[string]int{"pid": os.Getpid()}); err != nil {
+		t.Fatal(err)
+	}
+	const agentID = "opencode"
+	assigned := strings.Repeat("a", 24)
+	s.agentCLIs.mu.Lock()
+	err := s.saveAgentPoolsLocked(map[string]*agentAccountPool{agentID: {
+		Accounts: []agentAccount{{ID: assigned, Source: source, Enabled: true, Status: "ready", MaxConcurrency: 1}},
+	}})
+	s.agentCLIs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.closeAgents)
+	cfg := defaultT3CodeConfig()
+	cfg.Enabled = true
+	cfg.AccountBindings[agentID] = choice
+	s.t3code.mu.Lock()
+	err = s.saveT3CodeConfigLocked(cfg)
+	s.t3code.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := t3CodeGuestStatus{Port: cfg.Port}
+	var starts, stops int
+	failRestart := false
+	s.agentCLIs.runtimeHook = func(_ context.Context, verb string, input, output any) error {
+		switch verb {
+		case "t3code-status":
+			*output.(*t3CodeGuestStatus) = status
+		case "t3code-start", "t3code-restart":
+			if s.op.TryLock() {
+				s.op.Unlock()
+				t.Fatal("T3 was started outside the environment lock")
+			}
+			starts++
+			binding := input.(map[string]any)["bindings"].(map[string]any)[agentID].(map[string]any)
+			if binding["account_id"] != assigned ||
+				(source == "default" && binding["mode"] != "default") ||
+				(source != "default" && binding["guest_id"] != assigned) {
+				t.Fatalf("wrong provider binding: %v", binding)
+			}
+			if failRestart {
+				return errors.New("mock restart failed")
+			}
+			status = t3CodeGuestStatus{Running: true, Port: cfg.Port, PID: 1234, Accounts: map[string]string{agentID: assigned}}
+			*output.(*t3CodeGuestStatus) = status
+		case "t3code-stop":
+			stops++
+			status = t3CodeGuestStatus{Port: cfg.Port}
+		}
+		return nil
+	}
+	for _, restart := range []bool{false, false, true} {
+		if _, _, err := s.ensureManagedT3CodeRunning(context.Background(), restart, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if starts != 2 || s.activeT3CodeAccounts(agentID)[assigned] != 1 {
+		t.Fatalf("overcount or extra launch: starts=%d active=%v", starts, s.activeT3CodeAccounts(agentID))
+	}
+	spec, _, _ := s.lookupAgentSpec(agentID)
+	atCapacity := []string{"auto", assigned}
+	if choice == "default" {
+		atCapacity = append(atCapacity, "default")
+	}
+	for _, choice := range atCapacity {
+		if _, _, err := s.selectAgentAccount(spec, choice, false, workspace); err == nil {
+			t.Fatalf("selection %q reused the only slot held by T3", choice)
+		}
+	}
+	s.t3code.mu.Lock()
+	s.t3code.statusAt = time.Time{}
+	s.t3code.statusCache = t3CodeGuestStatus{}
+	s.t3code.mu.Unlock()
+	if s.activeT3CodeAccounts(agentID)[assigned] != 1 {
+		t.Fatal("controller did not recover the running service's account binding")
+	}
+	failRestart = true
+	if _, _, err := s.ensureManagedT3CodeRunning(context.Background(), true, ""); err == nil ||
+		s.activeT3CodeAccounts(agentID)[assigned] != 1 {
+		t.Fatal("failed restart released the still-running service's reservation")
+	}
+	if err := s.stopManagedT3Code(context.Background(), cfg.Port); err != nil || stops != 1 || len(s.activeT3CodeAccounts(agentID)) != 0 {
+		t.Fatalf("stop failed to release the reservation: stops=%d err=%v", stops, err)
+	}
+	if _, _, err := s.selectAgentAccount(spec, "auto", false, workspace); err != nil {
+		t.Fatalf("stopped service still blocks terminal admission: %v", err)
+	}
+}
+
+func TestT3CodeUnpooledDefaultCountsAfterRegistration(t *testing.T) {
+	s := testServer(t)
+	const agentID = "opencode"
+	cfg := defaultT3CodeConfig()
+	cfg.Enabled = true
+	cfg.AccountBindings[agentID] = "default"
+	s.t3code.mu.Lock()
+	err := s.saveT3CodeConfigLocked(cfg)
+	s.t3code.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindings, _, err := s.resolveT3CodeBindings(cfg, "")
+	if err != nil {
+		t.Fatalf("unpooled default was rejected: %v", err)
+	}
+	if binding := bindings[agentID].(map[string]any); binding["mode"] != "default" || binding["account_id"] != nil {
+		t.Fatalf("unpooled default gained a registered account ID: %v", binding)
+	}
+
+	// The guest persists the default marker before the account is enrolled.
+	s.agentCLIs.runtimeHook = func(_ context.Context, verb string, _, output any) error {
+		if verb == "t3code-status" {
+			*output.(*t3CodeGuestStatus) = t3CodeGuestStatus{
+				Running: true, Port: cfg.Port, PID: 1234, Accounts: map[string]string{agentID: "default"},
+			}
+		}
+		return nil
+	}
+	spec, _, _ := s.lookupAgentSpec(agentID)
+	if sel, _, err := s.selectAgentAccount(spec, "default", false, ""); err != nil || sel.ID != "" || sel.GuestID != "default" {
+		t.Fatalf("the unregistered default should remain available: %+v %v", sel, err)
+	}
+	registered := strings.Repeat("b", 24)
+	s.agentCLIs.mu.Lock()
+	err = s.saveAgentPoolsLocked(map[string]*agentAccountPool{agentID: {
+		Accounts: []agentAccount{{ID: registered, Source: "default", Enabled: true, Status: "ready", MaxConcurrency: 1}},
+	}})
+	s.agentCLIs.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, choice := range []string{"auto", "default", registered} {
+		if _, _, err := s.selectAgentAccount(spec, choice, false, ""); err == nil {
+			t.Fatalf("selection %q reused a registered default already held by T3", choice)
+		}
+	}
+	replacement, _, err := s.resolveT3CodeLaunchBindings(cfg, "", map[string]string{agentID: "default"})
+	if err != nil || replacement[agentID].(map[string]any)["account_id"] != registered {
+		t.Fatalf("restart could not replace its original default seat: %v, %v", replacement, err)
+	}
+}
+
+func TestT3CodePoolFailureRequiresExplicitDefault(t *testing.T) {
+	s := testServer(t)
+	claude, codex := strings.Repeat("a", 24), strings.Repeat("b", 24)
+	if err := s.saveClaudeAccounts(claudeAccountList{Accounts: []claudeAccount{{ID: claude, Status: "signed_out"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.saveCodexAccounts(codexAccountList{Accounts: []codexAccount{{ID: codex, Status: "signed_out"}}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultT3CodeConfig()
+	for _, id := range []string{"claude", "codex"} {
+		cfg.AccountBindings = map[string]string{"claude": "default", "codex": "default", id: "auto"}
+		if _, _, err := s.resolveT3CodeBindings(cfg, ""); err == nil {
+			t.Fatalf("ineligible %s pool silently fell back", id)
+		}
+		cfg.AccountBindings[id] = "default"
+		bindings, _, err := s.resolveT3CodeBindings(cfg, "")
+		if err != nil || bindings[id].(map[string]any)["mode"] != "default" {
+			t.Fatalf("explicit %s default was rejected: %v", id, err)
+		}
+	}
+}
 
 func TestT3CodeConfigLifecycleAndSecurityBoundaries(t *testing.T) {
 	s := testServer(t)
@@ -138,12 +329,16 @@ func TestT3CodeConfigLifecycleAndSecurityBoundaries(t *testing.T) {
 		case "/tabs":
 			_, _ = w.Write([]byte(`{"tabs":[{"id":"tab-other","kind":"t3code","url":"http://127.0.0.1:19999/"},{"id":"tab-match","kind":"web","url":"https://t3.example.test/threads/1"}]}`))
 		case "/activate":
-			var body struct{ ID string `json:"id"` }
+			var body struct {
+				ID string `json:"id"`
+			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			activatedID = body.ID
 			_, _ = w.Write([]byte(`{"ok":true}`))
 		case "/new":
-			var body struct{ URL string `json:"url"` }
+			var body struct {
+				URL string `json:"url"`
+			}
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			createdURL = body.URL
 			_, _ = w.Write([]byte(`{"id":"tab-new"}`))

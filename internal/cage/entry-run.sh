@@ -32,6 +32,9 @@ with_connection() {
 case "${1:-}" in
   exec)
     [ $# -eq 2 ] || exit 2
+    if [ -d "$HOME/.local/share/cage/auto-shims" ]; then
+      export PATH="$HOME/.local/share/cage/auto-shims:$PATH"
+    fi
     with_connection /bin/sh -c "$2"
     ;;
   shell)

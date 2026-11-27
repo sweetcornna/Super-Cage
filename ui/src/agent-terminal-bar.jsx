@@ -93,9 +93,9 @@ export function AgentTerminalBar({
         >
           <AgentIcon
             agentId={agentId}
-            glyph={agentSpec?.glyph}
             accentColor={agentSpec?.accent_color}
             size={16}
+            decorative
           />
           <span>{session.agent_name || agentId}</span>
           <span>·</span>

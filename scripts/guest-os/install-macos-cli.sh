@@ -140,6 +140,7 @@ if [[ -d $target ]]; then
         if ! cmp -s "$name" "$target/$name"; then intact=no; fi
     done
     if ! cmp -s claude_account_resume.md "$target/cli_channel.account-resume.md" ||
+        [[ ! -x $target/bin/cage-claude-account || ! -L $target/bin/cage-open || $(readlink "$target/bin/cage-open") != cage-claude-account ]] ||
         ! cmp -s <(sed "1s@.*@#!$runtime/bin/python3 -I@" claude-account.py) "$target/bin/cage-claude-account"; then intact=no; fi
     for name in python3 git; do
         if [[ ! -L $target/bin/$name || $(readlink "$target/bin/$name") != "$runtime/bin/$name" ]]; then intact=no; fi

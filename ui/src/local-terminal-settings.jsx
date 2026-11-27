@@ -16,6 +16,9 @@ export default function LocalTerminalSettings({ onDirty }) {
   const [app, setApp] = useState(undefined);
   const [supported, setSupported] = useState(true);
   const [warning, setWarning] = useState("");
+  const [settingsError, setSettingsError] = useState("");
+  const [appError, setAppError] = useState("");
+  const [readAttempt, setReadAttempt] = useState(0);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState(false);
@@ -25,21 +28,26 @@ export default function LocalTerminalSettings({ onDirty }) {
   useEffect(() => {
     const controller = new AbortController();
     const options = { signal: controller.signal };
-    Promise.all([api(SETTINGS_PATH, undefined, undefined, {}, options), api(APP_PATH, undefined, undefined, {}, options)])
-      .then(([state, found]) => {
+    setSettingsError("");
+    setAppError("");
+    if (!saved) api(SETTINGS_PATH, undefined, undefined, {}, options)
+      .then((state) => {
+        if (controller.signal.aborted) return;
         const settings = normalizeSettings(state?.settings);
         setSaved(settings);
         setDraft(settings);
         setSupported(state?.supported !== false);
         setWarning(state?.warning || "");
-        setApp(found?.app || null);
       })
-      .catch(reason => { if (!controller.signal.aborted) setError(reason.message); });
+      .catch(reason => { if (!controller.signal.aborted) setSettingsError(reason.message); });
+    if (app === undefined) api(APP_PATH, undefined, undefined, {}, options)
+      .then((found) => { if (!controller.signal.aborted) setApp(found?.app || null); })
+      .catch(reason => { if (!controller.signal.aborted) setAppError(reason.message); });
     return () => controller.abort();
-  }, []);
+  }, [readAttempt]);
 
   const dirty = Boolean(saved && draft && settingsChanged(saved, draft));
-  const loading = !error && (!saved || app === undefined);
+  const loading = (!saved && !settingsError) || (app === undefined && !appError);
   useEffect(() => { onDirty?.(dirty); }, [dirty, onDirty]);
   useEffect(() => () => onDirty?.(false), [onDirty]);
   const change = (key, value) => { setDraft(previous => ({ ...previous, [key]: value })); setDone(false); };
@@ -82,15 +90,15 @@ export default function LocalTerminalSettings({ onDirty }) {
   return <section className="settings-group local-terminal-part local-terminal-settings" aria-label="在本机终端中打开" aria-busy={loading}>
     <h3>在本机终端中打开</h3>
     {loading && <p className="local-terminal-loading" role="status"><LoaderCircle size={15} className="spin" aria-hidden="true" />正在查看这台电脑上的终端…</p>}
-    {!loading && saved && <p className="field-help local-terminal-opener">{openerLine(app, supported)}</p>}
-    {!loading && saved && supported && app !== undefined && app?.id !== "herdr" && <div className="local-terminal-herdr-install" style={{ marginTop: 10 }}>
+    {saved && app !== undefined && <p className="field-help local-terminal-opener">{openerLine(app, supported)}</p>}
+    {saved && supported && app !== undefined && app?.id !== "herdr" && <div className="local-terminal-herdr-install" style={{ marginTop: 10 }}>
       <button type="button" disabled={installingHerdr || saving} onClick={installHerdr} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
         {installingHerdr && <LoaderCircle size={15} className="spin" aria-hidden="true" />}
         {installingHerdr ? "正在安装 Herdr 桌面端…" : "安装 Herdr 桌面端（安装后自动改用 Herdr）"}
       </button>
     </div>}
     {herdrStatus && <p className="field-help" role="status">{herdrStatus}</p>}
-    {saved && app !== undefined && <>
+    {saved && <>
       <h4 className="local-terminal-subtitle">图片与剪贴板</h4>
       {SWITCHES.map(item => <label className="toggle-row" key={item.key}>
         <span>
@@ -102,6 +110,11 @@ export default function LocalTerminalSettings({ onDirty }) {
       </label>)}
       <p className="footnote">这些选择只保存在这台电脑上，不会同步到环境或其他设备。已经打开的窗口和 ssh 连接在下次打开时使用新的选择。</p>
     </>}
+    {(settingsError || appError) && <div>
+      {settingsError && <p className="error-message" role="alert">{settingsError}</p>}
+      {appError && <p className="error-message" role="alert">{appError}</p>}
+      <button type="button" onClick={() => setReadAttempt(value => value + 1)}>重新读取本机终端状态</button>
+    </div>}
     {warning && <p className="field-help">{warning}</p>}
     {error && <p className="error-message" role="alert">{error}</p>}
     {(dirty || saving) && <div className="local-terminal-savebar">

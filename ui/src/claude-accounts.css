@@ -192,9 +192,7 @@
   background: var(--clay-soft);
   color: var(--clay-ink);
 }
-.claude-profile-avatar img { width: 1.4rem; height: auto; }
 .claude-profile[data-enabled="false"] .claude-profile-avatar { background: var(--soft); color: var(--faint); }
-.claude-profile[data-enabled="false"] .claude-profile-avatar img { filter: saturate(0.4); opacity: 0.75; }
 .claude-detected .claude-profile-avatar { border: 1px dashed var(--line-strong); background: transparent; color: var(--muted); }
 .claude-profile-identity { grid-column: 2; min-width: 0; }
 .claude-profile-name { gap: 6px; }

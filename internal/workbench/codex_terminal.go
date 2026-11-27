@@ -68,6 +68,9 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 		if !validClaudeID(selection.ID) || selection.GuestID != selection.ID {
 			return nil, errors.New("Codex 账号 ID 无效")
 		}
+		if login && s.activeServiceAccounts("codex")[selection.ID] > 0 {
+			return nil, errors.New("请先停止使用此账号的托管服务，再重新登录")
+		}
 		if existing, conflict := s.terminals.existingCodexLogin(selection.ID, login); existing != nil || conflict != nil {
 			return existing, conflict
 		}
@@ -107,6 +110,9 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 	}
 	if err == nil && !login && selection.ID != "" {
 		s.noteCodexSelection(selection.ID, workspace)
+	}
+	if err == nil && selection.ID != "" {
+		s.kickCodexLaunchSchedule()
 	}
 	if err == nil && herdrID != "" {
 		s.rememberHerdrSession(session, "codex")
@@ -278,6 +284,9 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 	if input.sharedID == "" && selection.ID != "" {
 		s.noteCodexSelection(selection.ID, workspace)
 	}
+	if selection.ID != "" {
+		s.kickCodexLaunchSchedule()
+	}
 	return session, nil
 }
 
@@ -359,6 +368,9 @@ func codexSessionTerminalScript(directory, payload string) string {
 func (s *Server) codexSessionFinished(id, account string) func(*terminalSession) {
 	started := time.Now()
 	return func(session *terminalSession) {
+		if account != "" {
+			defer s.kickCodexLaunchSchedule()
+		}
 		// Codex's own failures end this terminal too; only 78 is the account
 		// helper refusing the account.
 		if account != "" && session.exitStatus() == 78 && time.Since(started) < codexQuickExit {
@@ -375,6 +387,7 @@ const codexQuickExit = 20 * time.Second
 func (s *Server) codexTerminalFinished(id string, login bool) func(*terminalSession) {
 	if login {
 		return func(*terminalSession) {
+			defer s.kickCodexLaunchSchedule()
 			ctx, cancel := context.WithTimeout(s.lifetimeContext(), 25*time.Second)
 			defer cancel()
 			_ = s.confirmCodexLogin(ctx, id)
@@ -382,6 +395,7 @@ func (s *Server) codexTerminalFinished(id string, login bool) func(*terminalSess
 	}
 	started := time.Now()
 	return func(session *terminalSession) {
+		defer s.kickCodexLaunchSchedule()
 		// The helper ends the terminal when the account is no longer signed in
 		// as selected. Re-check it in the background so allocation stops
 		// choosing it; the terminal's teardown never waits for the probe.
@@ -400,7 +414,7 @@ func codexTerminalScript(workspace, command, accountID, subject string, login bo
 	if login {
 		return "cd \"$HOME\" && exec /usr/local/bin/cage-codex-account login " + shellescape.Quote(accountID)
 	}
-	body := `eval "$CAGE_TERMINAL_COMMAND"; unset CAGE_TERMINAL_COMMAND; exec bash -il`
+	body := `CAGE_ACCOUNT_SCHEDULING=off eval "$CAGE_TERMINAL_COMMAND"; unset CAGE_TERMINAL_COMMAND; exec bash -il`
 	if accountID != "" {
 		body = `export CAGE_CODEX_ACCOUNT_ID=` + shellescape.Quote(accountID) + ` CAGE_CODEX_SUBJECT=` + shellescape.Quote(subject) + "; " +
 			`export CODEX_HOME="$HOME/.local/share/cage/codex-accounts/$CAGE_CODEX_ACCOUNT_ID/home"; (umask 077; mkdir -p "$CODEX_HOME"); ` +

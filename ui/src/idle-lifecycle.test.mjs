@@ -205,6 +205,8 @@ async function loadJSXExports(filename, { React, api, writeClipboard, useWindowV
     createAgentAccountsSequencer,
     projectName: (p) => (p ? p.split("/").pop() : ""),
     InlineSelect: ComponentStub,
+    LaunchAccountPolicy: ComponentStub,
+    launchModeLabel: mode => mode,
     SafetyMessage: ComponentStub,
     ProxyYAMLInput: ComponentStub,
     NetworkExplanation: ComponentStub,

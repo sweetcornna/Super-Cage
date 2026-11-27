@@ -70,6 +70,8 @@ class NativeMaintenance(unittest.TestCase):
             if name == 'claude-account.py':
                 target = 'usr/local/libexec/cage-cli/bin/cage-claude-account'
             files.append((name, target))
+            if name == 'claude-account.py':
+                files.append((name, 'usr/local/libexec/cage-cli/bin/cage-open'))
         for app, executable in (('Window', 'CageGuestWindow'), ('Clipboard', 'CageGuestClipboard')):
             name = f'Cage Guest {app}.app/Contents/MacOS/{executable}'
             self.write('kit/' + name, 'current-' + app, 0o755)
@@ -277,6 +279,19 @@ hdiutil() {
         self.assertEqual((application / 'Contents/Info.plist').read_bytes(), original)
         self.assertEqual((application / 'account-marker').read_text(), 'keep existing application')
         self.assertEqual((self.root / 'Users/cage/account.json').read_text(), 'account-and-login-marker')
+
+    def test_components_repair_missing_browser_login_helper_at_same_revision(self):
+        self.prepare_installer()
+        first = self.run_install()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        opener = self.root / 'usr/local/libexec/cage-cli/bin/cage-open'
+        expected = opener.read_bytes()
+        opener.rename(opener.with_name('missing-opener-fixture'))
+        repaired = self.run_install()
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertEqual(os.readlink(opener), 'cage-claude-account')
+        self.assertEqual(opener.read_bytes(), expected)
+        self.assertTrue(os.access(opener, os.X_OK))
 
     def test_existing_guest_failure_rollback_retry_and_new_helpers(self):
         manifest = self.prepare_installer()

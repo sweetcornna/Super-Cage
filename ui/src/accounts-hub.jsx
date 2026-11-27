@@ -132,9 +132,9 @@ export function AccountsHub({
                 ) : (
                   <AgentIcon
                     agentId={item.id}
-                    glyph={item.spec?.glyph}
                     accentColor={item.spec?.accent_color}
                     size={16}
+                    decorative
                   />
                 )}
                 <span className="accounts-hub-tab-label">{item.label}</span>
@@ -165,7 +165,7 @@ export function AccountsHub({
       {magpieTakeover && (
         <div className="accounts-hub-magpie-banner" role="status">
           <div className="accounts-hub-magpie-banner-body">
-            <AgentIcon agentId="magpie" size={20} />
+            <AgentIcon agentId="magpie" size={20} decorative />
             <div>
               <strong>已启用 Magpie，Super Cage 账号调度已自动关闭并由 Magpie 接管</strong>
               <p>

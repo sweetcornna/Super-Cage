@@ -683,13 +683,16 @@ def print_json(value):
     print(json.dumps(value, separators=(",", ":")))
 
 
-def main(args):
+def main(args, *, quiet=False, before_exec=None):
     mode, account_id, *rest = args
     if mode == "quotas":
         result = {}
         for candidate in [account_id, *rest]:
             base = profile(candidate)
             quota = merged_quota(base, codex_home(base))
+            count = _runtime["plain_launch_count"](base)
+            if count:
+                quota = {**(quota or {}), "plain_launches": count}
             if quota:
                 result[candidate] = quota
         print_json(result)
@@ -729,10 +732,11 @@ def main(args):
             raise KeyboardInterrupt()
         signal.signal(signal.SIGHUP, interrupted)
         signal.signal(signal.SIGTERM, interrupted)
-        for name in ("quota.json", "identity.json"):
-            (base / name).unlink(missing_ok=True)
-        print("请在任意浏览器打开下方链接，登录 ChatGPT 后输入一次性验证码。完成后此终端会自动结束。", flush=True)
-        return subprocess.call([binary, "login", "--device-auth"], cwd=Path.home(), env=env)
+        with _runtime["launch_guard"](base, login=True):
+            for name in ("quota.json", "identity.json"):
+                (base / name).unlink(missing_ok=True)
+            print("请在任意浏览器打开下方链接，登录 ChatGPT 后输入一次性验证码。完成后此终端会自动结束。", flush=True)
+            return subprocess.call([binary, "login", "--device-auth"], cwd=Path.home(), env=env)
     if mode == "run":
         kept = share_resources(base, home) if account_id != DEFAULT else []
         if kept:
@@ -741,90 +745,142 @@ def main(args):
         reading = identity(binary, env, Path.cwd())
         digest = subject(reading)
         if not expected or digest != expected:
-            print("此终端未登录所选 Codex 账号。请在 Codex 账号管理中检查登录状态或重新登录。", file=sys.stderr)
+            if not quiet:
+                print("此终端未登录所选 Codex 账号。请在 Codex 账号管理中检查登录状态或重新登录。", file=sys.stderr)
             return ACCOUNT_REFUSED
         note_identity(base, home, digest)
         overrides = shared_overrides(home, Path.cwd()) if account_id != DEFAULT else []
         # Codex and its tools create files in the shared project with the user's umask.
         os.umask(original_umask)
+        if before_exec is not None:
+            before_exec()
         os.execve(binary, [binary, *overrides, *rest], env)
     raise ValueError("unknown operation")
 
 
-def launch_headroom(quota, expected, now):
-    """The controller's headroom rule on the guest's own reading: None while a
-    window is used up, else the least known remaining percent (-1: unknown)."""
-    if not quota or quota.get("identity") != expected:
-        return -1
-    least = -1
-    for key in WINDOWS:
-        window = quota.get(key)
-        if not window:
-            continue
-        fresh = now - window["observed_at"] <= 15 * 60
-        if window["used_percentage"] >= 100 and (window["resets_at"] > now or fresh):
-            return None
-        if fresh and (least < 0 or 100 - window["used_percentage"] < least):
-            least = 100 - window["used_percentage"]
-    return least
+def launch_candidates(schedule, now=None):
+    return _runtime["native_launch_candidates"](
+        schedule, profile, lambda base, expected: merged_quota(base, codex_home(base), expected),
+        windows=WINDOWS, now=now)
 
 
-def launch_account(now=None):
-    """The account a plain `codex` starts on. The controller publishes its
-    scheduling order (preferred account first); a used-up account is skipped."""
-    now = int(time.time()) if now is None else now
-    schedule = json_file(profile(DEFAULT).parent / "launch.json")
-    if not isinstance(schedule, dict) or not isinstance(schedule.get("accounts"), list):
-        return None
-    best = None
-    for item in schedule["accounts"][:64]:
-        if not isinstance(item, dict):
+def orca_login_status(directory, schedule, args):
+    # A status probe consults the same policy without allocating a lease or
+    # advancing the scheduler. A quota limit does not end a login.
+    mode = schedule.get("mode") or "balanced"
+    pin = _runtime["_project_pin"](schedule.get("project_pins"), Path.cwd())
+    candidates = [item for item in schedule["accounts"] if isinstance(item, dict)
+                  and isinstance(item.get("id"), str) and re.fullmatch("[0-9a-f]{24}", item["id"])
+                  and isinstance(item.get("subject"), str) and re.fullmatch("[0-9a-f]{64}", item["subject"])]
+    ranked = launch_candidates(schedule)
+    if mode not in ("manual", "exhaust") and not pin and ranked:
+        candidates = ranked
+    else:
+        candidates = [{"load": 0, "headroom": -1, **item} for item in candidates]
+    for item in _runtime["launch_order"](directory, schedule, candidates, mode, pin):
+        try:
+            env = cli_environment(profile(item["id"]))
+            binary = shutil.which("codex", path=env["PATH"])
+            if binary and subject(identity(binary, env, Path.cwd(), timeout=3)) == item["subject"]:
+                os.execve(binary, [binary, *args], env)
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
             continue
-        account, expected = item.get("id"), item.get("subject")
-        if not isinstance(account, str) or not re.fullmatch("[0-9a-f]{24}", account) or \
-                not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
-            continue
-        base = profile(account)
-        room = launch_headroom(merged_quota(base, codex_home(base), expected), expected, now)
-        if room is None:
-            continue
-        if item.get("preferred") is True or schedule.get("mode") == "sequential":
-            return account, expected
-        if best is None or room > best[2]:
-            best = (account, expected, room)
-    return best[:2] if best else None
+    print("Not logged in", file=sys.stderr)
+    return 1
 
 
-def auto(args):
-    """`codex` typed in a guest shell or spawned via auto-shims (Orca, T3 Code,
-    Herdr, scripts). Starts on the scheduled account like a Codex terminal
-    does; anything that does not fit runs the CLI unchanged."""
-    picked = None
+def from_orca():
+    profile = os.environ.get("ORCA_USER_DATA_PATH")
+    if not profile:
+        return os.environ.get("TERM_PROGRAM") == "Orca"
+    home = Path.home()
+    standard = home / ("Library/Application Support/orca" if sys.platform == "darwin" else ".config/orca")
+    return Path(profile) in (standard, home / ".local/share/cage/orca/data")
+
+
+def auto(args, *, orca=False):
+    """Start a usable managed account, or preserve an explicit/default invocation."""
+    required = os.environ.pop("CAGE_REQUIRE_CODEX_SCHEDULE", "") == "1"
     magpie_takeover = (Path.home() / ".local/share/cage/magpie/takeover").is_file()
     disabled = magpie_takeover or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
-    explicit = disabled or any(os.environ.get(name) for name in ("CAGE_CODEX_ACCOUNT_ID", *PRIVATE_ENVIRONMENT))
-    if not explicit and not (args and args[0] in UNSCHEDULED):
-        try:
-            picked = launch_account()
-        except Exception:
-            picked = None
-    if picked:
-        account, expected = picked
-        mask = os.umask(0)
-        os.umask(mask)
-        _controller_context["CAGE_CODEX_SUBJECT"] = expected
-        try:
-            rc = main(["run", account, *args])  # replaces this process once the account is verified
-            if rc == 0:
-                return 0
-        except KeyboardInterrupt:
-            return 130
-        except Exception:
-            pass
-        os.umask(mask)
-        _controller_context.pop("CAGE_CODEX_SUBJECT", None)
-        print("Super Cage 调度的 Codex 账号暂不可用，本次用默认登录启动。", file=sys.stderr)
-    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))
+    pinned = os.environ.get("CAGE_CODEX_ACCOUNT_ID", "")
+    if not disabled and pinned not in ("", "auto", DEFAULT):
+        return entrypoint(["run", pinned, *args])
+    explicit = disabled or pinned == DEFAULT or _runtime["codex_explicit_remote"](args) or any(
+        os.environ.get(name) for name in PRIVATE_ENVIRONMENT)
+    command = _runtime["codex_subcommand"](args)
+    orca_probe = command == ("login", "status") and (orca or from_orca())
+    if not explicit and (orca_probe or not (command and command[0] in UNSCHEDULED)):
+        launch = profile(DEFAULT).parent / "launch.json"
+        def read_schedule():
+            try:
+                schedule = json.loads(launch.read_text())
+            except FileNotFoundError:
+                return None if required else {"managed": False, "accounts": []}
+            except (OSError, ValueError):
+                return None
+            return schedule if isinstance(schedule, dict) and isinstance(schedule.get("accounts"), list) else None
+
+        schedule = read_schedule()
+        if schedule is None:
+            print("无法读取 Super Cage 的 Codex 调度配置。请同步环境组件后重试。", file=sys.stderr)
+            return ACCOUNT_REFUSED
+        if _runtime["native_schedule_managed"](schedule):
+            if orca_probe:
+                return orca_login_status(launch.parent, schedule, args)
+            mask = os.umask(0)
+            os.umask(mask)
+            thread = _runtime["codex_history_request"](args)
+            if thread is not None:
+                try:
+                    roster = schedule.get("history_accounts", schedule["accounts"])
+                    selected = _runtime["history_account"](roster, lambda account: codex_home(profile(account)),
+                                                           _runtime["codex_history"], thread)
+                except KeyboardInterrupt:
+                    return 130
+                except ValueError as error:
+                    print(error, file=sys.stderr)
+                    return ACCOUNT_REFUSED
+                if selected is None:
+                    return 0
+                account, expected = selected
+                _controller_context["CAGE_CODEX_SUBJECT"] = expected
+                try:
+                    with _runtime["launch_guard"](profile(account)):
+                        return main(["run", account, *args])
+                except KeyboardInterrupt:
+                    return 130
+                except (OSError, ValueError, subprocess.SubprocessError, TypeError):
+                    print("无法打开原账号的 Codex 会话。请检查原账号的登录状态或稍后重试。", file=sys.stderr)
+                    return ACCOUNT_REFUSED
+                finally:
+                    os.umask(mask)
+                    _controller_context.pop("CAGE_CODEX_SUBJECT", None)
+
+            def start(_schedule, item, before_exec):
+                _controller_context["CAGE_CODEX_SUBJECT"] = item["subject"]
+                try:
+                    main(["run", item["id"], *args], quiet=True, before_exec=before_exec)
+                finally:
+                    os.umask(mask)
+                    _controller_context.pop("CAGE_CODEX_SUBJECT", None)
+
+            try:
+                mode, pin = _runtime["admit_account_launch"](launch.parent, read_schedule, launch_candidates, profile, start)
+            except KeyboardInterrupt:
+                return 130
+            except (OSError, ValueError):
+                print("无法读取 Super Cage 的 Codex 调度配置。请同步环境组件后重试。", file=sys.stderr)
+                return ACCOUNT_REFUSED
+            if pin:
+                print("此项目绑定的 Codex 账号不可用。请检查项目绑定、登录状态和额度后重试。", file=sys.stderr)
+            elif mode == "manual":
+                print("手动选择的 Codex 账号不可用。请检查登录状态和额度，或在账号管理中重新选择。", file=sys.stderr)
+            else:
+                print("暂无可启动的 Super Cage Codex 账号。请检查登录状态、参与状态和额度后重试。", file=sys.stderr)
+            return ACCOUNT_REFUSED
+    path = os.pathsep.join([str(Path.home() / ".local/bin"), *(
+        p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))])
     binary = shutil.which("codex", path=path)
     if not binary:
         print("未找到 codex 命令。", file=sys.stderr)
@@ -833,9 +889,16 @@ def auto(args):
 
 
 def entrypoint(args):
-    if args[:1] == ["auto"]:
-        return auto(args[1:])
+    if args[:1] in (["auto"], ["orca-auto"]):
+        return auto(args[1:], orca=args[0] == "orca-auto")
     try:
+        if args[:1] == ["run"] and len(args) >= 2:
+            try:
+                with _runtime["launch_guard"](profile(args[1]), track=False):
+                    return main(args)
+            except BlockingIOError:
+                print("所选 Codex 账号正在登录，请稍后重试。", file=sys.stderr)
+                return ACCOUNT_REFUSED
         return main(args)
     except KeyboardInterrupt:
         return 130

@@ -150,6 +150,11 @@ type magpieManager struct {
 // scheduling across all harnesses (Claude, Codex, Agent CLIs, shells, Herdr,
 // T3 Code, Orca Server) so Magpie's native config takeover works seamlessly.
 func (s *Server) magpieTakesOverScheduling() bool {
+	// An external Magpie can open on Windows, where the native Claude relay
+	// keeps ownership of account scheduling.
+	if s.windowsGuest != nil {
+		return false
+	}
 	s.magpie.mu.Lock()
 	cfg, err := s.loadMagpieConfigLocked()
 	s.magpie.mu.Unlock()
@@ -519,23 +524,23 @@ func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]an
 		"enabled":             cfg.Enabled,
 		"scheduling_disabled": cfg.Enabled,
 		"mode":                cfg.Mode,
-		"external_url":     cfg.ExternalURL,
-		"port":             cfg.Port,
-		"gateway_port":     gatewayPort,
-		"gateway_only":     cfg.GatewayOnly,
-		"open_mode":        cfg.OpenMode,
-		"focus_chrome":     cfg.FocusChrome,
-		"installed":        st.Installed,
-		"version":          st.Version,
-		"running":          st.Running,
-		"gateway_running":  st.GatewayRunning,
-		"url":              displayURL,
-		"gateway_url":      gatewayURL,
-		"error":            probeErr,
-		"vm_running":       runningVM,
-		"ready":            ready,
-		"supports_managed": supportsManaged,
-		"direct_available": directAvailable,
+		"external_url":        cfg.ExternalURL,
+		"port":                cfg.Port,
+		"gateway_port":        gatewayPort,
+		"gateway_only":        cfg.GatewayOnly,
+		"open_mode":           cfg.OpenMode,
+		"focus_chrome":        cfg.FocusChrome,
+		"installed":           st.Installed,
+		"version":             st.Version,
+		"running":             st.Running,
+		"gateway_running":     st.GatewayRunning,
+		"url":                 displayURL,
+		"gateway_url":         gatewayURL,
+		"error":               probeErr,
+		"vm_running":          runningVM,
+		"ready":               ready,
+		"supports_managed":    supportsManaged,
+		"direct_available":    directAvailable,
 	}, nil
 }
 
@@ -643,7 +648,7 @@ func (s *Server) magpieConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	needStopManaged := prevMode == "managed" && ((prevEnabled && !cfg.Enabled) || cfg.Mode != "managed" || cfg.Port != prevPort || cfg.GatewayOnly != prevGatewayOnly)
+	needStopManaged := prevEnabled && prevMode == "managed" && (!cfg.Enabled || cfg.Mode != "managed" || cfg.Port != prevPort || cfg.GatewayOnly != prevGatewayOnly)
 	if needStopManaged && s.vmRunning() && s.windowsGuest == nil {
 		stopCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 		stopErr := s.runAgentRuntime(stopCtx, "magpie-stop", map[string]any{"port": prevPort}, nil)

@@ -205,7 +205,8 @@ func TestCodexSchedulingIsIndependentFromClaude(t *testing.T) {
 		t.Fatal(w.Code, w.Body)
 	}
 	codex, _ := s.loadCodexAccounts()
-	if codex.Scheduling != (claudeScheduling{Mode: "sequential", SwitchPolicy: "wait"}) || codex.Accounts[0].ID != b {
+	if codex.Scheduling.Mode != "sequential" || codex.Scheduling.SwitchPolicy != "wait" ||
+		codex.Scheduling.SelectedAccountRevision == "" || codex.Accounts[0].ID != b {
 		t.Fatalf("Codex scheduling not saved: %+v", codex)
 	}
 	claudeAfter, _ := os.ReadFile(filepath.Join(s.profile, "claude-accounts.json"))
@@ -229,6 +230,42 @@ func TestCodexSchedulingIsIndependentFromClaude(t *testing.T) {
 		if w = request(s, "POST", "/api/codex-accounts", s.origin, body, true); w.Code == http.StatusOK {
 			t.Fatalf("accepted %s", body)
 		}
+	}
+}
+
+func TestCodexAllocationCountsGuestShellLaunch(t *testing.T) {
+	s := testServer(t)
+	a, b := strings.Repeat("a", 24), strings.Repeat("b", 24)
+	list := codexAccountList{
+		Scheduling: (claudeScheduling{}).defaults(),
+		Accounts:   []codexAccount{codexFixture(a, "a@example.test"), codexFixture(b, "b@example.test")},
+	}
+	if err := s.saveCodexAccounts(list); err != nil {
+		t.Fatal(err)
+	}
+	selection, err := s.allocateCodexAccount(list, "", func(context.Context, []string) (map[string]codexGuestQuota, error) {
+		return map[string]codexGuestQuota{a: {PlainLaunches: 1}}, nil
+	})
+	if err != nil || selection.ID != b {
+		t.Fatalf("SSH launch was not counted for workbench allocation: %+v %v", selection, err)
+	}
+}
+
+func TestCodexAccountLoadCombinesPhoneAndManagedService(t *testing.T) {
+	s := testServer(t)
+	id := strings.Repeat("a", 24)
+	s.mobileCLI.codexOwner = map[string]string{"conversation": "phone"}
+	s.mobileCLI.catalog = map[string]mobileSummary{"conversation": {CodexAccountID: id}}
+	if active, _ := s.codexAccountLoad(); active[id] != 1 {
+		t.Fatalf("dormant service hid phone load: %v", active)
+	}
+	s.t3code.config = defaultT3CodeConfig()
+	s.t3code.config.Enabled = true
+	s.t3code.configLoaded = true
+	s.t3code.statusAt = time.Now()
+	s.t3code.statusCache = t3CodeGuestStatus{Running: true, PID: 1234, Port: s.t3code.config.Port, Accounts: map[string]string{"codex": id}}
+	if active, _ := s.codexAccountLoad(); active[id] != 2 {
+		t.Fatalf("running service was not counted with phone load: %v", active)
 	}
 }
 

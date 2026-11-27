@@ -20,7 +20,7 @@ import {
 import { EarlierPartsDialog } from "./earlier-parts-dialog";
 import { tabName } from "./workspace-state.mjs";
 import { ProviderMark } from "./provider-mark";
-import { AgentIcon } from "./agent-icon";
+import { AgentIcon, harnessMarkId } from "./agent-icon";
 import { api } from "./api";
 
 const terminalProvider = (tab) => tab.sessionProvider === "codex" || tab.cli_session_provider === "codex" || /^codex/.test(tab.terminalKind || "") ? "codex" : "claude";
@@ -32,12 +32,16 @@ const ownerChips = {
 
 export function TabIcon({ kind, favicon, agent, provider = "claude", agentId = "", glyph = "", accentColor = "", accountNumber, size = 16 }) {
   const [failed, setFailed] = useState("");
+  const brandId = harnessMarkId(agentId);
   if (kind === "t3code") return <AgentIcon agentId="t3code" glyph={glyph || "T3"} accentColor={accentColor} size={size} />;
   if (kind === "magpie") return <AgentIcon agentId="magpie" glyph={glyph || "MP"} accentColor={accentColor} size={size} />;
-  if (kind === "terminal" && agentId && agentId !== "claude" && agentId !== "codex") {
+  if (kind === "terminal" && (brandId === "claude" || brandId === "codex")) {
+    return <ProviderMark provider={brandId} accountNumber={accountNumber} size={size} />;
+  }
+  if (kind === "terminal" && agentId) {
     return <AgentIcon agentId={agentId} glyph={glyph} accentColor={accentColor} accountNumber={accountNumber} size={Math.max(18, size)} />;
   }
-  if (kind === "terminal" && agent) return <ProviderMark provider={provider} accountNumber={accountNumber} />;
+  if (kind === "terminal" && agent) return <ProviderMark provider={provider} accountNumber={accountNumber} size={size} />;
   if (kind === "terminal") return <TerminalSquare size={16} />;
   if (kind === "editor") return <FileCode2 size={size} />;
   if (kind === "browser-settings") return <Settings size={size} />;

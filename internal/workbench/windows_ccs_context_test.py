@@ -44,10 +44,14 @@ class ActualContextTests(unittest.TestCase):
                 def __init__(self,args,env):events.append('spawn');runs.append((args,env))
                 def wait(self):return 0
                 def close(self):events.append('closed')
+            runtime={'path':str,'command':lambda script, args:['fixture-python','-I',script,*args],
+                     'environment':lambda env:{key:value for key,value in env.items() if not key.startswith('CAGE_')}}
             channel={'ROOT':root,'__file__':str(Path(__file__).with_name('cli_channel.py')),'identifier':lambda value:str(uuid.UUID(value)),
                      'read_json':lambda path,default=None:json.loads(path.read_text()) if path.exists() else default,
-                     'state_file':state_file,'save':lambda path,value:path.write_text(json.dumps(value))}
-            with patch.dict(os.environ,{'CAGE_CLI_BINARY':'trusted-native.exe','CAGE_CLI_IDENTITY_HELPER':'fixture-identity.py','DYNAMIC_PROXY_TOKEN':'fixture-only'}),patch.object(runpy,'run_path',return_value=identity),patch.dict(actual.__globals__,{'CliProcess':Process}):
+                     'state_file':state_file,'save':lambda path,value:path.write_text(json.dumps(value)),
+                     'client_runtime':lambda:runtime}
+            controller={'CAGE_CLI_BINARY':'trusted-native.exe','CAGE_CLI_IDENTITY_HELPER':'fixture-identity.py'}
+            with patch.dict(os.environ,{'DYNAMIC_PROXY_TOKEN':'fixture-only'}),patch.object(runpy,'run_path',return_value=identity),patch.dict(actual.__globals__,{'CliProcess':Process,'_controller_context':controller}):
                 if failure and resume:
                     with self.assertRaisesRegex(ValueError,'暂时无法核验'):actual(str(request),channel)
                 else:self.assertEqual(actual(str(request),channel),0)

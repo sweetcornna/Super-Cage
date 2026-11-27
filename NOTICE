@@ -17,6 +17,8 @@ also retained in Contents/Resources/guest-os/sources inside the macOS App.
 PDF metadata processing additionally uses pdfcpu, hhrutter/tiff and
 xdg-go/stringprep. Their license texts are included in THIRD_PARTY_LICENSES.
 The root MIT license does not replace these third-party license terms.
+The bundled harness marks' upstream sources and license texts are listed in
+ui/public/harness-marks-notice.txt, which is included in the web UI.
 
 agent-vm
 Copyright (c) 2026 Sylvain Zimmer (MIT, see LICENSE)

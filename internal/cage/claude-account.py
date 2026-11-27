@@ -697,12 +697,16 @@ def shared_launch_arguments_locked(base, args, settings_fd):
     return ["--settings", _runtime["path"](path), *result]
 
 
-def main(args, *, mobile_settings_fd=None, verify_mobile=None):
+def main(args, *, mobile_settings_fd=None, verify_mobile=None, quiet=False, before_exec=None):
     mode, account_id, *rest = args
     if mode == "quotas":
         result = {}
         for candidate in [account_id, *rest]:
-            quota = read_quota(profile(candidate))
+            base = profile(candidate)
+            quota = read_quota(base)
+            count = _runtime["plain_launch_count"](base)
+            if count:
+                quota = {**(quota or {}), "plain_launches": count}
             if quota:
                 result[candidate] = quota
         print(json.dumps(result))
@@ -752,6 +756,10 @@ def main(args, *, mobile_settings_fd=None, verify_mobile=None):
         quota = read_quota(base)
         if quota and quota["identity"] == subject(summary):
             summary["quota"] = quota
+        if account_id == DEFAULT:
+            count = _runtime["plain_launch_count"](base)
+            if count:
+                summary["plain_launches"] = count
         print(json.dumps(summary))
         return 0
     if mode == "login":
@@ -765,8 +773,9 @@ def main(args, *, mobile_settings_fd=None, verify_mobile=None):
             signal.signal(signal.SIGHUP, interrupted)
         signal.signal(signal.SIGTERM, interrupted)
         try:
-            (base / "quota.json").unlink(missing_ok=True)
-            return subprocess.call([_runtime["path"](binary), "auth", "login", *([] if os.name == "nt" else ["--claudeai"])], cwd=Path.home(), env=env)
+            with _runtime["launch_guard"](base, login=True):
+                (base / "quota.json").unlink(missing_ok=True)
+                return subprocess.call([_runtime["path"](binary), "auth", "login", *([] if os.name == "nt" else ["--claudeai"])], cwd=Path.home(), env=env)
         finally:
             if os.name != "nt":
                 subprocess.run([OPEN, "--login-id", account_id, "--finish-login"], env=os.environ, timeout=8, check=False,
@@ -784,7 +793,8 @@ def main(args, *, mobile_settings_fd=None, verify_mobile=None):
         pass_fds = () if mobile_settings_fd is None else (mobile_settings_fd,)
         reading = identity(binary, env, Path.cwd(), options, pass_fds=pass_fds) if expected else None
         if not expected or subject(reading) != expected:
-            print("此项目未使用所选 Claude 订阅。请检查项目配置和账号登录状态。", file=sys.stderr)
+            if not quiet:
+                print("此项目未使用所选 Claude 订阅。请检查项目配置和账号登录状态。", file=sys.stderr)
             return 1
         if mobile_settings_fd is not None:
             verify_mobile(reading)
@@ -794,6 +804,8 @@ def main(args, *, mobile_settings_fd=None, verify_mobile=None):
         os.umask(original_umask)
         if os.name == "nt":
             return subprocess.call([_runtime["path"](binary), *rest], env=env)
+        if before_exec is not None:
+            before_exec()
         os.execve(binary, [binary, *rest], env)
     raise ValueError("unknown operation")
 
@@ -866,79 +878,110 @@ def macos_open(args):
             return 0 if reply.read(4) == b"OK" else 1
 
 
-def launch_headroom(quota, expected, now):
-    """The controller's headroom rule on the guest's own reading: None while a
-    window is used up, else the least known remaining percent (-1: unknown)."""
-    if not quota or quota.get("identity") != expected:
-        return -1
-    least = -1
-    for key in ("five_hour", "seven_day"):
-        window = quota.get(key)
-        if not window:
-            continue
-        fresh = now - window["observed_at"] <= 15 * 60
-        if window["used_percentage"] >= 100 and (window["resets_at"] > now or fresh):
-            return None
-        if fresh and (least < 0 or 100 - window["used_percentage"] < least):
-            least = 100 - window["used_percentage"]
-    return least
+def launch_candidates(schedule, now=None):
+    return _runtime["native_launch_candidates"](
+        schedule, profile, lambda base, _: read_quota(base), allow_default=True, now=now)
 
 
-def launch_account(now=None):
-    """The account a plain `claude` starts on. The controller publishes its
-    scheduling order (preferred account first); a used-up account is skipped."""
-    now = int(time.time()) if now is None else now
-    schedule = json_file(profile(DEFAULT).parent / "launch.json")
-    if not isinstance(schedule, dict) or not isinstance(schedule.get("accounts"), list):
-        return None
-    best = None
-    for item in schedule["accounts"][:64]:
-        if not isinstance(item, dict):
+def requested_resume(args):
+    """Keep picker searches and explicit arguments in the vendor CLI's argv."""
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg in ("--continue", "-c"):
+            return ""
+        if arg in ("--resume", "-r"):
+            value = args[index + 1] if index + 1 < len(args) else ""
+        elif arg.startswith(("--resume=", "-r=")):
+            value = arg.partition("=")[2]
+        else:
             continue
-        account, expected = item.get("id"), item.get("subject")
-        if not isinstance(account, str) or not re.fullmatch("[0-9a-f]{24}", account) or \
-                not isinstance(expected, str) or not re.fullmatch("[a-f0-9]{64}", expected):
-            continue
-        room = launch_headroom(read_quota(profile(account)), expected, now)
-        if room is None:
-            continue
-        if item.get("preferred") is True or schedule.get("mode") == "sequential":
-            return account, expected
-        if best is None or room > best[2]:
-            best = (account, expected, room)
-    return best[:2] if best else None
+        if _runtime["_THREAD_ID"].fullmatch(value):
+            return value.lower()
+        if not value.startswith("-") and value.endswith(".jsonl"):
+            return value
+        return ""
+    return None
 
 
 def auto(args):
-    """`claude` typed in a guest shell or spawned via auto-shims (Orca, T3 Code,
-    Herdr, scripts). Starts on the scheduled account like a Claude terminal
-    does; anything that does not fit runs the CLI unchanged."""
-    picked = None
+    """Start a usable managed account, or preserve an explicit/default invocation."""
+    required = os.environ.pop("CAGE_REQUIRE_CLAUDE_SCHEDULE", "") == "1"
     magpie_takeover = (Path.home() / ".local/share/cage/magpie/takeover").is_file()
     disabled = magpie_takeover or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
-    explicit = disabled or any(os.environ.get(name) for name in ("CAGE_CLAUDE_ACCOUNT_ID", "CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
+    pinned = os.environ.get("CAGE_CLAUDE_ACCOUNT_ID", "")
+    if not disabled and pinned not in ("", "auto", DEFAULT):
+        return entrypoint(["run", pinned, *args])
+    explicit = disabled or pinned == DEFAULT or any(os.environ.get(name) for name in ("CLAUDE_CONFIG_DIR", *PROVIDER_VARIABLES))
     if not explicit and not (args and args[0] in UNSCHEDULED):
-        try:
-            picked = launch_account()
-        except Exception:
-            picked = None
-    if picked:
-        account, expected = picked
-        mask = os.umask(0)
-        os.umask(mask)
-        # The status line command carries the subject; CLAUDE_CONFIG_DIR keeps
-        # later `claude` calls in this session on the same account.
-        _controller_context["CAGE_CLAUDE_SUBJECT"] = expected
-        try:
-            main(["run", account, *args])  # replaces this process once the account is verified
-        except KeyboardInterrupt:
-            return 130
-        except Exception:
-            pass
-        os.umask(mask)
-        _controller_context.pop("CAGE_CLAUDE_SUBJECT", None)
-        print("Super Cage 调度的 Claude 账号暂不可用，本次用默认登录启动。", file=sys.stderr)
-    path = os.pathsep.join(p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))
+        launch = profile(DEFAULT).parent / "launch.json"
+        def read_schedule():
+            try:
+                schedule = json.loads(launch.read_text())
+            except FileNotFoundError:
+                return None if required else {"managed": False, "accounts": []}
+            except (OSError, ValueError):
+                return None
+            return schedule if isinstance(schedule, dict) and isinstance(schedule.get("accounts"), list) else None
+
+        schedule = read_schedule()
+        if schedule is None:
+            print("无法读取 Super Cage 的 Claude 调度配置。请同步环境组件后重试。", file=sys.stderr)
+            return 78
+        if _runtime["native_schedule_managed"](schedule):
+            mask = os.umask(0)
+            os.umask(mask)
+            thread = requested_resume(args)
+            if thread is not None:
+                try:
+                    roster = schedule.get("history_accounts", schedule["accounts"])
+                    selected = _runtime["history_account"](roster, lambda account: config_directory(profile(account)),
+                                                           _runtime["claude_history"], thread)
+                except KeyboardInterrupt:
+                    return 130
+                except ValueError as error:
+                    print(error, file=sys.stderr)
+                    return 78
+                if selected is None:
+                    return 0
+                account, expected = selected
+                _controller_context["CAGE_CLAUDE_SUBJECT"] = expected
+                try:
+                    with _runtime["launch_guard"](profile(account)):
+                        return main(["run", account, *args]) or 0
+                except KeyboardInterrupt:
+                    return 130
+                except (OSError, ValueError, subprocess.SubprocessError, TypeError):
+                    print("无法打开原账号的 Claude 会话。请检查原账号的登录状态或稍后重试。", file=sys.stderr)
+                    return 78
+                finally:
+                    os.umask(mask)
+                    _controller_context.pop("CAGE_CLAUDE_SUBJECT", None)
+
+            def start(_schedule, item, before_exec):
+                _controller_context["CAGE_CLAUDE_SUBJECT"] = item["subject"]
+                try:
+                    main(["run", item["id"], *args], quiet=True, before_exec=before_exec)
+                finally:
+                    os.umask(mask)
+                    _controller_context.pop("CAGE_CLAUDE_SUBJECT", None)
+
+            try:
+                mode, pin = _runtime["admit_account_launch"](launch.parent, read_schedule, launch_candidates, profile, start)
+            except KeyboardInterrupt:
+                return 130
+            except (OSError, ValueError):
+                print("无法读取 Super Cage 的 Claude 调度配置。请同步环境组件后重试。", file=sys.stderr)
+                return 78
+            if pin:
+                print("此项目绑定的 Claude 账号不可用。请检查项目绑定、登录状态和额度后重试。", file=sys.stderr)
+            elif mode == "manual":
+                print("手动选择的 Claude 账号不可用。请检查登录状态和额度，或在账号管理中重新选择。", file=sys.stderr)
+            else:
+                print("暂无可启动的 Super Cage Claude 账号。请检查登录状态、参与状态和额度后重试。", file=sys.stderr)
+            return 78
+    path = os.pathsep.join([str(Path.home() / ".local/bin"), *(
+        p for p in os.environ.get("PATH", os.defpath).split(os.pathsep) if not _is_cage_shim_dir(p))])
     binary = shutil.which("claude", path=path)
     if not binary:
         print("未找到 claude 命令。", file=sys.stderr)
@@ -950,6 +993,13 @@ def entrypoint(args):
     if args[:1] == ["auto"] and os.name != "nt":
         return auto(args[1:])
     try:
+        if args[:1] == ["run"] and len(args) >= 2 and os.name != "nt":
+            try:
+                with _runtime["launch_guard"](profile(args[1]), track=False):
+                    return main(args)
+            except BlockingIOError:
+                print("所选 Claude 账号正在登录，请稍后重试。", file=sys.stderr)
+                return 78
         return macos_open(args) if sys.platform == "darwin" and Path(sys.argv[0]).name == "cage-open" else main(args)
     except KeyboardInterrupt:
         return 130

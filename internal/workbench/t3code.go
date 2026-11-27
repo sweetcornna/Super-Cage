@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	defaultT3CodePort      = 13773
-	t3CodeStatusTTL        = 10 * time.Second
-	t3CodeDirectGrantTTL   = 30 * time.Second
+	defaultT3CodePort    = 13773
+	t3CodeStatusTTL      = 10 * time.Second
+	t3CodeDirectGrantTTL = 30 * time.Second
 )
 
 // t3CodeConfig persists the user's opt-in T3 Code integration preferences.
@@ -90,33 +90,36 @@ func validateT3CodeExternalURL(raw string) (string, error) {
 }
 
 type t3CodeGuestStatus struct {
-	Installed  bool   `json:"installed"`
-	BinaryPath string `json:"binary_path,omitempty"`
-	Version    string `json:"version,omitempty"`
-	Running    bool   `json:"running"`
-	PID        int    `json:"pid,omitempty"`
-	Port       int    `json:"port,omitempty"`
-	HasPairURL bool   `json:"has_pair_url,omitempty"`
+	Installed  bool              `json:"installed"`
+	BinaryPath string            `json:"binary_path,omitempty"`
+	Version    string            `json:"version,omitempty"`
+	Running    bool              `json:"running"`
+	PID        int               `json:"pid,omitempty"`
+	Port       int               `json:"port,omitempty"`
+	HasPairURL bool              `json:"has_pair_url,omitempty"`
+	Accounts   map[string]string `json:"accounts,omitempty"`
 }
 
 type t3CodeProbeCall struct {
-	done   chan struct{}
-	port   int
-	forced bool
-	status t3CodeGuestStatus
-	err    error
+	done       chan struct{}
+	port       int
+	forced     bool
+	generation uint64
+	status     t3CodeGuestStatus
+	err        error
 }
 
 type t3CodeManager struct {
-	opMu           sync.Mutex // serializes config transitions and managed guest lifecycle actions
-	mu             sync.Mutex
-	configLoaded   bool
-	config         t3CodeConfig
-	statusCache    t3CodeGuestStatus
-	statusAt       time.Time
-	probeInflight  *t3CodeProbeCall
-	activeBindings map[string]string
-	proxy          *t3CodeProxy
+	opMu             sync.Mutex // serializes config transitions and managed guest lifecycle actions
+	mu               sync.Mutex
+	configLoaded     bool
+	config           t3CodeConfig
+	statusCache      t3CodeGuestStatus
+	statusAt         time.Time
+	statusGeneration uint64
+	probeInflight    *t3CodeProbeCall
+	activeBindings   map[string]string
+	proxy            *t3CodeProxy
 }
 
 func (s *Server) loadT3CodeConfigLocked() (t3CodeConfig, error) {
@@ -159,6 +162,7 @@ func (s *Server) saveT3CodeConfigLocked(cfg t3CodeConfig) error {
 func (s *Server) invalidateT3CodeStatus() {
 	s.t3code.mu.Lock()
 	s.t3code.statusAt = time.Time{}
+	s.t3code.statusGeneration++
 	s.t3code.mu.Unlock()
 }
 
@@ -171,7 +175,7 @@ func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t
 			m.mu.Unlock()
 			return cached, nil
 		}
-		if call := m.probeInflight; call != nil && call.port == port {
+		if call := m.probeInflight; call != nil && call.port == port && call.generation == m.statusGeneration {
 			if !force || call.forced {
 				m.mu.Unlock()
 				select {
@@ -189,7 +193,7 @@ func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t
 				continue
 			}
 		}
-		call := &t3CodeProbeCall{done: make(chan struct{}), port: port, forced: force}
+		call := &t3CodeProbeCall{done: make(chan struct{}), port: port, forced: force, generation: m.statusGeneration}
 		m.probeInflight = call
 		m.mu.Unlock()
 
@@ -206,7 +210,12 @@ func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t
 			st.Port = port
 		}
 		m.mu.Lock()
-		if err == nil {
+		changedAccounts := false
+		if err == nil && call.generation == m.statusGeneration {
+			changedAccounts = !maps.Equal(m.statusCache.Accounts, st.Accounts)
+			if st.PID == 0 || m.statusCache.PID != st.PID || m.statusCache.Port != st.Port {
+				m.activeBindings = nil
+			}
 			m.statusCache = st
 			m.statusAt = time.Now()
 		}
@@ -216,6 +225,9 @@ func (s *Server) probeT3CodeStatus(ctx context.Context, port int, force bool) (t
 		}
 		close(call.done)
 		m.mu.Unlock()
+		if changedAccounts {
+			s.kickAllLaunchSchedules()
+		}
 		return st, err
 	}
 }
@@ -247,14 +259,6 @@ func (s *Server) t3CodeDirectAvailable(r *http.Request) bool {
 	return true
 }
 
-// resolveT3CodeBindings translates user-configured bindings ("auto", "default",
-// or specific account ID) into guest isolation specs and human-readable labels.
-// Explicit account bindings fail loudly when missing or not ready rather than
-// silently falling back to default credentials.
-func (s *Server) resolveT3CodeBindings(cfg t3CodeConfig, workspace string) (map[string]any, map[string]string, error) {
-	return s.resolveToolAccountBindings(cfg.AccountBindings, workspace, "T3 Code")
-}
-
 func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]any, error) {
 	ctx := context.Background()
 	if r != nil {
@@ -262,7 +266,6 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 	}
 	s.t3code.mu.Lock()
 	cfg, err := s.loadT3CodeConfigLocked()
-	activeBindings := maps.Clone(s.t3code.activeBindings)
 	s.t3code.mu.Unlock()
 	if err != nil {
 		return nil, err
@@ -292,6 +295,12 @@ func (s *Server) t3CodeStatusPayload(r *http.Request, force bool) (map[string]an
 	if cfg.Mode == "external" {
 		displayURL = cfg.ExternalURL
 		st.Running = displayURL != ""
+	}
+	var activeBindings map[string]string
+	if cfg.Mode == "managed" && st.Running {
+		s.t3code.mu.Lock()
+		activeBindings = maps.Clone(s.t3code.activeBindings)
+		s.t3code.mu.Unlock()
 	}
 	return map[string]any{
 		"enabled":          cfg.Enabled,
@@ -419,11 +428,9 @@ func (s *Server) t3CodeConfigHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	needStopManaged := prevMode == "managed" && ((prevEnabled && !cfg.Enabled) || cfg.Mode != "managed" || cfg.Port != prevPort)
+	needStopManaged := prevEnabled && prevMode == "managed" && (!cfg.Enabled || cfg.Mode != "managed" || cfg.Port != prevPort)
 	if needStopManaged && s.vmRunning() && s.windowsGuest == nil {
-		stopCtx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
-		stopErr := s.runAgentRuntime(stopCtx, "t3code-stop", map[string]any{"port": prevPort}, nil)
-		cancel()
+		stopErr := s.stopManagedT3Code(r.Context(), prevPort)
 		if stopErr != nil {
 			http.Error(w, fmt.Sprintf("停止原托管 T3 Code 服务失败，配置未变更: %v", stopErr), http.StatusConflict)
 			return
@@ -491,13 +498,17 @@ func (s *Server) t3CodeInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// Automatically enable managed T3 Code after a successful install.
 		s.t3code.mu.Lock()
-		if cfg, err := s.loadT3CodeConfigLocked(); err == nil {
+		cfg, err := s.loadT3CodeConfigLocked()
+		if err == nil && cfg.Mode == "managed" {
 			cfg.Enabled = true
-			cfg.Mode = "managed"
-			_ = s.saveT3CodeConfigLocked(cfg)
+			err = s.saveT3CodeConfigLocked(cfg)
 		}
 		s.t3code.statusAt = time.Time{}
+		s.t3code.statusGeneration++
 		s.t3code.mu.Unlock()
+		if err != nil {
+			return err
+		}
 		s.setMessage("T3 Code 安装完成，正在验证状态…")
 		return nil
 	})
@@ -511,28 +522,59 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 		return cfg, t3CodeGuestStatus{}, err
 	}
 	if !cfg.Enabled {
-		return cfg, t3CodeGuestStatus{}, errors.New("请先在「设置 → Agent CLI」中启用 T3 Code 接入后再启动服务")
+		return cfg, t3CodeGuestStatus{}, errors.New("请先在「设置 → T3 Code」中启用接入后再启动服务")
 	}
 	if cfg.Mode != "managed" {
 		return cfg, t3CodeGuestStatus{Running: cfg.ExternalURL != ""}, nil
-	}
-	if !s.vmRunning() {
-		return cfg, t3CodeGuestStatus{}, errors.New("请先启动 Cage 环境后再运行 T3 Code")
 	}
 	if s.windowsGuest != nil {
 		return cfg, t3CodeGuestStatus{}, errors.New("Windows 原生客机请切换到外部地址模式接入 T3 Code")
 	}
 
-	if !restart {
-		if st, err := s.probeT3CodeStatus(ctx, cfg.Port, false); err == nil && st.Running {
-			return cfg, st, nil
-		}
+	if !s.lockProjectOperation(ctx) {
+		return cfg, t3CodeGuestStatus{}, errTerminalBusy
+	}
+	defer s.op.Unlock()
+	s.mu.Lock()
+	sealed, closing := s.appUpdateSealed, s.closing
+	s.mu.Unlock()
+	if sealed {
+		return cfg, t3CodeGuestStatus{}, errAppUpdateSealed
+	}
+	if closing || s.busy() {
+		return cfg, t3CodeGuestStatus{}, errTerminalNotReady
+	}
+	if !s.vmRunning() {
+		return cfg, t3CodeGuestStatus{}, errors.New("请先启动 Cage 环境后再运行 T3 Code")
+	}
+	epoch, unlocked := s.account.access()
+	if !unlocked {
+		return cfg, t3CodeGuestStatus{}, errClaudeAccessLost
+	}
+	if requestedEpoch, ok := ctx.Value(accountEpochKey{}).(context.Context); ok && requestedEpoch != epoch {
+		return cfg, t3CodeGuestStatus{}, errClaudeAccessLost
+	}
+	s.noteAppUpdateActivity()
+
+	probeCtx, cancelProbe := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
+	previous, err := s.probeT3CodeStatus(probeCtx, cfg.Port, restart)
+	cancelProbe()
+	if err != nil {
+		return cfg, previous, err
+	}
+	if !restart && previous.Running {
+		return cfg, previous, nil
 	}
 
 	if workspace == "" {
 		workspace = s.workspace()
+	} else {
+		workspace, err = s.projectWorkspace(workspace)
+		if err != nil {
+			return cfg, t3CodeGuestStatus{}, err
+		}
 	}
-	guestBindings, labels, err := s.resolveT3CodeBindings(cfg, workspace)
+	guestBindings, labels, err := s.resolveT3CodeLaunchBindings(cfg, workspace, previous.Accounts)
 	if err != nil {
 		return cfg, t3CodeGuestStatus{}, err
 	}
@@ -541,14 +583,23 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 		subcmd = "t3code-restart"
 	}
 	startCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	stopOnLock := context.AfterFunc(epoch, cancel)
+	defer stopOnLock()
 	defer cancel()
+	if epoch.Err() != nil {
+		return cfg, t3CodeGuestStatus{}, errClaudeAccessLost
+	}
 	var st t3CodeGuestStatus
 	err = s.runAgentRuntime(startCtx, subcmd, map[string]any{
 		"port":      cfg.Port,
 		"workspace": s.cliWorkspace(workspace),
 		"bindings":  guestBindings,
 	}, &st)
-	if err != nil {
+	if err != nil || !st.Running {
+		s.invalidateT3CodeStatus()
+		if err == nil {
+			err = errors.New("T3 Code 未报告服务已就绪")
+		}
 		return cfg, st, err
 	}
 	st.Port = cfg.Port
@@ -556,9 +607,49 @@ func (s *Server) ensureManagedT3CodeRunning(ctx context.Context, restart bool, w
 	s.t3code.mu.Lock()
 	s.t3code.statusCache = st
 	s.t3code.statusAt = time.Now()
+	s.t3code.statusGeneration++
 	s.t3code.activeBindings = labels
 	s.t3code.mu.Unlock()
+	for agentID, id := range st.Accounts {
+		if !validClaudeID(id) {
+			continue
+		}
+		switch agentID {
+		case "claude":
+			s.noteClaudeSelection(id, workspace)
+		case "codex":
+			if binding, ok := guestBindings[agentID].(map[string]any); ok && binding["codex_native"] == true {
+				s.noteCodexSelection(id, workspace)
+			} else {
+				s.noteAgentSelection(agentID, id, workspace)
+			}
+		default:
+			s.noteAgentSelection(agentID, id, workspace)
+		}
+	}
+	s.kickAllLaunchSchedules()
 	return cfg, st, nil
+}
+
+func (s *Server) stopManagedT3Code(ctx context.Context, port int) error {
+	if !s.lockProjectOperation(ctx) {
+		return errTerminalBusy
+	}
+	defer s.op.Unlock()
+	stopCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if err := s.runAgentRuntime(stopCtx, "t3code-stop", map[string]any{"port": port}, nil); err != nil {
+		s.invalidateT3CodeStatus()
+		return err
+	}
+	s.t3code.mu.Lock()
+	s.t3code.statusCache = t3CodeGuestStatus{Port: port}
+	s.t3code.statusAt = time.Time{}
+	s.t3code.statusGeneration++
+	s.t3code.activeBindings = nil
+	s.t3code.mu.Unlock()
+	s.kickAllLaunchSchedules()
+	return nil
 }
 
 func (s *Server) t3CodeActionHTTP(w http.ResponseWriter, r *http.Request) {
@@ -582,23 +673,21 @@ func (s *Server) t3CodeActionHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		jsonReply(w, payload)
 	case "stop":
-		s.closeT3CodeProxy()
 		s.t3code.mu.Lock()
-		cfg, _ := s.loadT3CodeConfigLocked()
+		cfg, err := s.loadT3CodeConfigLocked()
 		s.t3code.mu.Unlock()
+		if err != nil {
+			requestError(w, err)
+			return
+		}
 		if cfg.Mode == "managed" && s.vmRunning() && s.windowsGuest == nil {
-			ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-			err := s.runAgentRuntime(ctx, "t3code-stop", map[string]any{"port": cfg.Port}, nil)
-			cancel()
+			err := s.stopManagedT3Code(r.Context(), cfg.Port)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusConflict)
 				return
 			}
 		}
-		s.t3code.mu.Lock()
-		s.t3code.activeBindings = nil
-		s.t3code.statusAt = time.Time{}
-		s.t3code.mu.Unlock()
+		s.closeT3CodeProxy()
 		payload, err := s.t3CodeStatusPayload(r, true)
 		if err != nil {
 			requestError(w, err)
@@ -652,7 +741,7 @@ func (s *Server) t3CodeOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !cfg.Enabled {
-		http.Error(w, "请先在「设置 → Agent CLI」中启用 T3 Code 接入", http.StatusConflict)
+		http.Error(w, "请先在「设置 → T3 Code」中启用接入", http.StatusConflict)
 		return
 	}
 	mode := cfg.OpenMode

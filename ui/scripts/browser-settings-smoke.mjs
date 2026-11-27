@@ -41,7 +41,7 @@ try {
   await nav.getByRole('button', { name: '外观', exact: true }).click();
   const layout = settings.getByRole('combobox', { name: '标签栏布局', exact: true });
   await layout.click();
-  await settings.getByRole('option', { name: '竖排（左侧）', exact: true }).click();
+  await page.getByRole('listbox', { name: '标签栏布局选项' }).getByRole('option', { name: '竖排（左侧）', exact: true }).click();
   await page.getByRole('complementary', { name: '竖排标签栏' }).waitFor();
   await page.reload();
   await page.getByRole('button', { name: '打开浏览器', exact: true }).click();

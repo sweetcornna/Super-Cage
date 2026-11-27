@@ -91,6 +91,9 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
 		launcher := claudeTerminalCommand(s.preferences)
 		s.mu.Unlock()
+		if s.windowsGuest == nil && record.Launcher != "" {
+			launcher = record.Launcher
+		}
 		if !sharedCLILauncher(launcher) || record.Launcher != "" && launcher != record.Launcher {
 			http.Error(w, "主机启动命令与原会话不一致，请恢复原配置后重试", 422)
 			return
