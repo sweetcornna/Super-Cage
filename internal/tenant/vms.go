@@ -225,7 +225,8 @@ func (s *Server) startVMLocked(record vmRecord, now time.Time) {
 		faults = current.faults
 	}
 	spec := LaunchSpec{VMID: id, SystemID: record.SystemID, Image: record.Image}
-	s.workers.Go(func() { s.prepare(spec, current, faults) })
+	replacement := s.replacements[id]
+	s.workers.Go(func() { s.prepare(spec, current, faults, replacement) })
 }
 
 func (s *Server) invalidateWorkspace(id string, workspace *Workspace) {
@@ -278,7 +279,7 @@ func (s *Server) deleteWorkspaceTickets(id string) {
 	}
 }
 
-func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
+func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults, replacement uint64) {
 	id := spec.VMID
 	select {
 	case s.startSlots <- struct{}{}:
@@ -292,13 +293,22 @@ func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
 	// resume fails, the check fails and Prepare starts the instance.
 	_ = s.wake(ctx, id)
 	workspace := previous
-	if previous != nil {
+	if previous != nil && previous.ctx.Err() != nil {
+		workspace = nil
+	} else if previous != nil {
 		probe, done := context.WithTimeout(ctx, 5*time.Second)
+		stop := context.AfterFunc(previous.ctx, done)
 		err := previous.recheck(probe)
 		probeErr := probe.Err()
+		stop()
 		done()
 		if err != nil {
 			s.mu.Lock()
+			if s.replacements[id] != replacement {
+				delete(s.starting, id)
+				s.mu.Unlock()
+				return
+			}
 			if probeErr != nil || errors.Is(err, errIncusQuery) || isTimeout(err) {
 				// A slow or unavailable probe cannot prove that active streams are broken.
 				s.markWorkspaceUnready(id, previous)
@@ -308,10 +318,11 @@ func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
 				return
 			}
 			workspace = nil
-			delete(s.workspaces, id)
-			s.deleteWorkspaceTickets(id)
-			s.mu.Unlock()
+			s.markWorkspaceUnready(id, previous)
+			// Retain the authenticated generation until its successor is
+			// published. Old browser grants may retry after a failed handshake.
 			previous.close()
+			s.mu.Unlock()
 		}
 	}
 	if workspace == nil {
@@ -326,13 +337,20 @@ func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
 				workspace = nil
 			}
 		}
+		s.mu.Lock()
+		superseded := s.replacements[id] != replacement
+		s.mu.Unlock()
+		if workspace != nil && (ctx.Err() != nil || superseded) {
+			workspace.close()
+			workspace = nil
+		}
 		if workspace != nil && s.cfg.GuestAccount != nil {
 			// The portal already authenticated the owner. An explicitly
 			// configured guest account lets that owner enter the VM without a
 			// second prompt. A VM that already has a different account is left
 			// untouched and keeps its existing account screen and vault.
 			accountCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			entered, accountErr := workspace.ensureGuestAccount(accountCtx, s.cfg.GuestAccount, id)
+			entered, accountErr := workspace.ensureGuestAccount(accountCtx, s.cfg.GuestAccount, id, previous)
 			cancel()
 			if accountErr != nil {
 				if s.context.Err() == nil {
@@ -348,7 +366,7 @@ func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.starting, id)
-	if s.context.Err() != nil {
+	if s.context.Err() != nil || s.replacements[id] != replacement {
 		if workspace != nil && workspace != previous {
 			workspace.close()
 		}
@@ -356,6 +374,9 @@ func (s *Server) prepare(spec LaunchSpec, previous *Workspace, faults uint64) {
 	}
 	if workspace == nil {
 		s.startFailed[id] = true
+		if previous != nil {
+			previous.nextProbe = s.now().Add(2 * time.Second)
+		}
 		return
 	}
 	if workspace != previous || workspace.faults == faults {

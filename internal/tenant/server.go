@@ -75,6 +75,7 @@ type Server struct {
 	tickets       map[string]entryTicket
 	rates         map[rateKey]rateWindow
 	workspaces    map[string]*Workspace
+	replacements  map[string]uint64 // fences prepares that overlap a controller update
 	systems       map[string]System
 	defaultSystem System
 	starting      map[string]bool
@@ -136,8 +137,9 @@ func NewServer(cfg Config) (*Server, error) {
 		site: site, cfg: cfg, context: ctx, cancel: cancel, store: state,
 		sessions: make(map[string]*loginSession), grants: make(map[string]vmGrant), tickets: make(map[string]entryTicket),
 		rates: make(map[rateKey]rateWindow), workspaces: make(map[string]*Workspace), starting: make(map[string]bool), systems: systems,
-		startFailed: make(map[string]bool),
-		startSlots:  make(chan struct{}, cfg.ParallelStarts), hashSlots: make(chan struct{}, 4),
+		replacements: make(map[string]uint64),
+		startFailed:  make(map[string]bool),
+		startSlots:   make(chan struct{}, cfg.ParallelStarts), hashSlots: make(chan struct{}, 4),
 		now: time.Now, sessionTTL: 24 * time.Hour,
 		selfUpdate: updater,
 	}

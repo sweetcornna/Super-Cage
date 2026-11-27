@@ -135,16 +135,16 @@ func (a *GuestAccount) password(vmID string) []byte {
 }
 
 type guestAccountState struct {
-	Exists   bool   `json:"exists"`
-	Unlocked bool   `json:"unlocked"`
-	Username string `json:"username"`
+	Exists                bool   `json:"exists"`
+	Unlocked              bool   `json:"unlocked"`
+	Username              string `json:"username"`
+	RequireAuthentication *bool  `json:"require_authentication"`
 }
 
 // ensureGuestAccount enters the guest workbench account. It returns false
-// without an error only when the VM already has an account that this managed
-// credential cannot unlock; that account and its encrypted vault are left
-// untouched, so the normal account screen remains available.
-func (w *Workspace) ensureGuestAccount(ctx context.Context, account *GuestAccount, vmID string) (bool, error) {
+// without an error when the normal account screen should remain available.
+// Call before publishing the workspace to browsers.
+func (w *Workspace) ensureGuestAccount(ctx context.Context, account *GuestAccount, vmID string, previous *Workspace) (bool, error) {
 	state, status, err := w.guestAccountState(ctx)
 	if err != nil {
 		return false, err
@@ -159,10 +159,12 @@ func (w *Workspace) ensureGuestAccount(ctx context.Context, account *GuestAccoun
 	if state.Unlocked {
 		return true, nil
 	}
-	// An account with another name predates the managed mechanism (or was
-	// renamed by its owner). Do not spend an Argon2 attempt on it and do not
-	// touch it; its existing account screen remains available.
-	if state.Exists && state.Username != "" && state.Username != account.username {
+	// Bootstrap cookies are random per controller process. Reconnecting to
+	// the same controller must not reverse a lock or suspend in that process.
+	if previous != nil && !w.replacedController(previous) {
+		return false, nil
+	}
+	if state.Exists && !state.allowsManagedResume(account.username) {
 		return false, nil
 	}
 	password := account.password(vmID)
@@ -192,6 +194,9 @@ func (w *Workspace) ensureGuestAccount(ctx context.Context, account *GuestAccoun
 		if state.Unlocked {
 			return true, nil
 		}
+		if !state.allowsManagedResume(account.username) {
+			return false, nil
+		}
 	}
 	status, err = w.guestAccountAction(ctx, "unlock", map[string]string{"password": string(password)})
 	if err != nil {
@@ -207,6 +212,19 @@ func (w *Workspace) ensureGuestAccount(ctx context.Context, account *GuestAccoun
 	default:
 		return false, errGuestAccountUnavailable
 	}
+}
+
+// A newer session has a different cookie, issued only after the launcher
+// handshake and a control-plane request. Missing evidence cannot prove a restart.
+func (w *Workspace) replacedController(previous *Workspace) bool {
+	return w.cookie != nil && previous.cookie != nil && w.cookie.Value != previous.cookie.Value
+}
+
+func (state guestAccountState) allowsManagedResume(username string) bool {
+	// The workbench persists this bit on a manual lock, logout or credential
+	// recovery. Require an explicit false from the upstream API for a saved
+	// account. The derived password must still pass normal authentication.
+	return state.Username == username && state.RequireAuthentication != nil && !*state.RequireAuthentication
 }
 
 func (w *Workspace) guestAccountState(ctx context.Context) (guestAccountState, int, error) {
