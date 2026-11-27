@@ -485,7 +485,7 @@ func (c Config) StartScript() string {
 func (c Config) SetupScript() string { return c.GuestProfile.Linux(GuestSetup) }
 
 func componentStartScript() string {
-	return APTBootstrapScript + "\n" + claudeAccountScript() + codexAccountScript() + browserServices() + "\nsudo tee /etc/claude-cage/editor-theme.json >/dev/null <<'CAGE_EDITOR_THEME'\n" + editorTheme + "\nCAGE_EDITOR_THEME\nif systemctl is-active --quiet cage-editor.service; then sudo systemctl stop cage-editor.service; fi\n" + guestStart
+	return APTBootstrapScript + "\n" + claudeAccountScript() + codexAccountScript() + dshSSHScript() + browserServices() + "\nsudo tee /etc/claude-cage/editor-theme.json >/dev/null <<'CAGE_EDITOR_THEME'\n" + editorTheme + "\nCAGE_EDITOR_THEME\nif systemctl is-active --quiet cage-editor.service; then sudo systemctl stop cage-editor.service; fi\n" + guestStart
 }
 
 func markGuestStart(body string) string {

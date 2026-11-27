@@ -134,11 +134,22 @@ func (s *Server) closeTerminalID(id string) error {
 			// A bound Codex terminal ends with its Codex; closing what is left
 			// of it only removes the tab. Closing a live one archives.
 			if summary["kind"] == "codex" && summary["closed"] == true {
+				if err := s.dismissTerminalRecovery(shared, id); err != nil {
+					return err
+				}
 				s.terminals.remove(id)
 				return nil
 			}
 			return s.setSessionArchived(shared, true, nil)
 		}
+	}
+	if terminal == nil {
+		if err := s.dismissDetachedTerminalRecovery(id); err != nil {
+			return err
+		}
+	}
+	if terminal == nil || terminal.herdrBacked {
+		s.markHerdrTerminalClosed(id)
 	}
 	s.terminals.remove(id)
 	s.entryUnkept()

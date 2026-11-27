@@ -24,7 +24,7 @@ const dark = { background: "#1f1e1d", foreground: "#f3efe5", cursor: "#d97757", 
 const darkQuery = matchMedia("(prefers-color-scheme: dark)");
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-export default function TerminalScreen({ id, title, kind, visible, onBack, onDenied }) {
+export default function TerminalScreen({ id, title, kind, ready, visible, onBack, onDenied }) {
   const host = useRef(null);
   const term = useRef(null);
   const fit = useRef(null);
@@ -143,10 +143,10 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
   }, [fontSize]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || ready === false) return;
     const controller = new AbortController();
     (async () => {
-      let failures = 0;
+      let failures = 0, missing = 0;
       resend.current?.();
       while (!controller.signal.aborted) {
         try {
@@ -154,8 +154,9 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
           const reply = await terminals.output(id, from, { signal: controller.signal });
           if (controller.signal.aborted) return;
           if (failures) resend.current?.();
+          missing = 0;
           failures = 0;
-          setState((s) => s.connecting || s.error ? { ...s, connecting: false, error: "" } : s);
+          setState((s) => s.connecting || s.error || s.closed ? { ...s, connecting: false, closed: false, exit: null, error: "" } : s);
           if (reply) {
             if (reply.reset) term.current?.reset();
             // The modes the kept output was written in, when the server no
@@ -174,7 +175,14 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
         } catch (err) {
           if (controller.signal.aborted) return;
           if (accessDenied(err)) { onDenied?.(err); return; }
-          if (err.status === 404) { setState((s) => ({ ...s, connecting: false, closed: true, error: "终端已关闭。" })); return; }
+          if (err.status === 404) {
+            if (++missing <= 4) {
+              await sleep(750 * missing);
+              continue;
+            }
+            setState((s) => ({ ...s, connecting: false, closed: true, error: "原终端已结束或不可用。若会话历史仍在，请从会话列表继续。" }));
+            return;
+          }
           failures++;
           setState((s) => ({ ...s, connecting: false, error: "连接中断，正在重新连接（" + failures + "）…" }));
           await sleep(Math.min(1000 * failures, 5000));
@@ -182,7 +190,7 @@ export default function TerminalScreen({ id, title, kind, visible, onBack, onDen
       }
     })();
     return () => controller.abort();
-  }, [id, visible, onDenied]);
+  }, [id, ready, visible, onDenied]);
 
   const arrow = (dir) => send((term.current?.modes?.applicationCursorKeysMode ? "\x1bO" : "\x1b[") + dir);
   const keys = [

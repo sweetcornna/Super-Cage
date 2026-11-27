@@ -308,6 +308,9 @@ func (s *Server) attachWindowsGuestContext(parent context.Context) error {
 	s.windowsState = state
 	newlyReady := !s.ready && err == nil
 	s.ready = err == nil
+	if err == nil && (newlyReady || restartedNetwork) {
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
+	}
 	if newlyReady || (!wasRunning && state.Running) {
 		s.wakeMonitorsLocked()
 	}

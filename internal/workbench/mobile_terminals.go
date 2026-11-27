@@ -23,7 +23,9 @@ var mobileTerminalHold = 25 * time.Second
 var mobileTerminalID = regexp.MustCompile("^[0-9a-f]{16}$")
 
 // Sign-in terminals carry account codes and stay on the computer.
-func mobileTerminalKind(kind string) bool { return kind != "claude-login" && kind != "codex-login" }
+func mobileTerminalKind(kind string) bool {
+	return kind != "claude-login" && kind != "codex-login" && kind != "agent-login"
+}
 
 func mobileTerminalSummary(t *terminalSession, item map[string]any) map[string]any {
 	kind, _ := item["kind"].(string)
@@ -32,8 +34,10 @@ func mobileTerminalSummary(t *terminalSession, item map[string]any) map[string]a
 	}
 	closed, _ := item["closed"].(bool)
 	var exit any
-	if code := t.exitStatus(); closed && code >= 0 {
-		exit = code
+	if t != nil && closed {
+		if code := t.exitStatus(); code >= 0 {
+			exit = code
+		}
 	}
 	// viewer: the phone may send a viewer identity with its input and resize.
 	return map[string]any{"id": item["id"], "title": item["title"], "kind": kind, "closed": closed, "workspace": item["workspace"], "exit_code": exit, "viewer": terminalViewerProtocol}
@@ -64,14 +68,21 @@ func (s *Server) mobileTerminals(w http.ResponseWriter, r *http.Request) {
 		view     map[string]any
 	}
 	var list []entry
-	for _, item := range s.terminalSummaries() {
+	for _, item := range s.withHerdrTerminals(r.Context(), s.terminalSummaries()) {
 		id, _ := item["id"].(string)
 		kind, _ := item["kind"].(string)
 		session := s.terminals.get(id)
-		if session == nil || !mobileTerminalKind(kind) {
+		if !mobileTerminalKind(kind) || item["herdr_imported"] == true {
 			continue
 		}
-		list = append(list, entry{session.sequence, mobileTerminalSummary(session, item)})
+		sequence := 0
+		if session != nil {
+			sequence = session.sequence
+		}
+		if item["herdr_live"] == true {
+			item["closed"] = false
+		}
+		list = append(list, entry{sequence, mobileTerminalSummary(session, item)})
 	}
 	slices.SortFunc(list, func(a, b entry) int { return a.sequence - b.sequence })
 	terminals := []map[string]any{}
@@ -106,9 +117,19 @@ func (s *Server) mobileNewTerminal(w http.ResponseWriter, r *http.Request) {
 }
 
 // mobileTerminal finds a terminal the phone may use, or replies 404.
-func (s *Server) mobileTerminal(w http.ResponseWriter, r *http.Request) *terminalSession {
+func (s *Server) mobileTerminal(w http.ResponseWriter, r *http.Request, attach bool) *terminalSession {
 	id := r.PathValue("id")
 	if mobileTerminalID.MatchString(id) {
+		if attach {
+			if record, owned := s.herdrRecord(id); owned && !record.Closed {
+				if session, err := s.openHerdrViewer(r.Context(), id); err != nil {
+					terminalFailure(w, err)
+					return nil
+				} else if session != nil && mobileTerminalKind(session.kind) {
+					return session
+				}
+			}
+		}
 		if session := s.terminals.get(id); session != nil {
 			session.mu.Lock()
 			kind := session.kind
@@ -130,7 +151,7 @@ func (s *Server) mobileTerminalOutput(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "读取位置无效", http.StatusBadRequest)
 		return
 	}
-	session := s.mobileTerminal(w, r)
+	session := s.mobileTerminal(w, r, true)
 	if session == nil {
 		return
 	}
@@ -182,7 +203,7 @@ func (s *Server) mobileTerminalInput(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "输入内容无效或超过 32 KiB", http.StatusBadRequest)
 		return
 	}
-	session := s.mobileTerminal(w, r)
+	session := s.mobileTerminal(w, r, false)
 	if session == nil {
 		return
 	}
@@ -225,7 +246,7 @@ func (s *Server) mobileTerminalResize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "终端尺寸无效", http.StatusBadRequest)
 		return
 	}
-	session := s.mobileTerminal(w, r)
+	session := s.mobileTerminal(w, r, false)
 	if session == nil {
 		return
 	}
@@ -244,7 +265,7 @@ func (s *Server) mobileCloseTerminal(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &struct{}{}, 1<<10) {
 		return
 	}
-	session := s.mobileTerminal(w, r)
+	session := s.mobileTerminal(w, r, false)
 	if session == nil {
 		return
 	}

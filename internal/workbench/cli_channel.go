@@ -638,7 +638,12 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	record.GuestConfig, record.Connection = current.Config, current.Connection
 	record.GuestWorkspace = current.Workspace
 	record.Resume = record.Resume || current.HasHistory
-	record.TerminalRunning = current.Running
+	// A view after controller restart must not clear the last active
+	// binding before recovery can examine it. A report from its own live
+	// viewer can still record that Claude exited into the surrounding shell.
+	if terminal != nil && bound != "" && current.Connection == bound {
+		record.TerminalRunning = current.Running
+	}
 	record.Active = current.Active
 	record.Tasks = current.Tasks
 	record.AccountFailure = current.AccountFailure
@@ -671,6 +676,9 @@ func (s *Server) terminalConversationView(ctx context.Context, id string) (mobil
 	view := record.snapshot()
 	if record.Resume && !current.HasHistory && !current.NativeHistory && current.Config != "" && record.ResumeTranscript == "" && record.Switch == nil {
 		view.missingHistory = current.Config
+	}
+	if current.NativeHistory && current.HasHistory && current.CLIID == record.CLIID && validCLIUUID(current.CLIID) {
+		view.nativeResumeID = current.CLIID
 	}
 	return view, nil
 }
@@ -821,13 +829,14 @@ func (s *Server) prepareTerminalConversation(workspace string, selection claudeS
 		return "", nil, err
 	}
 	record.Terminal, record.Account, record.Launcher = true, selection, launcher
+	record.TerminalApplication = "cage"
 	// A new session follows the rule in 调度设置 until the person sets its own.
 	if record.AccountLabel == "" {
 		if a := list.find(selection.ID); a != nil {
 			record.AccountLabel = a.Label
 		}
 	}
-	record.TerminalID, record.TerminalRunning = "", true
+	record.TerminalRunning, record.TerminalClosed = true, false
 	record.Connection = uuid.NewString()
 	if record.ResumeTranscript != "" && record.Switch != nil {
 		record.Connection = record.Switch.ID

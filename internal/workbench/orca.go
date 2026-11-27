@@ -43,6 +43,7 @@ type orcaConfig struct {
 	TerminalMemoryMax string            `json:"terminal_memory_max,omitempty"`
 	AccountBindings   map[string]string `json:"account_bindings,omitempty"`
 	PairedEnvID       string            `json:"paired_env_id,omitempty"`
+	RunIntent         *orcaRunIntent    `json:"run_intent,omitempty"`
 }
 
 func defaultOrcaServerName(profileDir string) string {
@@ -152,9 +153,10 @@ type orcaManager struct {
 	tunnel           *orcaTunnel
 	lastOpenAt       time.Time
 	// Test seams (nil in production).
-	localDetect    func() localorca.Installation
-	localClient    *localorca.Client
-	tunnelDialHook func(ctx context.Context, guestPort int) (string, error)
+	localDetect      func() localorca.Installation
+	localClient      *localorca.Client
+	tunnelDialHook   func(ctx context.Context, guestPort int) (string, error)
+	restorePortProbe func(ctx context.Context, address string, port int) (bool, error)
 }
 
 func (s *Server) detectLocalOrca() localorca.Installation {
@@ -556,6 +558,7 @@ func (s *Server) orcaConfigHTTP(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("停止原托管 Orca Server 失败，配置未变更: %v", stopErr), http.StatusConflict)
 			return
 		}
+		cfg.RunIntent = &orcaRunIntent{}
 	}
 
 	s.orca.mu.Lock()
@@ -679,6 +682,9 @@ func (s *Server) orcaUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 	s.launch(w, "orca-uninstall", func() error {
 		s.orca.opMu.Lock()
 		defer s.orca.opMu.Unlock()
+		if err := s.forgetOrcaService(); err != nil {
+			return err
+		}
 		s.closeOrcaTunnel()
 		if in.PurgeData {
 			s.setMessage("正在停止并彻底卸载 Orca Server（含服务端数据）…")
@@ -783,7 +789,8 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 				cancelSync()
 			}
 		}
-		return cfg, previous, nil
+		err := s.rememberOrcaService(&cfg, false)
+		return cfg, previous, err
 	}
 
 	if workspace == "" {
@@ -873,7 +880,8 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 		s.kickAllLaunchSchedules()
 	}
 	s.watchOrcaCodex()
-	return cfg, st, nil
+	err = s.rememberOrcaService(&cfg, false)
+	return cfg, st, err
 }
 
 func (s *Server) stopManagedOrca(ctx context.Context, port int, subcommand string) error {
@@ -881,6 +889,9 @@ func (s *Server) stopManagedOrca(ctx context.Context, port int, subcommand strin
 		return errTerminalBusy
 	}
 	defer s.op.Unlock()
+	if err := s.forgetOrcaService(); err != nil {
+		return err
+	}
 	stopCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	var result struct {
@@ -947,7 +958,7 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusConflict)
 		return
 	}
-	tun, err := s.ensureOrcaTunnel(r.Context(), cfg.effectiveTunnelPort(), cfg.GuestPort)
+	tun, err := s.ensureRememberedOrcaTunnel(r.Context(), &cfg)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1022,6 +1033,10 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var guestWorkspace string
+	if in.Workspace != "" {
+		guestWorkspace = s.cliWorkspace(in.Workspace)
+	}
 	jsonReply(w, map[string]any{
 		"opened":           true,
 		"paired":           true,
@@ -1030,6 +1045,7 @@ func (s *Server) orcaOpenHTTP(w http.ResponseWriter, r *http.Request) {
 		"environment_name": envName,
 		"endpoint":         endpoint,
 		"tunnel_port":      tun.hostPort,
+		"guest_workspace":  guestWorkspace,
 	})
 }
 
@@ -1062,7 +1078,7 @@ func (s *Server) orcaPairHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if addr == "" {
-			tun, tunErr := s.ensureOrcaTunnel(r.Context(), cfg.effectiveTunnelPort(), cfg.GuestPort)
+			tun, tunErr := s.ensureRememberedOrcaTunnel(r.Context(), &cfg)
 			if tunErr != nil {
 				http.Error(w, tunErr.Error(), http.StatusBadGateway)
 				return
@@ -1070,7 +1086,7 @@ func (s *Server) orcaPairHTTP(w http.ResponseWriter, r *http.Request) {
 			addr = fmt.Sprintf("127.0.0.1:%d", tun.hostPort)
 		}
 	} else if strings.HasPrefix(addr, "127.0.0.1:") || strings.HasPrefix(addr, "localhost:") {
-		if _, tunErr := s.ensureOrcaTunnel(r.Context(), cfg.effectiveTunnelPort(), cfg.GuestPort); tunErr != nil {
+		if _, tunErr := s.ensureRememberedOrcaTunnel(r.Context(), &cfg); tunErr != nil {
 			http.Error(w, tunErr.Error(), http.StatusBadGateway)
 			return
 		}
@@ -1130,8 +1146,8 @@ func (s *Server) orcaActionHTTP(w http.ResponseWriter, r *http.Request) {
 		if action == "restart" {
 			s.closeOrcaTunnel()
 		}
-		if cfg.BindMode == "loopback" && s.orcaLocalDesktopAllowed(r) {
-			if _, err := s.ensureOrcaTunnel(r.Context(), cfg.effectiveTunnelPort(), cfg.GuestPort); err != nil {
+		if s.orcaLocalDesktopAllowed(r) && (cfg.BindMode == "loopback" || cfg.RunIntent != nil && cfg.RunIntent.Tunnel) {
+			if _, err := s.ensureRememberedOrcaTunnel(r.Context(), &cfg); err != nil {
 				http.Error(w, err.Error(), http.StatusBadGateway)
 				return
 			}

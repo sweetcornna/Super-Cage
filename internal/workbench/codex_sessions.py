@@ -921,7 +921,8 @@ def view(request):
                   "updated_at": updated, "turns": turns, "running": owner != "", "active": bool(ours or (tui or desktop) and pending),
                   "can_send": readable and owner == "" and not (thread and path is None), "history_truncated": shortened,
                   "connection_notice": notice, "account_refused": not ours and run.get("exit_code") == ACCOUNT_REFUSED,
-                  "owner": owner, "lease": (lease or {}).get("id", ""), "history_compressed": compressed}
+                  "owner": owner, "lease": (lease or {}).get("id", ""), "history_compressed": compressed,
+                  "history_found": readable and bool(compressed or meta and meta["id"] == thread)}
     if request.get("probe"):
         result["cli"] = probe({})
     return result

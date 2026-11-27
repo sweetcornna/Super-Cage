@@ -547,9 +547,12 @@ func (s *Server) endHerdrTerminal(id string, session *terminalSession) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(s.lifetimeContext(), 10*time.Second)
-	err := s.runAgentRuntime(ctx, "herdr-close", map[string]any{"terminal": target}, nil)
+	var result struct {
+		Closed bool `json:"closed"`
+	}
+	err := s.runAgentRuntime(ctx, "herdr-close", map[string]any{"terminal": target}, &result)
 	cancel()
-	if err == nil {
+	if err == nil && result.Closed {
 		s.forgetHerdrTerminal(id)
 	}
 	s.invalidateHerdrList()

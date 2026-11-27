@@ -20,6 +20,7 @@ import { useServiceAccounts } from "./use-service-accounts";
 import { AgentIcon } from "./agent-icon";
 import { InlineSelect } from "./inline-select";
 import { Modal } from "./modal";
+import GuestOrcaRecovery from "./guest-orca-recovery";
 import "./t3code.css";
 import "./orca.css";
 
@@ -411,6 +412,8 @@ export function OrcaSettingsCard({
           <span>当前 Windows 原生客机暂不支持托管 Orca Server（官方服务端仅提供 Linux 与 macOS 运行时）。</span>
         </div>
       )}
+
+      {supportsManaged && !store.is_macos_guest && <GuestOrcaRecovery ready={envReady} />}
 
       {store.data && supportsManaged && (
         <div className="t3code-card-body">

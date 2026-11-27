@@ -332,6 +332,7 @@ func (s *Server) entrySSH(w http.ResponseWriter, r *http.Request) {
 	}
 	defer ws.Close()
 	transport := newEntryWSConn(ws)
+	transport.lost = func() { conn.lost.Store(true) }
 	transport.stalled = func() {
 		if !conn.stalled.Swap(true) {
 			diagnostics.Log("info", "entry", "an ssh connection ended: the client took no output for "+entryWriteTimeout.String()+"; its terminals are kept")
@@ -397,7 +398,7 @@ func (s *Server) entryServe(conn *entryConn, transport net.Conn, record entryDev
 			s.entrySession(conn, incoming)
 		}()
 	}
-	// The connection ended: end what its sessions started.
+	// The connection ended. Interactive PTYs may be kept for this device.
 	conn.cancel(nil)
 	sessions.Wait()
 	diagnostics.Log("info", "entry", fmt.Sprintf("connection of device %s ended", entryShortID(record.ID)))
@@ -1076,7 +1077,7 @@ func (s *Server) createEntryTerminal(conn *entryConn, pty entryPTYRequest, comma
 	if validTerminalSize(uint16(min(pty.Cols, 1<<16-1)), uint16(min(pty.Rows, 1<<16-1))) {
 		cols, rows = uint16(pty.Cols), uint16(pty.Rows)
 	}
-	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", script)
+	cmd := s.sshCommand(s.lifetimeContext(), "-tt", s.sshTarget(), "--", "export CAGE_DSH_SSH_DEVICE="+shellescape.Quote(conn.device)+"; "+script)
 	session, err := s.terminals.startSessionWithPTY(cmd, workspace, "shell", claudeSelection{}, nil, func() (terminalPTY, error) {
 		return startTerminal(cmd, cols, rows)
 	})
@@ -1409,10 +1410,22 @@ func (s *Server) entryRunTerminal(ctx context.Context, conn *entryConn, channel 
 	// A lock keeps the terminal, unless entryKeptLimit terminals are kept
 	// already: then it ends, and says so (entryKeepOnLock decides which).
 	full := locked && !s.entryKeepOnLock(conn.epoch, session)
-	if !ended && !failed.Load() && !locked && conn.stalled.Load() {
-		// The client stopped reading: a hang-up that keeps the terminal,
-		// within entryKeptLimit (R3-4). Nothing reaches that client any more.
-		_ = s.entryKeep(session)
+	if !ended && !failed.Load() && !locked {
+		session.mu.Lock()
+		interactive := session.originPID != "" && !session.closed && !session.ended
+		session.mu.Unlock()
+		// A disconnected viewer never re-executes the command that was
+		// running in an interactive PTY. An explicit SSH command retains its
+		// original lifetime, except for the existing stalled-viewer policy.
+		cause := context.Cause(conn.ctx)
+		if conn.stalled.Load() || interactive && conn.lost.Load() && (cause == nil || errors.Is(cause, context.Canceled)) {
+			s.mu.Lock()
+			closing := s.closing
+			s.mu.Unlock()
+			if !closing {
+				_ = s.entryKeep(session)
+			}
+		}
 	}
 	session.mu.Lock()
 	kept := session.kept || session.released
@@ -1505,6 +1518,7 @@ type entryWSConn struct {
 	closing         sync.Once
 	// stalled, when set, hears of a write that waited entryWriteTimeout.
 	stalled func()
+	lost    func()
 }
 
 // entryCloseLinger bounds how long a closed connection waits for the
@@ -1526,6 +1540,7 @@ func (c *entryWSConn) Read(p []byte) (int, error) {
 		if c.reader == nil {
 			kind, reader, err := c.ws.NextReader()
 			if err != nil {
+				c.noteLost(err)
 				return 0, err
 			}
 			if kind != websocket.BinaryMessage {
@@ -1541,7 +1556,15 @@ func (c *entryWSConn) Read(p []byte) (int, error) {
 			}
 			err = nil
 		}
+		c.noteLost(err)
 		return n, err
+	}
+}
+
+func (c *entryWSConn) noteLost(err error) {
+	var network *net.OpError
+	if c.lost != nil && (websocket.IsCloseError(err, websocket.CloseAbnormalClosure) || errors.Is(err, io.ErrUnexpectedEOF) || errors.As(err, &network)) {
+		c.lost()
 	}
 }
 

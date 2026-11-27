@@ -171,6 +171,7 @@ func (s *Server) synchronizeEnvironment() error {
 	if !s.vmRunning() {
 		return errors.New("请先启动 Super Cage 环境。")
 	}
+	s.captureOrcaBeforeMaintenance(s.operationContext())
 	if err := s.closeProxyGate("正在更新环境组件，外网暂时关闭"); err != nil {
 		return err
 	}

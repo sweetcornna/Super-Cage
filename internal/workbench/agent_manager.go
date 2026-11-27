@@ -124,10 +124,11 @@ type agentManager struct {
 }
 
 var agentRuntimeSpec = func() *guestScriptSpec {
-	sum := sha256.Sum256([]byte(cage.AgentRuntimeHelper + "\x00" + cage.OrcaCodexBridgeHelper))
+	sum := sha256.Sum256([]byte(cage.AgentRuntimeHelper + "\x00" + cage.OrcaCodexBridgeHelper + "\x00" + cage.GuestOrcaRestoreHelper))
 	return newGuestScriptBundle(".local/share/cage/agent-runtime", fmt.Sprintf("%x", sum), 0o700, ".py", []guestScriptFile{
 		{suffix: ".py", content: []byte(cage.AgentRuntimeHelper)},
 		{suffix: ".orca-codex-bridge.py", content: []byte(cage.OrcaCodexBridgeHelper)},
+		{suffix: ".guest-orca-restore.py", content: []byte(cage.GuestOrcaRestoreHelper)},
 	})
 }()
 

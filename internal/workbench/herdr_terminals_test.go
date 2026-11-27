@@ -23,11 +23,12 @@ import (
 // herdrGuest stands in for agent-runtime.py herdr-*: it answers herdr-list
 // with list and records every call.
 type herdrGuest struct {
-	mu     sync.Mutex
-	calls  []string
-	input  []map[string]any
-	list   string
-	status string // herdr-status's answer when set
+	mu         sync.Mutex
+	calls      []string
+	input      []map[string]any
+	list       string
+	status     string // herdr-status's answer when set
+	closeReply string
 }
 
 func (g *herdrGuest) hook(_ context.Context, sub string, input any, output any) error {
@@ -46,8 +47,28 @@ func (g *herdrGuest) hook(_ context.Context, sub string, input any, output any) 
 			return json.Unmarshal([]byte(g.status), output)
 		}
 		return json.Unmarshal([]byte(`{"installed":true,"version":"0.1.22","server_running":true,"terminals_count":2}`), output)
+	case "herdr-close":
+		if g.closeReply != "" {
+			return json.Unmarshal([]byte(g.closeReply), output)
+		}
+		return json.Unmarshal([]byte(`{"closed":true,"running":true}`), output)
 	}
 	return nil
+}
+
+func TestHerdrCloseDoesNotReattachWhenTheGuestHasNotClosedYet(t *testing.T) {
+	s, g := herdrServer(t, true)
+	const id = "0123456789abcdef"
+	s.rememberHerdrTerminal(id, herdrRecord{Name: herdrTerminalName(id), Title: "已手动关闭", Kind: "shell"})
+	g.list = `{"running":true,"terminals":[{"address":"t2","name":"cage-0123456789abcdef"}]}`
+	g.closeReply = `{"closed":false,"running":true}`
+	if err := s.closeTerminalID(id); err != nil {
+		t.Fatal(err)
+	}
+	record, ok := s.herdrRecord(id)
+	if !ok || !record.Closed || len(s.withHerdrTerminals(context.Background(), nil)) != 0 {
+		t.Fatal("a manually closed terminal could return from the guest list")
+	}
 }
 
 func (g *herdrGuest) count(sub string) int {

@@ -55,6 +55,7 @@ const DevicesPage = lazy(() => import("./devices-page.jsx"));
 // 其他客户端: its code loads when the section opens; the row itself only exists
 // when something can be added (other-clients-row.js).
 const OtherClientsSection = lazy(() => import("./other-clients-section.jsx"));
+const ExternalSessionRestore = lazy(() => import("./external_session_restore.jsx"));
 const sections = [
   ["account", "账户", UserRound],
   ["vault", "密码保险箱", KeyRound],
@@ -62,6 +63,7 @@ const sections = [
   ["keyboard", "通用", Settings],
   ["agents", "Agent CLI", Bot],
   ["orca", "Orca Server"],
+  ["external-session-restore", "原应用会话恢复", RotateCcw],
   ["t3code", "T3 Code"],
   ["appearance", "外观", Palette],
   ["devices", "设备", MonitorSmartphone],
@@ -351,6 +353,9 @@ export function SettingsPanel({
             onConfirm={onConfirm} onOpenOrca={onOpenOrca} onShowPairModal={onShowOrcaPair} onDirty={setClientConfigDirty}
             onOpenAgentSettings={() => changeSection("agents")}
           />}
+          {section === "external-session-restore" && <Suspense fallback={<p className="field-help">正在加载原应用会话…</p>}>
+            <ExternalSessionRestore workspace={current.workspace} />
+          </Suspense>}
           {section === "t3code" && t3code && <T3CodeSettingsCard
             store={t3code} agentsStore={agents} status={status} magpieEnabled={Boolean(magpie?.enabled)}
             onConfirm={onConfirm} onDirty={setClientConfigDirty}

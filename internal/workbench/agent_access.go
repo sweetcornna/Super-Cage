@@ -109,6 +109,9 @@ var agentWindowRoutes = []agentWindowRoute{
 	// Orca Desktop pairing & launching acts on this computer's local Orca app
 	// and mints pairing secrets; both stay window only.
 	{"POST /api/orca/open", "Pairing with and opening the local Orca Desktop app on this computer is done in the desktop window.", "open_desktop"},
+	{externalSessionOriginRoute, "External session provenance is verified by the paired desktop.", "open_desktop"},
+	{externalSessionRoute, "External application recovery is scoped to the desktop window on this computer.", "open_desktop"},
+	{"/api/client/" + externalSessionClientPath, "External application recovery is scoped to the desktop window on this computer.", "open_desktop"},
 	{"POST /api/orca/pair", "Minting an Orca Server pairing link or QR code grants remote access to the guest; codes are shown only in the desktop window.", "open_desktop"},
 }
 

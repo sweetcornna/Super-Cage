@@ -329,7 +329,8 @@ func (s *Server) createWindowsCLITerminal(input terminalRequest) (*terminalSessi
 			return nil, errMobileLocked
 		}
 	}
-	session, err := s.terminals.startSessionWithPTY(cmd, workspace, kind, selection, finished, func() (terminalPTY, error) { return startWindowsGuestTerminalRequest(cmd, request) })
+	session, err := s.terminals.startSessionWithSetup(cmd, workspace, kind, selection, finished,
+		func() (terminalPTY, error) { return startWindowsGuestTerminalRequest(cmd, request) }, input.setupRecoveredTerminal)
 	if input.requestContext != nil {
 		s.account.mu.Unlock()
 	}

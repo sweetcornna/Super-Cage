@@ -901,6 +901,7 @@ func (s *Server) saveClaudeSwitch(record *mobileRecord) error {
 		return err
 	}
 	record.CustomTitle, record.Pinned, record.Archived, record.Deleted = current.CustomTitle, current.Pinned, current.Archived, current.Deleted
+	record.TerminalClosed = current.TerminalClosed
 	record.SwitchPolicy, record.SwitchPolicySet, record.UngroupedHandoff = current.SwitchPolicy, current.SwitchPolicySet, current.UngroupedHandoff
 	record.Revision = current.Revision
 	record.changed()

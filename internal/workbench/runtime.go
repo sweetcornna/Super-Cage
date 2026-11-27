@@ -238,6 +238,7 @@ func (s *Server) attach() error {
 	s.credentials = credentials
 	s.ready = true
 	if newlyReady {
+		s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
 		s.wakeMonitorsLocked()
 	}
 	s.mu.Unlock()
@@ -580,6 +581,9 @@ func bootMemoryFailure(log string) string {
 // Without it a connection whose packets are lost stays up until ssh gives up
 // (30 s), and requests on it time out and back the helper off for a minute.
 func (s *Server) closeGuestSessions() {
+	s.mu.Lock()
+	s.cancelWorkbenchRuntimeRestoreLocked()
+	s.mu.Unlock()
 	s.controlSession.close()
 	s.guestScripts.reset()
 	s.nativeControl.close()
@@ -799,7 +803,9 @@ func retryAttach(ctx context.Context, attach func() error) error {
 func (s *Server) stopEnvironment() (returned error) {
 	s.desktopStatus.invalidate()
 	defer s.desktopStatus.invalidate()
+	s.captureOrcaBeforeMaintenance(s.operationContext())
 	s.closeGuestSessions()
+	s.closeOrcaTunnel()
 	explicitStop := s.jobs.snapshot().Kind == "stop"
 	defer func() {
 		if explicitStop && returned == nil {
@@ -847,7 +853,6 @@ func (s *Server) stopEnvironment() (returned error) {
 	s.invalidateT3CodeStatus()
 	s.closeMagpieProxy()
 	s.invalidateMagpieStatus()
-	s.closeOrcaTunnel()
 	s.invalidateOrcaStatus()
 	s.invalidateHerdrStatus()
 	s.invalidateAgentProbeCache()

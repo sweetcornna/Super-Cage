@@ -46,7 +46,7 @@ export function TerminalsView({ catalog, project, onProject, terminalID, onOpen,
   }, [visible, terminalID, tick, onDenied]);
   const current = data?.terminals?.find((t) => t.id === terminalID);
   if (terminalID) return <Suspense fallback={<p className="note center"><LoaderCircle size={16} className="spin" /> 正在打开终端…</p>}>
-    <TerminalScreen key={terminalID} id={terminalID} title={current?.title} kind={current?.kind} visible={visible} onBack={onBack} onDenied={onDenied} />
+    <TerminalScreen key={terminalID} id={terminalID} title={current?.title} kind={current?.kind} ready={catalog?.ready} visible={visible} onBack={onBack} onDenied={onDenied} />
   </Suspense>;
   const create = async (kind) => {
     setCreating(kind); setError("");

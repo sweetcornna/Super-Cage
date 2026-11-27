@@ -95,6 +95,7 @@ type Server struct {
 	magpie                                           magpieManager
 	herdr                                            herdrManager
 	orca                                             orcaManager
+	externalSessions                                 externalSessionManager
 	favoritesMu                                      sync.Mutex
 	diagnosticMu                                     sync.Mutex
 	localTerminal                                    localTerminalGate // opening windows in the owner's terminal app
@@ -151,6 +152,7 @@ type Server struct {
 	networkPaused                                    bool
 	proxyNetworkLost                                 bool
 	proxyRefreshAttempted                            map[string]time.Time
+	runtimeRestore                                   workbenchRuntimeRestore
 	checkCancel                                      context.CancelFunc
 	lifeContext                                      context.Context
 	lifeCancel                                       context.CancelFunc
@@ -469,6 +471,9 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/herdr/legacy/uninstall", s.herdrLegacyUninstallHTTP)
 	mux.HandleFunc("POST /api/herdr/{action}", s.herdrActionHTTP)
 	mux.HandleFunc("GET /api/orca", s.orcaStatusHTTP)
+	mux.HandleFunc("GET "+guestOrcaRestoreRoute, s.guestOrcaRestoreHTTP)
+	mux.HandleFunc("POST "+guestOrcaRestoreRoute, s.guestOrcaRestoreHTTP)
+	s.registerExternalSessionRoutes(mux)
 	mux.HandleFunc("POST /api/orca/config", s.orcaConfigHTTP)
 	mux.HandleFunc("POST /api/orca/install", s.orcaInstallHTTP)
 	mux.HandleFunc("POST /api/orca/uninstall", s.orcaUninstallHTTP)

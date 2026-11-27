@@ -55,17 +55,25 @@ func (s *Server) mobileCLIRoutes(mux routeRegistrar) {
 
 func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Automatic bool `json:"automatic"`
+		Automatic       bool   `json:"automatic"`
+		RecoverTerminal string `json:"recover_terminal_id"`
 	}
 	if !readJSON(w, r, &input) {
 		return
 	}
+	if input.RecoverTerminal != "" && (input.Automatic || !mobileTerminalID.MatchString(input.RecoverTerminal)) {
+		http.Error(w, "终端恢复请求无效", http.StatusBadRequest)
+		return
+	}
 	s.mobileConnectMu.Lock()
 	defer s.mobileConnectMu.Unlock()
-	if view, _, ok := s.authorizedMobileSessionRecord(w, r); !ok {
+	if view, terminal, ok := s.authorizedMobileSessionRecord(w, r); !ok {
+		return
+	} else if input.RecoverTerminal != "" && (!terminal || view.DesktopTerminalID != input.RecoverTerminal || view.Archived) {
+		http.Error(w, errTerminalRecoveryUnavailable.Error(), http.StatusConflict)
 		return
 	} else if view.Provider == codexProvider {
-		s.openCodexSession(w, r, view)
+		s.openCodexSession(w, r, view, input.RecoverTerminal)
 		return
 	}
 	view, ok := s.authorizedMobileSession(w, r)
@@ -87,6 +95,17 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	existing := s.boundTerminal(record)
 	needsTerminal := existing == nil || !existing.ownsConversation()
+	if input.RecoverTerminal != "" {
+		if !record.canRecoverTerminal(input.RecoverTerminal) || needsTerminal && view.nativeResumeID != record.CLIID {
+			http.Error(w, errTerminalRecoveryUnavailable.Error(), http.StatusConflict)
+			return
+		}
+		if !needsTerminal {
+			view.DesktopTerminalID = existing.id
+			jsonReply(w, view)
+			return
+		}
+	}
 	if needsTerminal {
 		s.mu.Lock()
 		launcher := claudeTerminalCommand(s.preferences)
@@ -125,7 +144,7 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 			}
 			mode = "handoff"
 		}
-		query := map[string]any{"cli_id": record.CLIID, "config": record.GuestConfig, "workspace": record.GuestWorkspace}
+		query := map[string]any{"cli_id": record.CLIID, "config": record.GuestConfig, "workspace": record.GuestWorkspace, "account": record.Account.GuestID}
 		if err := s.windowsConversationInput(record, query); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -162,7 +181,8 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "claude", sharedID: view.ID, requestContext: r.Context()})
+	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "claude", sharedID: view.ID, requestContext: r.Context(),
+		recoverTerminal: input.RecoverTerminal, recoverCLIID: view.nativeResumeID})
 	if err != nil {
 		http.Error(w, err.Error(), 409)
 		return
@@ -181,7 +201,7 @@ func (s *Server) mobileOpenTerminal(w http.ResponseWriter, r *http.Request) {
 // openCodexSession opens a Codex session in its desktop terminal. Shipped
 // phones call /open on their own for Claude sessions only, and older desktop
 // UIs never list Codex rows; the phone route keeps refusing.
-func (s *Server) openCodexSession(w http.ResponseWriter, r *http.Request, view mobileSession) {
+func (s *Server) openCodexSession(w http.ResponseWriter, r *http.Request, view mobileSession, recoverTerminal string) {
 	if view.Archived {
 		http.Error(w, "此会话已归档，请先在设置中的已归档会话撤销归档", http.StatusGone)
 		return
@@ -191,7 +211,8 @@ func (s *Server) openCodexSession(w http.ResponseWriter, r *http.Request, view m
 		return
 	}
 	probed := s.warmCodexProbe(r.Context())
-	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "codex", sharedID: view.ID, codexProbed: probed, requestContext: r.Context()})
+	terminal, err := s.createTerminal(terminalRequest{Workspace: view.Workspace, Kind: "codex", sharedID: view.ID, codexProbed: probed,
+		requestContext: r.Context(), recoverTerminal: recoverTerminal})
 	if err != nil {
 		switch {
 		case errors.Is(err, errMobileLocked):

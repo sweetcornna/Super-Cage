@@ -33,6 +33,8 @@ const agent = {
 };
 const changes = [];
 const registrations = [];
+const recoveryPosts = [];
+let recoveryWorkspaces = [];
 const protectedActions = [];
 let failOrca = false;
 let failCodexAccounts = true;
@@ -62,6 +64,15 @@ const fixture = await createWorkbench({
     const read = async (route, name, first, second) => {
       const request = route.request();
       const target = request.headers()["x-cage-connection"] === "fixture-b" ? second : first;
+      if (name === "orca" && request.url().endsWith("/guest-recovery")) {
+        if (request.method() === "POST") {
+          const body = request.postDataJSON();
+          recoveryPosts.push(body);
+          recoveryWorkspaces = body.action === "register"
+            ? [{ ...body, runtime_id: "fixture-runtime", verified: 1, captured: 1 }] : [];
+        }
+        return route.fulfill({ json: { workspaces: recoveryWorkspaces } });
+      }
       if (request.method() !== "POST") return route.fulfill({ json: target });
       if (name === "orca" && request.url().endsWith("/register_codex_account")) {
         registrations.push(request.postDataJSON());
@@ -319,6 +330,22 @@ try {
   await confirmRegistration.getByRole("button", { name: "登记账号" }).click();
   await orcaCard.getByText("「原生 Codex 账号」已登记到 Orca。", { exact: true }).waitFor();
   assert.deepEqual(registrations, [{ account_id: "native-codex" }]);
+  await orcaCard.getByText("客机 Orca 会话恢复", { exact: true }).click();
+  const recoveryWorkspace = "/home/cage/projects/example";
+  await orcaCard.getByRole("textbox", { name: "客机工作区绝对路径" }).fill(recoveryWorkspace);
+  await orcaCard.getByRole("button", { name: "登记工作区" }).click();
+  const watched = orcaCard.getByRole("list", { name: "已登记的客机 Orca 工作区" });
+  await watched.getByText(recoveryWorkspace).waitFor();
+  assert.match(await watched.innerText(), /已核实 1 \/ 已发现 1/);
+  await section("T3 Code").click();
+  await section("Orca Server").click();
+  await orcaCard.getByText("客机 Orca 会话恢复", { exact: true }).click();
+  await watched.getByRole("button", { name: "停止跟踪" }).click();
+  await watched.waitFor({ state: "hidden" });
+  assert.deepEqual(recoveryPosts, [
+    { action: "register", runtime: "independent", workspace: recoveryWorkspace },
+    { action: "unregister", runtime: "independent", runtime_id: "fixture-runtime", workspace: recoveryWorkspace },
+  ]);
   await section("T3 Code").click();
   await url.fill("https://draft.example.test");
   const switched = page.waitForEvent("load");

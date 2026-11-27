@@ -32,6 +32,8 @@ type terminalRequest struct {
 	AccountID       string `json:"account_id,omitempty"`
 	LoginMode       string `json:"login_mode,omitempty"`
 	sharedID        string
+	recoverTerminal string
+	recoverCLIID    string
 	// codexSession: the client knows Codex sessions, so a Codex terminal from
 	// the menu becomes one.
 	codexSession bool
@@ -568,6 +570,16 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	if input.CodexAccountID != "" {
 		return nil, errors.New("只有 Codex 终端可以指定 Codex 账号")
 	}
+	if input.recoverTerminal != "" {
+		s.mobileCLI.mu.Lock()
+		record, err := s.mobileCLI.record(s.profile, input.sharedID)
+		s.mobileCLI.mu.Unlock()
+		if err != nil || !record.canRecoverTerminal(input.recoverTerminal) || record.codex() ||
+			!record.wasTerminalRunning() || !record.Resume || !validCLIUUID(input.recoverCLIID) ||
+			record.CLIID != input.recoverCLIID || !record.canResumeClaudeWithoutInput() {
+			return nil, errTerminalRecoveryUnavailable
+		}
+	}
 	if s.windowsGuest != nil {
 		return s.createWindowsTerminal(input)
 	}
@@ -878,8 +890,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 		}
 	}
 	var setup func(*terminalSession, int)
-	if isAgentKind || herdrBacked {
+	if isAgentKind || herdrBacked || input.recoverTerminal != "" {
 		setup = func(session *terminalSession, seq int) {
+			input.setupRecoveredTerminal(session, seq)
 			session.herdrBacked = herdrBacked
 			if herdrID != "" {
 				session.id, session.herdrName = herdrID, herdrTerminalName(herdrID)
@@ -919,6 +932,9 @@ func (s *Server) createTerminalLocked(input terminalRequest) (*terminalSession, 
 	}
 	if err == nil && herdrID != "" {
 		s.rememberHerdrSession(session, herdrKind)
+	}
+	if err == nil && input.Kind == "herdr" {
+		_ = s.noteWorkbenchHerdrUse()
 	}
 	if err == nil && conversation != nil {
 		session.mu.Lock()

@@ -163,9 +163,15 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 		if loaded.Archived || loaded.Deleted {
 			return nil, errors.New("此会话已归档或删除，请先从已归档会话恢复")
 		}
+		if input.recoverTerminal != "" && !loaded.canRecoverTerminal(input.recoverTerminal) {
+			return nil, errTerminalRecoveryUnavailable
+		}
 		// Opening again shows the terminal that already owns the thread.
 		if existing := s.terminals.boundCodex(loaded.ID); existing != nil {
 			return existing, nil
+		}
+		if input.recoverTerminal != "" && !loaded.wasTerminalRunning() {
+			return nil, errTerminalRecoveryUnavailable
 		}
 		s.terminals.removeEndedCodex(loaded.ID)
 		record = loaded
@@ -197,6 +203,9 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 	if err != nil {
 		return nil, err
 	}
+	if record != nil && record.CodexSubject != "" && record.CodexSubject != selection.Subject {
+		return nil, errors.New("原会话的 Codex 登录身份已变化")
+	}
 	if selection.ID != "" {
 		if !validClaudeID(selection.ID) || selection.Subject == "" {
 			return nil, errors.New("Codex 账号状态已变化，请重试")
@@ -211,6 +220,7 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 		view, err := s.mobileCLI.createProvider(s.profile, workspace, uuid.NewString(), codexProvider, func(created *mobileRecord) {
 			closed := false
 			created.Terminal, created.CodexAccount, created.DesktopMenu = true, selection.ID, true
+			created.CodexSubject = selection.Subject
 			created.Connection, created.GuestWorkspace = uuid.NewString(), root
 			created.CanSend = &closed
 		})
@@ -227,7 +237,7 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 		if err := s.codexConnection(record); err != nil {
 			return nil, err
 		}
-		if thread, err = s.checkCodexOpen(input.requestContext, record, root, input.codexProbed); err != nil {
+		if thread, err = s.checkCodexOpen(input.requestContext, record, root, input.codexProbed, input.recoverTerminal != ""); err != nil {
 			return nil, err
 		}
 	}
@@ -255,7 +265,7 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 			return nil, errMobileLocked
 		}
 	}
-	session, err := s.terminals.startCodexSession(cmd, workspace, "codex", selection, s.codexSessionFinished(record.ID, selection.ID))
+	session, err := s.terminals.startCodexSessionWithSetup(cmd, workspace, "codex", selection, s.codexSessionFinished(record.ID, selection.ID), input.setupRecoveredTerminal)
 	if err == nil {
 		session.mu.Lock()
 		session.sharedID = record.ID
@@ -272,6 +282,12 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 	current, err := m.record(s.profile, record.ID)
 	if err == nil {
 		current.TerminalID, current.CodexLease, current.Owner = session.id, lease, "desktop"
+		current.CodexSubject, current.TerminalClosed = selection.Subject, false
+		current.TerminalApplication = "cage"
+		current.TerminalRunning = true
+		if thread != "" {
+			current.CLIID, current.Resume = thread, true
+		}
 		if err = writePrivate(mobileRecordPath(s.profile, current.ID), current); err == nil && m.catalog != nil {
 			m.catalog[current.ID] = current.summary()
 		}
@@ -299,7 +315,7 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 // has not cached takes seconds. Without it the open goes on, and tui-launch,
 // which probes on its own outside the lock, refuses to resume on a CLI that
 // cannot.
-func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root string, probe bool) (string, error) {
+func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root string, probe, recover bool) (string, error) {
 	if ctx == nil {
 		ctx = s.lifetimeContext()
 	}
@@ -329,6 +345,9 @@ func (s *Server) checkCodexOpen(ctx context.Context, record *mobileRecord, root 
 	}
 	if current.Workspace != "" && !cliWorkspaceWithin(current.Workspace, root, false) {
 		return "", errors.New("Codex 会话的项目已变化，请重新读取会话列表")
+	}
+	if recover && (thread == "" || current.ThreadID != thread || !current.HistoryFound) {
+		return "", errTerminalRecoveryUnavailable
 	}
 	if thread != "" && current.CLI != nil && current.CLI.Complete && !current.CLI.Resume {
 		return "", errors.New("电脑上的 Codex 版本不支持继续会话，请更新 Codex 后重试。")
@@ -377,6 +396,21 @@ func (s *Server) codexSessionFinished(id, account string) func(*terminalSession)
 			s.recheckCodexAccount(account)
 		}
 		s.mobileCLI.forgetCodexDesktop(id)
+		if session.exitStatus() == 0 {
+			s.mu.Lock()
+			ready := s.ready && !s.closing
+			s.mu.Unlock()
+			if ready {
+				m := &s.mobileCLI
+				m.mu.Lock()
+				record, err := m.record(s.profile, id)
+				if err == nil && record.TerminalID == session.id {
+					record.TerminalRunning, record.Owner = false, ""
+					_ = writePrivate(mobileRecordPath(s.profile, id), record)
+				}
+				m.mu.Unlock()
+			}
+		}
 	}
 }
 

@@ -67,6 +67,7 @@ type codexConversation struct {
 	// HistoryCompressed: the thread's history is stored compressed, which the
 	// helper cannot read but the Codex TUI resumes.
 	HistoryCompressed bool `json:"history_compressed"`
+	HistoryFound      bool `json:"history_found"`
 }
 
 // codexCLICaps is what the guest's Codex CLI supports, from its own help.
@@ -442,9 +443,8 @@ func (s *Server) codexConversationView(ctx context.Context, record *mobileRecord
 	// which can lag the terminal's start by a login shell.
 	bound := s.terminals.boundCodex(id)
 	owner := codexOwner(bound != nil, guestCodexOwner(current))
-	// Only a terminal this server has now can be opened from the phone; one
-	// recorded before a restart is gone.
-	record.TerminalID = ""
+	// Keep the durable last binding even when this server has no PTY. Only
+	// expose a live binding in the view sent to clients.
 	if bound != nil {
 		record.TerminalID = bound.id
 	}
@@ -478,6 +478,9 @@ func (s *Server) codexConversationView(ctx context.Context, record *mobileRecord
 	m.codexOwner[id] = guestCodexOwner(current)
 	view := record.snapshot()
 	view.Running, view.AccountLabel = owner != "", label
+	if bound == nil {
+		view.DesktopTerminalID = ""
+	}
 	return view, nil
 }
 
@@ -593,6 +596,7 @@ func (s *Server) createCodexConversation(ctx context.Context, id, workspace stri
 	view, err := s.mobileCLI.createProvider(s.profile, workspace, id, codexProvider, func(record *mobileRecord) {
 		created = true
 		record.Terminal, record.CodexAccount = true, selection.ID
+		record.CodexSubject = selection.Subject
 		record.Connection, record.GuestWorkspace = uuid.NewString(), s.cliWorkspace(workspace)
 		record.CanSend = &sendable
 	})

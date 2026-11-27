@@ -19,6 +19,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import ipaddress
@@ -32,6 +33,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -2636,6 +2638,348 @@ def _pid_state(pid, expected_identity="", require_identity=True):
 
 def _pid_matches(pid, expected_identity="", require_identity=True):
     return _pid_state(pid, expected_identity, require_identity=require_identity) == "matched"
+
+
+_ORIGIN_HANDLE = re.compile(r"term_[A-Za-z0-9_-]{4,128}")
+_ORIGIN_UUID = re.compile(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", re.IGNORECASE)
+_ORIGIN_ROLLOUT = re.compile(r"rollout-.+-(" + _ORIGIN_UUID.pattern + r")(?:_[0-9a-z-]{1,64})?\.jsonl", re.IGNORECASE)
+_ORIGIN_ENV = (b"ORCA_TERMINAL_HANDLE", b"ORCA_TAB_ID", b"ORCA_WORKTREE_ID", b"CODEX_HOME")
+_ORIGIN_AUTH_OVERRIDES = {
+    b"OPENAI_API_KEY", b"CODEX_API_KEY", b"OPENAI_BASE_URL", b"OPENAI_API_BASE",
+    b"OPENAI_ORG_ID", b"OPENAI_ORGANIZATION", b"OPENAI_PROJECT_ID", b"OPENAI_PROJECT",
+    b"CODEX_ACCESS_TOKEN", b"CODEX_SQLITE_HOME",
+}
+_ORIGIN_ENV_LIMIT = 256 * 1024
+_ORIGIN_META_LIMIT = 128 * 1024
+_ORIGIN_MAX_PROCESSES = 32768
+_ORIGIN_MAX_FDS = 4096
+
+
+class _OriginUnverified(ValueError):
+    pass
+
+
+def _origin_text(value, limit):
+    return (isinstance(value, str) and 0 < len(value) <= limit
+            and all(char.isprintable() for char in value))
+
+
+def _origin_workspace(value):
+    if not _origin_text(value, 4096) or not value.startswith("/"):
+        raise _OriginUnverified()
+    path = Path(value).resolve(strict=True)
+    info = path.stat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise _OriginUnverified()
+    return path, (info.st_dev, info.st_ino)
+
+
+@contextmanager
+def _origin_directory(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    try:
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _origin_file(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    with os.fdopen(fd, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise _OriginUnverified()
+        yield stream
+
+
+def _origin_read(path, limit, parent=None, *, private=False):
+    with _origin_file(path, parent) as stream:
+        if private:
+            info = os.fstat(stream.fileno())
+            if info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > limit:
+                raise _OriginUnverified()
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise _OriginUnverified()
+    return data
+
+
+def _origin_start_time(process):
+    raw = _origin_read("stat", 4096, process)
+    marker = raw.rfind(b") ")
+    fields = raw[marker + 2:].split()
+    if marker < 0 or len(fields) < 20 or fields[0] in (b"Z", b"X", b"x") or not fields[19].isdigit():
+        raise _OriginUnverified()
+    return fields[19]
+
+
+def _origin_binding(process, expected):
+    selected = {}
+    duplicates = False
+    overrides = False
+    for entry in _origin_read("environ", _ORIGIN_ENV_LIMIT, process).split(b"\0"):
+        key, _, value = entry.partition(b"=")
+        if key in _ORIGIN_AUTH_OVERRIDES and value:
+            overrides = True
+        if key in _ORIGIN_ENV:
+            if key in selected:
+                duplicates = True
+            selected.setdefault(key, value)
+    if any(selected.get(key) != value for key, value in expected.items()):
+        return None
+    if overrides or duplicates:
+        raise _OriginUnverified()
+    return os.fsdecode(selected.get(b"CODEX_HOME", b""))
+
+
+def _origin_account(raw, home):
+    if not _origin_text(raw, 4096) or not raw.startswith("/"):
+        raise _OriginUnverified()
+    accounts = home / ".local/share/cage/codex-accounts"
+    profile = Path(raw)
+    try:
+        account, leaf = profile.relative_to(accounts).parts
+    except ValueError as exc:
+        raise _OriginUnverified() from exc
+    if not ACCOUNT_ID_RE.fullmatch(account) or leaf != "home" or profile.resolve(strict=True) != profile:
+        raise _OriginUnverified()
+    for directory in (accounts, profile.parent, profile):
+        info = directory.lstat()
+        mask = 0o077 if directory == profile else 0o022
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & mask:
+            raise _OriginUnverified()
+    return accounts, account, profile
+
+
+def _origin_executable(process):
+    # The Linux exe link still refers to the live inode after a CLI upgrade.
+    path = os.readlink("exe", dir_fd=process).removesuffix(" (deleted)")
+    info = os.stat("exe", dir_fd=process)
+    if not path.startswith("/") or Path(path).name != "codex" or not stat.S_ISREG(info.st_mode):
+        raise _OriginUnverified()
+    if info.st_uid not in (0, os.getuid()) or not info.st_mode & 0o111:
+        raise _OriginUnverified()
+    return info.st_dev, info.st_ino
+
+
+def _origin_check_cwd(process, workspace, directory_id, *, allow_launcher_root):
+    observed = os.readlink("cwd", dir_fd=process)
+    if Path(observed) == workspace:
+        info = os.stat("cwd", dir_fd=process)
+        identity = info.st_dev, info.st_ino
+        if identity != directory_id:
+            raise _OriginUnverified()
+        return observed, identity
+    if observed != "/" or not allow_launcher_root:
+        raise _OriginUnverified()
+
+    # Older Orca Codex processes can report / after their old shared mount
+    # disconnects. The caller requires the exact tab and worktree binding and
+    # still verifies the root rollout's cwd against the current workspace.
+    try:
+        info = os.stat("cwd", dir_fd=process)
+    except OSError as exc:
+        if exc.errno != errno.ENOTCONN:
+            raise
+        identity = None
+    else:
+        if not os.path.samestat(info, os.stat("/")):
+            raise _OriginUnverified()
+        identity = info.st_dev, info.st_ino
+    if _origin_workspace(str(workspace))[1] != directory_id:
+        raise _OriginUnverified()
+    return observed, identity
+
+
+def _origin_metadata(rollout, descriptor, name, thread, workspace):
+    with _origin_file(rollout) as stream:
+        info = os.fstat(stream.fileno())
+        opened = os.stat(name, dir_fd=descriptor)
+        if info.st_uid != os.getuid() or (info.st_dev, info.st_ino) != (opened.st_dev, opened.st_ino):
+            raise _OriginUnverified()
+        first = stream.readline(_ORIGIN_META_LIMIT + 1)
+        if len(first) > _ORIGIN_META_LIMIT or not first.endswith(b"\n"):
+            raise _OriginUnverified()
+    row = json.loads(first)
+    payload = row.get("payload") if isinstance(row, dict) and row.get("type") == "session_meta" else None
+    if not isinstance(payload, dict) or not isinstance(payload.get("id"), str) or payload["id"].lower() != thread:
+        raise _OriginUnverified()
+    source = payload.get("source")
+    if isinstance(source, dict):
+        subagent = source.get("subagent")
+        spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+        parent = spawn.get("parent_thread_id") if isinstance(spawn, dict) else None
+        if isinstance(parent, str) and _ORIGIN_UUID.fullmatch(parent) and parent.lower() != thread:
+            return None
+    if source != "cli" or payload.get("thread_source") == "subagent" or any(
+            payload.get(key) for key in ("parent", "parent_thread_id", "parent_session_id", "parent_id", "forked_from_id")):
+        raise _OriginUnverified()
+    if payload.get("model_provider") not in (None, "", "openai") or _origin_workspace(payload.get("cwd"))[0] != workspace:
+        raise _OriginUnverified()
+    return thread
+
+
+def _origin_rollouts(process, profile, workspace, deadline):
+    roots = set()
+    visited = set()
+    sessions = profile / "sessions"
+    with _origin_directory("fd", process) as directory, os.scandir(directory) as opened:
+        for index, entry in enumerate(opened):
+            if index >= _ORIGIN_MAX_FDS or time.monotonic() >= deadline:
+                raise _OriginUnverified()
+            try:
+                target = Path(os.readlink(entry.name, dir_fd=directory))
+            except FileNotFoundError:
+                # An unrelated FD may close while the process continues.
+                continue
+            match = _ORIGIN_ROLLOUT.fullmatch(target.name)
+            if not match:
+                continue
+            try:
+                target.relative_to(sessions)
+            except ValueError as exc:
+                raise _OriginUnverified() from exc
+            if target.resolve(strict=True) != target:
+                raise _OriginUnverified()
+            if target in visited:
+                continue
+            visited.add(target)
+            thread = _origin_metadata(target, directory, entry.name, match[1].lower(), workspace)
+            if thread:
+                roots.add((thread, target))
+                if len(roots) > 1:
+                    break
+    return roots
+
+
+def _origin_subject(accounts, account, profile):
+    launch = json.loads(_origin_read(accounts / "launch.json", 512 * 1024, private=True))
+    roster = launch.get("history_accounts") if isinstance(launch, dict) else None
+    if not isinstance(roster, list):
+        raise _OriginUnverified()
+    entries = [item for item in roster if isinstance(item, dict)]
+    selected = [item.get("subject") for item in entries if item.get("id") == account]
+    if len(selected) != 1 or not isinstance(selected[0], str) or not ORCA_SHA256_RE.fullmatch(selected[0]):
+        raise _OriginUnverified()
+    expected = selected[0]
+    if sum(item.get("subject") == expected for item in entries) != 1:
+        raise _OriginUnverified()
+    auth = json.loads(_origin_read(profile / "auth.json", 256 * 1024, private=True))
+    if not isinstance(auth, dict) or auth.get("auth_mode") not in (None, "chatgpt") or auth.get("OPENAI_API_KEY"):
+        raise _OriginUnverified()
+    tokens = auth.get("tokens")
+    if not isinstance(tokens, dict) or not isinstance(tokens.get("access_token"), str) or not tokens["access_token"]:
+        raise _OriginUnverified()
+    claims = decode_jwt_claims(tokens.get("id_token"))
+    auth_claims = claims.get("https://api.openai.com/auth")
+    profile_claims = claims.get("https://api.openai.com/profile")
+    email = claims.get("email") or (profile_claims.get("email") if isinstance(profile_claims, dict) else None)
+    organization = (auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None) or tokens.get("account_id")
+    if not _origin_text(email, 320) or not _origin_text(organization, 256):
+        raise _OriginUnverified()
+    email, organization = email.strip().lower(), organization.strip()
+    if not email or not organization:
+        raise _OriginUnverified()
+    digest = hashlib.sha256(f"{email}\n{organization}".encode()).hexdigest()
+    if digest != expected:
+        raise _OriginUnverified()
+    return expected
+
+
+def _origin_process(process, expected, workspace, directory_id, home, deadline):
+    try:
+        if os.fstat(process).st_uid != os.getuid() or _origin_read("comm", 64, process) != b"codex\n":
+            return None
+        start = _origin_start_time(process)
+    except (OSError, _OriginUnverified):
+        return None
+    try:
+        config = _origin_binding(process, expected)
+    except OSError:
+        return None
+    if config is None:
+        return None
+    executable = _origin_executable(process)
+    allow_launcher_root = b"ORCA_TAB_ID" in expected and b"ORCA_WORKTREE_ID" in expected
+    cwd = _origin_check_cwd(process, workspace, directory_id, allow_launcher_root=allow_launcher_root)
+    accounts, account, profile = _origin_account(config, home)
+    roots = _origin_rollouts(process, profile, workspace, deadline)
+    if len(roots) > 1:
+        return {"state": "ambiguous"}
+    if not roots:
+        return None
+    subject = _origin_subject(accounts, account, profile)
+    # Recheck the same proc directory so an exited or re-execed PID cannot
+    # transfer an observation to the replacement process.
+    if (_origin_start_time(process) != start or _origin_executable(process) != executable
+            or _origin_binding(process, expected) != config
+            or _origin_check_cwd(process, workspace, directory_id, allow_launcher_root=allow_launcher_root) != cwd
+            or _origin_rollouts(process, profile, workspace, deadline) != roots):
+        raise _OriginUnverified()
+    (thread, _), = roots
+    return {"state": "found", "thread_id": thread, "account_id": account, "subject": subject}
+
+
+def external_session_origin(payload, *, proc_root=Path("/proc"), home=None):
+    """Find a native continuation using only live Orca binding and rollout metadata."""
+    unavailable = {"state": "unavailable"}
+    if not isinstance(payload, dict):
+        return unavailable
+    boot_only = payload.get("boot_only") is True
+    allowed = {"provider", "working_directory"}
+    allowed.update({"boot_only"} if boot_only else {"terminal_handle", "tab_id", "worktree_id"})
+    if payload.keys() - allowed:
+        return unavailable
+    handle, provider = payload.get("terminal_handle"), payload.get("provider")
+    if provider not in ("codex", "claude"):
+        return unavailable
+    if not boot_only and (not isinstance(handle, str) or not _ORIGIN_HANDLE.fullmatch(handle)):
+        return unavailable
+    expected = {} if boot_only else {b"ORCA_TERMINAL_HANDLE": handle.encode("ascii")}
+    for key, variable, limit in (("tab_id", b"ORCA_TAB_ID", 256), ("worktree_id", b"ORCA_WORKTREE_ID", 1200)):
+        if key in payload and payload[key] != "":
+            if not _origin_text(payload[key], limit):
+                return unavailable
+            expected[variable] = os.fsencode(payload[key])
+    if provider == "claude" or (home is None and sys.platform != "linux"):
+        return {"state": "unsupported"}
+    found = None
+    deadline = time.monotonic() + 2
+    try:
+        workspace, directory_id = _origin_workspace(payload.get("working_directory"))
+        with _origin_directory(proc_root) as proc:
+            boot_id = _origin_read("sys/kernel/random/boot_id", 64, proc).decode("ascii").strip().lower()
+            if not _ORIGIN_UUID.fullmatch(boot_id):
+                return unavailable
+            if boot_only:
+                return {"state": "boot", "boot_id": boot_id}
+            home = (home or HOME).resolve(strict=True)
+            with os.scandir(proc) as processes:
+                for index, entry in enumerate(processes):
+                    if index >= _ORIGIN_MAX_PROCESSES or time.monotonic() >= deadline:
+                        return unavailable
+                    if not entry.name.isascii() or not entry.name.isdigit():
+                        continue
+                    opened = False
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                        if info.st_uid != os.getuid() or not stat.S_ISDIR(info.st_mode):
+                            continue
+                        with _origin_directory(entry.name, proc) as process:
+                            opened = True
+                            observed = _origin_process(process, expected, workspace, directory_id, home, deadline)
+                    except (FileNotFoundError, PermissionError):
+                        if opened:
+                            return unavailable
+                        continue
+                    if observed is None:
+                        continue
+                    if observed["state"] == "ambiguous" or found is not None:
+                        return {"state": "ambiguous"}
+                    found = observed
+    except (OSError, ValueError, RuntimeError, UnicodeError):
+        return unavailable
+    return {**found, "boot_id": boot_id} if found is not None else unavailable
 
 
 def _redact_t3_log_tail(log_path, max_lines=6, max_chars=400):
@@ -6172,6 +6516,25 @@ def main(argv):
         agent_id = payload["agent_id"]
         count = _auto_client_runtime()["plain_launch_count"]
         print(json.dumps({gid: count(profile_root(agent_id, gid)) for gid in payload["guest_ids"]}))
+        return 0
+    if cmd == "external-session-origin":
+        print(json.dumps(external_session_origin(payload)))
+        return 0
+    if cmd == "orca-guest-restore":
+        source = Path(__file__).resolve()
+
+        def bundle_module(name):
+            bundled = source.with_name(source.stem + "." + name)
+            return runpy.run_path(str(bundled if bundled.is_file() else source.with_name(name)))
+
+        response = {"runtime_id": ""}
+        if sys.platform == "linux":
+            path = enriched_path()
+            response = bundle_module("guest-orca-restore.py")["execute"](
+                payload, home=HOME, managed_data=ORCA_DATA_DIR, managed_binary=_orca_find_binary(path),
+                search_path=path, transport=bundle_module("orca-codex-bridge.py")["runtime_transport"],
+            )
+        print(json.dumps(response))
         return 0
     if cmd == "orca-status":
         print(json.dumps(orca_status(payload), ensure_ascii=False))

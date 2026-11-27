@@ -146,6 +146,7 @@ func (s *Server) maintainNativeComponents(tools bool) error {
 	if err != nil {
 		return err
 	}
+	s.captureOrcaBeforeMaintenance(s.operationContext())
 	if err = s.closeProxyGate("正在更新原生客机组件，外网等待重新检查"); err != nil {
 		return err
 	}
@@ -188,6 +189,7 @@ func (s *Server) maintainNativeComponents(tools bool) error {
 	s.mu.Lock()
 	s.guestUpdateRequired = false
 	s.guestUpdateError = ""
+	s.queueWorkbenchRuntimeRestoreLocked(restoreRuntimeAll)
 	s.mu.Unlock()
 	return s.checkNetworkIfWanted()
 }
