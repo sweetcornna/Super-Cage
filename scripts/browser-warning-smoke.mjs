@@ -6,7 +6,7 @@ try {
   const { api, evaluate, waitFor, origin, restart } = fixture;
   async function check(id) {
     await waitFor(() => evaluate(id, "document.readyState === 'complete'"), "page loaded");
-    assert.deepEqual(await evaluate(id, "[navigator.webdriver, globalThis.webdriverAtLoad]"), [false, false]);
+    assert.deepEqual(await evaluate(id, "[navigator.webdriver, globalThis.webdriverAtLoad]"), [true, true]);
     assert.equal(await evaluate(id, "Object.getOwnPropertyDescriptor(Navigator.prototype, 'webdriver').get.toString()"),
       "function get webdriver() { [native code] }", "browser identity must retain Chromium's native getter");
   }
@@ -24,7 +24,7 @@ try {
       frame.src = ${JSON.stringify(origin.replace("localhost", "127.0.0.1") + "/frame")};
       document.body.append(frame);
     })`);
-    assert.deepEqual(frameIdentity, [false, "function get webdriver() { [native code] }"], "cross-site frame must retain the native browser identity");
+    assert.deepEqual(frameIdentity, [true, "function get webdriver() { [native code] }"], "cross-site frame must retain the native browser identity");
     await fixture.cdp(tab.id, "Runtime.evaluate", {
       expression: `window.open(${JSON.stringify(origin + "/popup")}, '_blank'); true`,
       userGesture: true,

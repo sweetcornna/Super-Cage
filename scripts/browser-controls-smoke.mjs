@@ -128,7 +128,7 @@ try {
   await writeFile(join(directory, "homepage.json"), JSON.stringify({ url: origin + "/first" }));
   await start();
   await waitFor(() => reports.get("/first"), "initial page");
-  assert.equal(reports.get("/first").webdriver, false, "Human browsing exposes the automation marker");
+  assert.equal(reports.get("/first").webdriver, true, "Chromium must report its native automation state");
   assert.equal((await fetch(control + "/tabs")).status, 401);
   assert.equal((await fetch(control + "/tabs", {
     headers: { Authorization: `Bearer ${token}`, Origin: "https://example.com" },
@@ -140,7 +140,7 @@ try {
   assert.equal(eventState.forward, false);
   const second = await api("/new", { url: origin + "/second" });
   await waitFor(() => reports.get("/second"), "new tab");
-  assert.equal(reports.get("/second").webdriver, false);
+  assert.equal(reports.get("/second").webdriver, true);
   assert.equal((await api("/tabs")).active, second.id);
   await api("/activate", { id: original });
   assert.equal((await api("/tabs")).active, original);
@@ -175,7 +175,7 @@ try {
   await start();
   await waitFor(() => reports.get("/third").visits > beforeRestart, "session restoration");
   assert.equal(reports.get("/third").cookie, true, "Browser cookies did not persist");
-  assert.equal(reports.get("/third").webdriver, false);
+  assert.equal(reports.get("/third").webdriver, true);
   const restored = await api("/tabs");
   assert.equal(restored.tabs.length, 1);
   assert.equal(restored.tabs[0].url, origin + "/third");
@@ -187,7 +187,7 @@ try {
   const reopened = await api("/new", { url: origin + "/first" });
   assert.equal((await api("/tabs")).active, reopened.id);
   console.log(JSON.stringify({
-    webdriver: false, newTab: true, activate: true, navigate: true,
+    webdriver: true, newTab: true, activate: true, navigate: true,
     back: true, forward: true, reload: true, close: true,
     sessionRestored: true, cookiesPreserved: true, lastTabClosed: true, reopened: true,
     unauthenticatedRejected: true, crossOriginRejected: true,

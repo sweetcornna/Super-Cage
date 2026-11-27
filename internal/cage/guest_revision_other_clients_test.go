@@ -15,14 +15,13 @@ import (
 // and, through them, every script the start script embeds (guest.go).
 
 // guestRevisionAtOtherClientsBase is guestRevision() at the last intentional
-// guest component update (SSH account policies, native history routing, Orca
-// login status, the guest CLI upgrade entry point, and recovery of SSH and
-// Orca sessions after a guest restart, shipped via 更新环境组件).
+// guest component update (browser authorization retries and Chromium's
+// native automation state, shipped via 更新环境组件).
 // If this fails you changed a hashed input: either undo it, or, if the change
 // is a product decision that is meant to ship with 更新环境组件, set the new
 // value here in the same commit and say so in the message. Work on 其他客户端
 // never does.
-const guestRevisionAtOtherClientsBase = "68129e7942a5c21c855f7bc8f4816f4dd132051dd9f8e250cee8adae25bf321a"
+const guestRevisionAtOtherClientsBase = "6149a23697bf651e3fcb7112b7af01debade07ffec850fd525fd7d261e1331b2"
 
 func TestGuestRevisionIsPinnedForOtherClients(t *testing.T) {
 	if got := guestRevision(); got != guestRevisionAtOtherClientsBase {

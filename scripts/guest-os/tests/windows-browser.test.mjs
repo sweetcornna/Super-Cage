@@ -138,10 +138,10 @@ integration("interactive browser identity is native in normal and private docume
       globals: Object.getOwnPropertyNames(globalThis).filter(name => /cage/i.test(name)),
       nativeClipboard: [Clipboard.prototype.writeText, Clipboard.prototype.write, DataTransfer.prototype.setData,
         DataTransfer.prototype.clearData, Document.prototype.execCommand].every(fn => /\{ \[native code\] \}/.test(Function.prototype.toString.call(fn))),
-    })), { automated: false, getter: "function get webdriver() { [native code] }", globals: [], nativeClipboard: true });
+    })), { automated: true, getter: "function get webdriver() { [native code] }", globals: [], nativeClipboard: true });
     assert.equal(await page.evaluate(() => navigator.permissions.query({ name: "clipboard-read" }).then(value => value.state)), permission);
   }
-  assert.ok(f.launchOptions().ignoreDefaultArgs.includes("--enable-automation"));
+  assert.ok(!f.launchOptions().ignoreDefaultArgs.includes("--enable-automation"));
   assert.equal(f.launchOptions().chromiumSandbox, true);
 });
 

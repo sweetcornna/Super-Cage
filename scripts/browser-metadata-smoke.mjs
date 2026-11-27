@@ -134,7 +134,8 @@ function checkPNG(icon) {
 try {
   const sourceDirectory = new URL("../internal/cage/", import.meta.url);
   for (const name of await readdir(sourceDirectory))
-    if ((name.startsWith("browser-") && name.endsWith(".mjs")) || name === "native-input.mjs")
+    if ((name.startsWith("browser-") && name.endsWith(".mjs")) ||
+        ["native-input.mjs", "tailnet-client.mjs", "device-observation.mjs", "display-density.mjs"].includes(name))
       await cp(new URL(name, sourceDirectory), join(directory, name));
   await cp(new URL("split-extension", sourceDirectory), join(directory, "extension"), { recursive: true });
   const source = await readFile(new URL("browser-agent.mjs", sourceDirectory), "utf8");
@@ -175,8 +176,8 @@ try {
   const initial = await waitFor(() => snapshot?.tabs.find(item => item.url === origin + "/red" && item.favicon), "initial favicon via production SSE");
   const id = initial.id, red = initial.favicon;
   checkPNG(red);
-  assert.equal(await evaluate(id, "navigator.webdriver"), false);
-  assert.equal(await evaluate(id, "globalThis.webdriverAtLoad"), false, "identity must be ready before the first website script");
+  assert.equal(await evaluate(id, "navigator.webdriver"), true);
+  assert.equal(await evaluate(id, "globalThis.webdriverAtLoad"), true, "identity must be ready before the first website script");
   assert.equal((await api("/tabs")).tabs.find(item => item.id === id).favicon, red);
 
   await api("/navigate", { id, url: origin + "/blue" });

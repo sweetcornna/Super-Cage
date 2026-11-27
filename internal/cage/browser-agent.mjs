@@ -132,9 +132,6 @@ const flags = [
   `--load-extension=${splitDirectory}`,
   "--user-data-dir=/home/cage-browser/profile",
   "--remote-debugging-pipe",
-  // The pipe carries user interaction. Set this before any document is created
-  // so normal pages, login popups and private contexts share the native getter.
-  "--disable-blink-features=AutomationControlled",
   // Kiosk mode blocks Chromium's DevTools UI, including F12. Ordinary
   // fullscreen keeps the guest browser chrome hidden while allowing inspection.
   "--start-fullscreen",
@@ -1084,7 +1081,7 @@ const server = http.createServer(async (req, res) => {
           if (!targets.has(tab.targetId)) targets.set(tab.targetId, loginBrowser.tab(tab));
           await activate(tab.targetId, true);
           return session(tab.targetId);
-        }, input.allowed_hosts);
+        }, input.allowed_hosts, activeId);
       }
       if (req.url === "/login-finish") {
         await loginBrowser.finish(input.login);
