@@ -632,12 +632,7 @@ export function AgentAccountsPanel({
 
       <div className="agent-schedule-preview" role="status">
         <strong>下次新建终端调度预测：</strong>
-        {state.magpie_takeover || preview?.strategy === "magpie" ? (
-          <>
-            <span className="agent-pill agent-pill--ok">Magpie 接管</span>
-            <span>{preview?.reason || "已启用 Magpie，账号调度已自动关闭并由 Magpie 接管"}</span>
-          </>
-        ) : preview?.account_id ? (
+        {preview?.account_id ? (
           <>
             <span className="agent-pill agent-pill--ok">{preview.label}</span>
             <span>{preview.reason}</span>

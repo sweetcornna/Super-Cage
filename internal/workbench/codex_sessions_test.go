@@ -24,6 +24,7 @@ import (
 
 	"al.essio.dev/pkg/shellescape"
 	"github.com/google/uuid"
+	"github.com/sylvinus/agent-vm/internal/cage"
 )
 
 func TestCodexSessionsHelper(t *testing.T) {
@@ -59,12 +60,24 @@ type codexFakeGuest struct {
 	home string
 }
 
+func installCodexRouteFixture(t *testing.T, home string) {
+	t.Helper()
+	folder := filepath.Join(home, ".local/share/cage/agent-runtime")
+	if err := os.MkdirAll(folder, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, "client_runtime.py"), []byte(cage.ClientRuntimeHelper), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newCodexFixture(t *testing.T) (*Server, string, *codexFakeGuest) {
 	t.Helper()
 	s := testServer(t)
 	project, _ := filepath.EvalSymlinks(t.TempDir())
 	s.preferences.Workspace = project
 	home, _ := filepath.EvalSymlinks(t.TempDir())
+	installCodexRouteFixture(t, home)
 	mobileTestSSH(t, s, home, []string{"HOME=" + home, "PATH=/usr/bin:/bin"})
 	helper := filepath.Join(home, ".local/share/cage/codex-session-code", fmt.Sprintf("%x.py", sha256.Sum256([]byte(codexSessionsHelper))))
 	if err := os.MkdirAll(filepath.Dir(helper), 0700); err != nil {
@@ -1292,6 +1305,7 @@ func shippedCodexWorkbench(t *testing.T) (*Server, string, string) {
 	s.preferences.Workspace = project
 	s.projectShares = map[string]*projectShare{project: {done: make(chan struct{})}}
 	home, _ := filepath.EvalSymlinks(t.TempDir())
+	installCodexRouteFixture(t, home)
 	bin := filepath.Join(home, "bin")
 	if err := os.Mkdir(bin, 0700); err != nil {
 		t.Fatal(err)

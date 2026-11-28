@@ -652,13 +652,7 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 	active, logins := s.agentAccountUsageLocked(spec.ID, &poolCopy, external)
 	s.agentCLIs.mu.Unlock()
 
-	magpieTakeover := s.magpieTakesOverScheduling()
-	var preview scheduleDecision
-	if magpieTakeover {
-		preview = scheduleDecision{Strategy: "magpie", Reason: magpieTakeoverReason}
-	} else {
-		preview = pickAgentAccount(poolCopy, active, logins, workspace, last, rec.id, rec.at, time.Now())
-	}
+	preview := pickAgentAccount(poolCopy, active, logins, workspace, last, rec.id, rec.at, time.Now())
 
 	jsonReply(w, map[string]any{
 		"agent":            spec,
@@ -673,7 +667,6 @@ func (s *Server) listAgentAccountsHTTP(w http.ResponseWriter, r *http.Request) {
 		"detection_status": detectionStatus,
 		"detection_error":  detectionError,
 		"login_notice":     notice,
-		"magpie_takeover":  magpieTakeover,
 	})
 }
 
@@ -1399,14 +1392,6 @@ func (s *Server) selectAgentAccountReplacing(spec agentcatalog.AgentSpec, reques
 func (s *Server) selectAgentAccountForServices(spec agentcatalog.AgentSpec, requestedID string, login bool, workspace, replacingT3 string, replacingOrca *string) (agentSelection, scheduleDecision, error) {
 	var empty agentSelection
 	var decision scheduleDecision
-	if !login && s.magpieTakesOverScheduling() {
-		return agentSelection{
-			AgentID: spec.ID,
-			GuestID: "default",
-			Label:   magpieTakeoverLabel,
-			Reason:  magpieTakeoverReason,
-		}, scheduleDecision{Strategy: "magpie", Reason: magpieTakeoverReason}, nil
-	}
 	m := &s.agentCLIs
 	m.mu.Lock()
 	defer m.mu.Unlock()

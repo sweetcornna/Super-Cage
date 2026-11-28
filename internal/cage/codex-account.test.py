@@ -499,7 +499,7 @@ clientSecret = "camel-client-secret"
             seen2 = json.loads(self.capture.read_text())
             self.assertNotEqual(seen2["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"), label)
 
-        # Magpie takeover marker bypasses scheduling even with valid launch.json present.
+        # A legacy marker cannot opt any launch out of Cage scheduling.
         takeover = self.home / ".local/share/cage/magpie/takeover"
         takeover.parent.mkdir(parents=True, exist_ok=True)
         takeover.write_text("1\n")
@@ -510,7 +510,7 @@ clientSecret = "camel-client-secret"
         )
         self.assertEqual(res3.returncode, 0)
         seen3 = json.loads(self.capture.read_text())
-        self.assertNotEqual(seen3["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"))
+        self.assertEqual(seen3["env"].get("CODEX_HOME"), str(self.base(SECOND) / "home"))
         self.assertEqual(seen3["argv"][-2:], ["--search", "magpie"])
 
     def orca_fixture(self):
@@ -639,7 +639,83 @@ clientSecret = "camel-client-secret"
         takeover = self.home / ".local/share/cage/magpie/takeover"
         takeover.parent.mkdir()
         takeover.write_text("1")
-        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        self.assertEqual(self.orca_launch(env, "prompt")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+
+    def test_orca_scoped_magpie_profile_routes_only_that_launch(self):
+        env, native, roster = self.orca_fixture()
+        schedule = self.base(FIRST).parent / "launch.json"
+        schedule.write_text(json.dumps({"managed": True, "mode": "smart", "active": {FIRST: 1},
+                                        "accounts": roster, "history_accounts": roster}))
+        self.write_native_magpie_profile(native[0])
+        managed = str(self.base(SECOND) / "home")
+        default = str(native[0])
+        self.assertEqual(self.orca_launch(env, "plain")["env"]["CODEX_HOME"], managed)
+        for options in (("-p", "magpie"), ("--profile=magpie",), ("-pmagpie",)):
+            self.assertEqual(self.orca_launch(env, *options, "profile")["env"]["CODEX_HOME"], default)
+        self.assertEqual(self.orca_launch({**env, "CODEX_HOME": str(native[1])}, "plain")["env"]["CODEX_HOME"], managed)
+        (native[0] / "work.config.toml").write_text('model_provider = "openai"\n')
+        self.assertEqual(self.orca_launch(env, "-p", "work", "other-profile")["env"]["CODEX_HOME"], managed)
+        self.assertEqual(self.orca_launch({**env, "CAGE_CODEX_ACCOUNT_ID": SECOND, "CAGE_CODEX_SUBJECT": roster[1]["subject"]},
+                                          "-p", "magpie", "pin")["env"]["CODEX_HOME"], managed)
+        self.assertEqual(self.orca_launch({**env, "CAGE_ACCOUNT_SCHEDULING": "off"}, "plain")["env"]["CODEX_HOME"], default)
+
+        thread = "b15e4647-8330-4721-9f6c-f99004c633bf"
+        history = Path(managed) / "sessions/2026/10/04" / f"rollout-2026-10-04T07-09-01-{thread}.jsonl"
+        history.parent.mkdir(parents=True)
+        history.write_text("{}\n")
+        self.assertEqual(self.orca_launch(env, "-p", "magpie", "resume", thread)["env"]["CODEX_HOME"], managed)
+        profile = native[0] / "magpie.config.toml"
+        profile.rename(profile.with_name("disconnected.fixture"))
+        self.assertEqual(self.orca_launch(env, "after-disconnect")["env"]["CODEX_HOME"], managed)
+        self.assertEqual(self.orca_launch(env, "-p", "magpie", "after-disconnect")["env"]["CODEX_HOME"], managed)
+
+    def write_native_magpie_profile(self, home):
+        root = self.home / ".config/magpie"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "gateway.json").write_text(json.dumps({"addr": "127.0.0.1:49111", "version": "0.1.4823"}))
+        (root / "stash.json").write_text(json.dumps({"codex.scope": "profile"}))
+        (home / "config.toml").write_text('model_provider = "openai"\n')
+        (home / "magpie-models.json").write_text('{"models":[]}')
+        profile = home / "magpie.config.toml"
+        profile.write_text('model_provider = "magpie"\nmodel_catalog_json = "magpie-models.json"\n'
+                           '[model_providers.magpie]\nbase_url = "http://127.0.0.1:49111/v1"\nwire_api = "responses"\n'
+                           'experimental_bearer_token = "synthetic-fixture"\n')
+        return profile
+
+    def test_orca_legacy_confirmation_is_local_revocable_and_expires_with_route(self):
+        env, native, roster = self.orca_fixture()
+        schedule = self.base(FIRST).parent / "launch.json"
+        schedule.write_text(json.dumps({"managed": True, "mode": "smart", "active": {FIRST: 1}, "accounts": roster}))
+        profile = self.write_native_magpie_profile(native[0])
+        (self.home / ".config/magpie/stash.json").write_text("{}")
+        marker = self.home / ".local/share/cage/magpie/takeover"
+        marker.parent.mkdir(parents=True)
+        marker.write_text("1\n")
+        def route(action, environment=env):
+            return json.loads(subprocess.check_output([sys.executable, str(source.with_name("agent-runtime.py")),
+                "route", action, "codex", "--", "-p", "magpie"], cwd=self.home, env=environment, text=True, timeout=10))
+        def blocked():
+            self.capture.unlink(missing_ok=True)
+            res = subprocess.run(["codex", "-p", "magpie", "prompt"], cwd=self.home, env=env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(res.returncode, 78, res.stderr)
+            self.assertIn("cage-agent route status", res.stderr)
+            self.assertFalse(self.capture.exists())
+        blocked()
+        pending = route("status")
+        self.assertEqual(pending["state"], "unknown")
+        self.assertTrue(pending["legacy"])
+        self.assertEqual(route("magpie")["state"], "magpie")
+        self.assertEqual(self.orca_launch(env, "-p", "magpie", "prompt")["env"]["CODEX_HOME"], str(native[0]))
+        self.assertEqual(self.orca_launch(env, "plain")["env"]["CODEX_HOME"], str(self.base(SECOND) / "home"))
+        self.assertFalse(route("status", {**env, "CODEX_HOME": str(native[1])})["confirmed"])
+        self.assertEqual(route("revoke")["state"], "unknown")
+        blocked()
+        route("magpie")
+        profile.write_text(profile.read_text().replace("49111", "49112"))
+        blocked()
+        self.assertNotEqual(route("status")["review"], pending["review"])
+        profile.write_text(profile.read_text().replace("49112", "49111"))
+        blocked()  # A stale acceptance must not revive on reversion.
 
     def test_orca_resume_keeps_rollouts_in_their_original_native_or_cage_home(self):
         env, native, roster = self.orca_fixture()

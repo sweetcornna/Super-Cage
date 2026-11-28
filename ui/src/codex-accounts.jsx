@@ -49,7 +49,7 @@ export function useCodexAccounts(enabled = true) {
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
     guestSupported: registry?.guest_supported !== false, loginPending: Boolean(registry?.login_pending),
     scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, schedulingAPI: registry?.scheduling_api || 0,
-    loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
+    loginNotice: registry?.login_notice, error, load };
 }
 
 const statusLabels = {

@@ -580,6 +580,15 @@ func (s *Server) createCodexConversation(ctx context.Context, id, workspace stri
 	s.mobileCLI.mu.Unlock()
 	var selection codexSelection
 	if errors.Is(err, os.ErrNotExist) {
+		if s.magpieNativeAutoEligible("codex") {
+			native, routeErr := s.magpieNewLaunch("codex", "codex", workspace)
+			if routeErr != nil {
+				return mobileSession{}, routeErr
+			}
+			if native {
+				return mobileSession{}, errors.New("此 Codex 配置由 Magpie 路由；结构化移动会话暂不支持，请使用终端")
+			}
+		}
 		if selection, err = s.selectCodexAccount("", false, workspace); err != nil {
 			return mobileSession{}, err
 		}

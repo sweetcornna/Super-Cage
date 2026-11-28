@@ -156,7 +156,7 @@ func (s *Server) registerOrcaCodex(ctx context.Context, accountID string) (orcaC
 	if err != nil {
 		return result, err
 	}
-	if !s.codexGuestSupported() || !orcaCodexBridgeEnabled(cfg) || s.magpieTakesOverScheduling() {
+	if !s.codexGuestSupported() || !orcaCodexBridgeEnabled(cfg) {
 		return result, errors.New("当前环境未启用 Orca Codex 账号登记")
 	}
 	s.codexAccounts.mu.Lock()
@@ -246,10 +246,6 @@ func orcaCodexRoster(list codexAccountList) map[string]string {
 
 func (s *Server) reconcileOrcaCodex(ctx context.Context, cfg orcaConfig, seen *orcaCodexObservation) orcaCodexBridgeView {
 	view := orcaCodexBridgeView{State: "unmatched"}
-	if s.magpieTakesOverScheduling() {
-		*seen = orcaCodexObservation{}
-		return orcaCodexBridgeView{State: "inactive"}
-	}
 	s.codexAccounts.mu.Lock()
 	list, err := s.loadCodexAccounts()
 	s.codexAccounts.mu.Unlock()

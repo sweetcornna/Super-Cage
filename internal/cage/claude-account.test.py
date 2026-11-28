@@ -778,16 +778,33 @@ else:
         self.assertEqual(observed["quota"]["seven_day"]["used_percentage"], 67)
         self.assertEqual(observed["quota"]["seven_day"]["resets_at"], 0)
 
-    def test_auto_bypasses_when_magpie_takeover_marker_present(self):
+    def test_auto_magpie_route_is_scoped_and_disconnect_restores_cage(self):
         capture = self.home / "env.txt"
         self.write_launch([{"id": FIRST, "subject": self.subject, "preferred": True}])
         takeover = self.home / ".local/share/cage/magpie/takeover"
         takeover.parent.mkdir(parents=True, exist_ok=True)
         takeover.write_text("1\n")
+        native = self.home / ".claude/settings.json"
+        native.parent.mkdir(exist_ok=True)
+        root = self.home / ".config/magpie"
+        root.mkdir(parents=True)
+        gateway = "http://127.0.0.1:44111"
+        (root / "gateway.json").write_text(json.dumps({"addr": "127.0.0.1:44111", "version": "0.1.4823"}))
+        (root / "stash.json").write_text(json.dumps({"claude.wired_at": gateway}))
+        native.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": gateway}}))
         result = self.run_helper("auto", "hello-magpie", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture)))
         self.assertEqual(result.stdout.splitlines(), ["hello-magpie"])
         env = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
         self.assertNotIn("CLAUDE_CONFIG_DIR", env)
+        self.run_helper("auto", "hello", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture), CAGE_CLAUDE_ACCOUNT_ID=FIRST,
+                                                                  CAGE_CLAUDE_SUBJECT=self.subject))
+        def assert_pinned():
+            env = dict(line.split("=", 1) for line in capture.read_text().splitlines() if "=" in line)
+            self.assertEqual(Path(env["CLAUDE_CONFIG_DIR"]).resolve(), (self.home / ".local/share/cage/claude-accounts" / FIRST / "config").resolve())
+        assert_pinned()
+        native.write_text("{}")
+        self.run_helper("auto", "after-disconnect", env=self.plain_shell_env(TEST_CAPTURE_ENV=str(capture)))
+        assert_pinned()
 
 
 if __name__ == "__main__":

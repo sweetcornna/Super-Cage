@@ -53,7 +53,8 @@ def _is_cage_shim_dir(entry):
     agent_shims = str(Path.home() / ".local/share/cage/agent-shims")
     orca_shims = str(Path.home() / ".local/share/cage/orca/shims")
     t3_shims = str(Path.home() / ".local/share/cage/t3code/shims")
-    if entry in (auto_shims, orca_shims, t3_shims) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
+    scoped_t3 = str(Path.home() / ".local/share/cage/t3code/scoped-auto")
+    if entry in (auto_shims, orca_shims, t3_shims, scoped_t3) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
         return True
     return False
 # Local instructions and helpers are shared. Credentials, conversations,
@@ -895,8 +896,7 @@ def codex_passthrough(args, home=None):
 def auto(args, *, orca=False):
     """Start a usable managed account, or preserve an explicit/default invocation."""
     required = os.environ.pop("CAGE_REQUIRE_CODEX_SCHEDULE", "") == "1"
-    magpie_takeover = (Path.home() / ".local/share/cage/magpie/takeover").is_file()
-    disabled = magpie_takeover or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
     pinned = os.environ.get("CAGE_CODEX_ACCOUNT_ID", "")
     if not disabled and pinned not in ("", "auto", DEFAULT):
         return entrypoint(["run", pinned, *args])
@@ -935,10 +935,16 @@ def auto(args, *, orca=False):
             injected_subject = orca_profile_subject(data, injected_home, subjects) if subjects else None
             if not injected_subject:
                 return codex_passthrough(args)
+        thread = _runtime["codex_history_request"](args)
+        if not orca_probe and thread is None and (schedule or {}).get("mode") != "manual":
+            route = _runtime["magpie_launch_route"]("codex", args)
+            if route in ("magpie", "native"):
+                return codex_passthrough(args)
+            if route != "cage":
+                return ACCOUNT_REFUSED
         if schedule is None:
             print("无法读取 Super Cage 的 Codex 调度配置。请同步环境组件后重试。", file=sys.stderr)
             return ACCOUNT_REFUSED
-        thread = _runtime["codex_history_request"](args)
         if _runtime["native_schedule_managed"](schedule) or (injected_home is not None and thread is not None):
             if orca_probe:
                 return orca_login_status(launch.parent, schedule, args)

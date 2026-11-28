@@ -1680,7 +1680,7 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(sync_empty["shims"], [])
         self.assertEqual(list(auto_dir.iterdir()), [])
 
-    def test_magpie_takeover_disables_all_shims_and_restores_cleanly(self):
+    def test_legacy_magpie_marker_keeps_all_schedules_and_existing_tool_shims(self):
         bin_dir = self.home / ".local/bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         fake_oc = bin_dir / "opencode"
@@ -1738,61 +1738,20 @@ class AgentRuntimeTests(unittest.TestCase):
         self.assertEqual(synced["shims"], ["claude", "codex", "opencode"])
         self.assertFalse(synced["magpie_takeover"])
 
-        # Enable Magpie takeover: all launch manifests & shims must be cleared and marker written.
-        disabled = json.loads(self.run_rt("sync-auto-shims", {"disable_all": True, "magpie_takeover": True}).stdout)
-        self.assertTrue(disabled["ok"])
-        self.assertTrue(disabled["magpie_takeover"])
-        self.assertEqual(disabled["shims"], [])
         takeover_file = self.home / ".local/share/cage/magpie/takeover"
-        self.assertTrue(takeover_file.is_file())
-        self.assertEqual(stat.S_IMODE(takeover_file.stat().st_mode), 0o600)
-        self.assertFalse(claude_launch.exists())
-        self.assertFalse(codex_launch.exists())
-        self.assertFalse((self.home / ".local/share/cage/agent-accounts/launch.json").exists())
-        self.assertEqual(list((self.home / ".local/share/cage/auto-shims").iterdir()), [])
-        self.assertEqual(list(orca_shim.parent.iterdir()), [])
-        self.assertEqual(list(t3_shim.parent.iterdir()), [])
-        self.assertFalse(agent_shim.exists())
-        self.assertTrue((Path(prep["shim_dir"]) / "spec.json").is_file())
-
-        # Any subsequent sync without magpie_takeover=False stays disabled while takeover marker exists.
-        still_off = json.loads(self.run_rt("sync-auto-shims", {"schedule": schedule_payload}).stdout)
-        self.assertTrue(still_off["magpie_takeover"])
-        self.assertEqual(still_off["shims"], [])
-
-        # Even if an agent-shim exists on PATH while takeover marker is set, it bypasses straight to real binary.
-        prep2 = json.loads(self.run_rt("prepare-session", {"spec": oc_spec, "account_id": acc1}).stdout)
-        clean_env = {k: v for k, v in self.env.items() if not k.startswith("XDG_") and k != "ANTHROPIC_API_KEY"}
-        clean_env["PATH"] = f"{prep2['shim_dir']}:{self.env['PATH']}"
-        clean_env["CAGE_CLI_ACCOUNT_OPENCODE"] = acc1
-        r_bypass = json.loads(subprocess.check_output(["opencode", "hello"], cwd=self.home, env=clean_env, text=True, timeout=10))
-        self.assertEqual(r_bypass["XDG_CONFIG_HOME"], "")
-        self.assertEqual(r_bypass["ANTHROPIC_API_KEY"], "")
-        self.assertEqual(r_bypass["ARGS"], ["hello"])
-
-        # auto-exec also bypasses directly when takeover marker exists.
-        r_auto = json.loads(subprocess.check_output(
-            [sys.executable, "-I", str(RUNTIME), "auto-exec", "opencode", "opencode", "world"],
-            cwd=self.home, env=clean_env, text=True, timeout=10,
-        ))
-        self.assertEqual(r_auto["XDG_CONFIG_HOME"], "")
-        self.assertEqual(r_auto["ANTHROPIC_API_KEY"], "")
-        self.assertEqual(r_auto["ARGS"], ["world"])
-
-        # Disabling Magpie takeover removes marker and restores auto-shims cleanly.
-        restored = json.loads(self.run_rt("sync-auto-shims", {
-            "schedule": schedule_payload,
-            "magpie_takeover": False,
-        }).stdout)
-        self.assertTrue(restored["ok"])
+        takeover_file.parent.mkdir(parents=True)
+        takeover_file.write_text("1\n")
+        restored = json.loads(self.run_rt("sync-auto-shims", {"disable_all": True, "magpie_takeover": True}).stdout)
         self.assertFalse(restored["magpie_takeover"])
+        self.assertEqual(restored["shims"], ["claude", "codex", "opencode"])
         self.assertFalse(takeover_file.exists())
-        self.assertEqual(restored["shims"], ["opencode"])
+        self.assertEqual(takeover_file.with_name("takeover.legacy").read_text(), "1\n")
+        self.assertTrue(all(p.is_file() for p in (claude_launch, codex_launch, agent_shim, orca_shim, t3_shim)))
         shim_env = {k: v for k, v in self.env.items() if not k.startswith("XDG_") and k != "ANTHROPIC_API_KEY"}
         shim_env["PATH"] = f"{restored['dir']}:{self.env['PATH']}"
-        r_restored = json.loads(subprocess.check_output(["opencode", "run"], cwd=self.home, env=shim_env, text=True, timeout=10))
-        self.assertEqual(r_restored["CAGE_CLI_ACCOUNT_OPENCODE"], acc1)
-        self.assertEqual(r_restored["ANTHROPIC_API_KEY"], "sk-ant-acc1-secret")
+        launched = json.loads(subprocess.check_output(["opencode", "run"], cwd=self.home, env=shim_env, text=True, timeout=10))
+        self.assertEqual(launched["CAGE_CLI_ACCOUNT_OPENCODE"], acc1)
+        self.assertEqual(launched["ANTHROPIC_API_KEY"], "sk-ant-acc1-secret")
 
     def test_generic_policy_manual_exhaust_and_smart(self):
         binary = self.home / ".local/bin/opencode"

@@ -65,8 +65,8 @@ func agentRuntimeScript() string {
 		`sudo tee /usr/local/bin/cage-agent >/dev/null <<'CAGE_UPGRADE_MENU'
 #!/bin/sh
 case "$1" in
-  upgrade) exec /usr/local/bin/cage-agent-runtime "$@" ;;
-  ''|help|-h|--help) echo 'Usage: cage-agent upgrade [agent-id]' ;;
+  upgrade|route) exec /usr/local/bin/cage-agent-runtime "$@" ;;
+  ''|help|-h|--help) printf '%s\n' 'Usage: cage-agent upgrade [agent-id]' '       cage-agent route {status|magpie|cage|revoke} <agent> [-- <launch-options>]' ;;
   *) echo 'Usage: cage-agent upgrade [agent-id]' >&2; exit 2 ;;
 esac
 CAGE_UPGRADE_MENU

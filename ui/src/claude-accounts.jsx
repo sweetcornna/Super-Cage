@@ -42,7 +42,7 @@ export function useClaudeAccounts() {
     detectionStatus: registry?.detection_status, detectionError: registry?.detection_error,
     usageRunning: registry?.usage_panel_running, usageUnavailable: registry?.usage_unavailable_reason,
     scheduling: registry?.scheduling || {mode:"balanced",switch_policy:"ask"}, schedulingAPI: registry?.scheduling_api || 0,
-    handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, magpieTakeover: Boolean(registry?.magpie_takeover), error, load };
+    handoff_api: registry?.handoff_api || 0, loginNotice: registry?.login_notice, error, load };
 }
 
 const statusLabels = {

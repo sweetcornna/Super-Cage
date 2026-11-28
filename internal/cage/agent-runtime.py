@@ -1707,7 +1707,6 @@ def ensure_shim(spec):
         q_shims = shlex.quote(shims_root_str)
         q_auto = shlex.quote(str(AUTO_SHIMS_DIR))
         q_orca_shims = shlex.quote(str(ORCA_SHIMS_DIR))
-        q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
         q_name = shlex.quote(name)
 
         exec_lines = []
@@ -1722,9 +1721,6 @@ def ensure_shim(spec):
 
         content = (
             "#!/bin/sh\n"
-            f'if [ -f {q_takeover} ]; then\n'
-            + _posix_strip_and_exec(name)
-            + 'fi\n'
             f'_acct="${{{per_agent_var}:-${{CAGE_CLI_ACCOUNT_ID:-default}}}}"\n'
             'case "$_acct" in\n'
             '  default) ;;\n'
@@ -2029,10 +2025,9 @@ def _posix_strip_and_exec(binary_name):
 def _write_claude_auto_shim():
     helper = _claude_account_helper()
     q_helper = shlex.quote(helper)
-    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     content = (
         "#!/bin/sh\n"
-        f'if [ -f {q_takeover} ] || [ "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
+        f'if [ "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec("claude")
         + 'fi\n'
         f'if [ -n "${{CAGE_CLAUDE_ACCOUNT_ID:-}}" ] && [ "$CAGE_CLAUDE_ACCOUNT_ID" != "auto" ] && [ -x {q_helper} ]; then\n'
@@ -2052,12 +2047,11 @@ def _write_claude_auto_shim():
 def _write_codex_auto_shim(has_native_codex, has_agent_codex):
     helper = _codex_account_helper()
     q_helper = shlex.quote(helper)
-    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_py = shlex.quote(sys.executable)
     q_rt = shlex.quote(str(Path(__file__).resolve()))
     parts = [
         "#!/bin/sh\n",
-        f'if [ -f {q_takeover} ] || [ "${{CAGE_CODEX_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_CLI_ACCOUNT_CODEX:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n',
+        f'if [ "${{CAGE_CODEX_ACCOUNT_ID:-}}" = "default" ] || [ "${{CAGE_CLI_ACCOUNT_CODEX:-}}" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n',
         _posix_strip_and_exec("codex"),
         'fi\n',
         'if [ -n "${CAGE_CODEX_ACCOUNT_ID:-}" ] && [ "$CAGE_CODEX_ACCOUNT_ID" != "auto" ]; then\n',
@@ -2099,14 +2093,13 @@ def _write_generic_auto_shim(agent_id, binary_name):
     per_agent_var = _agent_account_env_var(agent_id)
     q_py = shlex.quote(sys.executable)
     q_rt = shlex.quote(str(Path(__file__).resolve()))
-    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     q_agent = shlex.quote(agent_id)
     q_bin_name = shlex.quote(binary_name)
 
     content = (
         "#!/bin/sh\n"
         f'_pin="${{{per_agent_var}:-${{CAGE_CLI_ACCOUNT_ID:-}}}}"\n'
-        f'if [ -f {q_takeover} ] || [ "$_pin" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
+        f'if [ "$_pin" = "default" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "off" ] || [ "${{CAGE_ACCOUNT_SCHEDULING:-}}" = "0" ]; then\n'
         + _posix_strip_and_exec(binary_name)
         + 'fi\n'
         f'  exec {q_py} -I {q_rt} auto-exec {q_agent} {q_bin_name} "$@"\n'
@@ -2124,43 +2117,6 @@ def _launch_is_managed(path):
     return not isinstance(accts, list) or _auto_client_runtime()["native_schedule_managed"](data)
 
 
-def _clear_all_scheduling_artifacts():
-    """Remove all Cage launch manifests and executable shims so every harness
-    runs in its native default config directory (e.g. when Magpie takes over)."""
-    for launch_file in (CLAUDE_LAUNCH_FILE, CODEX_LAUNCH_FILE, AGENT_LAUNCH_FILE):
-        try:
-            launch_file.unlink(missing_ok=True)
-        except OSError:
-            pass
-    for shim_dir in (AUTO_SHIMS_DIR, ORCA_SHIMS_DIR, T3CODE_ROOT / "shims"):
-        if not shim_dir.is_dir():
-            continue
-        try:
-            for child in list(shim_dir.iterdir()):
-                if child.is_file() or child.is_symlink():
-                    try:
-                        child.unlink()
-                    except OSError:
-                        pass
-        except OSError:
-            pass
-    if SHIMS_ROOT.is_dir():
-        try:
-            for agent_dir in list(SHIMS_ROOT.iterdir()):
-                if not agent_dir.is_dir():
-                    continue
-                for child in list(agent_dir.iterdir()):
-                    if child.name == "spec.json":
-                        continue
-                    if child.is_file() or child.is_symlink():
-                        try:
-                            child.unlink()
-                        except OSError:
-                            pass
-        except OSError:
-            pass
-
-
 def sync_auto_shims(payload=None):
     """Publish optional agent launch schedule and synchronize universal auto-shims
     in ~/.local/share/cage/auto-shims for Claude, Codex, and all Agent CLIs."""
@@ -2168,20 +2124,18 @@ def sync_auto_shims(payload=None):
     os.umask(0o077)
     ACCOUNTS_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-    disable_all = bool(payload.get("disable_all"))
-    magpie_takeover = payload.get("magpie_takeover")
-    if magpie_takeover is True or disable_all:
-        MAGPIE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-        atomic_write_text(MAGPIE_TAKEOVER_FILE, "1\n", mode=0o600)
-    elif magpie_takeover is False:
+    # Preserve the old marker as migration evidence; never use it as an
+    # ownership decision or clear launch manifests because of it.
+    if MAGPIE_TAKEOVER_FILE.is_file():
         try:
-            MAGPIE_TAKEOVER_FILE.unlink(missing_ok=True)
-        except OSError:
+            # Leave an archive with a unique name if an older writer left
+            # another marker after a previous migration.
+            archive = MAGPIE_ROOT / "takeover.legacy"
+            if archive.exists():
+                archive = archive.with_name(f"takeover.legacy.{time.time_ns()}")
+            MAGPIE_TAKEOVER_FILE.replace(archive)
+        except FileNotFoundError:  # another publisher already migrated it
             pass
-
-    if disable_all or MAGPIE_TAKEOVER_FILE.is_file():
-        _clear_all_scheduling_artifacts()
-        return {"ok": True, "shims": [], "dir": str(AUTO_SHIMS_DIR), "magpie_takeover": True}
 
     if "schedule" in payload and isinstance(payload["schedule"], dict):
         atomic_write_json(AGENT_LAUNCH_FILE, payload["schedule"], mode=0o600)
@@ -2324,8 +2278,6 @@ def _schedule_cursor(payload):
     agent_id = payload.get("agent_id")
     if not isinstance(agent_id, str) or not CLI_ID_RE.fullmatch(agent_id):
         raise ValueError("invalid agent_id")
-    if MAGPIE_TAKEOVER_FILE.is_file():
-        return {}
     if agent_id == "claude" or (agent_id == "codex" and payload.get("codex_native") is True):
         launch = CLAUDE_LAUNCH_FILE if agent_id == "claude" else CODEX_LAUNCH_FILE
         schedule = read_json(launch)
@@ -2374,10 +2326,7 @@ def auto_exec_agent(agent_id, binary_name, extra_args):
         print("Agent CLI 调度配置中的类型无效。", file=sys.stderr)
         return 78
 
-    disabled = (
-        MAGPIE_TAKEOVER_FILE.is_file()
-        or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
-    )
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
     account_var = _agent_account_env_var(agent_id)
     pinned = os.environ.get(account_var) or os.environ.get("CAGE_CLI_ACCOUNT_ID", "")
     if disabled or pinned == "default":
@@ -2417,8 +2366,14 @@ def auto_exec_agent(agent_id, binary_name, extra_args):
         return _exec_real_binary(binary_name, extra_args)
 
     runtime = runtime or _auto_client_runtime()
+    thread = runtime["codex_history_request"](extra_args) if agent_id == "codex" and iso_var == "CODEX_HOME" else None
+    if thread is None and entry.get("mode") != "manual" and not runtime["_project_pin"](entry.get("project_pins"), Path.cwd().resolve()):
+        route = runtime["magpie_launch_route"](agent_id, extra_args)
+        if route in ("magpie", "native"):
+            return _exec_real_binary(binary_name, extra_args)
+        if route != "cage":
+            return 78
     if agent_id == "codex" and iso_var == "CODEX_HOME":
-        thread = runtime["codex_history_request"](extra_args)
         if thread is not None:
             def history_home(guest):
                 return resolve_dirs(spec, profile_root(agent_id, guest))["config"]
@@ -3500,12 +3455,8 @@ def _ensure_macos_claude_shim():
     shim_path = shim_dir / "claude"
     q_dir = shlex.quote(str(shim_dir))
     q_helper = shlex.quote(helper)
-    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
     script = (
         "#!/bin/sh\n"
-        f"if [ -f {q_takeover} ]; then\n"
-        + _posix_strip_and_exec("claude")
-        + "fi\n"
         f"SHIM_DIR={q_dir}\n"
         'CLEAN_PATH=""\n'
         'OLD_IFS="$IFS"\n'
@@ -3590,13 +3541,8 @@ def t3code_start(payload, restart=False):
         # XDG_CONFIG_HOME / XDG_DATA_HOME / XDG_STATE_HOME or CODEX_HOME on the parent process.
         # "auto" remains accepted from older controllers. Current controllers
         # choose a concrete account before starting the service.
-        magpie_mode = any(
-            isinstance(b, dict) and str(b.get("mode") or "").strip().lower() == "magpie"
-            for b in bindings.values()
-        )
-        legacy_auto = any(isinstance(b, dict) and b.get("mode") == "auto" for b in bindings.values())
-        if legacy_auto or magpie_mode:
-            sync_auto_shims({"disable_all": True, "magpie_takeover": True} if magpie_mode else {})
+        if any(isinstance(b, dict) and b.get("mode") in ("auto", "magpie", "scoped-auto") for b in bindings.values()):
+            sync_auto_shims()
         env = os.environ.copy()
         env.pop("CAGE_CLI_ACCOUNT_ID", None)
         for k in list(env):
@@ -3607,14 +3553,21 @@ def t3code_start(payload, restart=False):
         env.pop("CAGE_CODEX_ACCOUNT_ID", None)
         env.pop("CAGE_CODEX_SUBJECT", None)
         shim_prefixes = []
+        scoped_shim = T3CODE_ROOT / "scoped-auto"
         include_auto_shims = False
         for agent_id, binding in bindings.items():
             if not isinstance(binding, dict):
                 continue
             mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
-            if mode in ("auto", "magpie"):
+            if mode in ("auto", "magpie", "scoped-auto"):
                 include_auto_shims = True
+                if mode == "scoped-auto" and agent_id in ("claude", "codex"):
+                    scoped_shim.mkdir(parents=True, mode=0o700, exist_ok=True)
+                    helper = _claude_account_helper() if agent_id == "claude" else _codex_account_helper()
+                    atomic_write_text(scoped_shim / agent_id, "#!/bin/sh\nexec " + shlex.quote(helper) + ' auto "$@"\n', mode=0o700)
+                    if str(scoped_shim) not in shim_prefixes:
+                        shim_prefixes.insert(0, str(scoped_shim))
                 if agent_id == "claude":
                     env.pop("CAGE_CLAUDE_ACCOUNT_ID", None)
                     env.pop("CAGE_CLAUDE_SUBJECT", None)
@@ -4192,7 +4145,6 @@ def magpie_uninstall(payload=None):
                 except OSError:
                     pass
         MAGPIE_STATE_FILE.unlink(missing_ok=True)
-        MAGPIE_TAKEOVER_FILE.unlink(missing_ok=True)
         try:
             PROBE_CACHE_FILE.unlink(missing_ok=True)
         except OSError:
@@ -5335,23 +5287,14 @@ def _orca_resolve_bind_ip(bind_mode, path_str=None):
 def _orca_prepare_bindings(bindings, path_str):
     """Prepare universal auto-shims and any explicit per-agent override shims for Orca.
     Returns (extra_env, shim_prefixes, orca_override_dir)."""
-    magpie_mode = isinstance(bindings, dict) and any(
-        isinstance(b, dict) and str(b.get("mode") or "").strip().lower() == "magpie"
-        for b in bindings.values()
-    )
     try:
-        sync_auto_shims(
-            {"ensure_shell_hook": True, "disable_all": True, "magpie_takeover": True}
-            if magpie_mode
-            else {"ensure_shell_hook": True}
-        )
+        sync_auto_shims({"ensure_shell_hook": True})
     except Exception:
         pass
 
     extra_env = {}
     shim_prefixes = []
     override_written = False
-    q_takeover = shlex.quote(str(MAGPIE_TAKEOVER_FILE))
 
     # Rebuild ORCA_SHIMS_DIR cleanly on each start so stale explicit pins never linger.
     if ORCA_SHIMS_DIR.exists():
@@ -5369,9 +5312,7 @@ def _orca_prepare_bindings(bindings, path_str):
                 continue
             mode = str(binding.get("mode") or "").strip().lower()
             guest_id = str(binding.get("guest_id") or "default").strip() or "default"
-            if mode == "magpie":
-                continue
-            if mode == "auto":
+            if mode in ("auto", "magpie"):
                 # Keep account dispatch present before the first manifest write
                 # and when Orca starts a child directly, without a login shell.
                 if agent_id == "claude":
@@ -5411,9 +5352,6 @@ def _orca_prepare_bindings(bindings, path_str):
                     write_override_shim(
                         "claude",
                         "#!/bin/sh\n"
-                        f"if [ -f {q_takeover} ]; then\n"
-                        + _posix_strip_and_exec("claude")
-                        + "fi\n"
                         + f"export CAGE_CLAUDE_ACCOUNT_ID={shlex.quote(guest_id)}\n"
                         + (f"export CAGE_CLAUDE_SUBJECT={shlex.quote(subject)}\n" if subject else "")
                         + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
@@ -5433,9 +5371,6 @@ def _orca_prepare_bindings(bindings, path_str):
                     write_override_shim(
                         "codex",
                         "#!/bin/sh\n"
-                        f"if [ -f {q_takeover} ]; then\n"
-                        + _posix_strip_and_exec("codex")
-                        + "fi\n"
                         + f"export CAGE_CODEX_ACCOUNT_ID={shlex.quote(guest_id)}\n"
                         + (f"export CAGE_CODEX_SUBJECT={shlex.quote(subject)}\n" if subject else "")
                         + f'exec {shlex.quote(helper)} run {shlex.quote(guest_id)} "$@"\n',
@@ -5455,9 +5390,6 @@ def _orca_prepare_bindings(bindings, path_str):
                                 write_override_shim(
                                     bin_name,
                                     "#!/bin/sh\n"
-                                    f"if [ -f {q_takeover} ]; then\n"
-                                    + _posix_strip_and_exec(bin_name)
-                                    + "fi\n"
                                     + f"export {_agent_account_env_var(spec['id'])}={shlex.quote(guest_id)}\n"
                                     f'exec {shlex.quote(str(target_shim))} "$@"\n',
                                 )
@@ -6430,6 +6362,15 @@ def main(argv):
     cmd = argv[0]
     if cmd == "upgrade":
         return upgrade_agent(argv[1:], read_json("/usr/local/share/cage/cli-upgrades.json"))
+    if cmd == "route":
+        if len(argv) < 3 or argv[1] not in ("status", "magpie", "cage", "revoke"):
+            raise ValueError("用法: cage-agent route {status|magpie|cage|revoke} <agent> [-- <启动配置参数>]")
+        args = argv[3:]
+        if args[:1] == ["--"]:
+            args = args[1:]
+        result = _auto_client_runtime()["magpie_route"](argv[2], args, action=argv[1])
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     if cmd == "exec-shim":
         if len(argv) < 3:
             raise ValueError("exec-shim requires spec_file and account_id")
@@ -6505,6 +6446,24 @@ def main(argv):
         return 0
     if cmd == "prepare-session":
         print(json.dumps(prepare_session(payload), ensure_ascii=False))
+        return 0
+    if cmd == "magpie-route":
+        runtime = _auto_client_runtime()
+        out = {}
+        for agent, args in payload["agents"].items():
+            if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                raise ValueError("invalid route scope")
+            workspace = payload.get("workspace")
+            if workspace is None or workspace == "":
+                workspace = HOME
+            elif not isinstance(workspace, str) or not Path(workspace).is_absolute():
+                raise ValueError("invalid route workspace")
+            action = payload.get("action", "status")
+            review = payload.get("review", "")
+            if action != "status" and (not isinstance(review, str) or not re.fullmatch(r"[a-f0-9]{64}", review)):
+                raise ValueError("请重新读取路由状态后确认")
+            out[agent] = runtime["magpie_route"](agent, args, cwd=workspace, action=action, review=review)
+        print(json.dumps(out, ensure_ascii=False))
         return 0
     if cmd == "sync-auto-shims":
         print(json.dumps(sync_auto_shims(payload), ensure_ascii=False))

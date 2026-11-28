@@ -349,7 +349,7 @@ export function SettingsPanel({
             />
           )}
           {section === "orca" && orca && <OrcaSettingsCard
-            store={orca} agentsStore={agents} status={status} magpieEnabled={Boolean(magpie?.enabled)}
+            store={orca} agentsStore={agents} status={status}
             onConfirm={onConfirm} onOpenOrca={onOpenOrca} onShowPairModal={onShowOrcaPair} onDirty={setClientConfigDirty}
             onOpenAgentSettings={() => changeSection("agents")}
           />}
@@ -357,7 +357,7 @@ export function SettingsPanel({
             <ExternalSessionRestore workspace={current.workspace} />
           </Suspense>}
           {section === "t3code" && t3code && <T3CodeSettingsCard
-            store={t3code} agentsStore={agents} status={status} magpieEnabled={Boolean(magpie?.enabled)}
+            store={t3code} agentsStore={agents} status={status}
             onConfirm={onConfirm} onDirty={setClientConfigDirty}
             onOpenAgentSettings={() => changeSection("agents")}
             onOpenT3Code={async (forceMode, page) => {

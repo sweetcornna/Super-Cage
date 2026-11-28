@@ -28,6 +28,9 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 	closing, sealed, componentUpdate := s.closing, s.appUpdateSealed, s.guestUpdateRequired
 	command := codexTerminalCommand(s.preferences)
 	s.mu.Unlock()
+	if input.nativeCodexCommand != "" {
+		command = input.nativeCodexCommand
+	}
 	if closing {
 		return nil, errTerminalsClosed
 	}
@@ -56,7 +59,15 @@ func (s *Server) createCodexTerminalLocked(input terminalRequest) (*terminalSess
 			command += " --add-dir " + shellescape.Quote(directory)
 		}
 	}
-	selection, err := s.selectCodexAccount(input.CodexAccountID, login, workspace)
+	var selection codexSelection
+	var err error
+	native := input.nativeCodexCommand != ""
+	if !native && !login && (input.CodexAccountID == "" || input.CodexAccountID == "auto") && s.magpieNativeAutoEligible("codex") {
+		native, err = s.magpieNewLaunch("codex", command, workspace)
+	}
+	if !native && err == nil {
+		selection, err = s.selectCodexAccount(input.CodexAccountID, login, workspace)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -196,7 +207,22 @@ func (s *Server) createCodexSessionLocked(input terminalRequest) (*terminalSessi
 	}
 	var selection codexSelection
 	if record == nil {
-		selection, err = s.selectCodexAccount(input.CodexAccountID, false, workspace)
+		// A direct terminal command can select a profile that the structured
+		// app-server must not silently replace with its own default flags.
+		s.mu.Lock()
+		command := codexTerminalCommand(s.preferences)
+		s.mu.Unlock()
+		native := false
+		if (input.CodexAccountID == "" || input.CodexAccountID == "auto") && s.magpieNativeAutoEligible("codex") {
+			native, err = s.magpieNewLaunch("codex", command, workspace)
+		}
+		if native {
+			input.codexSession, input.Workspace, input.nativeCodexCommand = false, workspace, command
+			return s.createCodexTerminalLocked(input)
+		}
+		if err == nil {
+			selection, err = s.selectCodexAccount(input.CodexAccountID, false, workspace)
+		}
 	} else {
 		selection, err = s.pinnedCodexSelection(record)
 	}
