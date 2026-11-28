@@ -31,7 +31,7 @@ type claudePanel struct {
 	DetectionStatus        string           `json:"detection_status"`
 	DetectionError         string           `json:"detection_error,omitempty"`
 	LoginNotice            string           `json:"login_notice,omitempty"`
-	MagpieTakeover         bool             `json:"magpie_takeover,omitempty"`
+
 	// HandoffAPI tells a client which scheduling fields and actions (prefer,
 	// switch_answered, ungrouped_handoff) this server knows.
 	HandoffAPI int `json:"handoff_api"`
@@ -190,7 +190,7 @@ func (s *Server) claudePanelView(ctx context.Context) (claudePanel, claudeAccoun
 	s.mu.Lock()
 	ready, update := s.ready, s.guestUpdateRequired
 	s.mu.Unlock()
-	view := claudePanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI, MagpieTakeover: s.magpieTakesOverScheduling()}
+	view := claudePanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI}
 	if unavailable := s.usageAvailability(); unavailable != nil {
 		view.UsageUnavailableReason = unavailable.Error()
 	}

@@ -92,6 +92,8 @@ func (b *browserResponseBody) Close() error {
 	return b.ReadCloser.Close()
 }
 
+var errLoginNavigation = errors.New("Chromium 未能加载授权页，请检查环境网络后重试")
+
 func (c *browserClient) request(ctx context.Context, token, method, path string, body []byte) ([]byte, error) {
 	timeout := 5 * time.Second
 	switch path {
@@ -124,7 +126,10 @@ func (c *browserClient) request(ctx context.Context, token, method, path string,
 		var result struct {
 			Error string `json:"error"`
 		}
-		_ = json.Unmarshal(data, &result)
+		if err := json.Unmarshal(data, &result); err == nil && path == "/login-open" &&
+			response.StatusCode == http.StatusBadRequest && result.Error == "授权页导航失败" {
+			return nil, errLoginNavigation
+		}
 		known := map[string]string{
 			"Tab no longer exists": "标签页已关闭。请重新打开网页后再操作。",
 			"Browser is starting":  "浏览器仍在启动。请等待启动完成后再操作。",

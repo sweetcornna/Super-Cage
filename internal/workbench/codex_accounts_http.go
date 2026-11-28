@@ -48,7 +48,6 @@ type codexPanel struct {
 	DetectionError         string           `json:"detection_error,omitempty"`
 	LoginNotice            string           `json:"login_notice,omitempty"`
 	GuestSupported         bool             `json:"guest_supported"`
-	MagpieTakeover         bool             `json:"magpie_takeover,omitempty"`
 }
 
 // Codex runs in the Linux guest only; native macOS and Windows guests have
@@ -160,7 +159,7 @@ func (s *Server) codexPanelView(ctx context.Context) (codexPanel, codexAccountLi
 	ready, update := s.ready, s.guestUpdateRequired
 	s.mu.Unlock()
 	supported := s.codexGuestSupported()
-	view := codexPanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI, GuestSupported: supported, MagpieTakeover: s.magpieTakesOverScheduling()}
+	view := codexPanel{DetectionStatus: "offline", SchedulingAPI: schedulingAPI, GuestSupported: supported}
 	if unavailable := s.usageAvailability(); unavailable != nil {
 		view.UsageUnavailableReason = unavailable.Error()
 	}

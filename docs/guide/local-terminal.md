@@ -63,6 +63,20 @@ Super Cage 锁定时，以及无法确认环境是否已解锁时（例如环境
 
 「设置 → Orca Server」中的 Codex 绑定选「自动调度」时，可以登记同一客机上的 Cage Codex 账号。Orca 在该系统用户下保存登录资料。之后在 Orca 或 Cage 指定账号，会影响下一次启动；用完自动切换会从指定账号继续。已打开的会话仍可用原账号恢复。
 
+## 使用 Magpie 路由的启动配置
+
+打开 Magpie 服务不会暂停 Cage 的账号调度。Cage 对新启动的 Claude Code 和 Codex 检查各自实际使用的客机配置。例如，Magpie 的 Codex profile-only 模式下，`codex -p magpie` 可以保留原生 profile，普通 `codex` 仍可由 Cage 调度。显式固定账号、禁用调度和原有会话绑定优先。
+
+若当前配置不足以确认，在 **设置 → Agent CLI → Magpie** 中检查当前项目的桌面启动配置。对于 SSH 或 Orca 注入的 `CODEX_HOME`，请在原终端、同一个目录和启动环境中检查（只传配置选项，不传提示词或密钥）：
+
+```sh
+cage-agent route status codex -- -p magpie
+cage-agent route magpie codex -- -p magpie  # 仅在状态为待确认时
+cage-agent route revoke codex -- -p magpie
+```
+
+待确认时也可用 `cage-agent route cage …` 选择 Cage 调度。确认只保存给那个启动作用域；相关文件变化后需要重查，不会改写 Magpie 或 CLI 配置。第三方 shell 包装器、未支持的 Agent、外部 Magpie 和 Windows 原生客机不保证自动识别，请用其原生配置或显式账号绑定。旧全局标记仅保存为兼容记录。
+
 ## 在 SSH 中恢复 Agent 会话
 
 在项目目录运行 `claude --resume` 或 `codex resume`。多个账号有会话时，先选择原账号，再由官方 CLI 显示该账号的会话列表。可以直接运行 `claude --resume <会话 ID>` 或 `codex resume <会话 ID>`，Super Cage 会查找原配置目录并核对登录身份。Codex 可以用 `codex resume --all` 查看所选账号下其他目录的会话。需要恢复已归档的 Codex 会话时，可以在支持该命令的版本中先运行 `codex unarchive <会话 ID>`。

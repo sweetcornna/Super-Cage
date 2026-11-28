@@ -90,18 +90,23 @@ export class LoginBrowser {
     expiry.unref();
     const entry = { login, requestKey, expiry, targetId: "" };
     this.contexts.set(browserContextId, entry);
+    let navigation;
     try {
       const { targetId } = await this.cdp("Target.createTarget", { browserContextId, url: "about:blank", newWindow: true });
       entry.targetId = targetId;
       const sessionId = await activate({ targetId, browserContextId, type: "page", url: url.href });
-      const navigation = await this.cdp("Page.navigate", { url: url.href }, sessionId);
-      // A replacement navigation can cancel the initial load while the tab is still in use.
-      if (navigation?.errorText && navigation.errorText !== "net::ERR_ABORTED") throw new Error("授权页导航失败");
-      return { id: targetId };
+      navigation = await this.cdp("Page.navigate", { url: url.href }, sessionId);
     } catch {
       await this.close(browserContextId);
       throw new Error("临时登录页面未能打开");
     }
+    // A replacement navigation can cancel the initial load while the tab is still in use.
+    if (navigation?.errorText && navigation.errorText !== "net::ERR_ABORTED") {
+      await this.close(browserContextId);
+      // Only a fixed classification leaves the controller, not Chromium's error text.
+      throw new Error("授权页导航失败");
+    }
+    return { id: entry.targetId };
   }
 
   async finish(login) {

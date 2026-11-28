@@ -418,9 +418,6 @@ func (s *Server) selectClaudeAccount(requestedID string, login bool, workspace s
 	if !login && requestedID != "" {
 		return empty, errors.New("Claude 终端会自动分配账号")
 	}
-	if !login && s.magpieTakesOverScheduling() {
-		return empty, nil
-	}
 	m := &s.claudeAccounts
 	m.mu.Lock()
 	list, err := s.loadClaudeAccounts()

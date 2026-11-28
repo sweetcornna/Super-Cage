@@ -459,6 +459,7 @@ func (s *Server) handler() http.Handler {
 	mux.HandleFunc("POST /api/t3code/{action}", s.t3CodeActionHTTP)
 	mux.HandleFunc("GET /api/magpie", s.magpieStatusHTTP)
 	mux.HandleFunc("POST /api/magpie/config", s.magpieConfigHTTP)
+	mux.HandleFunc("POST /api/magpie/route", s.magpieRouteHTTP)
 	mux.HandleFunc("POST /api/magpie/install", s.magpieInstallHTTP)
 	mux.HandleFunc("POST /api/magpie/uninstall", s.magpieUninstallHTTP)
 	mux.HandleFunc("POST /api/magpie/open", s.magpieOpenHTTP)

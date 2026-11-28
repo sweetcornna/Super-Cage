@@ -98,34 +98,33 @@ try {
   await waitFor(() => controller.evaluate(id => faviconEvents.includes(id), target), "favicon invalidation binding");
   assert.notEqual(blue, red);
 
-  // Pause only decoding so real navigation and closure race the production reader.
-  await controller.evaluate(id => {
-    const decode = HTMLImageElement.prototype.decode;
-    globalThis.originalFaviconDecode = decode;
-    HTMLImageElement.prototype.decode = async function () {
-      await decode.call(this);
-      await new Promise(resolve => { globalThis.releaseFaviconDecode = resolve; });
-    };
-    globalThis.pendingFaviconRead = readCageFavicon(id);
-  }, target);
-  await controller.waitForFunction(() => typeof releaseFaviconDecode === "function");
+  // Pause delivery of the cached image's load event so real navigation and
+  // closure race the production reader.
+  async function pauseFaviconLoad() {
+    await controller.evaluate(id => {
+      const NativeImage = globalThis.Image;
+      globalThis.releaseFaviconLoad = null;
+      globalThis.Image = function () {
+        const image = new NativeImage();
+        image.addEventListener("load", event => {
+          event.stopImmediatePropagation();
+          globalThis.releaseFaviconLoad = () => image.onload(event);
+        }, { once: true });
+        return image;
+      };
+      globalThis.pendingFaviconRead = readCageFavicon(id).finally(() => { globalThis.Image = NativeImage; });
+    }, target);
+    await controller.waitForFunction(() => typeof releaseFaviconLoad === "function");
+  }
+  await pauseFaviconLoad();
   await page.goto(origin + "/blocked-race");
-  await controller.evaluate(() => releaseFaviconDecode());
+  await controller.evaluate(() => releaseFaviconLoad());
   assert.equal(await controller.evaluate(() => pendingFaviconRead), null, "navigation cannot publish the previous document's icon");
-  await controller.evaluate(() => { HTMLImageElement.prototype.decode = originalFaviconDecode; });
   await page.goto(origin + "/allowed");
   await waitFor(async () => (await read(controller, target))?.favicon === red, "favicon after full navigation");
-  await controller.evaluate(id => {
-    globalThis.releaseFaviconDecode = null;
-    HTMLImageElement.prototype.decode = async function () {
-      await originalFaviconDecode.call(this);
-      await new Promise(resolve => { globalThis.releaseFaviconDecode = resolve; });
-    };
-    globalThis.pendingFaviconRead = readCageFavicon(id);
-  }, target);
-  await controller.waitForFunction(() => typeof releaseFaviconDecode === "function");
+  await pauseFaviconLoad();
   await page.close();
-  await controller.evaluate(() => releaseFaviconDecode());
+  await controller.evaluate(() => releaseFaviconLoad());
   assert.equal(await controller.evaluate(() => pendingFaviconRead), null, "a closed tab cannot publish a late icon");
   assert.equal(await read(controller, target), null);
   const saved = await context.newPage();

@@ -61,6 +61,7 @@ var agentWindowRoutes = []agentWindowRoute{
 	// Adding, updating or removing an agent client installs software in the
 	// environment (设置 → 其他客户端); listing them (GET) stays open.
 	{"POST /api/agents/", "Installing, updating or removing software in the environment is the person's decision in the desktop window.", "open_desktop"},
+	{"POST /api/magpie/route", "Ambiguous launch routing must be reviewed by the person for that configuration.", "open_desktop"},
 	// Opening a workbench file with a host application (claim and complete).
 	{"POST /api/input/files/desktop/open", "Opening a file with an application on this computer is done by the desktop window.", "open_desktop"},
 	// The terminal app on this computer: its switches, finding the app that

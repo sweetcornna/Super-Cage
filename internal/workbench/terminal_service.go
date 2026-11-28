@@ -37,6 +37,9 @@ type terminalRequest struct {
 	// codexSession: the client knows Codex sessions, so a Codex terminal from
 	// the menu becomes one.
 	codexSession bool
+	// nativeCodexCommand is set only when a structured launch has already
+	// checked this exact non-structured route and found it Magpie-owned.
+	nativeCodexCommand string
 	// codexProbed: the guest answered the Codex CLI probe completely just
 	// before the operation lock (warmCodexProbe), so the open's check under
 	// the lock may ask for it again: the guest answers from its cache.
@@ -986,6 +989,11 @@ func (s *Server) selectTerminalClaudeAccount(command, requested string, login bo
 			return claudeSelection{}, errors.New("CCS 使用自己的配置，不能指定 Super Cage 账号")
 		}
 		return claudeSelection{}, nil
+	}
+	if !login && (requested == "" || requested == "auto") && s.magpieNativeAutoEligible("claude") {
+		if native, err := s.magpieNewLaunch("claude", command, workspace); native || err != nil {
+			return claudeSelection{}, err
+		}
 	}
 	return s.selectClaudeAccount(requested, login, workspace)
 }

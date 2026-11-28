@@ -154,17 +154,6 @@ func (s *Server) publishClaudeLaunchSchedule() {
 		return
 	}
 	m := &s.claudeAccounts
-	s.magpie.syncMu.Lock()
-	defer s.magpie.syncMu.Unlock()
-	if s.magpieTakesOverScheduling() {
-		m.mu.Lock()
-		already := m.launchPublished == launchPublishedMagpie
-		m.mu.Unlock()
-		if !already {
-			s.disableGuestAccountSchedulingLocked(epoch, false)
-		}
-		return
-	}
 	m.mu.Lock()
 	list, err := s.loadClaudeAccounts()
 	published := m.launchPublished
@@ -200,7 +189,7 @@ func (s *Server) publishClaudeLaunchSchedule() {
 	}
 	// Keep ~/.local/share/cage/auto-shims/claude synced so non-shell direct exec
 	// spawns (Orca Structured Chat, T3 Code, scripts) also honor Claude scheduling.
-	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"magpie_takeover": false}, nil); err != nil {
+	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{}, nil); err != nil {
 		return
 	}
 	m.mu.Lock()

@@ -52,7 +52,7 @@ test("reopening one authorization request preserves its current page and popup",
 test("an initial navigation error releases the failed context and allows another attempt", async () => {
   const fixture = loginFixture(), address = "https://claude.ai/oauth/authorize?state=example";
   fixture.navigationError = "net::ERR_NAME_NOT_RESOLVED";
-  await assert.rejects(fixture.open("a", address), /临时登录页面未能打开/);
+  await assert.rejects(fixture.open("a", address), { message: "授权页导航失败" });
   assert.deepEqual(fixture.closed, ["1"]);
   fixture.navigationError = "";
   assert.deepEqual(await fixture.open("a", address), { id: "tab-2" });

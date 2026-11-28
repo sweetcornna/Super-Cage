@@ -231,7 +231,6 @@ export function T3CodeSettingsCard({
   store,
   agentsStore,
   status,
-  magpieEnabled = false,
   onOpenT3Code,
   onOpenAgentSettings,
   onConfirm,
@@ -239,7 +238,6 @@ export function T3CodeSettingsCard({
 }) {
   const supportsManaged = isT3CodeManagedSupported(store, status);
   const directAvailable = isT3CodeDirectAvailable(store);
-  const magpieTakeover = Boolean(magpieEnabled || store?.magpie_takeover);
   const hasConfig = Boolean(store?.data);
   const restorePending = Boolean(store?.data?.restore_pending && !store.running);
   const savedMode = supportsManaged ? (store?.mode || "managed") : "external";
@@ -759,21 +757,14 @@ export function T3CodeSettingsCard({
               <div className="t3code-bindings-head">
                 <strong>Agent 账号绑定（自动注入到托管 T3 Code）</strong>
                 <small>
-                  {magpieTakeover
-                    ? "当前已启用 Magpie，账号调度与绑定已自动暂停并由 Magpie 统一接管；关闭 Magpie 后自动恢复下方配置。"
-                    : "为已安装的 Agent 指定 T3 Code 使用的 Cage 隔离账号，或交由智能调度器自动选择最优账号。"}
+                  为已安装的 Agent 指定 T3 Code 使用的 Cage 隔离账号，或交由智能调度器自动选择最优账号。 仅已确认的原生启动配置会跳过自动调度；固定账号不受影响。
                 </small>
                 {bindableAgents.some(entry => !entry.runtime?.installed) && (
                   <small>可以预先保存绑定，安装对应 CLI 后使用。 {onOpenAgentSettings && <button type="button" className="text-button" onClick={onOpenAgentSettings}>前往 Agent CLI</button>}</small>
                 )}
                 {Object.keys(accountErrors).length > 0 && <button type="button" disabled={accountsLoading} onClick={retryAccounts}>重试账号列表</button>}
               </div>
-              {magpieTakeover && (
-                <div className="inline-info t3code-info-banner" role="status">
-                  <span>Magpie 接管生效中：T3 Code 中的 Claude、Codex 及其他 Agent CLI 均沿用客机原生配置由 Magpie 路由，暂不使用下方 Cage 账号绑定。</span>
-                </div>
-              )}
-              {bindingRestartHint && !magpieTakeover && (
+              {bindingRestartHint && (
                 <div className="inline-info t3code-restart-hint">
                   <span>账号绑定已更新。重启 T3 Code 服务即可让运行中的实例立即切换至新账号。</span>
                   <button
@@ -795,7 +786,7 @@ export function T3CodeSettingsCard({
                   const id = entry.spec.id;
                   const currentValue = Object.hasOwn(store.account_bindings, id) ? store.account_bindings[id] : "auto";
                   const accounts = accountOptions[id] || [];
-                  const activeBound = magpieTakeover ? "Magpie 接管" : store.active_bindings?.[id];
+                  const activeBound = store.active_bindings?.[id];
                   return (
                     <div key={id} className="t3code-binding-row">
                       <div className="t3code-binding-agent">
@@ -807,7 +798,7 @@ export function T3CodeSettingsCard({
                         />
                         <span>{entry.spec.name}</span>
                         {activeBound && (
-                          <span className={`agent-pill ${magpieTakeover ? "agent-pill--ok" : ""}`} title={`当前生效绑定：${activeBound}`}>
+                          <span className="agent-pill" title={`当前生效绑定：${activeBound}`}>
                             生效：{activeBound}
                           </span>
                         )}

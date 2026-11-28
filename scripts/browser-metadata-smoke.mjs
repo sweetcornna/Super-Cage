@@ -140,8 +140,9 @@ try {
   await cp(new URL("split-extension", sourceDirectory), join(directory, "extension"), { recursive: true });
   const source = await readFile(new URL("browser-agent.mjs", sourceDirectory), "utf8");
   const listen = 'server.listen(18500, "127.0.0.1");';
+  const clipboardOrigin = 'const origin = "http://127.0.0.1:18500";';
   const input = 'const input = JSON.parse(text || "{}");';
-  assert.ok(source.includes(listen) && source.includes(input), "Update the isolated controller adapter");
+  assert.ok([listen, clipboardOrigin, input].every(marker => source.includes(marker)), "Update the isolated controller adapter");
   assert.ok(source.includes('spawn(browserBinary, flags'), "Update the isolated browser launch adapter");
   // The extra authenticated route only drives the real page through the existing
   // private CDP pipe. Production state, extension bindings and SSE are untouched.
@@ -157,6 +158,7 @@ try {
     .replace("/usr/local/lib/cage-split", join(directory, "extension"))
     .replace('spawn(browserBinary, flags', `spawn(${JSON.stringify(executable)}, [...flags, "--use-mock-keychain", "--password-store=basic"]`)
     .replace('"--start-fullscreen",', '"--headless=new",')
+    .replace(clipboardOrigin, 'const origin = "http://127.0.0.1:" + server.address().port;')
     .replace(listen, 'server.listen(0, "127.0.0.1", () => console.log("CONTROL_PORT=" + server.address().port));')
     .replace(input, testRoute);
   await writeFile(join(directory, "browser-agent.mjs"), isolated);

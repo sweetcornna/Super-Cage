@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { isRemoteClient } from "./client-context.mjs";
 import { AgentIcon } from "./agent-icon";
+import { api } from "./api";
 import { InlineSelect } from "./inline-select";
 import "./t3code.css";
 import "./magpie-herdr.css";
@@ -265,6 +266,44 @@ export function MagpieHeader({
   );
 }
 
+function ScopedRouting({ workspace }) {
+  const [agent, setAgent] = useState("claude");
+  const [route, setRoute] = useState(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const change = async action => {
+    setBusy(true);
+    setError("");
+    try {
+      setRoute(await api("/magpie/route", { agent, workspace, action, review: route?.review || "" }));
+    } catch (err) {
+      setRoute(null);
+      setError(err.message);
+    } finally { setBusy(false); }
+  };
+  const labels = { magpie: "Magpie 路由：保留原生启动配置", native: "使用显式原生配置（未判断 Magpie 归属）", cage: "继续使用 Cage 调度", unknown: "此启动配置待确认", unsupported: "此启动方式不支持检测" };
+  return <div className="t3code-bindings">
+    <div className="t3code-bindings-head">
+      <strong>新建桌面终端的 Magpie 路由</strong>
+      <small>结果只对当前项目和启动配置有效。其他配置（包括 Orca 传入的 Codex home）在目标终端运行 <code>cage-agent route status</code> 检查。固定账号、现有会话不受影响。</small>
+    </div>
+    <div className="agent-row-actions">
+      <InlineSelect aria-label="检查 Agent 路由" value={agent} disabled={busy} onValueChange={next => { setAgent(next); setRoute(null); setError(""); }}>
+        <option value="claude">Claude Code</option>
+        <option value="codex">Codex</option>
+      </InlineSelect>
+      <button className="quiet-button" type="button" disabled={busy} onClick={() => void change("status")}>检查启动配置</button>
+    </div>
+    {route && <p role="status">{route.scope && `${route.scope}：`}{labels[route.state]}{route.confirmed ? "（已确认）" : ""}{route.legacy && "。已识别旧标记；它不会关闭全局调度。"}</p>}
+    {route?.state === "unknown" && route.review && <div className="agent-row-actions">
+      <button className="quiet-button" type="button" disabled={busy} onClick={() => void change("magpie")}>确认：此配置交由 Magpie</button>
+      <button className="quiet-button" type="button" disabled={busy} onClick={() => void change("cage")}>确认：此配置由 Cage 调度</button>
+    </div>}
+    {route?.saved && <button className="quiet-button" type="button" disabled={busy} onClick={() => void change("revoke")}>撤销此配置的确认</button>}
+    {error && <p className="field-help" role="status">{error}</p>}
+  </div>;
+}
+
 export function MagpieSettingsCard({
   store,
   status,
@@ -508,14 +547,6 @@ export function MagpieSettingsCard({
                 网关 :{gatewayPort}
               </span>
             )}
-            {store.enabled && (
-              <span
-                className="agent-pill agent-pill--ok"
-                title="已自动关闭 Super Cage 内置多账号调度并交由 Magpie 统一接管"
-              >
-                已接管账号调度
-              </span>
-            )}
           </div>
           <p className="agent-card-desc">
             可选安装与托管 Magpie 统一模型路由与本地网关：一键切换任意 Agent CLI 的模型与供应商，自动故障转移与配额统计；提供原版 Magpie 网页界面（工作台分屏或 0 VNC 延迟原生直连窗口）与 Magpie TUI。
@@ -650,10 +681,12 @@ export function MagpieSettingsCard({
           {store.enabled && (
             <div className="inline-info t3code-info-banner" role="status">
               <span>
-                已启用 Magpie：Super Cage 内置多账号调度已自动关闭并交由 Magpie 统一接管，所有 Claude、Codex 及其他 Agent CLI（含终端、Shell、Herdr、T3 Code 与 Orca Server）均以原生配置运行以确保 Magpie 接管生效。您在 Cage 中保存的账号已保留，关闭或卸载 Magpie 后将自动恢复调度。
+                启用 Magpie 服务不会关闭 Cage 调度。仅已确认的 Claude / Codex 启动配置使用原生路由；固定账号和已绑定会话不变。
               </span>
             </div>
           )}
+
+          {supportsManaged && envReady && <ScopedRouting key={status?.workspace || ""} workspace={status?.workspace || ""} />}
 
           {!supportsManaged && (
             <div className="inline-info t3code-info-banner" role="status">

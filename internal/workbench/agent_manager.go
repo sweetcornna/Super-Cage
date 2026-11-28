@@ -316,7 +316,7 @@ func (s *Server) effectiveAgentLaunchCommand(spec agentcatalog.AgentSpec, cfg ag
 
 func agentRuntimeUsesSharedSession(subcommand string) bool {
 	switch subcommand {
-	case "probe-all", "snapshot", "plain-launches", "schedule-cursor", "t3code-status", "magpie-status", "herdr-status", "herdr-list", "orca-status", "orca-codex-accounts":
+	case "probe-all", "snapshot", "plain-launches", "schedule-cursor", "t3code-status", "magpie-status", "magpie-route", "herdr-status", "herdr-list", "orca-status", "orca-codex-accounts":
 		return true
 	default:
 		return false

@@ -86,17 +86,6 @@ func (s *Server) publishCodexLaunchSchedule() {
 		return
 	}
 	m := &s.codexAccounts
-	s.magpie.syncMu.Lock()
-	defer s.magpie.syncMu.Unlock()
-	if s.magpieTakesOverScheduling() {
-		m.mu.Lock()
-		already := m.launchPublished == launchPublishedMagpie
-		m.mu.Unlock()
-		if !already {
-			s.disableGuestAccountSchedulingLocked(epoch, false)
-		}
-		return
-	}
 	m.mu.Lock()
 	list, err := s.loadCodexAccounts()
 	published := m.launchPublished
@@ -123,7 +112,7 @@ func (s *Server) publishCodexLaunchSchedule() {
 	if _, err := s.guestQuick(ctx, script); err != nil {
 		return
 	}
-	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"magpie_takeover": false}, nil); err != nil {
+	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{}, nil); err != nil {
 		return
 	}
 	m.mu.Lock()
@@ -353,17 +342,6 @@ func (s *Server) publishAgentLaunchSchedule() {
 		return
 	}
 	m := &s.agentCLIs
-	s.magpie.syncMu.Lock()
-	defer s.magpie.syncMu.Unlock()
-	if s.magpieTakesOverScheduling() {
-		m.mu.Lock()
-		already := m.closed || m.launchPublished == launchPublishedMagpie
-		m.mu.Unlock()
-		if !already {
-			s.disableGuestAccountSchedulingLocked(epoch, false)
-		}
-		return
-	}
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -407,7 +385,7 @@ func (s *Server) publishAgentLaunchSchedule() {
 	}
 	ctx, cancel := context.WithTimeout(epoch, 12*time.Second)
 	defer cancel()
-	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"schedule": schedule, "magpie_takeover": false}, nil); err != nil {
+	if err := s.runAgentRuntime(ctx, "sync-auto-shims", map[string]any{"schedule": schedule}, nil); err != nil {
 		return
 	}
 	m.mu.Lock()
@@ -498,22 +476,6 @@ func (s *Server) resolveToolAccountBindings(bindings map[string]string, workspac
 func (s *Server) resolveToolAccountBindingsReplacing(bindings map[string]string, workspace, toolName string, replacing map[string]string) (map[string]any, map[string]string, error) {
 	guestBindings := map[string]any{}
 	labels := map[string]string{}
-
-	// When Magpie is enabled, Super Cage automatically hands off account
-	// scheduling to Magpie across all harnesses so every CLI reads its native
-	// config written by Magpie without Cage isolation overrides.
-	if s.magpieTakesOverScheduling() {
-		for agentID, choice := range bindings {
-			agentID = strings.TrimSpace(agentID)
-			choice = strings.TrimSpace(choice)
-			if agentID == "" || choice == "" {
-				continue
-			}
-			guestBindings[agentID] = map[string]any{"mode": "magpie"}
-			labels[agentID] = magpieTakeoverLabel
-		}
-		return guestBindings, labels, nil
-	}
 
 	for agentID, choice := range bindings {
 		agentID = strings.TrimSpace(agentID)

@@ -20,9 +20,6 @@ const (
 	defaultMagpiePort        = 3430
 	defaultMagpieGatewayPort = 3425
 	magpieStatusTTL          = 10 * time.Second
-	launchPublishedMagpie    = "magpie"
-	magpieTakeoverLabel      = "Magpie 接管"
-	magpieTakeoverReason     = "已启用 Magpie，账号调度已自动关闭并由 Magpie 接管"
 )
 
 // magpieConfig persists the user's opt-in Magpie (yetone/magpie) integration preferences.
@@ -136,8 +133,8 @@ type magpieProbeCall struct {
 }
 
 type magpieManager struct {
-	opMu             sync.Mutex
-	syncMu           sync.Mutex
+	opMu sync.Mutex
+
 	mu               sync.Mutex
 	configLoaded     bool
 	config           magpieConfig
@@ -146,219 +143,6 @@ type magpieManager struct {
 	statusGeneration uint64
 	probeInflight    *magpieProbeCall
 	proxy            *t3CodeProxy
-}
-
-// magpieTakesOverScheduling reports whether Magpie integration is enabled.
-// When enabled, Super Cage automatically pauses its built-in multi-account
-// scheduling across all harnesses (Claude, Codex, Agent CLIs, shells, Herdr,
-// T3 Code, Orca Server) so Magpie's native config takeover works seamlessly.
-func (s *Server) magpieTakesOverScheduling() bool {
-	// An external Magpie can open on Windows, where the native Claude relay
-	// keeps ownership of account scheduling.
-	if s.windowsGuest != nil {
-		return false
-	}
-	s.magpie.mu.Lock()
-	cfg, err := s.loadMagpieConfigLocked()
-	s.magpie.mu.Unlock()
-	return err == nil && cfg.Enabled
-}
-
-func (s *Server) allLaunchPublishedMagpie() bool {
-	s.claudeAccounts.mu.Lock()
-	c := s.claudeAccounts.launchPublished == launchPublishedMagpie
-	s.claudeAccounts.mu.Unlock()
-	s.codexAccounts.mu.Lock()
-	x := s.codexAccounts.launchPublished == launchPublishedMagpie
-	s.codexAccounts.mu.Unlock()
-	s.agentCLIs.mu.Lock()
-	a := s.agentCLIs.launchPublished == launchPublishedMagpie
-	s.agentCLIs.mu.Unlock()
-	return c && x && a
-}
-
-func (s *Server) markAllLaunchPublished(val string) {
-	s.claudeAccounts.mu.Lock()
-	s.claudeAccounts.launchPublished = val
-	s.claudeAccounts.mu.Unlock()
-	s.codexAccounts.mu.Lock()
-	s.codexAccounts.launchPublished = val
-	s.codexAccounts.mu.Unlock()
-	s.agentCLIs.mu.Lock()
-	s.agentCLIs.launchPublished = val
-	s.agentCLIs.mu.Unlock()
-}
-
-func (s *Server) resetLaunchPublishedFromMagpie() {
-	s.claudeAccounts.mu.Lock()
-	if s.claudeAccounts.launchPublished == launchPublishedMagpie {
-		s.claudeAccounts.launchPublished = ""
-	}
-	s.claudeAccounts.mu.Unlock()
-	s.codexAccounts.mu.Lock()
-	if s.codexAccounts.launchPublished == launchPublishedMagpie {
-		s.codexAccounts.launchPublished = ""
-	}
-	s.codexAccounts.mu.Unlock()
-	s.agentCLIs.mu.Lock()
-	if s.agentCLIs.launchPublished == launchPublishedMagpie {
-		s.agentCLIs.launchPublished = ""
-	}
-	s.agentCLIs.mu.Unlock()
-}
-
-// disableGuestAccountScheduling clears guest launch manifests and universal
-// shims and writes ~/.local/share/cage/magpie/takeover so every harness
-// (Claude, Codex, Gemini, OpenCode, etc.) runs with its native default config.
-func (s *Server) disableGuestAccountScheduling(ctx context.Context, force bool) bool {
-	s.magpie.syncMu.Lock()
-	defer s.magpie.syncMu.Unlock()
-	return s.disableGuestAccountSchedulingLocked(ctx, force)
-}
-
-func (s *Server) disableGuestAccountSchedulingLocked(ctx context.Context, force bool) bool {
-	if !s.magpieTakesOverScheduling() {
-		return false
-	}
-	if !force && s.allLaunchPublishedMagpie() {
-		return true
-	}
-	if s.windowsGuest != nil {
-		s.markAllLaunchPublished(launchPublishedMagpie)
-		return true
-	}
-	if !s.vmRunning() && s.agentCLIs.runtimeHook == nil {
-		return false
-	}
-	if ctx == nil {
-		ctx = s.lifetimeContext()
-	}
-	runCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
-	defer cancel()
-	err := s.runAgentRuntime(runCtx, "sync-auto-shims", map[string]any{
-		"disable_all":     true,
-		"magpie_takeover": true,
-	}, nil)
-	if err != nil && s.agentCLIs.runtimeHook == nil {
-		// Fallback if agent-runtime cannot run yet: directly remove guest
-		// scheduling manifests and shims and drop the takeover marker.
-		script := `umask 077; mkdir -p "$HOME/.local/share/cage/magpie" && printf '1\n' > "$HOME/.local/share/cage/magpie/takeover"; ` +
-			`rm -f "$HOME/.local/share/cage/claude-accounts/launch.json" "$HOME/.local/share/cage/codex-accounts/launch.json" "$HOME/.local/share/cage/agent-accounts/launch.json" ` +
-			`"$HOME/.local/share/cage/auto-shims"/* "$HOME/.local/share/cage/orca/shims"/* "$HOME/.local/share/cage/t3code/shims"/* 2>/dev/null || true`
-		_, err = s.guestQuick(runCtx, script)
-	}
-	if err != nil {
-		return false
-	}
-	s.markAllLaunchPublished(launchPublishedMagpie)
-	return true
-}
-
-func hasExplicitToolBindings(bindings map[string]string) bool {
-	for _, v := range bindings {
-		v = strings.TrimSpace(v)
-		if v != "" && v != "auto" && v != "default" {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Server) syncToolsForMagpieTransition(enabled bool) {
-	var restartT3, restartOrca bool
-
-	s.t3code.mu.Lock()
-	if t3Cfg, err := s.loadT3CodeConfigLocked(); err == nil {
-		if enabled {
-			if s.t3code.statusCache.Running || len(s.t3code.activeBindings) > 0 {
-				next := make(map[string]string, len(t3Cfg.AccountBindings))
-				for k, v := range t3Cfg.AccountBindings {
-					if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
-						next[strings.TrimSpace(k)] = magpieTakeoverLabel
-					}
-				}
-				s.t3code.activeBindings = next
-			}
-			restartT3 = t3Cfg.Enabled && t3Cfg.Mode == "managed" && s.t3code.statusCache.Running && hasExplicitToolBindings(t3Cfg.AccountBindings)
-		} else {
-			if len(s.t3code.activeBindings) > 0 {
-				s.t3code.activeBindings = nil
-			}
-			restartT3 = t3Cfg.Enabled && t3Cfg.Mode == "managed" && s.t3code.statusCache.Running && hasExplicitToolBindings(t3Cfg.AccountBindings)
-		}
-	}
-	s.t3code.mu.Unlock()
-
-	s.orca.mu.Lock()
-	if orcaCfg, err := s.loadOrcaConfigLocked(); err == nil {
-		if enabled {
-			if s.orca.statusCache.Running || len(s.orca.activeBindings) > 0 {
-				next := make(map[string]string, len(orcaCfg.AccountBindings))
-				for k, v := range orcaCfg.AccountBindings {
-					if strings.TrimSpace(k) != "" && strings.TrimSpace(v) != "" {
-						next[strings.TrimSpace(k)] = magpieTakeoverLabel
-					}
-				}
-				s.orca.activeBindings = next
-			}
-			restartOrca = orcaCfg.Enabled && s.orca.statusCache.Running && hasExplicitToolBindings(orcaCfg.AccountBindings)
-		} else {
-			if len(s.orca.activeBindings) > 0 {
-				s.orca.activeBindings = nil
-			}
-			restartOrca = orcaCfg.Enabled && s.orca.statusCache.Running && hasExplicitToolBindings(orcaCfg.AccountBindings)
-		}
-	}
-	s.orca.mu.Unlock()
-
-	if restartT3 && s.windowsGuest == nil && (s.vmRunning() || s.agentCLIs.runtimeHook != nil) {
-		go func() {
-			s.t3code.opMu.Lock()
-			defer s.t3code.opMu.Unlock()
-			ctx, cancel := context.WithTimeout(s.lifetimeContext(), 25*time.Second)
-			defer cancel()
-			_, _, _ = s.ensureManagedT3CodeRunning(ctx, true, s.workspace())
-		}()
-	}
-	if restartOrca && s.windowsGuest == nil && (s.vmRunning() || s.agentCLIs.runtimeHook != nil) {
-		go func() {
-			s.orca.opMu.Lock()
-			defer s.orca.opMu.Unlock()
-			ctx, cancel := context.WithTimeout(s.lifetimeContext(), 30*time.Second)
-			defer cancel()
-			_, _, _ = s.ensureManagedOrcaRunning(ctx, true, s.workspace())
-		}()
-	}
-}
-
-func (s *Server) syncSchedulingForMagpieTransition(ctx context.Context, enabled bool) {
-	if enabled {
-		// When the VM is stopped (and no test runtimeHook is installed),
-		// disableGuestAccountScheduling returns false without starting
-		// redundant background workers; newlyReady will enforce takeover once
-		// the VM boots.
-		s.disableGuestAccountScheduling(ctx, true)
-		s.syncToolsForMagpieTransition(true)
-		return
-	}
-	s.magpie.syncMu.Lock()
-	s.resetLaunchPublishedFromMagpie()
-	guestOnline := s.vmRunning() || s.agentCLIs.runtimeHook != nil
-	if !s.magpieTakesOverScheduling() && s.windowsGuest == nil && guestOnline {
-		if ctx == nil {
-			ctx = s.lifetimeContext()
-		}
-		runCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		_ = s.runAgentRuntime(runCtx, "sync-auto-shims", map[string]any{
-			"magpie_takeover": false,
-		}, nil)
-		cancel()
-	}
-	s.magpie.syncMu.Unlock()
-	if guestOnline {
-		s.kickAllLaunchSchedules()
-	}
-	s.syncToolsForMagpieTransition(false)
 }
 
 func (s *Server) loadMagpieConfigLocked() (magpieConfig, error) {
@@ -526,7 +310,7 @@ func (s *Server) magpieStatusPayload(r *http.Request, force bool) (map[string]an
 
 	return map[string]any{
 		"enabled":             cfg.Enabled,
-		"scheduling_disabled": cfg.Enabled,
+		"scheduling_disabled": false,
 		"mode":                cfg.Mode,
 		"external_url":        cfg.ExternalURL,
 		"port":                cfg.Port,
@@ -674,9 +458,6 @@ func (s *Server) magpieConfigHTTP(w http.ResponseWriter, r *http.Request) {
 	if stopProxy || needStopManaged {
 		s.closeMagpieProxy()
 	}
-	if prevEnabled != cfg.Enabled {
-		s.syncSchedulingForMagpieTransition(r.Context(), cfg.Enabled)
-	}
 	s.invalidateMagpieStatus()
 	payload, err := s.magpieStatusPayload(r, false)
 	if err != nil {
@@ -730,11 +511,9 @@ func (s *Server) magpieInstallHTTP(w http.ResponseWriter, r *http.Request) {
 			return errors.New("安装 Magpie 失败，请查看操作详情排查网络或运行环境")
 		}
 		// Automatically enable managed Magpie after a successful install.
-		var becameEnabled bool
 		s.magpie.mu.Lock()
 		cfg, err := s.loadMagpieConfigLocked()
 		if err == nil && cfg.Mode == "managed" {
-			becameEnabled = !cfg.Enabled
 			cfg.Enabled = true
 			err = s.saveMagpieConfigLocked(cfg)
 		}
@@ -743,9 +522,6 @@ func (s *Server) magpieInstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.magpie.mu.Unlock()
 		if err != nil {
 			return err
-		}
-		if becameEnabled {
-			s.syncSchedulingForMagpieTransition(s.operationContext(), true)
 		}
 		s.setMessage("Magpie 安装完成")
 		return nil
@@ -784,11 +560,9 @@ func (s *Server) magpieUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 			return errors.New("卸载 Magpie 失败，请查看操作详情")
 		}
 		s.closeMagpieProxy()
-		var becameDisabled bool
 		s.magpie.mu.Lock()
 		cfg, err := s.loadMagpieConfigLocked()
 		if err == nil && cfg.Mode == "managed" {
-			becameDisabled = cfg.Enabled
 			cfg.Enabled = false
 			cfg.RunWorkspace = nil
 			err = s.saveMagpieConfigLocked(cfg)
@@ -799,9 +573,6 @@ func (s *Server) magpieUninstallHTTP(w http.ResponseWriter, r *http.Request) {
 		s.magpie.mu.Unlock()
 		if err != nil {
 			return err
-		}
-		if becameDisabled {
-			s.syncSchedulingForMagpieTransition(s.operationContext(), false)
 		}
 		s.setMessage("Magpie 已卸载")
 		return nil
@@ -839,10 +610,6 @@ func (s *Server) ensureManagedMagpieRunning(ctx context.Context, restart bool, w
 	if !s.vmRunning() || s.busy() {
 		return cfg, magpieGuestStatus{}, errTerminalNotReady
 	}
-
-	// Ensure guest-side Cage scheduling manifests & shims are cleared even if
-	// Magpie was enabled while the VM was stopped or before a controller restart.
-	s.disableGuestAccountScheduling(ctx, false)
 
 	if !restart && cfg.RunWorkspace != nil {
 		workspace = *cfg.RunWorkspace

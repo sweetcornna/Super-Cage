@@ -2386,7 +2386,6 @@ function App() {
                     claudeProfiles={claudeProfiles}
                     codexProfiles={codexProfiles}
                     codexNative={codexUI.accounts}
-                    magpieEnabled={Boolean(magpie?.enabled)}
                     agents={agentCatalog.agents}
                     agentAccountsRevision={agentAccountsRevision}
                     tabs={tabs}
@@ -2401,7 +2400,6 @@ function App() {
                     onStartAgentLogin={(id, accountId, mode) => startAgentLogin(id, accountId, mode).catch((e) => notify(e.message))}
                     onLaunchAgent={(id, accountId) => launchAgentTerminal(id, accountId).catch((e) => notify(e.message))}
                     onOpenSettings={() => openSettings("agents")}
-                    onOpenMagpieSettings={() => openSettings("agents")}
                     onAgentChanged={() => { void agentCatalog.refresh(false); }}
                   />
                 )}

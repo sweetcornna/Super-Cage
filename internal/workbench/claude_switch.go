@@ -985,9 +985,6 @@ func (s *Server) claudeNow() time.Time {
 // maybeSwitchClaudeAccount runs on the terminal's existing ten-second check.
 // While nothing is limited it only reads the view that check already reads.
 func (s *Server) maybeSwitchClaudeAccount(ctx context.Context, id string, monitor *claudeMonitor) {
-	if s.magpieTakesOverScheduling() {
-		return
-	}
 	view, err := s.terminalConversationView(ctx, id)
 	if err != nil {
 		return

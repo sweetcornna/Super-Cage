@@ -41,8 +41,12 @@ globalThis.readCageFavicon = async function (targetId) {
     source.searchParams.set("size", "32");
     source.searchParams.set("version", String(version || 0));
     const image = new Image();
-    image.src = source.href;
-    await image.decode();
+    // A hidden CDP target may not get a rendering update to settle decode().
+    await new Promise((resolve, reject) => {
+      image.onload = resolve;
+      image.onerror = reject;
+      image.src = source.href;
+    });
     const current = await chrome.tabs.get(tabId);
     if (current.url !== tab.url || current.favIconUrl !== tab.favIconUrl || faviconVersions.get(tabId) !== version) return null;
     const canvas = document.createElement("canvas");

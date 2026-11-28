@@ -2,6 +2,7 @@ package workbench
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -48,13 +49,9 @@ func (s *Server) resolveT3CodeRun(intent *t3CodeRunIntent, replacing map[string]
 	}
 	resolved := make(map[string]any, len(intent.Bindings))
 	labels := make(map[string]string, len(intent.Bindings))
-	takeover := s.magpieTakesOverScheduling()
 	for agent, saved := range intent.Bindings {
-		if takeover != (saved.Mode == "magpie") {
-			return nil, nil, fmt.Errorf("Magpie 接管设置已变化，请重启 T3 Code 以重新分配账户")
-		}
-		if saved.Mode == "magpie" {
-			resolved[agent], labels[agent] = map[string]any{"mode": "magpie"}, saved.Label
+		if saved.Mode == "magpie" || saved.Mode == "scoped-auto" {
+			resolved[agent], labels[agent] = map[string]any{"mode": saved.Mode}, saved.Label
 			continue
 		}
 		choice := saved.AccountID
@@ -82,7 +79,7 @@ func (s *Server) resolveT3CodeRun(intent *t3CodeRunIntent, replacing map[string]
 func (s *Server) adoptT3CodeRun(cfg t3CodeConfig, live t3CodeGuestStatus, workspace string) error {
 	choices := defaultT3CodeConfig().AccountBindings
 	maps.Copy(choices, cfg.AccountBindings)
-	if len(live.Accounts) != len(choices) || s.magpieTakesOverScheduling() {
+	if len(live.Accounts) != len(choices) {
 		return nil
 	}
 	if workspace == "" {
@@ -141,14 +138,22 @@ func (s *Server) resolveT3CodeBindings(cfg t3CodeConfig, workspace string) (map[
 func (s *Server) resolveT3CodeLaunchBindings(cfg t3CodeConfig, workspace string, replacing map[string]string) (map[string]any, map[string]string, error) {
 	choices := defaultT3CodeConfig().AccountBindings
 	maps.Copy(choices, cfg.AccountBindings)
-	if s.magpieTakesOverScheduling() {
-		return s.resolveToolAccountBindings(choices, workspace, "T3 Code")
-	}
 	bindings := make(map[string]any, len(choices))
 	labels := make(map[string]string, len(choices))
 	for agentID, choice := range choices {
 		if choice = strings.TrimSpace(choice); choice == "" {
 			choice = "default"
+		}
+		// A route can change after a long-lived service starts and different
+		// children may use different scopes. Keep automatic bindings dynamic
+		// only for the native shims which can inspect each actual launch.
+		if choice == "auto" && (agentID == "claude" || agentID == "codex" && s.codexGuestSupported()) && s.magpieNativeAutoEligible(agentID) {
+			native, err := s.magpieNewLaunch(agentID, agentID, workspace)
+			if native || errors.Is(err, errMagpieRouteUnknown) {
+				bindings[agentID] = map[string]any{"mode": "scoped-auto"}
+				labels[agentID] = "按启动配置路由"
+				continue
+			}
 		}
 		binding, label, err := s.resolveT3CodeAccount(agentID, choice, workspace, replacing[agentID])
 		if err != nil {

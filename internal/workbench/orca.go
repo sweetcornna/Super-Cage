@@ -430,13 +430,13 @@ func (s *Server) orcaStatusPayload(r *http.Request, force bool) (map[string]any,
 		"download_url":                 localorca.DownloadURL,
 		"active_bindings":              activeBindings,
 		"codex_bridge":                 bridge,
-		"codex_registration_supported": bridge.RegistrationSupported && orcaCodexBridgeEnabled(cfg) && !s.magpieTakesOverScheduling(),
-		"magpie_takeover":              s.magpieTakesOverScheduling(),
-		"error":                        probeErr,
-		"vm_running":                   runningVM,
-		"ready":                        ready,
-		"supports_managed":             supportsManaged,
-		"is_macos_guest":               s.macosGuest != nil,
+		"codex_registration_supported": bridge.RegistrationSupported && orcaCodexBridgeEnabled(cfg),
+
+		"error":            probeErr,
+		"vm_running":       runningVM,
+		"ready":            ready,
+		"supports_managed": supportsManaged,
+		"is_macos_guest":   s.macosGuest != nil,
 	}, nil
 }
 
@@ -770,9 +770,12 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 	}
 	s.noteAppUpdateActivity()
 
-	magpie := s.magpieTakesOverScheduling()
-	cfgJSON, _ := json.Marshal([]any{cfg.BindMode, cfg.TerminalMemoryMax, cfg.AccountBindings, magpie})
+	cfgJSON, _ := json.Marshal([]any{cfg.BindMode, cfg.TerminalMemoryMax, cfg.AccountBindings, false})
 	configKey := fmt.Sprintf("%x", sha256.Sum256(cfgJSON))
+	// Prior releases put the unrelated Magpie enable switch into this key.
+	// Opening the existing process must not restart it merely to migrate that bit.
+	legacyJSON, _ := json.Marshal([]any{cfg.BindMode, cfg.TerminalMemoryMax, cfg.AccountBindings, true})
+	legacyMagpieKey := fmt.Sprintf("%x", sha256.Sum256(legacyJSON))
 	probeCtx, cancelProbe := context.WithTimeout(ctx, s.statusProbeWaitTimeout())
 	previous, err := s.probeOrcaStatus(probeCtx, cfg.GuestPort, restart)
 	cancelProbe()
@@ -781,7 +784,7 @@ func (s *Server) ensureManagedOrcaRunning(ctx context.Context, restart bool, wor
 	}
 	// A legacy guest process has no config key or account metadata. Keep its
 	// existing session on open; an explicit restart adopts recorded bindings.
-	if !restart && previous.Running && (previous.ConfigKey == configKey || previous.ConfigKey == "" && !magpie) {
+	if !restart && previous.Running && (previous.ConfigKey == configKey || previous.ConfigKey == legacyMagpieKey || previous.ConfigKey == "") {
 		if cfg.AutoSyncProjects {
 			if projects := s.orcaProjectGuestPaths(); len(projects) > 0 {
 				syncCtx, cancelSync := context.WithTimeout(ctx, 15*time.Second)

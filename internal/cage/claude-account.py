@@ -49,7 +49,8 @@ def _is_cage_shim_dir(entry):
     agent_shims = str(Path.home() / ".local/share/cage/agent-shims")
     orca_shims = str(Path.home() / ".local/share/cage/orca/shims")
     t3_shims = str(Path.home() / ".local/share/cage/t3code/shims")
-    if entry in (auto_shims, orca_shims, t3_shims) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
+    scoped_t3 = str(Path.home() / ".local/share/cage/t3code/scoped-auto")
+    if entry in (auto_shims, orca_shims, t3_shims, scoped_t3) or entry == agent_shims or entry.startswith(agent_shims + os.sep):
         return True
     return False
 # Settings that choose another provider or carry a credential. A private
@@ -907,8 +908,7 @@ def requested_resume(args):
 def auto(args):
     """Start a usable managed account, or preserve an explicit/default invocation."""
     required = os.environ.pop("CAGE_REQUIRE_CLAUDE_SCHEDULE", "") == "1"
-    magpie_takeover = (Path.home() / ".local/share/cage/magpie/takeover").is_file()
-    disabled = magpie_takeover or os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
+    disabled = os.environ.get("CAGE_ACCOUNT_SCHEDULING", "").strip().lower() in ("0", "off", "false", "no")
     pinned = os.environ.get("CAGE_CLAUDE_ACCOUNT_ID", "")
     if not disabled and pinned not in ("", "auto", DEFAULT):
         return entrypoint(["run", pinned, *args])
@@ -925,13 +925,19 @@ def auto(args):
             return schedule if isinstance(schedule, dict) and isinstance(schedule.get("accounts"), list) else None
 
         schedule = read_schedule()
+        thread = requested_resume(args)
+        if thread is None and (schedule or {}).get("mode") != "manual":
+            route = _runtime["magpie_launch_route"]("claude", args)
+            if route in ("magpie", "native"):
+                schedule = {"managed": False, "accounts": []}
+            elif route != "cage":
+                return 78
         if schedule is None:
             print("无法读取 Super Cage 的 Claude 调度配置。请同步环境组件后重试。", file=sys.stderr)
             return 78
         if _runtime["native_schedule_managed"](schedule):
             mask = os.umask(0)
             os.umask(mask)
-            thread = requested_resume(args)
             if thread is not None:
                 try:
                     roster = schedule.get("history_accounts", schedule["accounts"])
