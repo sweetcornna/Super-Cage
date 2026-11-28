@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-export async function createPrivacyController({ preferences, headless = true } = {}) {
+export async function createPrivacyController({ preferences, headless = true, browserArgs = [] } = {}) {
   const browserPath = process.env.CAGE_PRIVACY_BROWSER_PATH || process.env.CAGE_TEST_BROWSER_PATH;
   assert.ok(browserPath, 'Set CAGE_PRIVACY_BROWSER_PATH or CAGE_TEST_BROWSER_PATH to Chromium');
   const directory = await realpath(await mkdtemp(join(tmpdir(), 'cage-browser-privacy-')));
@@ -82,7 +82,7 @@ export async function createPrivacyController({ preferences, headless = true } =
     const adapted = source.replaceAll('/home/cage-browser', directory)
       .replace('/etc/claude-cage/browser-control.json', join(directory, 'control.json'))
       .replace('/usr/local/lib/cage-split', join(directory, 'extension'))
-      .replace('spawn(browserBinary, flags', `spawn(${JSON.stringify(browserPath)}, [...flags, "--use-mock-keychain", "--password-store=basic"]`)
+      .replace('spawn(browserBinary, flags', `spawn(${JSON.stringify(browserPath)}, flags.concat(${JSON.stringify(["--use-mock-keychain", "--password-store=basic", ...browserArgs])})`)
       .replace('"--start-fullscreen",', headless ? '"--headless=new", "--disable-background-networking",' : '"--start-fullscreen", "--disable-background-networking",')
       .replace('server.listen(18500, "127.0.0.1");', 'server.listen(0,"127.0.0.1",()=>console.log("PORT="+server.address().port));')
       .replace(marker, `${marker}\nif(req.url === "/__privacy-test") { res.end(JSON.stringify(await cdp(input.method, input.params || {}, input.id ? await session(input.id) : input.sessionId))); return; }`);
@@ -115,6 +115,6 @@ export async function createPrivacyController({ preferences, headless = true } =
       return result;
     };
     const states = signal => fetch(control + '/events', { headers: { Authorization: `Bearer ${token}` }, signal });
-    return { api, cdp, evaluate, waitFor, origin, directory, close, uploadExtension, states, restart: async () => { await stop(); await start(); } };
+    return { api, cdp, evaluate, waitFor, origin, directory, close, stop, uploadExtension, states, restart: async () => { await stop(); await start(); } };
   } catch (error) { await close(); throw error; }
 }
